@@ -1,0 +1,173 @@
+rules_version = '2';
+
+// ============================================================================
+// VentaporWhatsapp — Reglas de seguridad de Firestore
+// ----------------------------------------------------------------------------
+// Modelo: Multi-tenant por documento. Cada usuario tiene custom claims
+// { tenantId, role } seteados en Firebase Auth por la Cloud Function
+// `userProvision`. Las reglas validan tanto el tenant como el rol.
+// Ver ARCHITECTURE.md §5.
+// ============================================================================
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ---------- Helpers ----------
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function userTenantId() {
+      return request.auth.token.tenantId;
+    }
+
+    function userRole() {
+      return request.auth.token.role;
+    }
+
+    function isPlatformAdmin() {
+      return isSignedIn() && userRole() == 'PLATFORM_ADMIN';
+    }
+
+    function isTenantMember(tenantId) {
+      return isSignedIn() && userTenantId() == tenantId;
+    }
+
+    function isTenantOwner(tenantId) {
+      return isTenantMember(tenantId) && userRole() == 'TENANT_OWNER';
+    }
+
+    function isTenantManager(tenantId) {
+      return isTenantMember(tenantId)
+        && userRole() in ['TENANT_OWNER', 'TENANT_MANAGER'];
+    }
+
+    function isTenantViewer(tenantId) {
+      return isTenantMember(tenantId)
+        && userRole() in ['TENANT_OWNER', 'TENANT_MANAGER', 'TENANT_VIEWER'];
+    }
+
+    // ---------- Planes (solo lectura para todos los autenticados) ----------
+
+    match /plans/{planId} {
+      allow read: if isSignedIn();
+      allow write: if isPlatformAdmin();
+    }
+
+    // ---------- Usuarios admin ----------
+
+    match /users/{userId} {
+      // Un usuario puede leer su propio perfil
+      allow read: if isSignedIn() && request.auth.uid == userId;
+      // Platform admin puede leer/escribir todos
+      allow read, write: if isPlatformAdmin();
+      // Solo Cloud Functions con Admin SDK pueden crear/modificar usuarios
+      // (el cliente NO puede escribir directamente)
+      allow write: if false;
+    }
+
+    // ---------- Tenants ----------
+
+    match /tenants/{tenantId} {
+      // Lectura: cualquier miembro del tenant + platform admin
+      allow read: if isTenantViewer(tenantId) || isPlatformAdmin();
+
+      // Escritura del documento raíz del tenant: solo el owner y platform admin
+      // (cambios sensibles como branding, fiscal, payments)
+      allow update: if isTenantOwner(tenantId) || isPlatformAdmin();
+
+      // Creación y borrado: solo platform admin (vía Cloud Functions con Admin SDK)
+      allow create, delete: if false;
+
+      // ---------- Subcolecciones del tenant ----------
+
+      // Productos
+      match /products/{productId} {
+        allow read: if isTenantViewer(tenantId) || isPlatformAdmin();
+        allow write: if isTenantManager(tenantId) || isPlatformAdmin();
+      }
+
+      // Categorías
+      match /categories/{categoryId} {
+        allow read: if isTenantViewer(tenantId) || isPlatformAdmin();
+        allow write: if isTenantManager(tenantId) || isPlatformAdmin();
+      }
+
+      // Clientes
+      match /customers/{customerId} {
+        allow read: if isTenantViewer(tenantId) || isPlatformAdmin();
+        allow write: if isTenantManager(tenantId) || isPlatformAdmin();
+
+        // Sesiones de conversación (solo Cloud Functions las escriben)
+        match /sessions/{sessionId} {
+          allow read: if isTenantManager(tenantId) || isPlatformAdmin();
+          allow write: if false; // Solo Admin SDK
+        }
+      }
+
+      // Órdenes
+      match /orders/{orderId} {
+        allow read: if isTenantViewer(tenantId) || isPlatformAdmin();
+        // Cambios de estado críticos solo vía Cloud Functions (Admin SDK)
+        allow create, delete: if false;
+        // Update limitado: manager puede cancelar o agregar notas
+        allow update: if (isTenantManager(tenantId) || isPlatformAdmin())
+          && request.resource.data.diff(resource.data).affectedKeys()
+              .hasOnly(['status', 'notes', 'updatedAt']);
+
+        match /items/{itemId} {
+          allow read: if isTenantViewer(tenantId) || isPlatformAdmin();
+          allow write: if false; // Solo Admin SDK
+        }
+      }
+
+      // Entregas
+      match /deliveries/{deliveryId} {
+        allow read: if isTenantViewer(tenantId) || isPlatformAdmin();
+        allow write: if false; // Solo Admin SDK (vía Cloud Functions)
+
+        match /events/{eventId} {
+          allow read: if isTenantViewer(tenantId) || isPlatformAdmin();
+          allow write: if false;
+        }
+      }
+
+      // Repartidores
+      match /deliveryPersons/{driverId} {
+        allow read: if isTenantViewer(tenantId) || isPlatformAdmin();
+        allow create, update, delete: if isTenantManager(tenantId) || isPlatformAdmin();
+      }
+
+      // Pagos (solo lectura, escritura por Cloud Functions)
+      match /payments/{paymentId} {
+        allow read: if isTenantViewer(tenantId) || isPlatformAdmin();
+        allow write: if false;
+      }
+
+      // Facturas (solo lectura, escritura por Cloud Functions)
+      match /invoices/{invoiceId} {
+        allow read: if isTenantViewer(tenantId) || isPlatformAdmin();
+        allow write: if false;
+      }
+
+      // Suscripciones de clientes finales
+      match /subscriptions/{subscriptionId} {
+        allow read: if isTenantViewer(tenantId) || isPlatformAdmin();
+        allow write: if false;
+      }
+
+      // Webhook events (solo Cloud Functions, lectura para debug)
+      match /webhookEvents/{eventId} {
+        allow read: if isPlatformAdmin();
+        allow write: if false;
+      }
+    }
+
+    // ---------- Default deny ----------
+    // Cualquier ruta no listada arriba está denegada por defecto.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

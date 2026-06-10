@@ -1,0 +1,445 @@
+{
+  "name": "Arfagi — Flujo 2: Ingreso Omnicanal (WA + FB + IG)",
+  "nodes": [
+    {
+      "id": "b2c3d4e5-0002-0002-0002-000000000001",
+      "name": "Webhook Meta (WA + FB + IG)",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 380],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "meta-webhook",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "notes": "URL de este webhook: https://n8n.arfagi.com/webhook/meta-webhook. Registrar esta URL en Meta for Developers → Webhooks. El GET de verificación lo maneja FastAPI /api/v1/webhook."
+    },
+    {
+      "id": "b2c3d4e5-0002-0002-0002-000000000002",
+      "name": "Responder 200 a Meta (inmediato)",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [480, 240],
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "OK",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "notes": "Meta requiere respuesta HTTP 200 en menos de 20 segundos. Respondemos primero y procesamos en paralelo."
+    },
+    {
+      "id": "b2c3d4e5-0002-0002-0002-000000000003",
+      "name": "Validar Firma Meta (HMAC)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [480, 480],
+      "parameters": {
+        "jsCode": "const crypto = require('crypto');\n\nconst body = $input.first();\nconst headers = body.headers || {};\nconst rawBody = JSON.stringify(body.json);\nconst appSecret = $env.META_APP_SECRET;\nconst signatureHeader = headers['x-hub-signature-256'] || '';\n\nif (!signatureHeader) {\n  console.warn('⚠️ Webhook sin firma X-Hub-Signature-256');\n  return []; // Salir sin procesar\n}\n\nconst expectedSig = 'sha256=' + crypto\n  .createHmac('sha256', appSecret)\n  .update(rawBody)\n  .digest('hex');\n\n// Comparación segura (tiempo constante)\nconst sigBuffer = Buffer.from(signatureHeader);\nconst expBuffer = Buffer.from(expectedSig);\n\nif (sigBuffer.length !== expBuffer.length || !crypto.timingSafeEqual(sigBuffer, expBuffer)) {\n  console.error('❌ Firma Meta INVÁLIDA. Posible spoofing.');\n  return []; // Bloquear silenciosamente\n}\n\nconsole.log('✅ Firma Meta válida.');\nreturn [$input.first()];"
+      }
+    },
+    {
+      "id": "b2c3d4e5-0002-0002-0002-000000000004",
+      "name": "Extraer Mensaje del Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [720, 480],
+      "parameters": {
+        "jsCode": "// Extraer y normalizar mensaje según el canal (WA, FB, IG)\nconst payload = $input.first().json;\nconst object = payload.object || '';\n\nlet mensajes = [];\n\nif (object === 'whatsapp_business_account') {\n  for (const entry of payload.entry || []) {\n    for (const change of entry.changes || []) {\n      const value = change.value || {};\n      const messages = value.messages || [];\n      const contacts = value.contacts || [];\n      const phoneNumberId = value.metadata?.phone_number_id || '';\n\n      for (const msg of messages) {\n        const fromNum = msg.from;\n        const msgId = msg.id;\n        const msgType = msg.type;\n        const nombre = contacts[0]?.profile?.name || '';\n\n        let textoMensaje = '';\n        let mediaId = null;\n        let tipoMedia = 'text';\n\n        if (msgType === 'text') {\n          textoMensaje = msg.text?.body || '';\n          tipoMedia = 'text';\n        } else if (msgType === 'interactive') {\n          const interactive = msg.interactive || {};\n          if (interactive.type === 'button_reply') {\n            textoMensaje = interactive.button_reply?.title || '';\n          } else if (interactive.type === 'list_reply') {\n            textoMensaje = interactive.list_reply?.title || '';\n          }\n          tipoMedia = 'text';\n        } else if (msgType === 'audio') {\n          mediaId = msg.audio?.id;\n          tipoMedia = 'audio';\n          textoMensaje = ''; // Se transcribirá con Whisper\n        } else if (msgType === 'image') {\n          mediaId = msg.image?.id;\n          tipoMedia = 'image';\n          textoMensaje = msg.image?.caption || '';\n        } else {\n          console.log(`Tipo de mensaje no manejado: ${msgType}`);\n          continue;\n        }\n\n        mensajes.push({\n          json: {\n            canal: 'whatsapp',\n            cliente_id: `wa:${fromNum}`,\n            nombre_cliente: nombre,\n            meta_message_id: msgId,\n            tipo_media: tipoMedia,\n            mensaje_texto: textoMensaje,\n            media_id: mediaId,\n            phone_number_id: phoneNumberId,\n            wa_from: fromNum,\n            raw_type: msgType\n          }\n        });\n      }\n    }\n  }\n} else if (object === 'page') {\n  // Facebook Messenger\n  for (const entry of payload.entry || []) {\n    for (const messaging of entry.messaging || []) {\n      const senderId = messaging.sender?.id;\n      const text = messaging.message?.text || '';\n      const msgId = messaging.message?.mid || '';\n      if (!text && !messaging.message?.attachments) continue;\n      mensajes.push({\n        json: {\n          canal: 'facebook',\n          cliente_id: `fb:${senderId}`,\n          nombre_cliente: '',\n          meta_message_id: msgId,\n          tipo_media: 'text',\n          mensaje_texto: text,\n          media_id: null,\n          page_id: entry.id\n        }\n      });\n    }\n  }\n} else if (object === 'instagram') {\n  // Instagram DM\n  for (const entry of payload.entry || []) {\n    for (const messaging of entry.messaging || []) {\n      const senderId = messaging.sender?.id;\n      const text = messaging.message?.text || '';\n      const msgId = messaging.message?.mid || '';\n      if (!text) continue;\n      mensajes.push({\n        json: {\n          canal: 'instagram',\n          cliente_id: `ig:${senderId}`,\n          nombre_cliente: '',\n          meta_message_id: msgId,\n          tipo_media: 'text',\n          mensaje_texto: text,\n          media_id: null\n        }\n      });\n    }\n  }\n}\n\nconsole.log(`Extraídos ${mensajes.length} mensajes del payload.`);\nreturn mensajes;"
+      }
+    },
+    {
+      "id": "b2c3d4e5-0002-0002-0002-000000000005",
+      "name": "¿Es Media? (Audio o Imagen)",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [960, 480],
+      "parameters": {
+        "mode": "rules",
+        "rules": {
+          "rules": [
+            {
+              "outputKey": "audio",
+              "conditions": {
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.tipo_media }}",
+                    "rightValue": "audio",
+                    "operator": {"type": "string", "operation": "equals"}
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "outputKey": "imagen",
+              "conditions": {
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.tipo_media }}",
+                    "rightValue": "image",
+                    "operator": {"type": "string", "operation": "equals"}
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "outputKey": "texto",
+              "conditions": {
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.tipo_media }}",
+                    "rightValue": "text",
+                    "operator": {"type": "string", "operation": "equals"}
+                  }
+                ],
+                "combinator": "and"
+              }
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "b2c3d4e5-0002-0002-0002-000000000006",
+      "name": "Obtener URL del Media (Meta API)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1200, 300],
+      "parameters": {
+        "method": "GET",
+        "url": "=https://graph.facebook.com/v19.0/{{ $json.media_id }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.WA_ACCESS_TOKEN }}"
+            }
+          ]
+        },
+        "options": {"timeout": 10000}
+      }
+    },
+    {
+      "id": "b2c3d4e5-0002-0002-0002-000000000007",
+      "name": "Descargar Media de Meta",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1440, 300],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $json.url }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.WA_ACCESS_TOKEN }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000,
+          "response": {
+            "response": {
+              "responseFormat": "file"
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "b2c3d4e5-0002-0002-0002-000000000008",
+      "name": "Subir a Firebase Storage",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1680, 300],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.ARFAGI_API_URL }}/api/v1/storage/upload",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-API-Key",
+              "value": "={{ $env.ARFAGI_API_KEY }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "multipart-form-data",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "cliente_id",
+              "value": "={{ $('Extraer Mensaje del Payload').item.json.cliente_id }}"
+            },
+            {
+              "name": "tipo_media",
+              "value": "={{ $('Extraer Mensaje del Payload').item.json.tipo_media }}"
+            }
+          ]
+        },
+        "options": {"timeout": 30000}
+      },
+      "notes": "Retorna: { storage_url: 'https://...', signed_url: 'https://...' }"
+    },
+    {
+      "id": "b2c3d4e5-0002-0002-0002-000000000009",
+      "name": "Transcribir Audio (Whisper)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1920, 200],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/audio/transcriptions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.OPENAI_API_KEY }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "multipart-form-data",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "model",
+              "value": "whisper-1"
+            },
+            {
+              "name": "language",
+              "value": "es"
+            },
+            {
+              "name": "response_format",
+              "value": "json"
+            }
+          ]
+        },
+        "options": {"timeout": 60000}
+      },
+      "notes": "Usa el archivo descargado del paso anterior. Whisper retorna { text: 'transcripción' }."
+    },
+    {
+      "id": "b2c3d4e5-0002-0002-0002-000000000010",
+      "name": "Enviar typing_on (WA)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1200, 600],
+      "parameters": {
+        "method": "POST",
+        "url": "=https://graph.facebook.com/v19.0/{{ $env.WA_PHONE_NUMBER_ID }}/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.WA_ACCESS_TOKEN }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "body": "={\n  \"messaging_product\": \"whatsapp\",\n  \"to\": \"{{ $json.wa_from }}\",\n  \"type\": \"reaction\",\n  \"reaction\": {\n    \"message_id\": \"{{ $json.meta_message_id }}\",\n    \"emoji\": \"\"\n  }\n}",
+        "options": {"timeout": 5000}
+      },
+      "notes": "Envía el indicador de 'escribiendo...' al cliente. Usar junto con marcar el mensaje como leído."
+    },
+    {
+      "id": "b2c3d4e5-0002-0002-0002-000000000011",
+      "name": "Armar Payload para FastAPI",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1440, 600],
+      "parameters": {
+        "jsCode": "// Unificar datos de todos los pasos anteriores en el payload para FastAPI\nconst msgData = $('Extraer Mensaje del Payload').item.json;\n\n// Si hubo transcripción de audio, usar el texto de Whisper\nlet mensajeTexto = msgData.mensaje_texto || '';\nlet storageUrl = null;\n\ntry {\n  const whisperData = $('Transcribir Audio (Whisper)').item.json;\n  if (whisperData?.text) {\n    mensajeTexto = whisperData.text;\n    console.log(`Audio transcrito: \"${mensajeTexto.substring(0, 80)}...\"`);\n  }\n} catch(e) { /* No era audio */ }\n\ntry {\n  const storageData = $('Subir a Firebase Storage').item.json;\n  storageUrl = storageData?.signed_url || storageData?.storage_url || null;\n} catch(e) { /* No había media */ }\n\nconst payload = {\n  cliente_id: msgData.cliente_id,\n  canal: msgData.canal,\n  mensaje_texto: mensajeTexto,\n  tipo_media: msgData.tipo_media,\n  media_storage_url: storageUrl,\n  meta_message_id: msgData.meta_message_id,\n  nombre_cliente: msgData.nombre_cliente || ''\n};\n\nconsole.log(`Payload armado para ${payload.cliente_id} | tipo: ${payload.tipo_media}`);\nreturn [{ json: payload }];"
+      }
+    },
+    {
+      "id": "b2c3d4e5-0002-0002-0002-000000000012",
+      "name": "POST FastAPI /api/v1/process",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1680, 600],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.ARFAGI_API_URL }}/api/v1/process",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-API-Key",
+              "value": "={{ $env.ARFAGI_API_KEY }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "X-Request-ID",
+              "value": "=n8n-{{ $json.meta_message_id }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "body": "={{ JSON.stringify($json) }}",
+        "options": {
+          "timeout": 60000,
+          "retry": {
+            "enabled": true,
+            "maxTries": 2,
+            "waitBetweenTries": 2000
+          }
+        }
+      }
+    },
+    {
+      "id": "b2c3d4e5-0002-0002-0002-000000000013",
+      "name": "Enviar Respuesta al Cliente (WA)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1920, 600],
+      "parameters": {
+        "method": "POST",
+        "url": "=https://graph.facebook.com/v19.0/{{ $env.WA_PHONE_NUMBER_ID }}/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.WA_ACCESS_TOKEN }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "body": "={\n  \"messaging_product\": \"whatsapp\",\n  \"to\": \"{{ $('Extraer Mensaje del Payload').item.json.wa_from }}\",\n  \"type\": \"text\",\n  \"text\": {\n    \"body\": \"{{ $json.respuesta_texto }}\",\n    \"preview_url\": false\n  }\n}",
+        "options": {"timeout": 10000}
+      },
+      "notes": "Para mensajes con botones (Bancard CTA), usar type='interactive' con cta_url. El texto viene del campo respuesta_texto de FastAPI."
+    },
+    {
+      "id": "b2c3d4e5-0002-0002-0002-000000000014",
+      "name": "¿Requiere Acción Humana?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [2160, 600],
+      "parameters": {
+        "conditions": {
+          "options": {"caseSensitive": false},
+          "conditions": [
+            {
+              "leftValue": "={{ $('POST FastAPI /api/v1/process').item.json.requiere_accion_humana }}",
+              "rightValue": true,
+              "operator": {"type": "boolean", "operation": "equals"}
+            }
+          ],
+          "combinator": "and"
+        }
+      }
+    },
+    {
+      "id": "b2c3d4e5-0002-0002-0002-000000000015",
+      "name": "Notificar Flutter (Alerta Humana)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2400, 480],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.ARFAGI_API_URL }}/api/v1/alertas/humana",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {"name": "X-API-Key", "value": "={{ $env.ARFAGI_API_KEY }}"}
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "body": "={{ JSON.stringify({ cliente_id: $('Extraer Mensaje del Payload').item.json.cliente_id, sesion_id: $('POST FastAPI /api/v1/process').item.json.sesion_id }) }}",
+        "options": {"timeout": 5000}
+      }
+    }
+  ],
+  "connections": {
+    "Webhook Meta (WA + FB + IG)": {
+      "main": [
+        [{"node": "Responder 200 a Meta (inmediato)", "type": "main", "index": 0}],
+        [{"node": "Validar Firma Meta (HMAC)", "type": "main", "index": 0}]
+      ]
+    },
+    "Validar Firma Meta (HMAC)": {
+      "main": [[{"node": "Extraer Mensaje del Payload", "type": "main", "index": 0}]]
+    },
+    "Extraer Mensaje del Payload": {
+      "main": [[{"node": "¿Es Media? (Audio o Imagen)", "type": "main", "index": 0}]]
+    },
+    "¿Es Media? (Audio o Imagen)": {
+      "main": [
+        [{"node": "Obtener URL del Media (Meta API)", "type": "main", "index": 0}],
+        [{"node": "Obtener URL del Media (Meta API)", "type": "main", "index": 0}],
+        [{"node": "Enviar typing_on (WA)", "type": "main", "index": 0}]
+      ]
+    },
+    "Obtener URL del Media (Meta API)": {
+      "main": [[{"node": "Descargar Media de Meta", "type": "main", "index": 0}]]
+    },
+    "Descargar Media de Meta": {
+      "main": [[{"node": "Subir a Firebase Storage", "type": "main", "index": 0}]]
+    },
+    "Subir a Firebase Storage": {
+      "main": [
+        [{"node": "Transcribir Audio (Whisper)", "type": "main", "index": 0}],
+        [{"node": "Armar Payload para FastAPI", "type": "main", "index": 0}]
+      ]
+    },
+    "Transcribir Audio (Whisper)": {
+      "main": [[{"node": "Armar Payload para FastAPI", "type": "main", "index": 0}]]
+    },
+    "Enviar typing_on (WA)": {
+      "main": [[{"node": "Armar Payload para FastAPI", "type": "main", "index": 0}]]
+    },
+    "Armar Payload para FastAPI": {
+      "main": [[{"node": "POST FastAPI /api/v1/process", "type": "main", "index": 0}]]
+    },
+    "POST FastAPI /api/v1/process": {
+      "main": [[{"node": "Enviar Respuesta al Cliente (WA)", "type": "main", "index": 0}]]
+    },
+    "Enviar Respuesta al Cliente (WA)": {
+      "main": [[{"node": "¿Requiere Acción Humana?", "type": "main", "index": 0}]]
+    },
+    "¿Requiere Acción Humana?": {
+      "main": [
+        [{"node": "Notificar Flutter (Alerta Humana)", "type": "main", "index": 0}],
+        []
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "errorWorkflow": ""
+  },
+  "meta": {
+    "arfagi_version": "1.0.0",
+    "descripcion": "Ingreso omnicanal de mensajes WA/FB/IG. Valida firma HMAC, descarga media, transcribe audio con Whisper, sube a Storage, envía typing_on y llama al orquestador FastAPI."
+  }
+}

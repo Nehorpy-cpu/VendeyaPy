@@ -1,0 +1,10 @@
+{
+  "projects": {
+    "default": "vpw-dev",
+    "dev": "vpw-dev",
+    "staging": "vpw-staging",
+    "production": "vpw-prod"
+  },
+  "targets": {},
+  "etags": {}
+}

@@ -1,0 +1,91 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*.*.*']
+
+env:
+  NODE_VERSION: '20'
+  PNPM_VERSION: '9'
+
+jobs:
+  deploy-staging:
+    name: Deploy to Staging
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v3
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm build
+
+      - name: Deploy to Firebase Staging
+        uses: w9jds/firebase-action@master
+        with:
+          args: deploy --project vpw-staging --force
+        env:
+          GCP_SA_KEY: ${{ secrets.FIREBASE_SA_STAGING }}
+
+      - name: Import n8n workflows (staging)
+        run: |
+          for f in packages/n8n-workflows/workflows/*.json; do
+            curl -X POST "${{ secrets.N8N_STAGING_URL }}/api/v1/workflows" \
+              -H "X-N8N-API-KEY: ${{ secrets.N8N_STAGING_API_KEY }}" \
+              -H "Content-Type: application/json" \
+              -d @"$f" || echo "Workflow $f ya existe o falló"
+          done
+
+  deploy-production:
+    name: Deploy to Production
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: https://ventaporwhatsapp.com
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v3
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm build
+
+      - name: Deploy to Firebase Production
+        uses: w9jds/firebase-action@master
+        with:
+          args: deploy --project vpw-prod --force
+        env:
+          GCP_SA_KEY: ${{ secrets.FIREBASE_SA_PRODUCTION }}
+
+      - name: Import n8n workflows (production)
+        run: |
+          for f in packages/n8n-workflows/workflows/*.json; do
+            curl -X POST "${{ secrets.N8N_PROD_URL }}/api/v1/workflows" \
+              -H "X-N8N-API-KEY: ${{ secrets.N8N_PROD_API_KEY }}" \
+              -H "Content-Type: application/json" \
+              -d @"$f" || echo "Workflow $f ya existe o falló"
+          done

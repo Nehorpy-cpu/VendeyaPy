@@ -1,0 +1,22 @@
+{
+  "name": "tests",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Tests de integración y E2E del monorepo",
+  "scripts": {
+    "test": "pnpm test:integration && pnpm test:e2e",
+    "test:integration": "vitest run --dir integration",
+    "test:e2e": "playwright test",
+    "typecheck": "tsc --noEmit",
+    "lint": "echo 'no lint needed'",
+    "build": "echo 'no build needed'"
+  },
+  "devDependencies": {
+    "@firebase/rules-unit-testing": "^3.0.0",
+    "@playwright/test": "^1.41.0",
+    "@vpw/shared": "workspace:*",
+    "firebase-admin": "^12.0.0",
+    "typescript": "^5.3.0",
+    "vitest": "^1.2.0"
+  }
+}

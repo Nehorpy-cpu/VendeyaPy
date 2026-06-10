@@ -1,0 +1,259 @@
+{
+  "name": "Arfagi — Flujo 4: Logística y Tracking al Cliente",
+  "nodes": [
+    {
+      "id": "d4e5f6a7-0004-0004-0004-000000000001",
+      "name": "Cron Cada 2 Min (Alertas Logística)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [240, 380],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "*/2 * * * *"
+            }
+          ]
+        }
+      },
+      "notes": "Verifica cada 2 minutos si hay alertas LOGISTICA_PENDIENTE en Firestore (creadas por crm_service.py post-pago)."
+    },
+    {
+      "id": "d4e5f6a7-0004-0004-0004-000000000002",
+      "name": "Buscar Alertas de Logística (FastAPI)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [480, 380],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.ARFAGI_API_URL }}/api/v1/alertas?tipo=LOGISTICA_PENDIENTE&leida=false&limit=10",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {"name": "X-API-Key", "value": "={{ $env.ARFAGI_API_KEY }}"}
+          ]
+        },
+        "options": {"timeout": 10000}
+      }
+    },
+    {
+      "id": "d4e5f6a7-0004-0004-0004-000000000003",
+      "name": "¿Hay Pedidos para Despachar?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [720, 380],
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "leftValue": "={{ $json.alertas.length }}",
+              "rightValue": 0,
+              "operator": {"type": "number", "operation": "gt"}
+            }
+          ],
+          "combinator": "and"
+        }
+      }
+    },
+    {
+      "id": "d4e5f6a7-0004-0004-0004-000000000004",
+      "name": "Dividir por Alerta",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [960, 280],
+      "parameters": {
+        "batchSize": 1,
+        "options": {}
+      }
+    },
+    {
+      "id": "d4e5f6a7-0004-0004-0004-000000000005",
+      "name": "Cargar Datos Completos del Pedido",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1200, 280],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.ARFAGI_API_URL }}/api/v1/payments/pedido/{{ $json.pedido_id }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {"name": "X-API-Key", "value": "={{ $env.ARFAGI_API_KEY }}"}
+          ]
+        },
+        "options": {"timeout": 10000}
+      }
+    },
+    {
+      "id": "d4e5f6a7-0004-0004-0004-000000000006",
+      "name": "Armar Mensajes (Repartidor + Cliente)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1440, 280],
+      "parameters": {
+        "jsCode": "const alerta = $('Dividir por Alerta').item.json;\nconst pedido = $input.first().json;\n\nconst pedidoId = pedido.pedido_id || alerta.pedido_id;\nconst clienteId = pedido.cliente_id || alerta.cliente_id;\nconst waNum = clienteId.replace('wa:', '');\nconst totalFormateado = pedido.total_formateado || alerta.total_gs?.toLocaleString();\nconst metodo = pedido.metodo_pago || alerta.metodo_pago;\nconst itemsResumen = alerta.items_resumen || 'Productos Arfagi';\n\n// Datos de dirección\nconst dir = alerta.direccion || {};\nconst pinUrl = dir.pin_url || 'Sin pin';\nconst referencia = dir.referencia_visual || 'Sin referencia';\nconst ciudad = dir.ciudad || 'Asunción';\n\n// Mensaje para el repartidor\nconst msgRepartidor = `🛵 *Nuevo pedido Arfagi — ${pedidoId}*\n━━━━━━━━━━━━━━━━━━━━\n📦 Productos: ${itemsResumen}\n💰 Total: Gs. ${totalFormateado}\n💳 Método: ${metodo}\n📍 Ubicación: ${pinUrl}\n🏠 Referencia: ${referencia}\n🏙 Ciudad: ${ciudad}\n━━━━━━━━━━━━━━━━━━━━\n✅ Confirmar recepción respondiendo OK`;\n\n// Mensaje de tracking para el cliente\nconst msgCliente = `✅ *¡Tu pedido está confirmado, ${alerta.nombre_cliente || 'che'}!*\n\nEstamos preparando: *${itemsResumen}*\nPedido: ${pedidoId}\n\n🛵 Cuando esté en camino, te avisamos. ¡Gracias por elegir Arfagi! 🌸`;\n\nconsole.log(`Logística activada para pedido ${pedidoId}`);\n\nreturn [{\n  json: {\n    pedido_id: pedidoId,\n    cliente_id: clienteId,\n    wa_cliente: waNum,\n    wa_repartidor: $env.REPARTIDOR_WA_NUMERO,\n    msg_repartidor: msgRepartidor,\n    msg_cliente: msgCliente,\n    alerta_id: alerta.id || alerta.alerta_id\n  }\n}];"
+      }
+    },
+    {
+      "id": "d4e5f6a7-0004-0004-0004-000000000007",
+      "name": "WA al Repartidor (Detalles + Pin)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1680, 180],
+      "parameters": {
+        "method": "POST",
+        "url": "=https://graph.facebook.com/v19.0/{{ $env.WA_PHONE_NUMBER_ID }}/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {"name": "Authorization", "value": "=Bearer {{ $env.WA_ACCESS_TOKEN }}"},
+            {"name": "Content-Type", "value": "application/json"}
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "body": "={\n  \"messaging_product\": \"whatsapp\",\n  \"to\": \"{{ $json.wa_repartidor }}\",\n  \"type\": \"text\",\n  \"text\": {\n    \"body\": \"{{ $json.msg_repartidor }}\"\n  }\n}",
+        "options": {"timeout": 10000}
+      }
+    },
+    {
+      "id": "d4e5f6a7-0004-0004-0004-000000000008",
+      "name": "WA al Cliente (Confirmación + Tracking)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1680, 380],
+      "parameters": {
+        "method": "POST",
+        "url": "=https://graph.facebook.com/v19.0/{{ $env.WA_PHONE_NUMBER_ID }}/messages",
+        "sendHeaders": true,
+        "headerParameters": [
+          {"name": "Authorization", "value": "=Bearer {{ $env.WA_ACCESS_TOKEN }}"},
+          {"name": "Content-Type", "value": "application/json"}
+        ],
+        "sendBody": true,
+        "contentType": "json",
+        "body": "={\n  \"messaging_product\": \"whatsapp\",\n  \"to\": \"{{ $json.wa_cliente }}\",\n  \"type\": \"text\",\n  \"text\": {\n    \"body\": \"{{ $json.msg_cliente }}\"\n  }\n}",
+        "options": {"timeout": 10000}
+      }
+    },
+    {
+      "id": "d4e5f6a7-0004-0004-0004-000000000009",
+      "name": "Actualizar Pedido a EN_PREPARACION",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1920, 280],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.ARFAGI_API_URL }}/api/v1/pedidos/estado",
+        "sendHeaders": true,
+        "headerParameters": [
+          {"name": "X-API-Key", "value": "={{ $env.ARFAGI_API_KEY }}"},
+          {"name": "Content-Type", "value": "application/json"}
+        ],
+        "sendBody": true,
+        "contentType": "json",
+        "body": "={\n  \"pedido_id\": \"{{ $json.pedido_id }}\",\n  \"estado\": \"EN_PREPARACION\",\n  \"alerta_id\": \"{{ $json.alerta_id }}\"\n}",
+        "options": {"timeout": 10000}
+      }
+    },
+    {
+      "id": "d4e5f6a7-0004-0004-0004-000000000010",
+      "name": "Webhook Repartidor Confirma Entrega",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 620],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "entrega-confirmada",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "notes": "El repartidor usa un link simple para confirmar entrega. URL: https://n8n.arfagi.com/webhook/entrega-confirmada"
+    },
+    {
+      "id": "d4e5f6a7-0004-0004-0004-000000000011",
+      "name": "Actualizar Pedido a ENTREGADO",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [480, 620],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.ARFAGI_API_URL }}/api/v1/pedidos/estado",
+        "sendHeaders": true,
+        "headerParameters": [
+          {"name": "X-API-Key", "value": "={{ $env.ARFAGI_API_KEY }}"},
+          {"name": "Content-Type", "value": "application/json"}
+        ],
+        "sendBody": true,
+        "contentType": "json",
+        "body": "={\n  \"pedido_id\": \"{{ $json.pedido_id }}\",\n  \"estado\": \"ENTREGADO\"\n}",
+        "options": {"timeout": 10000}
+      }
+    },
+    {
+      "id": "d4e5f6a7-0004-0004-0004-000000000012",
+      "name": "WA Entrega Confirmada al Cliente",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [720, 620],
+      "parameters": {
+        "method": "POST",
+        "url": "=https://graph.facebook.com/v19.0/{{ $env.WA_PHONE_NUMBER_ID }}/messages",
+        "sendHeaders": true,
+        "headerParameters": [
+          {"name": "Authorization", "value": "=Bearer {{ $env.WA_ACCESS_TOKEN }}"},
+          {"name": "Content-Type", "value": "application/json"}
+        ],
+        "sendBody": true,
+        "contentType": "json",
+        "body": "={\n  \"messaging_product\": \"whatsapp\",\n  \"to\": \"{{ $json.wa_cliente }}\",\n  \"type\": \"text\",\n  \"text\": {\n    \"body\": \"🎉 ¡Tu pedido fue entregado! Esperamos que ames tu nueva fragancia 🌸\\n\\nEn las próximas horas te enviamos una pequeña encuesta sobre tu experiencia. ¡Gracias por confiar en Arfagi! 💛\"\n  }\n}",
+        "options": {"timeout": 10000}
+      }
+    }
+  ],
+  "connections": {
+    "Cron Cada 2 Min (Alertas Logística)": {
+      "main": [[{"node": "Buscar Alertas de Logística (FastAPI)", "type": "main", "index": 0}]]
+    },
+    "Buscar Alertas de Logística (FastAPI)": {
+      "main": [[{"node": "¿Hay Pedidos para Despachar?", "type": "main", "index": 0}]]
+    },
+    "¿Hay Pedidos para Despachar?": {
+      "main": [
+        [{"node": "Dividir por Alerta", "type": "main", "index": 0}],
+        []
+      ]
+    },
+    "Dividir por Alerta": {
+      "main": [[{"node": "Cargar Datos Completos del Pedido", "type": "main", "index": 0}]]
+    },
+    "Cargar Datos Completos del Pedido": {
+      "main": [[{"node": "Armar Mensajes (Repartidor + Cliente)", "type": "main", "index": 0}]]
+    },
+    "Armar Mensajes (Repartidor + Cliente)": {
+      "main": [
+        [{"node": "WA al Repartidor (Detalles + Pin)", "type": "main", "index": 0}],
+        [{"node": "WA al Cliente (Confirmación + Tracking)", "type": "main", "index": 0}]
+      ]
+    },
+    "WA al Repartidor (Detalles + Pin)": {
+      "main": [[{"node": "Actualizar Pedido a EN_PREPARACION", "type": "main", "index": 0}]]
+    },
+    "WA al Cliente (Confirmación + Tracking)": {
+      "main": [[{"node": "Actualizar Pedido a EN_PREPARACION", "type": "main", "index": 0}]]
+    },
+    "Webhook Repartidor Confirma Entrega": {
+      "main": [[{"node": "Actualizar Pedido a ENTREGADO", "type": "main", "index": 0}]]
+    },
+    "Actualizar Pedido a ENTREGADO": {
+      "main": [[{"node": "WA Entrega Confirmada al Cliente", "type": "main", "index": 0}]]
+    }
+  },
+  "active": false,
+  "settings": {"executionOrder": "v1", "saveManualExecutions": true},
+  "meta": {
+    "arfagi_version": "1.0.0",
+    "descripcion": "Detecta pedidos PAGADOS, notifica al repartidor con pin de ubicación y al cliente con tracking. Gestiona confirmación de entrega y dispara el flujo NPS."
+  }
+}

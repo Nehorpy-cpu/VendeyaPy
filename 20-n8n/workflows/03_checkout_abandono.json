@@ -1,0 +1,357 @@
+{
+  "name": "Arfagi — Flujo 3: Checkout, Abandono de Carrito y Bancard Fallback",
+  "nodes": [
+    {
+      "id": "c3d4e5f6-0003-0003-0003-000000000001",
+      "name": "Cron Cada 5 Min (Detector Abandono)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [240, 300],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "*/5 * * * *"
+            }
+          ]
+        }
+      },
+      "notes": "Ejecuta cada 5 minutos para detectar carritos abandonados (40 min sin pago) y locks expirados (45 min)."
+    },
+    {
+      "id": "c3d4e5f6-0003-0003-0003-000000000002",
+      "name": "Webhook Comprobante SIPAP (n8n)",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 500],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "sipap-comprobante",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "notes": "URL: https://n8n.arfagi.com/webhook/sipap-comprobante. n8n recibe la foto del comprobante desde WA, la sube a Storage y llama a FastAPI /sipap/comprobante."
+    },
+    {
+      "id": "c3d4e5f6-0003-0003-0003-000000000003",
+      "name": "Buscar Carritos Abandonados (FastAPI)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [480, 300],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.ARFAGI_API_URL }}/api/v1/pedidos/abandonados",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-API-Key",
+              "value": "={{ $env.ARFAGI_API_KEY }}"
+            }
+          ]
+        },
+        "options": {"timeout": 10000}
+      },
+      "notes": "Retorna pedidos en PENDIENTE_PAGO donde cart_lock_expires_at - now < 5 min (umbral de alerta: 40 min transcurridos de 45)."
+    },
+    {
+      "id": "c3d4e5f6-0003-0003-0003-000000000004",
+      "name": "¿Hay Carritos Abandonados?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [720, 300],
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "leftValue": "={{ $json.total }}",
+              "rightValue": 0,
+              "operator": {"type": "number", "operation": "gt"}
+            }
+          ],
+          "combinator": "and"
+        }
+      }
+    },
+    {
+      "id": "c3d4e5f6-0003-0003-0003-000000000005",
+      "name": "Dividir por Pedido Abandonado",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [960, 200],
+      "parameters": {
+        "batchSize": 1,
+        "options": {}
+      }
+    },
+    {
+      "id": "c3d4e5f6-0003-0003-0003-000000000006",
+      "name": "Armar Mensaje de Recuperación",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1200, 200],
+      "parameters": {
+        "jsCode": "const pedido = $input.first().json;\nconst clienteId = pedido.cliente_id || '';\nconst waNum = clienteId.replace('wa:', '');\n\n// Obtener primer producto del pedido para el mensaje\nconst primerItem = pedido.items?.[0] || {};\nconst nombreProducto = primerItem.nombre || 'tu fragancia elegida';\nconst totalFormateado = pedido.total_formateado || 'el total de tu pedido';\nconst nombre = pedido.nombre_cliente || '';\n\n// Minutos restantes del cart lock\nconst expiraAt = new Date(pedido.cart_lock_expires_at?._seconds * 1000 || Date.now());\nconst minutosRestantes = Math.max(0, Math.round((expiraAt - Date.now()) / 60000));\n\nconst saludo = nombre ? `¡Che, ${nombre}!` : '¡Hola!';\nconst mensaje = `${saludo} ⏰ Tu reserva de *${nombreProducto}* está por vencer en ${minutosRestantes} minutos.\\n\\n¿Seguís con tu pedido de ${totalFormateado}? ¡Ayudame a finalizarlo ahora! 🛍️`;\n\nconsole.log(`Mensaje de recuperación para ${clienteId}`);\n\nreturn [{\n  json: {\n    wa_numero: waNum,\n    mensaje_recuperacion: mensaje,\n    pedido_id: pedido.pedido_id,\n    cliente_id: clienteId\n  }\n}];"
+      }
+    },
+    {
+      "id": "c3d4e5f6-0003-0003-0003-000000000007",
+      "name": "Enviar Template Recuperación (WA)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1440, 200],
+      "parameters": {
+        "method": "POST",
+        "url": "=https://graph.facebook.com/v19.0/{{ $env.WA_PHONE_NUMBER_ID }}/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.WA_ACCESS_TOKEN }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "body": "={\n  \"messaging_product\": \"whatsapp\",\n  \"to\": \"{{ $json.wa_numero }}\",\n  \"type\": \"template\",\n  \"template\": {\n    \"name\": \"arfagi_recuperacion_carrito\",\n    \"language\": { \"code\": \"es\" },\n    \"components\": [\n      {\n        \"type\": \"body\",\n        \"parameters\": [\n          { \"type\": \"text\", \"text\": \"{{ $json.mensaje_recuperacion }}\" }\n        ]\n      },\n      {\n        \"type\": \"button\",\n        \"sub_type\": \"quick_reply\",\n        \"index\": \"0\",\n        \"parameters\": [{ \"type\": \"text\", \"text\": \"BAJA\" }]\n      }\n    ]\n  }\n}",
+        "options": {"timeout": 10000}
+      },
+      "notes": "Usar Template Message (aprobado por Meta). Incluye botón de Opt-Out 'BAJA' según política Meta. Template debe estar aprobado en Meta Business Suite."
+    },
+    {
+      "id": "c3d4e5f6-0003-0003-0003-000000000008",
+      "name": "Marcar Carrito Como Notificado",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1680, 200],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.ARFAGI_API_URL }}/api/v1/pedidos/marcar-notificado",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {"name": "X-API-Key", "value": "={{ $env.ARFAGI_API_KEY }}"}
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "body": "={{ JSON.stringify({ pedido_id: $json.pedido_id }) }}",
+        "options": {"timeout": 5000}
+      }
+    },
+    {
+      "id": "c3d4e5f6-0003-0003-0003-000000000009",
+      "name": "Liberar Locks Expirados (FastAPI)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [960, 420],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.ARFAGI_API_URL }}/api/v1/pedidos/liberar-locks-expirados",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {"name": "X-API-Key", "value": "={{ $env.ARFAGI_API_KEY }}"}
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "body": "{}",
+        "options": {"timeout": 15000}
+      },
+      "notes": "Libera el stock_bloqueado de pedidos cuyo cart_lock_expires_at ya venció. FastAPI ejecuta batch en Firestore."
+    },
+    {
+      "id": "c3d4e5f6-0003-0003-0003-000000000010",
+      "name": "Recibir Comprobante SIPAP OK",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [480, 500],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ recibido: true }) }}",
+        "options": {"responseCode": 200}
+      }
+    },
+    {
+      "id": "c3d4e5f6-0003-0003-0003-000000000011",
+      "name": "Obtener Datos del Comprobante",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [720, 600],
+      "parameters": {
+        "jsCode": "const body = $input.first().json;\nconst pedidoId = body.pedido_id;\nconst mediaId = body.media_id;\nconst clienteId = body.cliente_id;\n\nconsole.log(`Comprobante SIPAP recibido. Pedido: ${pedidoId}`);\n\nreturn [{ json: { pedido_id: pedidoId, media_id: mediaId, cliente_id: clienteId } }];"
+      }
+    },
+    {
+      "id": "c3d4e5f6-0003-0003-0003-000000000012",
+      "name": "Obtener URL Media Meta (Comprobante)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [960, 600],
+      "parameters": {
+        "method": "GET",
+        "url": "=https://graph.facebook.com/v19.0/{{ $json.media_id }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {"name": "Authorization", "value": "=Bearer {{ $env.WA_ACCESS_TOKEN }}"}
+          ]
+        },
+        "options": {"timeout": 10000}
+      }
+    },
+    {
+      "id": "c3d4e5f6-0003-0003-0003-000000000013",
+      "name": "Descargar Comprobante",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1200, 600],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $json.url }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {"name": "Authorization", "value": "=Bearer {{ $env.WA_ACCESS_TOKEN }}"}
+          ]
+        },
+        "options": {
+          "timeout": 30000,
+          "response": {
+            "response": {
+              "responseFormat": "file"
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "c3d4e5f6-0003-0003-0003-000000000014",
+      "name": "Subir Comprobante a Storage",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1440, 600],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.ARFAGI_API_URL }}/api/v1/storage/upload",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {"name": "X-API-Key", "value": "={{ $env.ARFAGI_API_KEY }}"}
+          ]
+        },
+        "sendBody": true,
+        "contentType": "multipart-form-data",
+        "bodyParameters": {
+          "parameters": [
+            {"name": "pedido_id", "value": "={{ $('Obtener Datos del Comprobante').item.json.pedido_id }}"},
+            {"name": "tipo_media", "value": "sipap_comprobante"},
+            {"name": "ttl_minutes", "value": "120"}
+          ]
+        },
+        "options": {"timeout": 30000}
+      }
+    },
+    {
+      "id": "c3d4e5f6-0003-0003-0003-000000000015",
+      "name": "POST FastAPI /sipap/comprobante (OCR)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1680, 600],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.ARFAGI_API_URL }}/api/v1/payments/sipap/comprobante",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {"name": "X-API-Key", "value": "={{ $env.ARFAGI_API_KEY }}"},
+            {"name": "Content-Type", "value": "application/json"}
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "body": "={\n  \"pedido_id\": \"{{ $('Obtener Datos del Comprobante').item.json.pedido_id }}\",\n  \"storage_url\": \"{{ $json.signed_url }}\",\n  \"cliente_id\": \"{{ $('Obtener Datos del Comprobante').item.json.cliente_id }}\"\n}",
+        "options": {"timeout": 30000}
+      }
+    },
+    {
+      "id": "c3d4e5f6-0003-0003-0003-000000000016",
+      "name": "Confirmar Recepción al Cliente (WA)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1920, 600],
+      "parameters": {
+        "method": "POST",
+        "url": "=https://graph.facebook.com/v19.0/{{ $env.WA_PHONE_NUMBER_ID }}/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {"name": "Authorization", "value": "=Bearer {{ $env.WA_ACCESS_TOKEN }}"},
+            {"name": "Content-Type", "value": "application/json"}
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "body": "={\n  \"messaging_product\": \"whatsapp\",\n  \"to\": \"{{ $('Obtener Datos del Comprobante').item.json.cliente_id.replace('wa:', '') }}\",\n  \"type\": \"text\",\n  \"text\": {\n    \"body\": \"¡Recibimos tu comprobante! ✅ Un asesor lo verifica en los próximos 30 min. Te avisamos cuando esté confirmado 🌸\"\n  }\n}",
+        "options": {"timeout": 10000}
+      }
+    }
+  ],
+  "connections": {
+    "Cron Cada 5 Min (Detector Abandono)": {
+      "main": [[{"node": "Buscar Carritos Abandonados (FastAPI)", "type": "main", "index": 0}]]
+    },
+    "Buscar Carritos Abandonados (FastAPI)": {
+      "main": [[{"node": "¿Hay Carritos Abandonados?", "type": "main", "index": 0}]]
+    },
+    "¿Hay Carritos Abandonados?": {
+      "main": [
+        [{"node": "Dividir por Pedido Abandonado", "type": "main", "index": 0}],
+        [{"node": "Liberar Locks Expirados (FastAPI)", "type": "main", "index": 0}]
+      ]
+    },
+    "Dividir por Pedido Abandonado": {
+      "main": [[{"node": "Armar Mensaje de Recuperación", "type": "main", "index": 0}]]
+    },
+    "Armar Mensaje de Recuperación": {
+      "main": [[{"node": "Enviar Template Recuperación (WA)", "type": "main", "index": 0}]]
+    },
+    "Enviar Template Recuperación (WA)": {
+      "main": [[{"node": "Marcar Carrito Como Notificado", "type": "main", "index": 0}]]
+    },
+    "Webhook Comprobante SIPAP (n8n)": {
+      "main": [
+        [{"node": "Recibir Comprobante SIPAP OK", "type": "main", "index": 0}],
+        [{"node": "Obtener Datos del Comprobante", "type": "main", "index": 0}]
+      ]
+    },
+    "Obtener Datos del Comprobante": {
+      "main": [[{"node": "Obtener URL Media Meta (Comprobante)", "type": "main", "index": 0}]]
+    },
+    "Obtener URL Media Meta (Comprobante)": {
+      "main": [[{"node": "Descargar Comprobante", "type": "main", "index": 0}]]
+    },
+    "Descargar Comprobante": {
+      "main": [[{"node": "Subir Comprobante a Storage", "type": "main", "index": 0}]]
+    },
+    "Subir Comprobante a Storage": {
+      "main": [[{"node": "POST FastAPI /sipap/comprobante (OCR)", "type": "main", "index": 0}]]
+    },
+    "POST FastAPI /sipap/comprobante (OCR)": {
+      "main": [[{"node": "Confirmar Recepción al Cliente (WA)", "type": "main", "index": 0}]]
+    }
+  },
+  "active": false,
+  "settings": {"executionOrder": "v1", "saveManualExecutions": true},
+  "meta": {
+    "arfagi_version": "1.0.0",
+    "descripcion": "Detecta carritos abandonados cada 5 min y envía Template de recuperación. Gestiona recepción de comprobantes SIPAP: descarga imagen → Storage → FastAPI OCR → notifica cliente."
+  }
+}

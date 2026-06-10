@@ -1,0 +1,13 @@
+{
+  "name": "@vpw/n8n-workflows",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Workflows n8n exportados como JSON (fuente de verdad versionada)",
+  "scripts": {
+    "validate": "node scripts/validate.mjs",
+    "typecheck": "echo 'no typecheck needed'",
+    "lint": "echo 'no lint needed'",
+    "build": "echo 'no build needed'",
+    "test": "echo 'no tests yet'"
+  }
+}

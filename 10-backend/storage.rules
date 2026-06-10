@@ -1,0 +1,82 @@
+rules_version = '2';
+
+// ============================================================================
+// VentaporWhatsapp — Reglas de Firebase Storage
+// ----------------------------------------------------------------------------
+// Estructura de buckets:
+//   /tenants/{tenantId}/products/{productId}/{filename}   — imágenes de productos
+//   /tenants/{tenantId}/invoices/{invoiceId}.pdf          — facturas generadas
+//   /tenants/{tenantId}/exports/{filename}                — exports CSV/Excel
+//   /platform/...                                          — assets de plataforma
+// ============================================================================
+
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function userTenantId() {
+      return request.auth.token.tenantId;
+    }
+
+    function userRole() {
+      return request.auth.token.role;
+    }
+
+    function isPlatformAdmin() {
+      return isSignedIn() && userRole() == 'PLATFORM_ADMIN';
+    }
+
+    function isTenantManager(tenantId) {
+      return isSignedIn()
+        && userTenantId() == tenantId
+        && userRole() in ['TENANT_OWNER', 'TENANT_MANAGER'];
+    }
+
+    function isTenantViewer(tenantId) {
+      return isSignedIn()
+        && userTenantId() == tenantId
+        && userRole() in ['TENANT_OWNER', 'TENANT_MANAGER', 'TENANT_VIEWER'];
+    }
+
+    function isImageFile() {
+      return request.resource.contentType.matches('image/.*');
+    }
+
+    function under5MB() {
+      return request.resource.size < 5 * 1024 * 1024;
+    }
+
+    // Imágenes de productos: público para lectura (necesario para WhatsApp), upload restringido
+    match /tenants/{tenantId}/products/{productId}/{filename} {
+      allow read: if true;
+      allow write: if isTenantManager(tenantId) && isImageFile() && under5MB();
+      allow delete: if isTenantManager(tenantId);
+    }
+
+    // Facturas PDF: solo el tenant las lee, solo Cloud Functions las escriben
+    match /tenants/{tenantId}/invoices/{invoiceId} {
+      allow read: if isTenantViewer(tenantId) || isPlatformAdmin();
+      allow write: if false; // Solo Admin SDK
+    }
+
+    // Exports: solo el tenant los lee, solo Cloud Functions los crean
+    match /tenants/{tenantId}/exports/{filename} {
+      allow read: if isTenantViewer(tenantId) || isPlatformAdmin();
+      allow write: if false; // Solo Admin SDK
+    }
+
+    // Assets de plataforma (logos, banners de la propia VentaporWhatsapp)
+    match /platform/{allPaths=**} {
+      allow read: if true;
+      allow write: if isPlatformAdmin();
+    }
+
+    // Default deny
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

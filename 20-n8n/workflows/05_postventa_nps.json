@@ -1,0 +1,415 @@
+{
+  "name": "Arfagi — Flujo 5: Post-Venta, NPS y Campañas CRM",
+  "nodes": [
+    {
+      "id": "e5f6a7b8-0005-0005-0005-000000000001",
+      "name": "Cron Detector Pedidos Entregados (NPS)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [240, 280],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 * * * *"
+            }
+          ]
+        }
+      },
+      "notes": "Revisa cada hora si hay pedidos ENTREGADOS hace 24hs con nps_enviado=false."
+    },
+    {
+      "id": "e5f6a7b8-0005-0005-0005-000000000002",
+      "name": "Cron Campañas Mensuales (Día 1 del mes)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [240, 460],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 10 1 * *"
+            }
+          ]
+        }
+      },
+      "notes": "El día 1 de cada mes a las 10am dispara las campañas segmentadas CRM."
+    },
+    {
+      "id": "e5f6a7b8-0005-0005-0005-000000000003",
+      "name": "Buscar Pedidos para NPS (FastAPI)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [480, 280],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.ARFAGI_API_URL }}/api/v1/pedidos/pendientes-nps",
+        "sendHeaders": true,
+        "headerParameters": [
+          {"name": "X-API-Key", "value": "={{ $env.ARFAGI_API_KEY }}"}
+        ],
+        "options": {"timeout": 10000}
+      },
+      "notes": "Retorna pedidos donde: estado=ENTREGADO, nps_enviado=false, y (now - entregado_at) >= 24hs."
+    },
+    {
+      "id": "e5f6a7b8-0005-0005-0005-000000000004",
+      "name": "¿Hay Pedidos Listos para NPS?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [720, 280],
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "leftValue": "={{ $json.total }}",
+              "rightValue": 0,
+              "operator": {"type": "number", "operation": "gt"}
+            }
+          ],
+          "combinator": "and"
+        }
+      }
+    },
+    {
+      "id": "e5f6a7b8-0005-0005-0005-000000000005",
+      "name": "Dividir por Pedido NPS",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [960, 180],
+      "parameters": {
+        "batchSize": 1,
+        "options": {}
+      }
+    },
+    {
+      "id": "e5f6a7b8-0005-0005-0005-000000000006",
+      "name": "Verificar Opt-Out del Cliente",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1200, 180],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.ARFAGI_API_URL }}/api/v1/clientes/{{ $json.cliente_id }}/opt-out",
+        "sendHeaders": true,
+        "headerParameters": [
+          {"name": "X-API-Key", "value": "={{ $env.ARFAGI_API_KEY }}"}
+        ],
+        "options": {"timeout": 5000}
+      }
+    },
+    {
+      "id": "e5f6a7b8-0005-0005-0005-000000000007",
+      "name": "¿Cliente Tiene Opt-Out?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [1440, 180],
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "leftValue": "={{ $json.opt_out }}",
+              "rightValue": true,
+              "operator": {"type": "boolean", "operation": "equals"}
+            }
+          ],
+          "combinator": "and"
+        }
+      }
+    },
+    {
+      "id": "e5f6a7b8-0005-0005-0005-000000000008",
+      "name": "Armar Encuesta NPS",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1680, 80],
+      "parameters": {
+        "jsCode": "const pedido = $('Dividir por Pedido NPS').item.json;\nconst nombre = pedido.nombre_cliente || 'che';\nconst producto = pedido.items?.[0]?.nombre || 'tu fragancia';\nconst waNum = pedido.cliente_id?.replace('wa:', '') || '';\n\n// Mensaje NPS con opciones de respuesta (botones interactivos)\nconst mensajeNPS = `¡Hola ${nombre}! 🌸\\n\\n¿Cómo llegó tu ${producto} de Arfagi?\\n\\nCalificá tu experiencia del 1 al 10 ⭐\\n\\n_Para no recibir más mensajes, respondé BAJA_`;\n\nconsole.log(`NPS preparado para ${pedido.cliente_id}`);\n\nreturn [{\n  json: {\n    pedido_id: pedido.pedido_id,\n    cliente_id: pedido.cliente_id,\n    wa_numero: waNum,\n    nombre_cliente: nombre,\n    producto_principal: producto,\n    mensaje_nps: mensajeNPS\n  }\n}];"
+      }
+    },
+    {
+      "id": "e5f6a7b8-0005-0005-0005-000000000009",
+      "name": "Enviar Template NPS (WA)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1920, 80],
+      "parameters": {
+        "method": "POST",
+        "url": "=https://graph.facebook.com/v19.0/{{ $env.WA_PHONE_NUMBER_ID }}/messages",
+        "sendHeaders": true,
+        "headerParameters": [
+          {"name": "Authorization", "value": "=Bearer {{ $env.WA_ACCESS_TOKEN }}"},
+          {"name": "Content-Type", "value": "application/json"}
+        ],
+        "sendBody": true,
+        "contentType": "json",
+        "body": "={\n  \"messaging_product\": \"whatsapp\",\n  \"to\": \"{{ $json.wa_numero }}\",\n  \"type\": \"interactive\",\n  \"interactive\": {\n    \"type\": \"button\",\n    \"body\": {\n      \"text\": \"{{ $json.mensaje_nps }}\"\n    },\n    \"action\": {\n      \"buttons\": [\n        { \"type\": \"reply\", \"reply\": { \"id\": \"nps_bueno\", \"title\": \"⭐ 9-10 Excelente\" } },\n        { \"type\": \"reply\", \"reply\": { \"id\": \"nps_medio\", \"title\": \"😊 7-8 Bueno\" } },\n        { \"type\": \"reply\", \"reply\": { \"id\": \"nps_bajo\", \"title\": \"😕 1-6 Mejorable\" } }\n      ]\n    }\n  }\n}",
+        "options": {"timeout": 10000}
+      },
+      "notes": "Template interactivo con 3 botones de respuesta rápida. El Template debe estar aprobado en Meta Business Suite con nombre 'arfagi_nps_encuesta'."
+    },
+    {
+      "id": "e5f6a7b8-0005-0005-0005-000000000010",
+      "name": "Marcar NPS como Enviado (FastAPI)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2160, 80],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.ARFAGI_API_URL }}/api/v1/pedidos/nps-enviado",
+        "sendHeaders": true,
+        "headerParameters": [
+          {"name": "X-API-Key", "value": "={{ $env.ARFAGI_API_KEY }}"},
+          {"name": "Content-Type", "value": "application/json"}
+        ],
+        "sendBody": true,
+        "contentType": "json",
+        "body": "={{ JSON.stringify({ pedido_id: $('Armar Encuesta NPS').item.json.pedido_id }) }}",
+        "options": {"timeout": 5000}
+      }
+    },
+    {
+      "id": "e5f6a7b8-0005-0005-0005-000000000011",
+      "name": "Ignorar (Opt-Out Activo)",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [1680, 280],
+      "parameters": {}
+    },
+    {
+      "id": "e5f6a7b8-0005-0005-0005-000000000012",
+      "name": "Webhook Respuesta NPS del Cliente",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 640],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "nps-respuesta",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "notes": "Recibe la respuesta del cliente al NPS (botón o número 1-10). Viene procesada por el Flujo 2 (Ingreso Omnicanal) que detecta el contexto NPS."
+    },
+    {
+      "id": "e5f6a7b8-0005-0005-0005-000000000013",
+      "name": "Detectar Score NPS",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [480, 640],
+      "parameters": {
+        "jsCode": "const body = $input.first().json;\nconst respuesta = body.respuesta || body.button_id || '';\nconst pedidoId = body.pedido_id;\nconst clienteId = body.cliente_id;\nconst waNum = clienteId?.replace('wa:', '') || '';\nconst nombre = body.nombre_cliente || 'che';\n\nlet score = null;\nlet categoria = 'DESCONOCIDA';\n\n// Mapear botón o número a score\nif (respuesta === 'nps_bueno' || (parseInt(respuesta) >= 9)) {\n  score = parseInt(respuesta) || 10;\n  categoria = 'PROMOTOR'; // NPS 9-10\n} else if (respuesta === 'nps_medio' || (parseInt(respuesta) >= 7 && parseInt(respuesta) <= 8)) {\n  score = parseInt(respuesta) || 8;\n  categoria = 'PASIVO'; // NPS 7-8\n} else if (respuesta === 'nps_bajo' || (parseInt(respuesta) >= 1 && parseInt(respuesta) <= 6)) {\n  score = parseInt(respuesta) || 5;\n  categoria = 'DETRACTOR'; // NPS 1-6\n}\n\n// Respuesta según categoría\nlet mensajeRespuesta = '';\nif (categoria === 'PROMOTOR') {\n  mensajeRespuesta = `¡Gracias, ${nombre}! 🌸 Nos alegra muchísimo que hayas quedado feliz ✨\\n\\n¿Te animás a dejarnos una reseña en nuestro Instagram @arfagi.perfumes o en Google? ¡Es de mucha ayuda para nosotros! 💛`;\n} else if (categoria === 'PASIVO') {\n  mensajeRespuesta = `¡Gracias por tu calificación, ${nombre}! 🌺\\nNos encantaría verte de vuelta pronto. Si tenés alguna sugerencia, podés escribirnos cuando quieras 💛`;\n} else {\n  mensajeRespuesta = `Lamentamos que tu experiencia no haya sido la mejor, ${nombre}. Una asesora se va a comunicar con vos ahora mismo para resolverlo 💛`;\n}\n\nconsole.log(`NPS recibido: score=${score}, categoría=${categoria}, pedido=${pedidoId}`);\n\nreturn [{\n  json: {\n    pedido_id: pedidoId,\n    cliente_id: clienteId,\n    wa_numero: waNum,\n    nombre,\n    score,\n    categoria,\n    mensaje_respuesta: mensajeRespuesta,\n    requiere_atencion: categoria === 'DETRACTOR'\n  }\n}];"
+      }
+    },
+    {
+      "id": "e5f6a7b8-0005-0005-0005-000000000014",
+      "name": "Guardar Score NPS en Firestore",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [720, 640],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.ARFAGI_API_URL }}/api/v1/pedidos/guardar-nps",
+        "sendHeaders": true,
+        "headerParameters": [
+          {"name": "X-API-Key", "value": "={{ $env.ARFAGI_API_KEY }}"},
+          {"name": "Content-Type", "value": "application/json"}
+        ],
+        "sendBody": true,
+        "contentType": "json",
+        "body": "={{ JSON.stringify({ pedido_id: $json.pedido_id, score: $json.score, categoria: $json.categoria }) }}",
+        "options": {"timeout": 5000}
+      }
+    },
+    {
+      "id": "e5f6a7b8-0005-0005-0005-000000000015",
+      "name": "Responder al Cliente según NPS",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [960, 640],
+      "parameters": {
+        "method": "POST",
+        "url": "=https://graph.facebook.com/v19.0/{{ $env.WA_PHONE_NUMBER_ID }}/messages",
+        "sendHeaders": true,
+        "headerParameters": [
+          {"name": "Authorization", "value": "=Bearer {{ $env.WA_ACCESS_TOKEN }}"},
+          {"name": "Content-Type", "value": "application/json"}
+        ],
+        "sendBody": true,
+        "contentType": "json",
+        "body": "={\n  \"messaging_product\": \"whatsapp\",\n  \"to\": \"{{ $json.wa_numero }}\",\n  \"type\": \"text\",\n  \"text\": { \"body\": \"{{ $json.mensaje_respuesta }}\" }\n}",
+        "options": {"timeout": 10000}
+      }
+    },
+    {
+      "id": "e5f6a7b8-0005-0005-0005-000000000016",
+      "name": "¿Requiere Atención Humana? (NPS Bajo)",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [1200, 640],
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "leftValue": "={{ $json.requiere_atencion }}",
+              "rightValue": true,
+              "operator": {"type": "boolean", "operation": "equals"}
+            }
+          ],
+          "combinator": "and"
+        }
+      }
+    },
+    {
+      "id": "e5f6a7b8-0005-0005-0005-000000000017",
+      "name": "Alerta NPS Bajo → Flutter (solicitar_asistencia)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1440, 540],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.ARFAGI_API_URL }}/api/v1/process",
+        "sendHeaders": true,
+        "headerParameters": [
+          {"name": "X-API-Key", "value": "={{ $env.ARFAGI_API_KEY }}"},
+          {"name": "Content-Type", "value": "application/json"}
+        ],
+        "sendBody": true,
+        "contentType": "json",
+        "body": "={\n  \"cliente_id\": \"{{ $json.cliente_id }}\",\n  \"canal\": \"whatsapp\",\n  \"mensaje_texto\": \"[SISTEMA] NPS_BAJO score={{ $json.score }} pedido={{ $json.pedido_id }}\",\n  \"tipo_media\": \"text\",\n  \"meta_message_id\": \"nps_auto_{{ $json.pedido_id }}\"\n}",
+        "options": {"timeout": 15000}
+      },
+      "notes": "Envía un mensaje interno al orquestador que dispara solicitar_asistencia_humana con motivo=NPS_BAJO. El agente de Fidelización lo maneja."
+    },
+    {
+      "id": "e5f6a7b8-0005-0005-0005-000000000018",
+      "name": "Cargar Clientes por Segmento (Campañas)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [480, 460],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.ARFAGI_API_URL }}/api/v1/clientes/campanas-mensuales",
+        "sendHeaders": true,
+        "headerParameters": [
+          {"name": "X-API-Key", "value": "={{ $env.ARFAGI_API_KEY }}"}
+        ],
+        "options": {"timeout": 15000}
+      },
+      "notes": "Retorna clientes agrupados por segmento CRM: LEAD_FRIO, CLIENTE_NUEVO, CLIENTE_VIP. Solo incluye clientes con opt_out=false."
+    },
+    {
+      "id": "e5f6a7b8-0005-0005-0005-000000000019",
+      "name": "Procesar Campañas por Segmento",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [720, 460],
+      "parameters": {
+        "jsCode": "const data = $input.first().json;\nconst clientes = data.clientes || [];\n\n// Definir mensajes por segmento\nconst campanas = {\n  LEAD_FRIO: {\n    template: 'arfagi_campana_lead',\n    mensaje: '🌸 ¿Todavía buscás tu fragancia ideal? En Arfagi tenemos más de 100 perfumes desde Gs. 125.000. ¡Escribinos y te asesoramos gratis!\\n\\n_Para no recibir más mensajes, respondé BAJA_'\n  },\n  CLIENTE_NUEVO: {\n    template: 'arfagi_campana_nuevo',\n    mensaje: '✨ ¿Ya elegiste tu próxima fragancia? ¡Tenemos nuevos arrivals este mes! Escribinos para ver las novedades 🌺\\n\\n_Para no recibir más mensajes, respondé BAJA_'\n  },\n  CLIENTE_VIP: {\n    template: 'arfagi_campana_vip',\n    mensaje: '💛 ¡Hola! Como cliente VIP de Arfagi, tenés acceso anticipado a nuestros nuevos arrivals de este mes.\\n\\n¿Querés que te mostremos lo último antes que nadie? ✨\\n\\n_Para no recibir más mensajes, respondé BAJA_'\n  }\n};\n\nconst mensajesAEnviar = [];\n\nfor (const cliente of clientes) {\n  const segmento = cliente.segmento_crm;\n  const campana = campanas[segmento];\n  if (!campana) continue;\n  \n  const waNum = cliente.cliente_id?.replace('wa:', '') || '';\n  if (!waNum) continue; // Solo WhatsApp en esta versión\n  \n  mensajesAEnviar.push({\n    json: {\n      wa_numero: waNum,\n      cliente_id: cliente.cliente_id,\n      nombre: cliente.nombre || '',\n      segmento,\n      mensaje: campana.mensaje,\n      template: campana.template\n    }\n  });\n}\n\nconsole.log(`Campañas mensuales: ${mensajesAEnviar.length} mensajes a enviar.`);\nreturn mensajesAEnviar;"
+      }
+    },
+    {
+      "id": "e5f6a7b8-0005-0005-0005-000000000020",
+      "name": "Esperar 3s Entre Mensajes (Rate Limit)",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [960, 460],
+      "parameters": {
+        "resume": "timeInterval",
+        "amount": 3,
+        "unit": "seconds"
+      },
+      "notes": "WhatsApp Cloud API tiene límites de rate. Esperar 3 segundos entre mensajes masivos evita suspensión de la cuenta."
+    },
+    {
+      "id": "e5f6a7b8-0005-0005-0005-000000000021",
+      "name": "Enviar Campaña por Segmento (WA Template)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1200, 460],
+      "parameters": {
+        "method": "POST",
+        "url": "=https://graph.facebook.com/v19.0/{{ $env.WA_PHONE_NUMBER_ID }}/messages",
+        "sendHeaders": true,
+        "headerParameters": [
+          {"name": "Authorization", "value": "=Bearer {{ $env.WA_ACCESS_TOKEN }}"},
+          {"name": "Content-Type", "value": "application/json"}
+        ],
+        "sendBody": true,
+        "contentType": "json",
+        "body": "={\n  \"messaging_product\": \"whatsapp\",\n  \"to\": \"{{ $json.wa_numero }}\",\n  \"type\": \"template\",\n  \"template\": {\n    \"name\": \"{{ $json.template }}\",\n    \"language\": { \"code\": \"es\" },\n    \"components\": [\n      {\n        \"type\": \"body\",\n        \"parameters\": [\n          { \"type\": \"text\", \"text\": \"{{ $json.nombre || 'che' }}\" }\n        ]\n      },\n      {\n        \"type\": \"button\",\n        \"sub_type\": \"quick_reply\",\n        \"index\": \"0\",\n        \"parameters\": [{ \"type\": \"text\", \"text\": \"BAJA\" }]\n      }\n    ]\n  }\n}",
+        "options": {"timeout": 10000}
+      },
+      "notes": "OBLIGATORIO: El Template 'arfagi_campana_*' debe estar aprobado por Meta ANTES de activar este flujo. Siempre incluye botón de Opt-Out 'BAJA'."
+    }
+  ],
+  "connections": {
+    "Cron Detector Pedidos Entregados (NPS)": {
+      "main": [[{"node": "Buscar Pedidos para NPS (FastAPI)", "type": "main", "index": 0}]]
+    },
+    "Buscar Pedidos para NPS (FastAPI)": {
+      "main": [[{"node": "¿Hay Pedidos Listos para NPS?", "type": "main", "index": 0}]]
+    },
+    "¿Hay Pedidos Listos para NPS?": {
+      "main": [
+        [{"node": "Dividir por Pedido NPS", "type": "main", "index": 0}],
+        []
+      ]
+    },
+    "Dividir por Pedido NPS": {
+      "main": [[{"node": "Verificar Opt-Out del Cliente", "type": "main", "index": 0}]]
+    },
+    "Verificar Opt-Out del Cliente": {
+      "main": [[{"node": "¿Cliente Tiene Opt-Out?", "type": "main", "index": 0}]]
+    },
+    "¿Cliente Tiene Opt-Out?": {
+      "main": [
+        [{"node": "Ignorar (Opt-Out Activo)", "type": "main", "index": 0}],
+        [{"node": "Armar Encuesta NPS", "type": "main", "index": 0}]
+      ]
+    },
+    "Armar Encuesta NPS": {
+      "main": [[{"node": "Enviar Template NPS (WA)", "type": "main", "index": 0}]]
+    },
+    "Enviar Template NPS (WA)": {
+      "main": [[{"node": "Marcar NPS como Enviado (FastAPI)", "type": "main", "index": 0}]]
+    },
+    "Webhook Respuesta NPS del Cliente": {
+      "main": [[{"node": "Detectar Score NPS", "type": "main", "index": 0}]]
+    },
+    "Detectar Score NPS": {
+      "main": [[{"node": "Guardar Score NPS en Firestore", "type": "main", "index": 0}]]
+    },
+    "Guardar Score NPS en Firestore": {
+      "main": [[{"node": "Responder al Cliente según NPS", "type": "main", "index": 0}]]
+    },
+    "Responder al Cliente según NPS": {
+      "main": [[{"node": "¿Requiere Atención Humana? (NPS Bajo)", "type": "main", "index": 0}]]
+    },
+    "¿Requiere Atención Humana? (NPS Bajo)": {
+      "main": [
+        [{"node": "Alerta NPS Bajo → Flutter (solicitar_asistencia)", "type": "main", "index": 0}],
+        []
+      ]
+    },
+    "Cron Campañas Mensuales (Día 1 del mes)": {
+      "main": [[{"node": "Cargar Clientes por Segmento (Campañas)", "type": "main", "index": 0}]]
+    },
+    "Cargar Clientes por Segmento (Campañas)": {
+      "main": [[{"node": "Procesar Campañas por Segmento", "type": "main", "index": 0}]]
+    },
+    "Procesar Campañas por Segmento": {
+      "main": [[{"node": "Esperar 3s Entre Mensajes (Rate Limit)", "type": "main", "index": 0}]]
+    },
+    "Esperar 3s Entre Mensajes (Rate Limit)": {
+      "main": [[{"node": "Enviar Campaña por Segmento (WA Template)", "type": "main", "index": 0}]]
+    }
+  },
+  "active": false,
+  "settings": {"executionOrder": "v1", "saveManualExecutions": true},
+  "meta": {
+    "arfagi_version": "1.0.0",
+    "descripcion": "Encuestas NPS a 24hs post-entrega con botones interactivos. Detecta DETRACTORES y alerta a Flutter. Campañas mensuales segmentadas por CRM con respeto total al Opt-Out."
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "name": "@vpw/firebase-config",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Reglas e índices de Firestore — fuente única",
+  "scripts": {
+    "test:rules": "vitest run",
+    "deploy:rules": "cd ../.. && firebase deploy --only firestore:rules,storage:rules",
+    "deploy:indexes": "cd ../.. && firebase deploy --only firestore:indexes",
+    "typecheck": "echo 'no typecheck needed'",
+    "lint": "echo 'no lint needed'",
+    "build": "echo 'no build needed'",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@firebase/rules-unit-testing": "^3.0.0",
+    "vitest": "^1.2.0"
+  }
+}

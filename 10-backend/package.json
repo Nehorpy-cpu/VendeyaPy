@@ -1,0 +1,48 @@
+{
+  "name": "ventaporwhatsapp",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Plataforma SaaS de venta por WhatsApp para Latinoamérica",
+  "engines": {
+    "node": ">=20",
+    "pnpm": ">=8"
+  },
+  "packageManager": "pnpm@9.0.0",
+  "scripts": {
+    "build": "pnpm -r build",
+    "dev": "pnpm -r --parallel dev",
+    "lint": "pnpm -r lint",
+    "typecheck": "pnpm -r typecheck",
+    "test": "pnpm -r test",
+    "test:unit": "pnpm -r test:unit",
+    "test:integration": "pnpm -r test:integration",
+    "test:e2e": "pnpm -r test:e2e",
+    "format": "prettier --write \"**/*.{ts,tsx,js,jsx,json,md}\"",
+    "format:check": "prettier --check \"**/*.{ts,tsx,js,jsx,json,md}\"",
+    "emulators": "firebase emulators:start",
+    "emulators:export": "firebase emulators:export ./tests/fixtures/emulator-data",
+    "emulators:import": "firebase emulators:start --import=./tests/fixtures/emulator-data",
+    "deploy:staging": "firebase deploy --project vpw-staging",
+    "deploy:prod": "firebase deploy --project vpw-prod",
+    "deploy:rules": "firebase deploy --only firestore:rules,storage:rules",
+    "deploy:indexes": "firebase deploy --only firestore:indexes",
+    "prepare": "husky install"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "firebase-tools": "^13.0.0",
+    "husky": "^9.0.0",
+    "lint-staged": "^15.0.0",
+    "prettier": "^3.2.0",
+    "typescript": "^5.3.0",
+    "vitest": "^1.2.0"
+  },
+  "lint-staged": {
+    "*.{ts,tsx,js,jsx}": [
+      "prettier --write"
+    ],
+    "*.{json,md}": [
+      "prettier --write"
+    ]
+  }
+}
