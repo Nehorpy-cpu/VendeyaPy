@@ -745,9 +745,16 @@ match /{document=**} {
 
 ---
 
-## 6. Integración WhatsApp Cloud API
+## 6. Integración WhatsApp
 
-### 6.1 Arquitectura de mensajería
+> **Estrategia de dos etapas (ver ADR-0003).**
+> El estado final descrito en esta sección usa **WhatsApp Cloud API oficial**. Sin embargo, la **fase 1 de desarrollo usa OpenWA** (cliente no oficial, ya instalado en `50-whatsapp-server/OpenWA/`) para prototipar el bot sin esperar trámites de Meta. La migración a Cloud API se ejecuta **antes** de conectar Meta Business Suite y correr ads.
+>
+> **Regla de diseño inviolable:** toda la mensajería va detrás de una abstracción `WhatsAppClient` con adapters intercambiables:
+> `WhatsAppClient` (interfaz) → `OpenWAAdapter` (fase 1) → `CloudAPIAdapter` (fase 2).
+> El bot y el checkout hablan con la interfaz, nunca con el proveedor directo. Cambiar de adapter no debe tocar la lógica conversacional.
+
+### 6.1 Arquitectura de mensajería (estado final — Cloud API)
 
 ```
 Usuario en WhatsApp

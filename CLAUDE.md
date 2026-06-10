@@ -24,7 +24,7 @@
 - **DB:** Cloud Firestore
 - **Auth:** Firebase Authentication
 - **Orquestación:** n8n self-hosted
-- **WhatsApp:** OpenWA local + (eventual) WhatsApp Cloud API oficial
+- **WhatsApp:** WhatsApp Cloud API oficial de Meta (OpenWA descartado — ver ADR-0003)
 - **Pagos:** Stripe internacional + pasarelas locales Paraguay (Bancard vPOS, Tigo Money, Personal Pay, Zimple) — ya documentadas en ARCHITECTURE.md heredado
 - **Móvil:** Flutter (opcional, diferido)
 - **Monorepo:** pnpm workspaces

@@ -23,9 +23,9 @@
 | Fase | Nombre | Estado |
 |------|--------|--------|
 | **F0** | Preparación del entorno y estructura | ✅ Completada |
-| **F1** | Fix técnico de OpenWA (servidor WhatsApp corriendo) | ⚡ EN CURSO |
+| **F1** | Setup WhatsApp Cloud API (canal oficial Meta) | ⚡ EN CURSO |
 | **F2** | Diseño de datos (schema Firestore tenant perfumería) | ⏳ Pendiente |
-| **F3** | Infra unificada (docker-compose: OpenWA + n8n + emuladores) | ⏳ Pendiente |
+| **F3** | Infra unificada (docker-compose: n8n + emuladores Firebase) | ⏳ Pendiente |
 | **F4** | Bot conversacional básico (recibe → responde) | ⏳ Pendiente |
 | **F5** | Catálogo + carrito (el bot vende) | ⏳ Pendiente |
 | **F6** | Cobros (links de pago dentro de WhatsApp) | ⏳ Pendiente |
@@ -33,34 +33,45 @@
 | **F8** | Posventa + seguimiento + fidelización | ⏳ Pendiente |
 | **F9** | Testing E2E + salida a producción | ⏳ Pendiente |
 
+> **Nota de canal:** se usa WhatsApp Cloud API oficial. OpenWA fue descartado (ver ADR-0003).
+
 ---
 
-# ⚡ FASE ACTIVA: F1 — Fix técnico de OpenWA
+# ⚡ FASE ACTIVA: F1 — Setup WhatsApp Cloud API
 
-**Objetivo:** dejar el servidor OpenWA corriendo en Docker, con el dashboard accesible en `localhost:2785`, sin errores de build.
+**Objetivo:** tener el canal oficial de WhatsApp listo para que el backend pueda recibir
+y enviar mensajes — número dedicado registrado, app de Meta creada, tokens obtenidos,
+y webhook respondiendo el handshake de verificación de Meta.
 
-**Por qué primero:** sin el servidor WhatsApp funcionando, nada del resto se puede probar. Es el cimiento físico.
+**Por qué primero:** sin el canal de WhatsApp conectado, el bot no puede recibir ni
+responder mensajes. Es el cimiento del producto.
 
 **Criterio de "fase terminada" (Definition of Done):**
-- [ ] `docker compose -f docker-compose.dev.yml up -d` levanta sin errores
-- [ ] `curl http://localhost:2785` responde (no Connection refused)
-- [ ] El dashboard abre en el navegador
-- [ ] La sesión WhatsApp de `data/` se reconoce (o se puede escanear QR nuevo)
+- [ ] Meta Business verificado
+- [ ] App de WhatsApp creada en developers.facebook.com
+- [ ] Número dedicado registrado en WhatsApp Business API
+- [ ] Access token permanente (System User) obtenido y guardado de forma segura
+- [ ] Webhook desplegado que responde el `GET` de verificación de Meta (hub.challenge)
+- [ ] Mensaje de prueba recibido en el webhook (entrante) y uno enviado (saliente) OK
 
 ### Sub-fases de F1
 
 | Sub-fase | Acción | Estado | Riesgo |
 |----------|--------|--------|--------|
-| **F1.1** | Diagnóstico: confirmar el error de build (vite 8 vs plugin-react 5) y revisar si hay otros | ⏳ | Bajo |
-| **F1.2** | Aplicar fix en `dashboard/package.json`: bajar `vite ^8` → `vite ^7` | ⏳ | Bajo |
-| **F1.3** | Regenerar `package-lock.json` del dashboard (local, fuera de Docker, para validar que resuelve) | ⏳ | Bajo |
-| **F1.4** | Rebuild del container: `docker compose build dashboard` | ⏳ | Medio (puede aparecer otro conflicto) |
-| **F1.5** | Levantar todo: `docker compose up -d` y mirar logs | ⏳ | Medio |
-| **F1.6** | Verificar dashboard responde en `localhost:2785` | ⏳ | Bajo |
-| **F1.7** | Verificar estado de sesión WhatsApp (data/ reconocida o QR) | ⏳ | Bajo |
-| **F1.8** | Commit del fix + nota en CHANGELOG si aplica | ⏳ | Cero |
+| **F1.1** | Verificar estado de Meta Business (¿verificado? ¿qué falta?) — guía al owner | ⏳ | Bajo |
+| **F1.2** | Crear app de WhatsApp en developers.facebook.com + obtener App ID / App Secret | ⏳ | Bajo |
+| **F1.3** | Registrar número dedicado en WhatsApp Business API (no personal) | ⏳ | Medio (trámite Meta) |
+| **F1.4** | Generar access token permanente vía System User (no el temporal de 24h) | ⏳ | Bajo |
+| **F1.5** | Definir `verify token` propio + documentar config en `50-whatsapp-cloud-api/config/` | ⏳ | Cero |
+| **F1.6** | Codear webhook mínimo en `10-backend` (GET verificación + POST recepción) | ⏳ | Medio |
+| **F1.7** | Desplegar webhook (Cloud Functions o túnel local) y registrarlo en Meta | ⏳ | Medio |
+| **F1.8** | Prueba E2E: enviar/recibir un mensaje de test. Commit + ADR si surge decisión | ⏳ | Bajo |
 
-**Regla de oro de F1:** si una sub-fase falla, NO se pasa a la siguiente. Se para, se diagnostica el error en español simple, se proponen 2 opciones, y el owner elige. (Igual que pediste en el pedido original de OpenWA.)
+**Regla de oro de F1:** si una sub-fase falla, NO se pasa a la siguiente. Se para, se diagnostica
+el error en español simple, se proponen 2 opciones, y el owner elige. Nada de "ya va a funcionar".
+
+**Nota:** las sub-fases F1.1–F1.5 son **trámites/config en Meta** (las hacés vos, yo te guío
+paso a paso). Las F1.6–F1.8 son **código** (las hago yo, vos validás).
 
 ---
 
@@ -72,8 +83,8 @@ respetando la estructura multi-tenant (`tenants/perfumeria/...`). Sin código to
 solo el modelo de datos y las reglas de seguridad.
 
 ### F3 — Infra unificada
-Un solo `docker-compose.yml` en `90-ops/` que levante OpenWA + n8n + emulador Firestore,
-para tener el entorno completo de desarrollo con un comando.
+Un solo `docker-compose.yml` en `90-ops/` que levante n8n + emuladores de Firebase
+(Firestore + Functions), para tener el entorno completo de desarrollo con un comando.
 
 ### F4 — Bot conversacional básico
 El webhook recibe un mensaje de WhatsApp, lo procesa en Cloud Functions, y responde algo.
