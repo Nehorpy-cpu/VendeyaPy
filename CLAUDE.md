@@ -6,7 +6,7 @@
 
 ## Contexto del proyecto
 
-`AI_AFG` automatiza ventas y créditos para dos negocios en Bolivia:
+`AI_AFG` automatiza ventas y créditos para dos negocios en Paraguay:
 
 1. **Perfumería y cuidado personal femenino** — catálogo, checkout, posventa
 2. **Servicios financieros** — créditos analizados por **CrediAgil**, **LlevaYa**, **Solar Banco**
@@ -22,7 +22,7 @@
 - **Auth:** Firebase Authentication
 - **Orquestación:** n8n self-hosted
 - **WhatsApp:** OpenWA local + (eventual) WhatsApp Cloud API oficial
-- **Pagos:** Stripe internacional + pasarelas locales BO (a definir)
+- **Pagos:** Stripe internacional + pasarelas locales Paraguay (Bancard vPOS, Tigo Money, Personal Pay, Zimple) — ya documentadas en ARCHITECTURE.md heredado
 - **Móvil:** Flutter (opcional, diferido)
 - **Monorepo:** pnpm workspaces
 

@@ -1,7 +1,7 @@
 # AI_AFG
 
-> Plataforma de automatización de ventas y créditos.
-> Empresa A: perfumería y cuidado personal. Empresa B: créditos (CrediAgil / LlevaYa / Solar Banco).
+> Plataforma de automatización de ventas y créditos **en Paraguay**.
+> Empresa A: perfumería y cuidado personal femenino. Empresa B: créditos (CrediAgil / LlevaYa / Solar Banco).
 > Flujo: Meta Ads → WhatsApp → cierre de venta / aprobación de crédito.
 
 ---
@@ -12,7 +12,7 @@ Las carpetas usan **prefijo numérico** para orden visual y para señalar depend
 
 | Carpeta | Qué contiene | Estado |
 |---|---|---|
-| `00-architecture/` | Fuente única de verdad: `ARCHITECTURE.md` y ADRs (decisiones técnicas) | ✅ Heredado de VentaporWhatsapp — pendiente adaptar a Bolivia |
+| `00-architecture/` | Fuente única de verdad: `ARCHITECTURE.md` y ADRs (decisiones técnicas) | ✅ Heredado de VentaporWhatsapp (ya Paraguay-céntrico) |
 | `10-backend/` | Monorepo Node.js 20 + TypeScript: Firebase Functions, packages compartidos | ✅ Base de VentaporWhatsapp |
 | `20-n8n/` | Workflows N8N (`*.json`) + README de importación | ✅ 5 workflows de Arfagi + 2 placeholders |
 | `30-services-python/` | Microservicios Python (visión, ML scoring de crédito) | ⏳ Vacío — opcional |
@@ -46,7 +46,7 @@ Ver `00-architecture/decisions/`:
 
 ## Tareas pendientes
 
-- [ ] Adaptar `ARCHITECTURE.md` (Paraguay→Bolivia, agregar entidades de crédito y perfumería como tenants)
+- [ ] Agregar a `ARCHITECTURE.md` capítulo de entidades de crédito (CrediAgil/LlevaYa/Solar Banco) y documentar perfumería + créditos como tenants iniciales
 - [ ] Resolver build de OpenWA (vite v8 → v7 en `50-whatsapp-server/OpenWA/dashboard/package.json`)
 - [ ] Crear `90-ops/docker-compose.yml` unificado (n8n + OpenWA + Postgres opcional)
 - [ ] Decidir e integrar API de WhatsApp (OpenWA vs Cloud API oficial)
