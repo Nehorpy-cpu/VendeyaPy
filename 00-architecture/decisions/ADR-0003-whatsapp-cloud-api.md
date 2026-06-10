@@ -63,8 +63,21 @@ Se evaluó qué canal usar para todo el desarrollo en adelante.
 - [x] Roadmap F1 reescrito (setup Cloud API en vez de fix OpenWA)
 - [x] Este ADR creado
 
+## Regla de diseño derivada: capa de abstracción del canal
+
+Aunque hoy el canal es Cloud API, **toda la lógica de mensajería debe ir detrás de una
+interfaz/abstracción** (`packages/whatsapp-client/` o similar). El bot conversacional habla
+con esa interfaz, NUNCA con la API de Meta directamente.
+
+- `WhatsAppClient` (interfaz) → `CloudAPIAdapter` (implementación actual)
+- Si el día de mañana se suma otro canal (Instagram DM, Telegram, o incluso OpenWA para
+  testing local), se agrega un nuevo adapter SIN tocar la lógica conversacional ni el checkout.
+
+**Esto es regla inviolable.** El beneficio: el canal queda desacoplado del producto.
+
 ## Reversibilidad
 
 Reversible con bajo costo: OpenWA está intacto en `_archive/OpenWA-descartado/`.
 Si Cloud API resultara inviable (ej. Meta rechaza la verificación), se puede retomar
-OpenWA aplicando el fix de vite documentado en el historial de esta sesión.
+OpenWA aplicando el fix de vite documentado en el historial de esta sesión, e implementando
+un `OpenWAAdapter` detrás de la misma interfaz `WhatsAppClient`.
