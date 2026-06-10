@@ -1,8 +1,11 @@
 # AI_AFG
 
-> Plataforma de automatización de ventas y créditos **en Paraguay**.
-> Empresa A: perfumería y cuidado personal femenino. Empresa B: créditos (CrediAgil / LlevaYa / Solar Banco).
-> Flujo: Meta Ads → WhatsApp → cierre de venta / aprobación de crédito.
+> Plataforma multi-tenant de automatización de ventas vía WhatsApp **en Paraguay**.
+>
+> **Fase 1 (en desarrollo):** tenant perfumería y cuidado personal femenino.
+> **Fase 2 (diferida):** tenant créditos (CrediAgil / LlevaYa / Solar Banco) — ver ADR-0002.
+>
+> Flujo fase 1: Meta Ads → WhatsApp → cierre de venta.
 
 ---
 
@@ -19,8 +22,8 @@ Las carpetas usan **prefijo numérico** para orden visual y para señalar depend
 | `40-mobile/` | App móvil Flutter | ⏳ Vacío — opcional |
 | `50-whatsapp-server/OpenWA/` | Servidor WhatsApp local (OpenWA) | ✅ Migrado con sesión activa |
 | `60-admin/` | Panel admin web propio | ⏳ Vacío — diferido (uso de Supabase Studio + n8n dashboard mientras tanto) |
-| `70-perfumeria/` | Catálogo y promociones específicas del negocio perfumería | ⏳ Vacío |
-| `80-creditos/` | Integraciones CrediAgil/LlevaYa/Solar Banco + scoring + docs legales | ⏳ Vacío |
+| `70-perfumeria/` | ⚡ **Foco actual:** catálogo, promociones, checkout de perfumería | ⏳ Vacío — próximo a desarrollar |
+| `80-creditos.future/` | Tenant créditos — DIFERIDO fase 2 (ADR-0002). No tocar | 🚫 No se desarrolla ahora |
 | `90-ops/` | `docker-compose.yml` unificado, `.env.example`, scripts deploy | ⏳ Vacío |
 | `_archive/` | Proyectos previos (VentaporWhatsapp, Proyecto_Arfagi) y backups zip | ✅ |
 | `docs/` | Documentación adicional (no-arquitectura) | ⏳ Vacío |
@@ -41,13 +44,21 @@ Las carpetas usan **prefijo numérico** para orden visual y para señalar depend
 
 Ver `00-architecture/decisions/`:
 - [ADR-0001](00-architecture/decisions/ADR-0001-base-stack-decision.md) — Base stack y consolidación
+- [ADR-0002](00-architecture/decisions/ADR-0002-scope-fase1-solo-perfumeria.md) — Scope fase 1: solo perfumería con arquitectura multi-tenant
 
 ---
 
 ## Tareas pendientes
 
-- [ ] Agregar a `ARCHITECTURE.md` capítulo de entidades de crédito (CrediAgil/LlevaYa/Solar Banco) y documentar perfumería + créditos como tenants iniciales
+### Fase 1 (perfumería — en curso)
+- [ ] Documentar perfumería como tenant inicial en `ARCHITECTURE.md` sección 2 Multi-Tenant
 - [ ] Resolver build de OpenWA (vite v8 → v7 en `50-whatsapp-server/OpenWA/dashboard/package.json`)
-- [ ] Crear `90-ops/docker-compose.yml` unificado (n8n + OpenWA + Postgres opcional)
-- [ ] Decidir e integrar API de WhatsApp (OpenWA vs Cloud API oficial)
-- [ ] Documentar APIs de entidades de crédito (CrediAgil / LlevaYa / Solar Banco)
+- [ ] Crear `90-ops/docker-compose.yml` unificado (n8n + OpenWA)
+- [ ] Decidir API de WhatsApp final (OpenWA local vs Cloud API oficial)
+- [ ] Diseñar schema Firestore para tenant perfumería (catálogo, órdenes, conversaciones)
+- [ ] Desarrollar `70-perfumeria/catalogo/` y `70-perfumeria/promociones/`
+
+### Fase 2 (créditos — diferida, no se trabaja ahora)
+- [ ] Agregar capítulo "Entidades de crédito" cuando se retome el scope
+- [ ] Documentar APIs de CrediAgil / LlevaYa / Solar Banco
+- [ ] Evaluar compliance regulatoria (INCOOP, BCP, KYC, AML)

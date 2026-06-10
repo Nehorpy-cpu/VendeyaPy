@@ -6,12 +6,15 @@
 
 ## Contexto del proyecto
 
-`AI_AFG` automatiza ventas y créditos para dos negocios en Paraguay:
+`AI_AFG` es una plataforma multi-tenant para automatizar ventas vía WhatsApp en Paraguay.
 
-1. **Perfumería y cuidado personal femenino** — catálogo, checkout, posventa
-2. **Servicios financieros** — créditos analizados por **CrediAgil**, **LlevaYa**, **Solar Banco**
+**Scope actual (fase 1):** un solo tenant — **perfumería y cuidado personal femenino** (catálogo, promociones, checkout, posventa).
 
-**Flujo crítico:** lead capturado en Meta Ads → conversación en WhatsApp → cierre de venta o aprobación de crédito → sin intervención humana en el camino feliz.
+**Scope diferido (fase 2, no se desarrolla ahora):** un segundo tenant — **servicios financieros / créditos** vía CrediAgil / LlevaYa / Solar Banco. Ver `ADR-0002` para razón de diferimiento.
+
+**Flujo crítico fase 1:** lead capturado en Meta Ads → conversación WhatsApp → cierre de venta → sin intervención humana en el camino feliz.
+
+**Decisión arquitectónica clave:** aunque hoy solo se desarrolla perfumería, el backend conserva la arquitectura **multi-tenant** heredada de VentaporWhatsapp. Esto permite sumar el tenant de créditos en el futuro sin refactor — solo agregando un nuevo `tenant_id` + módulo específico en `80-creditos.future/`.
 
 ---
 
@@ -44,6 +47,8 @@
 - Modificar `C:\Users\Usuario\.claude\settings.json` (config global Claude — auto-modificación)
 - Hacer `git push --force`, `git reset --hard` o `Remove-Item -Recurse -Force`
 - Cambiar el stack confirmado sin ADR previo
+- **Tocar `80-creditos.future/`** — está diferido, no se desarrolla en fase 1
+- **Hardcodear "perfumería" en el backend.** Todo va con `tenant_id`. Si el código asume tenant único, se rompe la decisión de Opción C (ver ADR-0002)
 
 ---
 
