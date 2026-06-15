@@ -46,11 +46,15 @@ y webhook respondiendo el handshake de verificación de Meta.
 **Por qué primero:** sin el canal de WhatsApp conectado, el bot no puede recibir ni
 responder mensajes. Es el cimiento del producto.
 
+**Modo:** DESARROLLO sin verificación de Meta Business (decisión 2026-06-10). Se usa el
+**número de prueba gratuito** de Meta + hasta ~5 destinatarios de prueba. La verificación de
+Meta Business + número propio se difiere al **gate de F7** (antes de ads/producción).
+
 **Criterio de "fase terminada" (Definition of Done):**
-- [ ] Meta Business verificado
-- [ ] App de WhatsApp creada en developers.facebook.com
-- [ ] Número dedicado registrado en WhatsApp Business API
-- [ ] Access token permanente (System User) obtenido y guardado de forma segura
+- [ ] App de WhatsApp creada en developers.facebook.com (modo desarrollo)
+- [ ] Número de prueba de Meta activo + destinatario(s) de prueba agregados
+- [ ] Access token (temporal de dev sirve para empezar) + Phone Number ID guardados
+- [ ] `verify token` propio definido y documentado
 - [ ] Webhook desplegado que responde el `GET` de verificación de Meta (hub.challenge)
 - [ ] Mensaje de prueba recibido en el webhook (entrante) y uno enviado (saliente) OK
 
@@ -58,20 +62,21 @@ responder mensajes. Es el cimiento del producto.
 
 | Sub-fase | Acción | Estado | Riesgo |
 |----------|--------|--------|--------|
-| **F1.1** | Verificar estado de Meta Business (¿verificado? ¿qué falta?) — guía al owner | ⏳ | Bajo |
-| **F1.2** | Crear app de WhatsApp en developers.facebook.com + obtener App ID / App Secret | ⏳ | Bajo |
-| **F1.3** | Registrar número dedicado en WhatsApp Business API (no personal) | ⏳ | Medio (trámite Meta) |
-| **F1.4** | Generar access token permanente vía System User (no el temporal de 24h) | ⏳ | Bajo |
-| **F1.5** | Definir `verify token` propio + documentar config en `50-whatsapp-cloud-api/config/` | ⏳ | Cero |
-| **F1.6** | Codear webhook mínimo en `10-backend` (GET verificación + POST recepción) | ⏳ | Medio |
-| **F1.7** | Desplegar webhook (Cloud Functions o túnel local) y registrarlo en Meta | ⏳ | Medio |
-| **F1.8** | Prueba E2E: enviar/recibir un mensaje de test. Commit + ADR si surge decisión | ⏳ | Bajo |
+| **F1.1** | Crear app en developers.facebook.com + agregar producto WhatsApp + obtener número de prueba | ⏳ | Bajo |
+| **F1.2** | Agregar destinatario(s) de prueba + guardar App ID, Phone Number ID y token temporal | ⏳ | Bajo |
+| **F1.3** | Definir `verify token` propio + documentar config en `50-whatsapp-cloud-api/config/` | ⏳ | Cero |
+| **F1.4** | Codear webhook mínimo en `10-backend` (GET verificación + POST recepción) | ⏳ | Medio |
+| **F1.5** | Desplegar webhook (túnel cloudflared/ngrok para dev) y registrarlo en Meta | ⏳ | Medio |
+| **F1.6** | Prueba E2E: recibir un mensaje de test + enviar uno saliente. Commit | ⏳ | Bajo |
+
+**Diferido al gate de F7 (producción):** verificación de Meta Business, registro de número
+propio dedicado, access token permanente (System User), display name approval, subir tiers.
 
 **Regla de oro de F1:** si una sub-fase falla, NO se pasa a la siguiente. Se para, se diagnostica
 el error en español simple, se proponen 2 opciones, y el owner elige. Nada de "ya va a funcionar".
 
-**Nota:** las sub-fases F1.1–F1.5 son **trámites/config en Meta** (las hacés vos, yo te guío
-paso a paso). Las F1.6–F1.8 son **código** (las hago yo, vos validás).
+**Nota:** F1.1–F1.3 son **config en Meta** (las hacés vos, yo te guío). F1.4–F1.6 son
+**código** (las hago yo, vos validás).
 
 ---
 
@@ -97,7 +102,11 @@ El bot muestra productos, arma carrito, calcula totales. Acá empieza a vender.
 Generación de links de pago (Bancard/Tigo Money/Stripe) y confirmación de pago.
 
 ### F7 — Integración Meta Business Suite
-Conversion API, catálogo sincronizado, click-to-WhatsApp ads, audiencias de retargeting.
+**⚠️ GATE DE VERIFICACIÓN:** antes de esta fase se completa la verificación de Meta Business,
+el registro del número propio dedicado, el access token permanente (System User) y el display
+name approval. Recién con eso: Conversion API, catálogo sincronizado, click-to-WhatsApp ads,
+audiencias de retargeting. La verificación puede iniciarse en paralelo desde cualquier momento
+(tarda 1-3 días del lado de Meta).
 
 ### F8 — Posventa
 Seguimiento de envío, mensajes de fidelización, NPS.
