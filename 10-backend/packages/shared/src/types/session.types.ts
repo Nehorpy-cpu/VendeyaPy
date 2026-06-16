@@ -26,6 +26,8 @@ export interface SessionContext {
   currentCategoryId: string | null;
   pendingOrderId: string | null;
   pendingPaymentId: string | null;
+  /** SKUs de los productos mostrados al cliente en el último listado (para "agregá el primero"). */
+  lastShownSkus: string[];
 }
 
 export interface Session {

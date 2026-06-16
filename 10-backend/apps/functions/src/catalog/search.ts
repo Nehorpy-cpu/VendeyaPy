@@ -56,3 +56,22 @@ export async function searchCatalog(
 
   return scored.slice(0, filters.limit ?? 3).map((s) => s.p);
 }
+
+/** Trae un producto por su id (SKU). null si no existe. */
+export async function getProductById(tenantId: string, productId: string): Promise<Product | null> {
+  const doc = await db().doc(paths.product(tenantId, productId)).get();
+  return doc.exists ? (doc.data() as Product) : null;
+}
+
+/** Busca un producto activo cuyo nombre aparezca en el texto (ej: "quiero good girl"). */
+export async function findProductByName(tenantId: string, text: string): Promise<Product | null> {
+  const t = text.toLowerCase();
+  const snap = await db()
+    .collection(paths.products(tenantId))
+    .where('status', '==', 'ACTIVE')
+    .get();
+  const productos = snap.docs.map((d) => d.data() as Product);
+  // Match por nombre más largo primero (evita falsos positivos con nombres cortos)
+  productos.sort((a, b) => b.name.length - a.name.length);
+  return productos.find((p) => p.name && t.includes(p.name.toLowerCase())) ?? null;
+}

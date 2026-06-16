@@ -5,15 +5,21 @@
  * una respuesta. Es channel-agnostic: NO sabe si la respuesta sale por WhatsApp
  * real o por el endpoint de prueba (ADR-0003). El cómo se entrega es del que llama.
  *
- * Fase 4: lógica básica (saludo / acuse). El catálogo llega en F5; el cerebro
- * de IA (Claude/GPT) se enchufa más adelante, reemplazando generarRespuesta().
+ * Fase 5: catálogo real + carrito. El cerebro de IA (Claude/GPT) se enchufa
+ * más adelante, reemplazando la lógica por reglas de decidirRespuesta().
  */
 
 import { Timestamp } from 'firebase-admin/firestore';
-import type { Session, SessionState, Product } from '@vpw/shared';
+import type { Session, SessionState, Product, Cart } from '@vpw/shared';
 import { db, paths } from '../lib/firebase.js';
 import { logger } from '../lib/logger.js';
-import { searchCatalog, type CatalogFilters } from '../catalog/search.js';
+import {
+  searchCatalog,
+  getProductById,
+  findProductByName,
+  type CatalogFilters,
+} from '../catalog/search.js';
+import { addToCart, formatCart } from './cart.js';
 
 const SESSION_TTL_MS = 1000 * 60 * 60 * 24; // 24 horas
 
@@ -98,8 +104,47 @@ function formatearProductos(productos: Product[]): string {
     if (p.inventory && p.inventory.stock <= 3) out += `  ⚠️ ¡Últimas ${p.inventory.stock}!`;
     if (p.featured) out += '\n   Uno de nuestros más vendidos 🌟';
   }
-  out += '\n\n¿Cuál te gusta más? Te cuento más de cualquiera 😊';
+  out += '\n\n¿Cuál te gusta más? Decime el *número* o el *nombre* para agregarlo 🛒';
   return out;
+}
+
+function quiereVerCarrito(t: string): boolean {
+  return /\b(carrito|mi pedido|qu[eé] llevo|qu[eé] tengo|mi compra)\b/.test(t);
+}
+
+function quiereAgregar(t: string): boolean {
+  return /\b(agreg|añad|anad|sum[aá]|llev|me lo llevo|me la llevo|lo quiero|la quiero|lo llevo|la llevo)\b/.test(
+    t,
+  );
+}
+
+/** Mapea "el primero/segundo/tercero" o "1/2/3" a un índice 0-based. */
+function ordinalIndex(t: string): number | null {
+  if (/\b(primero|primera|primer|1)\b/.test(t)) return 0;
+  if (/\b(segundo|segunda|2)\b/.test(t)) return 1;
+  if (/\b(tercero|tercera|3)\b/.test(t)) return 2;
+  return null;
+}
+
+/**
+ * Resuelve qué producto quiere el cliente:
+ *  - por orden ("el primero") sobre lo último mostrado, o
+ *  - por nombre ("agregá Good Girl") — solo si hay intención de agregar (evita reads de más).
+ */
+async function resolverSeleccion(
+  tenantId: string,
+  t: string,
+  lastShownSkus: string[],
+): Promise<Product | null> {
+  const idx = ordinalIndex(t);
+  if (idx !== null && lastShownSkus[idx]) {
+    const p = await getProductById(tenantId, lastShownSkus[idx]!);
+    if (p) return p;
+  }
+  if (quiereAgregar(t)) {
+    return findProductByName(tenantId, t);
+  }
+  return null;
 }
 
 /**
@@ -110,9 +155,11 @@ async function decidirRespuesta(
   tenantId: string,
   text: string,
   esNuevo: boolean,
-): Promise<{ reply: string; nextState: SessionState }> {
+  prev: { cart: Cart; lastShownSkus: string[] },
+): Promise<{ reply: string; nextState: SessionState; cart?: Cart; lastShownSkus?: string[] }> {
   const t = text.toLowerCase();
 
+  // 1. Saludo / cliente nuevo
   if (esNuevo || esSaludo(text)) {
     return {
       reply:
@@ -123,6 +170,33 @@ async function decidirRespuesta(
     };
   }
 
+  // 2. Ver carrito
+  if (quiereVerCarrito(t)) {
+    return { reply: formatCart(prev.cart), nextState: 'CART' };
+  }
+
+  // 3. Agregar al carrito (seleccionar producto por orden o nombre)
+  const seleccion = await resolverSeleccion(tenantId, t, prev.lastShownSkus);
+  if (seleccion) {
+    const cart = addToCart(prev.cart, seleccion);
+    const unidades = cart.items.reduce((n, i) => n + i.quantity, 0);
+    return {
+      reply:
+        `✅ Agregué *${seleccion.name}* a tu carrito.\n` +
+        `🛒 Llevás ${unidades} producto(s) — Total: ${GS(cart.subtotal)}\n\n` +
+        'Seguí mirando (*catálogo*) o escribí *carrito* / *pagar*.',
+      nextState: 'CART',
+      cart,
+    };
+  }
+  if (quiereAgregar(t)) {
+    return {
+      reply: 'Decime cuál querés agregar 🙂 — el *número* (1, 2, 3) o el *nombre* del perfume.',
+      nextState: 'VIEWING_PRODUCT',
+    };
+  }
+
+  // 4. Catálogo / búsqueda
   if (quiereCatalogo(t)) {
     const filtros: CatalogFilters = {
       gender: detectarGenero(t),
@@ -139,9 +213,14 @@ async function decidirRespuesta(
         nextState: 'BROWSING',
       };
     }
-    return { reply: formatearProductos(productos), nextState: 'VIEWING_PRODUCT' };
+    return {
+      reply: formatearProductos(productos),
+      nextState: 'VIEWING_PRODUCT',
+      lastShownSkus: productos.map((p) => p.id),
+    };
   }
 
+  // 5. Fallback
   return {
     reply:
       'Puedo ayudarte a encontrar tu perfume ideal 🌸. Decime qué estilo buscás ' +
@@ -162,21 +241,28 @@ export async function handleMessage(input: ConversationInput): Promise<Conversat
   const snap = await sessionRef.get();
   const existing = snap.exists ? (snap.data() as Session) : null;
   const esNuevo = !existing || existing.state === 'GREETING';
+  const prevCart: Cart = existing?.cart ?? { items: [], subtotal: 0 };
+  const prevShown: string[] = existing?.context?.lastShownSkus ?? [];
 
-  const { reply, nextState } = await decidirRespuesta(tenantId, text, esNuevo);
+  const result = await decidirRespuesta(tenantId, text, esNuevo, {
+    cart: prevCart,
+    lastShownSkus: prevShown,
+  });
+  const { reply, nextState } = result;
 
   const session: Session = {
     id: 'active',
     tenantId,
     customerId,
     state: nextState,
-    cart: existing?.cart ?? { items: [], subtotal: 0 },
+    cart: result.cart ?? prevCart,
     context: {
       lastMessageAt: now,
       currentPage: existing?.context?.currentPage ?? 0,
       currentCategoryId: existing?.context?.currentCategoryId ?? null,
       pendingOrderId: existing?.context?.pendingOrderId ?? null,
       pendingPaymentId: existing?.context?.pendingPaymentId ?? null,
+      lastShownSkus: result.lastShownSkus ?? prevShown,
     },
     expiresAt: Timestamp.fromMillis(now.toMillis() + SESSION_TTL_MS),
     updatedAt: now,

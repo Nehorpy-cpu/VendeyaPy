@@ -28,7 +28,7 @@
 | **F2** | Diseño de datos (schema Firestore tenant perfumería) | ✅ Completada |
 | **F3** | Entorno ejecutable local + carga del catálogo | ✅ Completada |
 | **F4** | Bot conversacional básico (recibe → responde) | ✅ Completada |
-| **F5** | Catálogo + carrito (el bot vende) | ⏳ Pendiente |
+| **F5** | Catálogo + carrito (el bot vende) | ✅ Completada |
 | **F6** | Cobros (links de pago dentro de WhatsApp) | ⏳ Pendiente |
 | **F7** | Integración Meta Business Suite (CAPI + catálogo + click-to-WA) | ⏳ Pendiente |
 | **F8** | Posventa + seguimiento + fidelización | ⏳ Pendiente |
