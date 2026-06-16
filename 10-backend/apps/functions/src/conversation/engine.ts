@@ -20,6 +20,7 @@ import {
   type CatalogFilters,
 } from '../catalog/search.js';
 import { addToCart, formatCart } from './cart.js';
+import { createPendingOrder } from '../orders/createPendingOrder.js';
 
 const SESSION_TTL_MS = 1000 * 60 * 60 * 24; // 24 horas
 
@@ -118,6 +119,10 @@ function quiereAgregar(t: string): boolean {
   );
 }
 
+function quierePagar(t: string): boolean {
+  return /\b(pagar|pago|finalizar|comprar|checkout|cobrar|terminar (compra|pedido))\b/.test(t);
+}
+
 /** Mapea "el primero/segundo/tercero" o "1/2/3" a un índice 0-based. */
 function ordinalIndex(t: string): number | null {
   if (/\b(primero|primera|primer|1)\b/.test(t)) return 0;
@@ -153,10 +158,17 @@ async function resolverSeleccion(
  */
 async function decidirRespuesta(
   tenantId: string,
+  customerId: string,
   text: string,
   esNuevo: boolean,
   prev: { cart: Cart; lastShownSkus: string[] },
-): Promise<{ reply: string; nextState: SessionState; cart?: Cart; lastShownSkus?: string[] }> {
+): Promise<{
+  reply: string;
+  nextState: SessionState;
+  cart?: Cart;
+  lastShownSkus?: string[];
+  pendingOrderId?: string;
+}> {
   const t = text.toLowerCase();
 
   // 1. Saludo / cliente nuevo
@@ -175,7 +187,26 @@ async function decidirRespuesta(
     return { reply: formatCart(prev.cart), nextState: 'CART' };
   }
 
-  // 3. Agregar al carrito (seleccionar producto por orden o nombre)
+  // 3. Pagar → crear pre-orden + link de pago
+  if (quierePagar(t)) {
+    if (prev.cart.items.length === 0) {
+      return {
+        reply: '🛒 Tu carrito está vacío. Agregá algún perfume primero (escribí *catálogo*).',
+        nextState: 'BROWSING',
+      };
+    }
+    const { order, paymentLink } = await createPendingOrder(tenantId, customerId, prev.cart);
+    return {
+      reply:
+        `💳 *Resumen de tu compra*\nTotal a pagar: *${GS(order.totals.total)}*\n\n` +
+        `🔗 Link de pago:\n${paymentLink}\n\n` +
+        'Apenas confirmemos el pago te aviso 🙌 (este link es de prueba por ahora).',
+      nextState: 'AWAITING_PAYMENT',
+      pendingOrderId: order.id,
+    };
+  }
+
+  // 4. Agregar al carrito (seleccionar producto por orden o nombre)
   const seleccion = await resolverSeleccion(tenantId, t, prev.lastShownSkus);
   if (seleccion) {
     const cart = addToCart(prev.cart, seleccion);
@@ -196,7 +227,7 @@ async function decidirRespuesta(
     };
   }
 
-  // 4. Catálogo / búsqueda
+  // 5. Catálogo / búsqueda
   if (quiereCatalogo(t)) {
     const filtros: CatalogFilters = {
       gender: detectarGenero(t),
@@ -220,7 +251,7 @@ async function decidirRespuesta(
     };
   }
 
-  // 5. Fallback
+  // 6. Fallback
   return {
     reply:
       'Puedo ayudarte a encontrar tu perfume ideal 🌸. Decime qué estilo buscás ' +
@@ -244,7 +275,7 @@ export async function handleMessage(input: ConversationInput): Promise<Conversat
   const prevCart: Cart = existing?.cart ?? { items: [], subtotal: 0 };
   const prevShown: string[] = existing?.context?.lastShownSkus ?? [];
 
-  const result = await decidirRespuesta(tenantId, text, esNuevo, {
+  const result = await decidirRespuesta(tenantId, customerId, text, esNuevo, {
     cart: prevCart,
     lastShownSkus: prevShown,
   });
@@ -260,7 +291,7 @@ export async function handleMessage(input: ConversationInput): Promise<Conversat
       lastMessageAt: now,
       currentPage: existing?.context?.currentPage ?? 0,
       currentCategoryId: existing?.context?.currentCategoryId ?? null,
-      pendingOrderId: existing?.context?.pendingOrderId ?? null,
+      pendingOrderId: result.pendingOrderId ?? existing?.context?.pendingOrderId ?? null,
       pendingPaymentId: existing?.context?.pendingPaymentId ?? null,
       lastShownSkus: result.lastShownSkus ?? prevShown,
     },

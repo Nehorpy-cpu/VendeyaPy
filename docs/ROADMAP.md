@@ -41,27 +41,32 @@
 
 ---
 
-# ⚡ FASE ACTIVA: F5 — Catálogo (el bot muestra perfumes reales)
+# ⚡ FASE ACTIVA: F6 — Cobros (link de pago en WhatsApp)
 
-**Objetivo:** que el bot deje de dar respuestas genéricas y empiece a **mostrar los perfumes
-reales de la base de datos** según lo que pide el cliente (estilo, género, presupuesto), y
-que pueda armar un **carrito**. Sigue sin Meta y sin cerebro de IA (reglas por ahora).
+**Objetivo:** que cuando el cliente escriba *"pagar"*, el bot **cree una orden** desde el
+carrito y le devuelva un **link de pago**, y luego pueda **confirmar el pago**. Sigue sin Meta;
+las pasarelas reales (Bancard/Stripe) se integran cuando haya credenciales — por ahora el link
+es simulado para validar el flujo.
 
 **Sub-fases (2) — se ejecutan DE A UNA, no juntas:**
 
 | Sub-fase | Acción | Estado | Riesgo |
 |----------|--------|--------|--------|
-| **F5.1** | Conectar el motor de conversación con el catálogo real: el bot lee productos de Firestore y los muestra/busca según filtros básicos (estilo/género/precio). Verificar build + E2E. | ⚡ | Medio |
-| **F5.2** | Carrito: agregar productos, ver carrito, calcular total — persistido en la sesión. Verificar build + E2E. Commit. | ⏳ | Medio |
+| **F6.1** | "pagar" → crear **pre-orden** (`PENDING_PAYMENT`) en Firestore desde el carrito + devolver link de pago (simulado). Verificar build + E2E. | ⚡ | Medio |
+| **F6.2** | Confirmación de pago: endpoint que marca la orden `PAID`, vacía el carrito y el bot confirma. (Webhook real de pasarela con firma → cuando haya credenciales.) Verificar + commit. | ⏳ | Medio |
+
+**Nota:** crear la pre-orden NO cobra dinero (el cobro ocurre cuando el cliente paga en la
+pasarela). El gate de aprobación humana aplica a acciones que mueven dinero de verdad, no a esto.
 
 **Regla de oro:** si una sub-fase falla, parar, explicar simple, proponer 2 opciones, el owner elige.
 
 ---
 
-# ✅ FASE COMPLETADA: F4 — Bot conversacional básico
+# ✅ FASES COMPLETADAS: F4 (bot conversacional) · F5 (catálogo + carrito)
 
-Motor de conversación con sesión en Firestore, probado E2E. Ver `conversation/engine.ts` +
-`functions/conversation/devMessage.ts`. Sub-fases F4.1 (motor) y F4.2 (prueba E2E) ✅.
+- **F4:** motor de conversación con sesión en Firestore (`conversation/engine.ts`, `devMessage`).
+- **F5:** el bot muestra perfumes reales (`catalog/search.ts`) y arma carrito (`conversation/cart.ts`),
+  todo persistido en la sesión. Probado E2E contra el emulador.
 
 ---
 
