@@ -37,3 +37,6 @@ export { healthCheck } from './functions/healthCheck.js';
 
 // Bot conversacional — endpoint de prueba (F4). El webhook real de WhatsApp (F1) usará el mismo motor.
 export { devMessage } from './functions/conversation/devMessage.js';
+
+// Confirmación de pago — endpoint de prueba (F6.2). El webhook real de la pasarela lo reemplaza.
+export { devConfirmPayment } from './functions/payments/devConfirmPayment.js';
