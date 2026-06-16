@@ -32,5 +32,5 @@ initializeApp();
 // export { internalAssignDelivery } from './functions/internal/internalAssignDelivery.js';
 // export { internalSendWhatsapp } from './functions/internal/internalSendWhatsapp.js';
 
-// Placeholder mientras se implementan los handlers
-export const healthCheck = (await import('./functions/healthCheck.js')).healthCheck;
+// Health check (export estático — el emulador de Functions no soporta top-level await)
+export { healthCheck } from './functions/healthCheck.js';
