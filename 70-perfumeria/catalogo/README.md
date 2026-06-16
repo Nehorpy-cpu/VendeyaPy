@@ -2,6 +2,11 @@
 
 Cómo cargás tus perfumes al sistema para que el agente de IA los conozca y recomiende.
 
+> **Fuente principal del catálogo: tu tienda WordPress/WooCommerce en Hostinger** (ver ADR-0004).
+> Los productos se sincronizan automáticamente desde la tienda. Esta planilla CSV es la
+> **vía secundaria / de enriquecimiento**: sirve para cargar las **notas olfativas, estilos y
+> familia olfativa** que la tienda normalmente no tiene, y como respaldo si la sync no está lista.
+
 ---
 
 ## Flujo
