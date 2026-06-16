@@ -7,7 +7,7 @@ import { onRequest } from 'firebase-functions/v2/https';
 
 export const healthCheck = onRequest(
   { region: 'us-central1', cors: true },
-  (req, res) => {
+  (_req, res) => {
     res.json({
       status: 'ok',
       service: 'ventaporwhatsapp-functions',
