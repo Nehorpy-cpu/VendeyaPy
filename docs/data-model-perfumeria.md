@@ -117,7 +117,9 @@ sesión (para que el cerebro recuerde la conversación). Se decide al construir 
 ## 4. Alcance de F2 (lo que falta hacer)
 
 - [x] F2.1 — Inventario (este doc lo resume)
-- [~] F2.2 — Diseño (este documento)
-- [ ] F2.3 — Reglas: las heredadas ya cubren `products`. Verificar, sin cambios esperados.
-- [ ] F2.4 — Seed: catálogo real de perfumería para el emulador de Firestore.
-- [ ] F2.5 — Agregar `PerfumeAttributes` al tipo `Product` + índices + validar + commit.
+- [x] F2.2 — Diseño (este documento)
+- [x] F2.3 — Reglas: verificado — las reglas heredadas ya cubren `products`/`categories`/`customers`/`sessions`/`orders` bajo el tenant. Sin cambios.
+- [x] F2.4 — Importador de catálogo (CSV → seed). Ver `70-perfumeria/catalogo/`.
+- [x] F2.5 — `PerfumeAttributes` + `OlfactiveNotes` agregados a `Product`; enums `PERFUME_GENDER`/`PRICE_RANGE`; índices Firestore. Validación de estructura OK; `tsc` completo en F3.
+
+**F2 COMPLETA.** Próxima fase: F3 (infra unificada — emulador Firebase para cargar el seed y correr el backend).

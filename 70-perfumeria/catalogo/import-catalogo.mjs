@@ -99,6 +99,7 @@ function main() {
       name: nombre,
       description: get('descripcion'),
       price: precio,
+      compareAtPrice: null,
       currency: 'PYG',
       categoryId: 'perfumes',
       images: get('imagen_url') ? [get('imagen_url')] : [],

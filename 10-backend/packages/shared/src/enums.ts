@@ -78,6 +78,12 @@ export type SessionState = (typeof SESSION_STATE)[number];
 export const PRODUCT_STATUS = ['ACTIVE', 'INACTIVE', 'ARCHIVED'] as const;
 export type ProductStatus = (typeof PRODUCT_STATUS)[number];
 
+export const PERFUME_GENDER = ['Femenino', 'Masculino', 'Unisex'] as const;
+export type PerfumeGender = (typeof PERFUME_GENDER)[number];
+
+export const PRICE_RANGE = ['ACCESIBLE', 'MID', 'PREMIUM', 'LUJO'] as const;
+export type PriceRange = (typeof PRICE_RANGE)[number];
+
 export const DRIVER_STATUS = ['AVAILABLE', 'BUSY', 'OFFLINE'] as const;
 export type DriverStatus = (typeof DRIVER_STATUS)[number];
 
