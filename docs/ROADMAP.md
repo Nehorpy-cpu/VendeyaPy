@@ -5,7 +5,7 @@
 > recién cuando se cierra la anterior — así evitamos planificar sobre supuestos
 > que cambian, y evitamos fallas por avanzar en muchos frentes a la vez.
 
-**Última actualización:** 2026-06-10
+**Última actualización:** 2026-06-15
 
 ---
 
@@ -13,6 +13,7 @@
 
 - ✅ Completada
 - ⚡ EN CURSO (fase activa — desglosada en sub-fases)
+- ⏸️ Pausada (bloqueada por algo externo)
 - ⏳ Pendiente (alto nivel, se desglosa al llegar)
 - 🚫 Diferida (fase 2 — créditos, ver ADR-0002)
 
@@ -23,9 +24,9 @@
 | Fase | Nombre | Estado |
 |------|--------|--------|
 | **F0** | Preparación del entorno y estructura | ✅ Completada |
-| **F1** | Setup WhatsApp Cloud API (canal oficial Meta) | ⚡ EN CURSO |
-| **F2** | Diseño de datos (schema Firestore tenant perfumería) | ⏳ Pendiente |
-| **F3** | Infra unificada (docker-compose: n8n + emuladores Firebase) | ⏳ Pendiente |
+| **F1** | Setup WhatsApp Cloud API (canal oficial Meta) | ⏸️ Pausada (Meta bloqueado del lado del owner) |
+| **F2** | Diseño de datos (schema Firestore tenant perfumería) | ✅ Completada |
+| **F3** | Entorno ejecutable local + carga del catálogo | ⚡ EN CURSO |
 | **F4** | Bot conversacional básico (recibe → responde) | ⏳ Pendiente |
 | **F5** | Catálogo + carrito (el bot vende) | ⏳ Pendiente |
 | **F6** | Cobros (links de pago dentro de WhatsApp) | ⏳ Pendiente |
@@ -40,14 +41,47 @@
 
 ---
 
-# ⚡ FASE ACTIVA: F1 — Setup WhatsApp Cloud API
+# ⚡ FASE ACTIVA: F3 — Entorno ejecutable local + carga del catálogo
+
+**Objetivo:** dejar el backend corriendo localmente, con la base de datos (emulador de
+Firestore) levantada y el catálogo cargado de verdad. Acá lo diseñado en F2 pasa a ser
+ejecutable, y corre la validación completa de TypeScript que diferimos.
+
+**Por qué ahora:** no depende de Meta ni de API key. Convierte el diseño en algo que corre.
+
+**Criterio de "fase terminada" (Definition of Done):**
+- [ ] `pnpm install` resuelve las dependencias del backend
+- [ ] `tsc` compila el backend sin errores (incluye los tipos de perfume de F2.5)
+- [ ] Emulador de Firestore corriendo localmente
+- [ ] Catálogo (`seed-productos.json`) cargado en el emulador
+- [ ] `healthCheck` responde desde el emulador
+- [ ] Un solo comando levanta el entorno (documentado)
+
+### Sub-fases de F3
+
+| Sub-fase | Acción | Estado | Riesgo |
+|----------|--------|--------|--------|
+| **F3.1** | `pnpm install` en `10-backend` (resolver el monorepo) | ⏳ | Medio (Windows puede dar guerra) |
+| **F3.2** | Validación TypeScript completa (`tsc`) del backend, incluye tipos de F2.5 | ⏳ | Bajo |
+| **F3.3** | Configurar emuladores de Firebase (Firestore + Functions) en `firebase.json` | ⏳ | Bajo |
+| **F3.4** | Conectar el importador y cargar `seed-productos.json` al emulador | ⏳ | Medio |
+| **F3.5** | Correr `healthCheck` en el emulador y verificar que responde | ⏳ | Bajo |
+| **F3.6** | `docker-compose` en `90-ops` (n8n + emuladores) — un comando levanta todo | ⏳ | Medio |
+| **F3.7** | Documentar cómo levantar el entorno + commit | ⏳ | Cero |
+
+**Regla de oro:** si una sub-fase falla, NO se pasa a la siguiente. Se para, se explica el
+error en español simple, se proponen 2 opciones, y el owner elige. Nada de "ya va a funcionar".
+
+---
+
+# ⏸️ FASE PAUSADA: F1 — Setup WhatsApp Cloud API
+
+> Pausada porque el owner no puede acceder a Meta/Facebook por ahora. Se retoma cuando
+> recupere el acceso. Las sub-fases ya están definidas y listas.
 
 **Objetivo:** tener el canal oficial de WhatsApp listo para que el backend pueda recibir
 y enviar mensajes — número dedicado registrado, app de Meta creada, tokens obtenidos,
 y webhook respondiendo el handshake de verificación de Meta.
-
-**Por qué primero:** sin el canal de WhatsApp conectado, el bot no puede recibir ni
-responder mensajes. Es el cimiento del producto.
 
 **Modo:** DESARROLLO sin verificación de Meta Business (decisión 2026-06-10). Se usa el
 **número de prueba gratuito** de Meta + hasta ~5 destinatarios de prueba. La verificación de
@@ -84,15 +118,6 @@ el error en español simple, se proponen 2 opciones, y el owner elige. Nada de "
 ---
 
 # Fases siguientes (alto nivel — se desglosan al llegar)
-
-### F2 — Diseño de datos
-Definir cómo se guardan productos, clientes, conversaciones y órdenes en Firestore,
-respetando la estructura multi-tenant (`tenants/perfumeria/...`). Sin código todavía,
-solo el modelo de datos y las reglas de seguridad.
-
-### F3 — Infra unificada
-Un solo `docker-compose.yml` en `90-ops/` que levante n8n + emuladores de Firebase
-(Firestore + Functions), para tener el entorno completo de desarrollo con un comando.
 
 ### F4 — Bot conversacional básico
 El webhook recibe un mensaje de WhatsApp, lo procesa en Cloud Functions, y responde algo.
