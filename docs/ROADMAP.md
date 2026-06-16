@@ -41,31 +41,27 @@
 
 ---
 
-# ⚡ FASE ACTIVA: F4 — Bot conversacional básico
+# ⚡ FASE ACTIVA: F5 — Catálogo (el bot muestra perfumes reales)
 
-**Objetivo:** que el **backend real** (Cloud Functions + Firestore) reciba un mensaje de un
-cliente, recuerde la conversación (sesión en Firestore) y devuelva una respuesta. El "hola
-mundo" del bot, corriendo en el sistema de verdad — todavía SIN catálogo (eso es F5) y SIN
-cerebro de IA (eso se enchufa más adelante con la API key).
+**Objetivo:** que el bot deje de dar respuestas genéricas y empiece a **mostrar los perfumes
+reales de la base de datos** según lo que pide el cliente (estilo, género, presupuesto), y
+que pueda armar un **carrito**. Sigue sin Meta y sin cerebro de IA (reglas por ahora).
 
-**Por qué así:** Meta está pausado (F1), así que probamos vía un endpoint HTTP local +
-simulador, no por WhatsApp real. La lógica vive detrás de la interfaz `WhatsAppClient`
-(ADR-0003), así que cuando se conecte WhatsApp real, el bot no cambia.
-
-**Criterio de "fase terminada" (Definition of Done):**
-- [ ] Una Cloud Function recibe `{ from, text }` y devuelve una respuesta
-- [ ] La sesión del cliente se guarda/lee en Firestore (`customers/{id}/sessions`)
-- [ ] Probado end-to-end contra el emulador (mensaje → respuesta + sesión persistida)
-- [ ] typecheck en verde
-
-### Sub-fases de F4 (2)
+**Sub-fases (2) — se ejecutan DE A UNA, no juntas:**
 
 | Sub-fase | Acción | Estado | Riesgo |
 |----------|--------|--------|--------|
-| **F4.1** | Crear la función de conversación en el backend: recibe mensaje, maneja sesión en Firestore, responde (lógica básica saludo/eco detrás de `WhatsAppClient`). Verificar typecheck + build. | ⏳ | Medio |
-| **F4.2** | Probar end-to-end contra el emulador: enviar mensaje vía HTTP, ver la respuesta y la sesión guardada en Firestore. Commit. | ⏳ | Bajo |
+| **F5.1** | Conectar el motor de conversación con el catálogo real: el bot lee productos de Firestore y los muestra/busca según filtros básicos (estilo/género/precio). Verificar build + E2E. | ⚡ | Medio |
+| **F5.2** | Carrito: agregar productos, ver carrito, calcular total — persistido en la sesión. Verificar build + E2E. Commit. | ⏳ | Medio |
 
 **Regla de oro:** si una sub-fase falla, parar, explicar simple, proponer 2 opciones, el owner elige.
+
+---
+
+# ✅ FASE COMPLETADA: F4 — Bot conversacional básico
+
+Motor de conversación con sesión en Firestore, probado E2E. Ver `conversation/engine.ts` +
+`functions/conversation/devMessage.ts`. Sub-fases F4.1 (motor) y F4.2 (prueba E2E) ✅.
 
 ---
 
