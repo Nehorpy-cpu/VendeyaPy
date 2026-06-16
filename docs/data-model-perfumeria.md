@@ -44,11 +44,18 @@ tipo base o usar un mapa sin tipar. Ventajas: tipado fuerte, no rompe otros vert
 y la herramienta de catálogo puede indexar `perfume.gender`, `perfume.priceRange`, etc.
 
 ```ts
+export interface OlfactiveNotes {
+  top: string[];     // notas de salida (ej: bergamota, limón)
+  heart: string[];   // notas de corazón (ej: jazmín, rosa)
+  base: string[];    // notas de fondo (ej: vainilla, almizcle, oud)
+}
+
 export interface PerfumeAttributes {
   brand: string;                                  // marca (ej: "Carolina Herrera")
   gender: 'Femenino' | 'Masculino' | 'Unisex';    // género
   olfactiveFamily: string;                         // familia olfativa (floral, oriental, amaderado...)
   styleTags: string[];                             // estilos para búsqueda: dulce, fresco, intenso, árabe, cítrico...
+  notes: OlfactiveNotes;                           // notas olfativas — el agente las usa al recomendar
   priceRange: 'ACCESIBLE' | 'MID' | 'PREMIUM' | 'LUJO';  // espeja RANGOS de Arfagi
   sizeMl: number | null;                           // tamaño en ml
   isNew: boolean;                                  // recién llegado
@@ -56,6 +63,25 @@ export interface PerfumeAttributes {
 
 // En Product:
 //   perfume: PerfumeAttributes | null;   // null para productos no-perfume (cremas, etc.)
+```
+
+**Por qué las notas importan:** cuando un cliente pregunta "¿qué tiene este perfume?" o
+"busco algo con vainilla", el agente lee `perfume.notes` y responde con criterio real,
+no inventado.
+
+### Instrucciones del agente (editables por el dueño)
+
+La persona y reglas del agente NO van fijas en código — van en la config del tenant para
+que el dueño las edite sin programar (futuro panel admin):
+
+```ts
+// En Tenant (o subdocumento tenants/{id}/aiConfig):
+export interface TenantAiConfig {
+  agentName: string;        // "Sofía"
+  persona: string;          // tono y estilo de respuesta
+  rules: string[];          // reglas de negocio ("nunca ofrecer sin stock", etc.)
+  greeting: string;         // saludo inicial
+}
 ```
 
 Rangos de precio (Guaraníes), heredados de Arfagi:

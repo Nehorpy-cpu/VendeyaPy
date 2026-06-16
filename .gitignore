@@ -51,3 +51,6 @@ _archive/
 *.swp
 .cache/
 .turbo/
+
+# Seed generado por el importador de catálogo (no editar a mano)
+70-perfumeria/catalogo/seed-productos.json
