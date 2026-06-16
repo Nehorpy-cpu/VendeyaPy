@@ -55,8 +55,9 @@ export async function confirmPayment(
       cart: { items: [], subtotal: 0 },
       state: 'CHECKOUT_DONE',
       'context.pendingOrderId': null,
-      'context.humanTakeover': false, // el bot retoma tras la confirmación del vendedor
       updatedAt: now,
+      // NO se toca humanTakeover: el vendedor sigue en control hasta que libera el chat
+      // explícitamente (ver releaseToBot). Así no interrumpe el cierre de la venta.
     });
 
   logger.info('Pago confirmado', { tenantId, customerId: order.customerId, orderId });

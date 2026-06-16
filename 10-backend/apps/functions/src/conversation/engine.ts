@@ -174,13 +174,22 @@ async function decidirRespuesta(
 }> {
   const t = text.toLowerCase();
 
-  // 1. Saludo / cliente nuevo
-  if (esNuevo || esSaludo(text)) {
+  // 1a. Cliente nuevo → saludo completo
+  if (esNuevo) {
     return {
       reply:
         '¡Hola! 💖 Bienvenida a *Perfumería AFG*. Soy Sofía, tu asesora.\n' +
         '¿Buscás algo para vos o para regalar? Contame qué estilo te gusta ' +
         '(dulce, floral, fresco, intenso...) y te muestro opciones ✨',
+      nextState: 'BROWSING',
+    };
+  }
+  // 1b. Cliente que vuelve y saluda → bienvenida corta (no repetir el intro completo)
+  if (esSaludo(text)) {
+    return {
+      reply:
+        '¡Hola de nuevo! 🌸 ¿Te ayudo con algo más? Decime qué estilo buscás ' +
+        '(dulce, floral, fresco, intenso) o escribí *catálogo*.',
       nextState: 'BROWSING',
     };
   }

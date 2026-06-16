@@ -43,3 +43,6 @@ export { devConfirmPayment } from './functions/payments/devConfirmPayment.js';
 
 // Recepción de comprobante — endpoint de prueba (F6b.2). El webhook de WhatsApp (F1) lo reemplaza.
 export { devSubmitComprobante } from './functions/payments/devSubmitComprobante.js';
+
+// Liberar chat (vendedor devuelve la conversación al bot) — endpoint de prueba (F6b).
+export { devReleaseChat } from './functions/conversation/devReleaseChat.js';
