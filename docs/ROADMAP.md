@@ -26,8 +26,8 @@
 | **F0** | Preparación del entorno y estructura | ✅ Completada |
 | **F1** | Setup WhatsApp Cloud API (canal oficial Meta) | ⏸️ Pausada (Meta bloqueado del lado del owner) |
 | **F2** | Diseño de datos (schema Firestore tenant perfumería) | ✅ Completada |
-| **F3** | Entorno ejecutable local + carga del catálogo | ⚡ EN CURSO |
-| **F4** | Bot conversacional básico (recibe → responde) | ⏳ Pendiente |
+| **F3** | Entorno ejecutable local + carga del catálogo | ✅ Completada |
+| **F4** | Bot conversacional básico (recibe → responde) | ⏳ Próxima (a desglosar) |
 | **F5** | Catálogo + carrito (el bot vende) | ⏳ Pendiente |
 | **F6** | Cobros (links de pago dentro de WhatsApp) | ⏳ Pendiente |
 | **F7** | Integración Meta Business Suite (CAPI + catálogo + click-to-WA) | ⏳ Pendiente |

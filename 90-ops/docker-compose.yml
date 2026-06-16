@@ -1,0 +1,37 @@
+# ═══════════════════════════════════════════════════════════════
+#  AI_AFG — Infraestructura de desarrollo local
+# ═══════════════════════════════════════════════════════════════
+#  Levanta n8n (orquestador de workflows) en Docker.
+#
+#  Los emuladores de Firebase (Firestore + Functions) corren NATIVOS
+#  (vía pnpm), no acá, porque el emulador de Functions necesita el
+#  código local compilado. El script dev-up.ps1 levanta ambos juntos.
+#
+#  Uso:  docker compose -f 90-ops/docker-compose.yml up -d
+#  O:    90-ops/dev-up.ps1   (levanta n8n + emuladores)
+# ═══════════════════════════════════════════════════════════════
+
+services:
+  n8n:
+    image: n8nio/n8n:latest        # TODO: pinear a una versión estable cuando estabilicemos
+    container_name: aiafg-n8n
+    restart: unless-stopped
+    ports:
+      - "5678:5678"
+    environment:
+      - N8N_HOST=localhost
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=http
+      - N8N_SECURE_COOKIE=false               # permite login por http en localhost
+      - GENERIC_TIMEZONE=America/Asuncion      # Paraguay
+      - TZ=America/Asuncion
+      # En el host (Windows/Mac), los servicios del host se alcanzan vía host.docker.internal
+      # ej: el webhook de Cloud Functions del emulador → http://host.docker.internal:5001/...
+    volumes:
+      - n8n_data:/home/node/.n8n
+      # Workflows versionados del proyecto (solo lectura) para importar manualmente
+      - ../20-n8n/workflows:/workflows:ro
+
+volumes:
+  n8n_data:
+    name: aiafg_n8n_data
