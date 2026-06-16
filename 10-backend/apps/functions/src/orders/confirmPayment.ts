@@ -36,7 +36,7 @@ export async function confirmPayment(
   if (order.status === 'PAID') {
     return { ok: true, message: 'El pago de esta orden ya estaba confirmado.', status: 'PAID' };
   }
-  if (order.status !== 'PENDING_PAYMENT') {
+  if (order.status !== 'PENDING_PAYMENT' && order.status !== 'PENDING_VERIFICATION') {
     return { ok: false, message: `La orden está en estado ${order.status}; no se puede confirmar.`, status: order.status };
   }
 
@@ -55,6 +55,7 @@ export async function confirmPayment(
       cart: { items: [], subtotal: 0 },
       state: 'CHECKOUT_DONE',
       'context.pendingOrderId': null,
+      'context.humanTakeover': false, // el bot retoma tras la confirmación del vendedor
       updatedAt: now,
     });
 

@@ -34,6 +34,8 @@ export interface ConversationInput {
 export interface ConversationResult {
   reply: string;
   state: SessionState;
+  /** true si el chat está en atención humana: el bot no generó respuesta. */
+  handledByHuman?: boolean;
 }
 
 /** El teléfono (solo dígitos) sirve de id de cliente. */
@@ -270,6 +272,13 @@ export async function handleMessage(input: ConversationInput): Promise<Conversat
   const sessionRef = db().doc(paths.session(tenantId, customerId));
   const snap = await sessionRef.get();
   const existing = snap.exists ? (snap.data() as Session) : null;
+  // Atención humana: si un vendedor tomó el chat, el bot NO responde.
+  if (existing?.context?.humanTakeover) {
+    await sessionRef.set({ context: { lastMessageAt: now }, updatedAt: now }, { merge: true });
+    logger.info('Mensaje en modo atención humana (bot en pausa)', { tenantId, customerId });
+    return { reply: '', state: existing.state, handledByHuman: true };
+  }
+
   const esNuevo = !existing || existing.state === 'GREETING';
   const prevCart: Cart = existing?.cart ?? { items: [], subtotal: 0 };
   const prevShown: string[] = existing?.context?.lastShownSkus ?? [];
@@ -293,6 +302,7 @@ export async function handleMessage(input: ConversationInput): Promise<Conversat
       pendingOrderId: result.pendingOrderId ?? existing?.context?.pendingOrderId ?? null,
       pendingPaymentId: existing?.context?.pendingPaymentId ?? null,
       lastShownSkus: result.lastShownSkus ?? prevShown,
+      humanTakeover: existing?.context?.humanTakeover ?? false,
     },
     expiresAt: Timestamp.fromMillis(now.toMillis() + SESSION_TTL_MS),
     updatedAt: now,

@@ -6,6 +6,7 @@
 
 export const ORDER_STATUS = [
   'PENDING_PAYMENT',
+  'PENDING_VERIFICATION', // comprobante recibido, esperando verificación del vendedor
   'PAID',
   'PREPARING',
   'ASSIGNED',

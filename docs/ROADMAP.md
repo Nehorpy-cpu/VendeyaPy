@@ -30,7 +30,7 @@
 | **F4** | Bot conversacional básico (recibe → responde) | ✅ Completada |
 | **F5** | Catálogo + carrito (el bot vende) | ✅ Completada |
 | **F6** | Cobros — link de pago (simulado) | ✅ Completada |
-| **F6b** | Pago por transferencia + comprobante + handoff a vendedor | ⚡ EN CURSO |
+| **F6b** | Pago por transferencia + comprobante + handoff a vendedor | ✅ Completada |
 | **F7** | Integración Meta Business Suite (CAPI + catálogo + click-to-WA) | ⏳ Pendiente |
 | **F8** | Posventa + seguimiento + fidelización | ⏳ Pendiente |
 | **F9** | Testing E2E + salida a producción | ⏳ Pendiente |

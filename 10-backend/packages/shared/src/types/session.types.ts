@@ -28,6 +28,8 @@ export interface SessionContext {
   pendingPaymentId: string | null;
   /** SKUs de los productos mostrados al cliente en el último listado (para "agregá el primero"). */
   lastShownSkus: string[];
+  /** Si está en true, un vendedor humano tomó el chat y el bot NO responde. */
+  humanTakeover: boolean;
 }
 
 export interface Session {

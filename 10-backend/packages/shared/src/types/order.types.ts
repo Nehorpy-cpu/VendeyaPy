@@ -26,6 +26,8 @@ export interface OrderPayment {
   method: PaymentMethod;
   paymentId: string;
   paidAt: Timestamp | null;
+  /** URL/ref del comprobante de transferencia que envió el cliente (null hasta recibirlo). */
+  comprobanteUrl: string | null;
 }
 
 export interface OrderDelivery {

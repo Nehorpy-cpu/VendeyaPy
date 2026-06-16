@@ -50,7 +50,7 @@ export async function createPendingOrder(
     status: 'PENDING_PAYMENT',
     items,
     totals: { subtotal: cart.subtotal, discount: 0, total: cart.subtotal, currency: 'PYG' },
-    payment: { method: 'BANCARD', paymentId: '', paidAt: null }, // provisional; se confirma al pagar
+    payment: { method: 'BANCARD', paymentId: '', paidAt: null, comprobanteUrl: null }, // provisional; se confirma al pagar
     delivery: { deliveryId: null, address: emptyAddress() }, // domicilio: fase logística
     invoice: { invoiceId: null, number: null },
     channel: 'WHATSAPP',
