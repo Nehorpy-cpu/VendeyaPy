@@ -34,3 +34,6 @@ initializeApp();
 
 // Health check (export estático — el emulador de Functions no soporta top-level await)
 export { healthCheck } from './functions/healthCheck.js';
+
+// Bot conversacional — endpoint de prueba (F4). El webhook real de WhatsApp (F1) usará el mismo motor.
+export { devMessage } from './functions/conversation/devMessage.js';

@@ -1,11 +1,11 @@
 # ROADMAP — AI_AFG (Agente WhatsApp Perfumería)
 
 > **Metodología:** desarrollo incremental. Se trabaja UNA fase a la vez.
-> Solo la fase actual está desglosada en sub-fases. Las siguientes se desglosan
-> recién cuando se cierra la anterior — así evitamos planificar sobre supuestos
-> que cambian, y evitamos fallas por avanzar en muchos frentes a la vez.
+> Cada fase se divide en **~2 sub-fases** (preferencia del owner). Si una fase tiene un
+> tercer paso genuinamente riesgoso, se avisa y se separa; si no, el default son 2.
+> Solo la fase actual está desglosada. Las siguientes se desglosan al cerrar la anterior.
 
-**Última actualización:** 2026-06-15
+**Última actualización:** 2026-06-16
 
 ---
 
@@ -27,7 +27,7 @@
 | **F1** | Setup WhatsApp Cloud API (canal oficial Meta) | ⏸️ Pausada (Meta bloqueado del lado del owner) |
 | **F2** | Diseño de datos (schema Firestore tenant perfumería) | ✅ Completada |
 | **F3** | Entorno ejecutable local + carga del catálogo | ✅ Completada |
-| **F4** | Bot conversacional básico (recibe → responde) | ⏳ Próxima (a desglosar) |
+| **F4** | Bot conversacional básico (recibe → responde) | ✅ Completada |
 | **F5** | Catálogo + carrito (el bot vende) | ⏳ Pendiente |
 | **F6** | Cobros (links de pago dentro de WhatsApp) | ⏳ Pendiente |
 | **F7** | Integración Meta Business Suite (CAPI + catálogo + click-to-WA) | ⏳ Pendiente |
@@ -41,36 +41,31 @@
 
 ---
 
-# ⚡ FASE ACTIVA: F3 — Entorno ejecutable local + carga del catálogo
+# ⚡ FASE ACTIVA: F4 — Bot conversacional básico
 
-**Objetivo:** dejar el backend corriendo localmente, con la base de datos (emulador de
-Firestore) levantada y el catálogo cargado de verdad. Acá lo diseñado en F2 pasa a ser
-ejecutable, y corre la validación completa de TypeScript que diferimos.
+**Objetivo:** que el **backend real** (Cloud Functions + Firestore) reciba un mensaje de un
+cliente, recuerde la conversación (sesión en Firestore) y devuelva una respuesta. El "hola
+mundo" del bot, corriendo en el sistema de verdad — todavía SIN catálogo (eso es F5) y SIN
+cerebro de IA (eso se enchufa más adelante con la API key).
 
-**Por qué ahora:** no depende de Meta ni de API key. Convierte el diseño en algo que corre.
+**Por qué así:** Meta está pausado (F1), así que probamos vía un endpoint HTTP local +
+simulador, no por WhatsApp real. La lógica vive detrás de la interfaz `WhatsAppClient`
+(ADR-0003), así que cuando se conecte WhatsApp real, el bot no cambia.
 
 **Criterio de "fase terminada" (Definition of Done):**
-- [ ] `pnpm install` resuelve las dependencias del backend
-- [ ] `tsc` compila el backend sin errores (incluye los tipos de perfume de F2.5)
-- [ ] Emulador de Firestore corriendo localmente
-- [ ] Catálogo (`seed-productos.json`) cargado en el emulador
-- [ ] `healthCheck` responde desde el emulador
-- [ ] Un solo comando levanta el entorno (documentado)
+- [ ] Una Cloud Function recibe `{ from, text }` y devuelve una respuesta
+- [ ] La sesión del cliente se guarda/lee en Firestore (`customers/{id}/sessions`)
+- [ ] Probado end-to-end contra el emulador (mensaje → respuesta + sesión persistida)
+- [ ] typecheck en verde
 
-### Sub-fases de F3
+### Sub-fases de F4 (2)
 
 | Sub-fase | Acción | Estado | Riesgo |
 |----------|--------|--------|--------|
-| **F3.1** | `pnpm install` en `10-backend` (resolver el monorepo) | ⏳ | Medio (Windows puede dar guerra) |
-| **F3.2** | Validación TypeScript completa (`tsc`) del backend, incluye tipos de F2.5 | ⏳ | Bajo |
-| **F3.3** | Configurar emuladores de Firebase (Firestore + Functions) en `firebase.json` | ⏳ | Bajo |
-| **F3.4** | Conectar el importador y cargar `seed-productos.json` al emulador | ⏳ | Medio |
-| **F3.5** | Correr `healthCheck` en el emulador y verificar que responde | ⏳ | Bajo |
-| **F3.6** | `docker-compose` en `90-ops` (n8n + emuladores) — un comando levanta todo | ⏳ | Medio |
-| **F3.7** | Documentar cómo levantar el entorno + commit | ⏳ | Cero |
+| **F4.1** | Crear la función de conversación en el backend: recibe mensaje, maneja sesión en Firestore, responde (lógica básica saludo/eco detrás de `WhatsAppClient`). Verificar typecheck + build. | ⏳ | Medio |
+| **F4.2** | Probar end-to-end contra el emulador: enviar mensaje vía HTTP, ver la respuesta y la sesión guardada en Firestore. Commit. | ⏳ | Bajo |
 
-**Regla de oro:** si una sub-fase falla, NO se pasa a la siguiente. Se para, se explica el
-error en español simple, se proponen 2 opciones, y el owner elige. Nada de "ya va a funcionar".
+**Regla de oro:** si una sub-fase falla, parar, explicar simple, proponer 2 opciones, el owner elige.
 
 ---
 
@@ -118,10 +113,6 @@ el error en español simple, se proponen 2 opciones, y el owner elige. Nada de "
 ---
 
 # Fases siguientes (alto nivel — se desglosan al llegar)
-
-### F4 — Bot conversacional básico
-El webhook recibe un mensaje de WhatsApp, lo procesa en Cloud Functions, y responde algo.
-El "hola mundo" del bot. Sin catálogo aún.
 
 ### F5 — Catálogo + carrito
 El bot muestra productos, arma carrito, calcula totales. Acá empieza a vender.
