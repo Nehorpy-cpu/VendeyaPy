@@ -29,7 +29,8 @@
 | **F3** | Entorno ejecutable local + carga del catálogo | ✅ Completada |
 | **F4** | Bot conversacional básico (recibe → responde) | ✅ Completada |
 | **F5** | Catálogo + carrito (el bot vende) | ✅ Completada |
-| **F6** | Cobros (links de pago dentro de WhatsApp) | ✅ Completada |
+| **F6** | Cobros — link de pago (simulado) | ✅ Completada |
+| **F6b** | Pago por transferencia + comprobante + handoff a vendedor | ⚡ EN CURSO |
 | **F7** | Integración Meta Business Suite (CAPI + catálogo + click-to-WA) | ⏳ Pendiente |
 | **F8** | Posventa + seguimiento + fidelización | ⏳ Pendiente |
 | **F9** | Testing E2E + salida a producción | ⏳ Pendiente |
@@ -41,28 +42,31 @@
 
 ---
 
-# ⚡ FASE ACTIVA: F6 — Cobros (link de pago en WhatsApp)
+# ⚡ FASE ACTIVA: F6b — Pago por transferencia + comprobante + handoff a vendedor
 
-**Objetivo:** que cuando el cliente escriba *"pagar"*, el bot **cree una orden** desde el
-carrito y le devuelva un **link de pago**, y luego pueda **confirmar el pago**. Sigue sin Meta;
-las pasarelas reales (Bancard/Stripe) se integran cuando haya credenciales — por ahora el link
-es simulado para validar el flujo.
+**Objetivo (flujo real de Paraguay):** al pagar, el bot da los **datos bancarios** (UENO,
+Banco Familiar, etc.) para transferir; el cliente manda el **comprobante**; el bot lo guarda,
+marca la orden "en verificación" y **deriva al vendedor real** (el bot deja de responder ese
+chat y le avisa al vendedor). No necesita pasarela de pago.
+
+**Decisiones (2026-06-16):** handoff = el bot avisa al vendedor y le pasa la conversación ·
+varios vendedores (config) pero arrancamos con uno · solo transferencia (link de tarjeta en pausa).
 
 **Sub-fases (2) — se ejecutan DE A UNA, no juntas:**
 
 | Sub-fase | Acción | Estado | Riesgo |
 |----------|--------|--------|--------|
-| **F6.1** | "pagar" → crear **pre-orden** (`PENDING_PAYMENT`) en Firestore desde el carrito + devolver link de pago (simulado). Verificar build + E2E. | ⚡ | Medio |
-| **F6.2** | Confirmación de pago: endpoint que marca la orden `PAID`, vacía el carrito y el bot confirma. (Webhook real de pasarela con firma → cuando haya credenciales.) Verificar + commit. | ⏳ | Medio |
+| **F6b.1** | "pagar" → crear orden + mostrar **datos bancarios** (de config) + pedir el comprobante. Config de cuentas + vendedores (con placeholders a reemplazar). Verificar build + E2E. | ⚡ | Medio |
+| **F6b.2** | Recibir comprobante (simulado) → guardarlo, marcar orden `PENDING_VERIFICATION`, **handoff**: el bot deja de responder + avisa al vendedor. Verificar + commit. | ⏳ | Medio |
 
-**Nota:** crear la pre-orden NO cobra dinero (el cobro ocurre cuando el cliente paga en la
-pasarela). El gate de aprobación humana aplica a acciones que mueven dinero de verdad, no a esto.
+**Dependencia:** recibir la FOTO real del comprobante necesita el WhatsApp real (F1, pausado);
+mientras tanto se simula con un endpoint de prueba. Lo demás se construye y prueba ahora.
 
 **Regla de oro:** si una sub-fase falla, parar, explicar simple, proponer 2 opciones, el owner elige.
 
 ---
 
-# ✅ FASES COMPLETADAS: F4 (bot conversacional) · F5 (catálogo + carrito)
+# ✅ FASES COMPLETADAS: F4 (bot) · F5 (catálogo+carrito) · F6 (cobro link simulado)
 
 - **F4:** motor de conversación con sesión en Firestore (`conversation/engine.ts`, `devMessage`).
 - **F5:** el bot muestra perfumes reales (`catalog/search.ts`) y arma carrito (`conversation/cart.ts`),

@@ -21,6 +21,7 @@ import {
 } from '../catalog/search.js';
 import { addToCart, formatCart } from './cart.js';
 import { createPendingOrder } from '../orders/createPendingOrder.js';
+import { getCheckoutConfig, formatTransferInstructions } from '../orders/checkoutConfig.js';
 
 const SESSION_TTL_MS = 1000 * 60 * 60 * 24; // 24 horas
 
@@ -195,12 +196,10 @@ async function decidirRespuesta(
         nextState: 'BROWSING',
       };
     }
-    const { order, paymentLink } = await createPendingOrder(tenantId, customerId, prev.cart);
+    const order = await createPendingOrder(tenantId, customerId, prev.cart);
+    const config = await getCheckoutConfig(tenantId);
     return {
-      reply:
-        `💳 *Resumen de tu compra*\nTotal a pagar: *${GS(order.totals.total)}*\n\n` +
-        `🔗 Link de pago:\n${paymentLink}\n\n` +
-        'Apenas confirmemos el pago te aviso 🙌 (este link es de prueba por ahora).',
+      reply: formatTransferInstructions(config, order.totals.total),
       nextState: 'AWAITING_PAYMENT',
       pendingOrderId: order.id,
     };

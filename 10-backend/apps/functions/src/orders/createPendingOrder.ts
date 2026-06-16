@@ -2,12 +2,10 @@
  * orders/createPendingOrder.ts — Crea una orden pendiente de pago (F6.1)
  * ======================================================================
  * Toma el carrito de la sesión y crea una Order en Firestore con estado
- * PENDING_PAYMENT, más un link de pago.
- *
- * El link es SIMULADO por ahora — la pasarela real (Bancard/Stripe) se integra
- * cuando haya credenciales (fase posterior). Crear la orden NO cobra dinero:
- * persiste el estado del checkout antes de la operación de pago (innegociable
- * de backend: persistir antes de operaciones importantes).
+ * PENDING_PAYMENT. El cobro es por TRANSFERENCIA (ver checkoutConfig): el cliente
+ * transfiere y manda comprobante; un vendedor confirma (F6b). Crear la orden NO
+ * cobra dinero: persiste el estado del checkout antes del pago (innegociable de
+ * backend: persistir antes de operaciones importantes).
  */
 
 import { Timestamp } from 'firebase-admin/firestore';
@@ -28,16 +26,11 @@ function emptyAddress(): Address {
   };
 }
 
-export interface PendingOrderResult {
-  order: Order;
-  paymentLink: string;
-}
-
 export async function createPendingOrder(
   tenantId: string,
   customerId: string,
   cart: Cart,
-): Promise<PendingOrderResult> {
+): Promise<Order> {
   const now = Timestamp.now();
   const orderId = newOrderId();
 
@@ -68,9 +61,6 @@ export async function createPendingOrder(
 
   await db().doc(paths.order(tenantId, orderId)).set(order);
 
-  // Link simulado. TODO: reemplazar por el link real de la pasarela (Bancard/Stripe).
-  const paymentLink = `https://pago.perfumeriaafg.com/checkout/${orderId}`;
-
   logger.info('Pre-orden creada', { tenantId, customerId, orderId });
-  return { order, paymentLink };
+  return order;
 }
