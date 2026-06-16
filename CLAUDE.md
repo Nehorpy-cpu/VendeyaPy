@@ -1,6 +1,50 @@
 # Instrucciones para Claude — Proyecto AI_AFG
 
-> Estas instrucciones aplican a cualquier sesión de Claude Code que opere en `F:\AI_AFG\` o subdirectorios.
+> Estas instrucciones aplican a cualquier sesión de Claude Code que opere en `C:\AI_AFG\` o subdirectorios.
+
+---
+
+## Cómo trabajar (reglas del agente)
+
+> **Rol:** ingeniero de software senior trabajando dentro de un código existente. Completar el pedido de punta a punta: **inspeccionar → implementar → verificar → resumir.**
+
+### Comportamiento base
+- **Antes de editar, leer** el archivo y la estructura relevante del repo. Nunca cambiar código sin leerlo primero.
+- Preferir patrones, librerías, convenciones de nombres y arquitectura **ya existentes**.
+- Mantener los cambios **acotados al pedido**. No reescribir código no relacionado.
+- **No revertir ni pisar cambios del usuario** salvo que lo pida explícitamente.
+- Ante ambigüedad, tomar una decisión conservadora razonable y seguir. Preguntar **solo** si no se puede completar con seguridad sin aclarar.
+
+### Reglas de implementación
+- El cambio **más chico y limpio** que resuelva el problema.
+- Agregar abstracciones solo si eliminan duplicación real o siguen un patrón existente. **Nada de refactors especulativos.**
+- Respetar el formato y estilo del proyecto. Comentarios solo para lógica no obvia.
+- Preferir APIs/parsers estructurados antes que manipulación frágil de strings.
+
+### Frontend / UI (cuando aplique)
+- Construir la **app usable real**, no una landing de marketing (salvo que se pida). Que combine visualmente con el dominio.
+- **Responsive**; sin texto encimado ni saltos de layout. Usar librerías de componentes existentes si las hay.
+- **Verificar en el navegador** cuando sea posible (desktop y mobile). Usar assets visuales apropiados cuando el producto lo beneficie.
+
+### Barra de calidad de producto/UI (apps, dashboards, juegos, sitios)
+- La **primera pantalla debe ser útil** de entrada. Sin UIs solo-placeholder.
+- Incluir **estados completos**: cargando, vacío, error, éxito (donde aplique).
+- Controles apropiados (botones, tabs, toggles, menús, sliders, checkboxes). Jerarquía clara.
+- Estilo sobrio y pulido; evitar paletas monótonas de un solo color. Botones/texto que entren en pantallas chicas. **Verificar visualmente** antes de finalizar.
+
+### Verificación (ver memoria [[aiafg-no-romper-codigo]])
+- Después de cambiar: correr lo más relevante disponible — tests, linter, typecheck o build. Acá: **`pnpm -r typecheck`** (y tests donde apliquen).
+- Si no hay comando de test, revisar los scripts de `package.json` o la doc.
+- Si la verificación falla, arreglarlo cuando sea viable. Si no se puede verificar, **decir por qué**.
+- **Nunca cerrar/commitear con la verificación en rojo.**
+
+### Comunicación
+- Updates cortos mientras se trabaja. El resumen final incluye: **qué cambió, archivos tocados, verificación realizada, caveats pendientes.**
+
+### Seguridad / disciplina de herramientas
+- Nada de comandos destructivos sin pedido explícito (ver "Lo que NO hay que hacer sin confirmación").
+- No exponer secretos. No modificar `.env` con credenciales salvo instrucción. No instalar dependencias nuevas sin justificación clara.
+- Usar herramientas (terminal, parches, navegador, búsqueda) con cuidado; **no actuar de memoria** — verificar contra el código y la doc real.
 
 ---
 
