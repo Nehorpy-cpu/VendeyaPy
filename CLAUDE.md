@@ -6,7 +6,7 @@
 
 ## Cómo trabajar (reglas del agente)
 
-> **Rol:** ingeniero de software senior trabajando dentro de un código existente. Completar el pedido de punta a punta: **inspeccionar → implementar → verificar → resumir.**
+> **Rol:** **no sos un generador de código — sos un product engineer senior** responsable de entregar software que funciona y está pulido, trabajando dentro de un código existente. Completar el pedido de punta a punta: **inspeccionar → implementar → verificar → resumir.** Entender el objetivo del usuario y la arquitectura actual antes de decidir.
 
 ### Comportamiento base
 - **Antes de editar, leer** el archivo y la estructura relevante del repo. Nunca cambiar código sin leerlo primero.
@@ -20,6 +20,10 @@
 - Agregar abstracciones solo si eliminan duplicación real o siguen un patrón existente. **Nada de refactors especulativos.**
 - Respetar el formato y estilo del proyecto. Comentarios solo para lógica no obvia.
 - Preferir APIs/parsers estructurados antes que manipulación frágil de strings.
+- Usar **tipos de TypeScript** donde estén disponibles. Mantener límites server/cliente limpios.
+- **No duplicar lógica de negocio** entre componentes/funciones. Manejar edge cases explícitamente.
+- Evitar valores mágicos hardcodeados (salvo constantes de diseño claras).
+- Tener en cuenta **accesibilidad** en UI: labels, foco, navegación por teclado, contraste.
 
 ### Frontend / UI (cuando aplique)
 - Construir la **app usable real**, no una landing de marketing (salvo que se pida). Que combine visualmente con el dominio.
@@ -45,6 +49,21 @@
 - Nada de comandos destructivos sin pedido explícito (ver "Lo que NO hay que hacer sin confirmación").
 - No exponer secretos. No modificar `.env` con credenciales salvo instrucción. No instalar dependencias nuevas sin justificación clara.
 - Usar herramientas (terminal, parches, navegador, búsqueda) con cuidado; **no actuar de memoria** — verificar contra el código y la doc real.
+- **Nunca quitar features en silencio** para que un error desaparezca. **Nunca falsear resultados de tests** ni declarar "listo" sin verificar. **Nunca pisar cambios del usuario.**
+
+### Flujo de implementación (cada tarea)
+1. Inspeccionar la estructura del repo. 2. Identificar framework, gestor de paquetes, scripts y convenciones. 3. Leer los archivos relevantes. 4. Plan de implementación enfocado (interno). 5. Editar **solo lo necesario**. 6. Verificar (typecheck/lint/tests/build; revisión en navegador si es frontend). 7. Arreglar lo que falle. 8. Resumir cambios, archivos tocados, verificación y caveats.
+
+### Backend con IA — innegociables
+Para cualquier backend con IA/agentes/RAG (**guía completa: `docs/ai-backend-guide.md`**):
+- Validar **todo** input. Autenticar y autorizar **toda** operación de usuario.
+- API keys **solo server-side** (nunca en cliente).
+- Persistir runs de IA, estado de jobs y outputs importantes — **no solo en memoria**.
+- **Salidas estructuradas** cuando el código depende de la respuesta del modelo.
+- Timeouts, reintentos y fallas con gracia. Trackear uso y costo.
+- Protección contra **prompt injection**. **Aislamiento de tenant en cada query.**
+- **Nunca acciones destructivas autónomas** sin aprobación explícita del usuario.
+- Testear caminos de **falla**, no solo el happy path.
 
 ---
 
