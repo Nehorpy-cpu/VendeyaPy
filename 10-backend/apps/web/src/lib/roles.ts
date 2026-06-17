@@ -29,6 +29,7 @@ export const MODULES: NavModule[] = [
   { key: 'agent', label: 'Config. del agente', href: '/agent', icon: '🤖', roles: ['PLATFORM_ADMIN', 'TENANT_OWNER'] },
   { key: 'simulator', label: 'Simulador', href: '/simulator', icon: '🧪', roles: ['PLATFORM_ADMIN', 'TENANT_OWNER', 'TENANT_MANAGER'] },
   { key: 'replies', label: 'Respuestas', href: '/replies', icon: '🏆', roles: ['PLATFORM_ADMIN', 'TENANT_OWNER', 'TENANT_MANAGER', 'SELLER'] },
+  { key: 'integrations', label: 'Integración Meta', href: '/integrations', icon: '🔌', roles: ['PLATFORM_ADMIN', 'TENANT_OWNER'] },
   { key: 'company', label: 'Config. de empresa', href: '/company', icon: '⚙️', roles: ['PLATFORM_ADMIN', 'TENANT_OWNER'] },
 ];
 

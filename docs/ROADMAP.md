@@ -39,7 +39,7 @@
 
 | Fase | Nombre | Estado |
 |------|--------|--------|
-| **D1** | Centro de Integración Meta: `metaConnections` (+ tokens seguros) + `metaAssets` + estados de conexión en el panel | ⏳ |
+| **D1** | Centro de Integración Meta: `metaConnections` (+ tokens seguros) + `metaAssets` + estados de conexión en el panel | ✅ Completada (modo demo) |
 | **D2** | Webhooks + omnicanal: `metaWebhookInbox` (TTL) + `metaExternalIndex` + `processMetaWebhook` + `channel` (whatsapp/instagram/messenger). Incluye ex-F1 | ⏳ |
 | **D3** | Meta Ads (solo lectura): campañas/adsets/ads + `metaAdInsightsDaily` por jobs + snapshots diarios | ⏳ |
 | **D4** | Catálogo → Meta: `syncToMeta` + `syncProductToMeta` + `metaCatalogSyncLogs` | ⏳ |
@@ -105,22 +105,22 @@
 
 ---
 
-# ✅ FASE COMPLETADA: P19 — Onboarding rápido + plantillas · 🎉 TRACK C (copiloto) COMPLETO
+# ✅ FASE COMPLETADA: D1 — Centro de Integración Meta (Track D arrancó)
 
-Onboarding para arrancar en minutos: plantillas por rubro (perfumería / ropa / accesorios) que precargan
-la config del agente (nombre, tono, saludo, reglas, FAQ) + categorías típicas, y una lista de "primeros
-pasos" con progreso (rubro / productos / datos bancarios / probar el bot).
+La estructura para conectar Meta: `metaConnections` (con estados de conexión y el token SOLO por
+referencia — `tokenSecretRef`, nunca en claro, ADR-0009) + `metaAssets` (WhatsApp, IG, página, ad account,
+catálogo, pixel…). En modo DEMO (Meta bloqueado) se simula la conexión para ver/construir el panel; el
+OAuth real se enchufa cuando se habilite Meta.
 
-**Hecho:** `AgentConfig.industry`; `lib/templates.ts` (3 plantillas + `applyTemplate` que escribe
-config/agent + categorías); página `/onboarding` (picker de rubro + checklist con barra de progreso) + nav.
+**Hecho:** enums `META_CONNECTION_STATUS`/`META_ASSET_TYPE`; tipos `MetaConnection`/`MetaAsset`;
+`connectMetaDemo`/`disconnectMeta` + `devMetaConnect`/`devMetaDisconnect`; reglas (manager+ lee, escribe
+solo Admin SDK); página `/integrations` (estado + activos + Conectar(demo)/Desconectar) + nav.
 
-**Verificado:** `typecheck` EXIT 0 · build de producción (17 rutas) · `verify-p19.mjs` **4/4** (la plantilla
-precarga el agente + las categorías del rubro).
+**Verificado:** `typecheck` EXIT 0 · build de producción (18 rutas) · `verify-d1.mjs` **6/6** (conexión + 8
+activos; sin token en claro; desconectar limpia; vendedora 403 / dueña 200).
 
-**🎉 Con P19, el Track C (Growth Copilot, P12–P19) queda COMPLETO.** Resta solo **P11** (tracking propio de
-campañas), que se hace junto al **Track D — Meta** (atribución).
-**Próximo (pendiente, no iniciado):** Track D (Meta) — empezando por **D1** (Centro de Integración).
-Es lo único que queda: el bloque de Meta (D1–D6 + P11).
+**🎉 Track B (P1–P9) + Track C (P12–P19) COMPLETOS.**
+**Próxima (pendiente, no iniciada):** D2 — Webhooks + omnicanal (WhatsApp/IG/Messenger; incluye ex-F1).
 
 ---
 

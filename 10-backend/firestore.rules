@@ -220,6 +220,17 @@ service cloud.firestore {
         allow write: if isTenantManager(tenantId) || isPlatformAdmin();
       }
 
+      // Integración Meta (D1): conexión + activos. El manager+ los lee; los escribe
+      // SOLO Cloud Functions (Admin SDK). El token nunca está acá (solo tokenSecretRef).
+      match /metaConnections/{connectionId} {
+        allow read: if isTenantManager(tenantId) || isPlatformAdmin();
+        allow write: if false;
+      }
+      match /metaAssets/{assetId} {
+        allow read: if isTenantManager(tenantId) || isPlatformAdmin();
+        allow write: if false;
+      }
+
       // Entregas
       match /deliveries/{deliveryId} {
         allow read: if isTenantViewer(tenantId) || isPlatformAdmin();

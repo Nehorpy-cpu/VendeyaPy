@@ -74,3 +74,6 @@ export { devGenerateAudits } from './functions/audits/devGenerateAudits.js';
 
 // Respuestas ganadoras (P18): mina respuestas de chats que convirtieron.
 export { devGenerateWinningReplies } from './functions/replies/devGenerateWinningReplies.js';
+
+// Integración Meta (D1): conexión en modo demo (reemplaza OAuth real cuando se habilite).
+export { devMetaConnect, devMetaDisconnect } from './functions/meta/devMeta.js';

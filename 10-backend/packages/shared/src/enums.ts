@@ -173,6 +173,31 @@ export type AgentTestStatus = (typeof AGENTTEST_STATUS)[number];
 export const REPLY_STATUS = ['ACTIVE', 'ARCHIVED'] as const;
 export type ReplyStatus = (typeof REPLY_STATUS)[number];
 
+// Integración con Meta (Track D / D1). Estados de la conexión (ADR-0009).
+export const META_CONNECTION_STATUS = [
+  'not_connected',
+  'connected_limited',
+  'pending_review',
+  'permission_missing',
+  'active',
+  'error',
+  'expired',
+  'revoked',
+] as const;
+export type MetaConnectionStatus = (typeof META_CONNECTION_STATUS)[number];
+
+export const META_ASSET_TYPE = [
+  'business',
+  'ad_account',
+  'facebook_page',
+  'instagram_account',
+  'whatsapp_business_account',
+  'whatsapp_phone_number',
+  'catalog',
+  'pixel',
+] as const;
+export type MetaAssetType = (typeof META_ASSET_TYPE)[number];
+
 // Segmento del cliente (Growth Copilot, P12). Calculado por reglas RFM-lite.
 export const CUSTOMER_TYPE = [
   'NEW', // recién apareció, sin compras
