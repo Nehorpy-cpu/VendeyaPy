@@ -57,10 +57,11 @@ export const TENANT_STATUS = [
 export type TenantStatus = (typeof TENANT_STATUS)[number];
 
 export const USER_ROLE = [
-  'PLATFORM_ADMIN',
-  'TENANT_OWNER',
+  'PLATFORM_ADMIN', // Super Admin (Marco) — dueño del SaaS, ve todas las empresas
+  'TENANT_OWNER', // Dueño de la empresa cliente
   'TENANT_MANAGER',
   'TENANT_VIEWER',
+  'SELLER', // Vendedor — solo pedidos/conversaciones/handoffs asignados (ADR-0005)
 ] as const;
 export type UserRole = (typeof USER_ROLE)[number];
 

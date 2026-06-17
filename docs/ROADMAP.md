@@ -9,6 +9,31 @@
 
 ---
 
+## 🆕 TRACK B — Panel SaaS multiempresa (track principal actual; Meta bloqueado)
+
+> Ver ADR-0005. Panel admin (CRM) sobre `apps/web` (Next.js) + Firestore. Cada fase en ~2 sub-fases.
+
+| Fase | Nombre | Estado |
+|------|--------|--------|
+| **P1** | Fundación: auth + roles (SuperAdmin/Owner/Seller) + aislamiento por empresa + cáscara del panel | ⚡ EN CURSO |
+| **P2** | Catálogo como fuente de verdad (productos + `costPrice` + `aiNotes` + categorías + imágenes) | ⏳ |
+| **P3** | Pedidos con costo/ganancia + Dashboard (ventas, ingresos, ganancia, margen, tops) | ⏳ |
+| **P4** | Configuración del agente (identidad, tono, reglas, FAQ, bancos, envíos, vendedores, control bot) + chat de prueba | ⏳ |
+| **P5** | Clientes + Conversaciones/Bot (historial de mensajes + handoff en UI) | ⏳ |
+| **P6** | Campañas manuales + capa `CampaignDataProvider` (preparada para Meta) | ⏳ |
+| **P7** | Vistas/analíticas (anuncios / tienda / bot separadas) + embudo | ⏳ |
+| **P8** | Promotion Strategy (promos + calendario + sugerencias IA) | ⏳ |
+| **P9** | Integración tienda PHP (consume el catálogo) — depende de acceso al código PHP | ⏳ |
+| **P10** | Hardening seguridad multi-tenant + seeders demo + criterios de aceptación | ⏳ |
+
+### ⚡ P1 — Fundación del panel (sub-fases, de a una)
+| Sub-fase | Acción | Estado |
+|----------|--------|--------|
+| **P1.1** | Modelo de auth/roles: agregar rol `SELLER`, matriz de permisos, ADR-0005, doc de roles. Verificar typecheck. | ⚡ |
+| **P1.2** | Cáscara del panel en Next.js: login (Firebase Auth) + contexto de rol/empresa + shell (sidebar/header/selector de empresa) + guards de ruta + seed de usuarios de prueba. | ⏳ |
+
+---
+
 ## Leyenda de estado
 
 - ✅ Completada
