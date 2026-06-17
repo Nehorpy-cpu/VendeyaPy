@@ -54,8 +54,8 @@
 
 | Fase | Nombre | Estado |
 |------|--------|--------|
-| **P11** | Tracking propio sin Meta (source/UTM/cupones/QR por campaña) | ⏳ |
-| **P12** | Score de clientes + segmentación (job + reglas) | ⏳ |
+| **P11** | Tracking propio sin Meta (source/UTM/cupones/QR por campaña) | ⏳ (se hace junto al Track D / atribución) |
+| **P12** | Score de clientes + segmentación (job + reglas) | ✅ Completada |
 | **P13** | Centro de Decisiones / Growth Copilot + "Acciones de hoy" (`insights`) | ⏳ |
 | **P14** | Follow-ups inteligentes (`followUpTasks`, tareas sugeridas, sin envío auto) | ⏳ |
 | **P15** | Modo Ganancia del agente (margen/prioridad/descuento + reglas de venta) | ⏳ |
@@ -105,20 +105,23 @@
 
 ---
 
-# ✅ FASE COMPLETADA: P9 — Hardening multiempresa + asignación · 🎉 TRACK B COMPLETO
+# ✅ FASE COMPLETADA: P12 — Score y segmentación de clientes (Track C arrancó)
 
-Cierre del panel núcleo. **Asignación:** el chat queda asignado (`assignedSellerId`) al vendedor que
-lo toma (el callable pasa su uid); filtro "Mis chats" en Conversaciones. **Blindaje:** auditoría de
-`firestore.rules` + 2ª empresa de prueba (boutique-demo) + **prueba de aceptación con logins reales**.
+Cada cliente recibe un **segmento** (nuevo/caliente/comprador/recurrente/premium/dormido/perdido) y un
+**score 0-100** (RFM-lite: recencia + frecuencia + monto), por reglas baratas (sin IA). Es la materia
+prima del copiloto "qué hacer hoy".
 
-**Verificado:** `typecheck` EXIT 0 · build de producción (12 rutas) · `verify-p9.mjs` **23/23** —
-aislamiento entre empresas (owner A no lee tenant B; Super Admin sí), límites por rol (vendedora 403 en
-finanzas/insights/stats privado/config; 200 en lo operativo), sin sesión = denegado, y la asignación
-funciona. Doc: `docs/criterios-aceptacion.md`.
+**Hecho:** enum `CUSTOMER_TYPE`; `Customer.customerType`/`customerScore`; `recomputeCustomerScores`
+(lee pedidos PAID + última interacción; actualiza también `stats`); `devRecomputeScores` (job manual).
+Página Clientes: badge de segmento + score + filtro por segmento.
 
-**🎉 Con P9, el Track B (panel SaaS núcleo, P1–P9) queda COMPLETO.**
-**Próximo (pendiente, no iniciado):** Track D (Meta) — empezando por **D1** (Centro de Integración) —
-o Track C (Growth Copilot). Una fase a la vez, como siempre.
+**Verificado:** `typecheck` EXIT 0 · build de producción · `verify-p12.mjs` **7/7** (7 perfiles → el
+segmento correcto).
+
+**Nota de orden:** dentro del Track C arrancamos por **P12** (base del copiloto). **P11** (tracking de
+campañas/cupones) se hará junto al **Track D** (atribución con Meta), donde luce.
+**🎉 Track B (panel núcleo, P1–P9) COMPLETO.**
+**Próxima (pendiente, no iniciada):** P13 — Centro de Decisiones ("Acciones de hoy").
 
 ---
 

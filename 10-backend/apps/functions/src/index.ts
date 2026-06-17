@@ -59,3 +59,6 @@ export { devRecomputeStats } from './functions/stats/devRecomputeStats.js';
 
 // Sugerencias de promoción por reglas (P8): generación manual/job.
 export { devGenerateSuggestions } from './functions/promotions/devGenerateSuggestions.js';
+
+// Score y segmentación de clientes por reglas (P12): recálculo manual/job.
+export { devRecomputeScores } from './functions/customers/devRecomputeScores.js';

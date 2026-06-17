@@ -139,3 +139,15 @@ export type InsightStatus = (typeof INSIGHT_STATUS)[number];
 
 export const INSIGHT_PRIORITY = ['LOW', 'MEDIUM', 'HIGH'] as const;
 export type InsightPriority = (typeof INSIGHT_PRIORITY)[number];
+
+// Segmento del cliente (Growth Copilot, P12). Calculado por reglas RFM-lite.
+export const CUSTOMER_TYPE = [
+  'NEW', // recién apareció, sin compras
+  'HOT', // interactuó hace poco, todavía no compró
+  'BUYER', // compró 1 vez
+  'RECURRING', // 2+ compras
+  'PREMIUM', // alto gasto acumulado
+  'DORMANT', // sin interacción hace tiempo
+  'LOST', // sin interacción hace mucho
+] as const;
+export type CustomerType = (typeof CUSTOMER_TYPE)[number];

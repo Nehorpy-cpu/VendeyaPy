@@ -3,6 +3,7 @@
  * Ver ARCHITECTURE.md §4.4.
  */
 
+import type { CustomerType } from '../enums.js';
 import type { Address, Timestamp } from './common.types.js';
 import type { CustomerConversationMeta } from './message.types.js';
 
@@ -28,6 +29,9 @@ export interface Customer {
   assignedSellerId?: string | null;
   /** Nombre legible del vendedor asignado (para mostrar sin un join). */
   assignedSellerName?: string | null;
+  /** Segmento + puntaje calculados por reglas (P12). */
+  customerType?: CustomerType | null;
+  customerScore?: number | null;
   createdAt: Timestamp;
   updatedAt: Timestamp;
 }
