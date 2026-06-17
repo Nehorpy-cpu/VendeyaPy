@@ -5,6 +5,7 @@ import { useSearchParams } from 'next/navigation';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import type { Customer, Message } from '@vpw/shared';
 import { useActiveCompany } from '@/lib/active-company';
+import { useAuth } from '@/lib/auth-context';
 import {
   listConversations,
   getCustomer,
@@ -28,9 +29,11 @@ function name(c: Customer): string {
 
 function ConversationsInner() {
   const { tenantId, loading: companyLoading } = useActiveCompany();
+  const { user } = useAuth();
   const qc = useQueryClient();
   const params = useSearchParams();
   const [selected, setSelected] = useState<string | null>(null);
+  const [onlyMine, setOnlyMine] = useState(false);
 
   // Preselección desde ?c= (link "Ver chat" de Clientes)
   useEffect(() => {
@@ -90,6 +93,7 @@ function ConversationsInner() {
   }
 
   const convs = convsQ.data ?? [];
+  const visibleConvs = onlyMine && user ? convs.filter((c) => c.assignedSellerId === user.uid) : convs;
   const current = customerQ.data ?? convs.find((c) => c.id === selected) ?? null;
   const isHuman = current?.conversation?.humanTakeover ?? false;
   const busy = takeMut.isPending || releaseMut.isPending;
@@ -102,15 +106,20 @@ function ConversationsInner() {
         {/* Lista */}
         <div className="overflow-y-auto rounded-xl border border-gray-200 bg-white md:col-span-1">
           {convsQ.isLoading && <div className="p-4 text-sm text-gray-400">Cargando…</div>}
-          {convsQ.isSuccess && convs.length === 0 && (
+          <label className="flex items-center gap-2 border-b border-gray-100 px-4 py-2 text-xs text-gray-600">
+            <input type="checkbox" checked={onlyMine} onChange={(e) => setOnlyMine(e.target.checked)} />
+            Solo mis chats (asignados a mí)
+          </label>
+          {convsQ.isSuccess && visibleConvs.length === 0 && (
             <div className="p-6 text-center text-sm text-gray-500">
-              Sin conversaciones todavía. Aparecerán cuando un cliente escriba al bot.
+              {onlyMine ? 'No tenés conversaciones asignadas todavía.' : 'Sin conversaciones todavía. Aparecerán cuando un cliente escriba al bot.'}
             </div>
           )}
           <ul className="divide-y divide-gray-100">
-            {convs.map((c) => {
+            {visibleConvs.map((c) => {
               const active = c.id === selected;
               const unread = c.conversation?.unreadForSeller ?? 0;
+              const mine = !!user && c.assignedSellerId === user.uid;
               return (
                 <li key={c.id}>
                   <button
@@ -124,6 +133,9 @@ function ConversationsInner() {
                     <div className="flex items-center justify-between gap-2">
                       <span className="truncate text-xs text-gray-500">{c.conversation?.lastMessagePreview ?? ''}</span>
                       <span className="flex shrink-0 items-center gap-1">
+                        {c.assignedSellerId && (
+                          <span title={'Asignado a ' + (c.assignedSellerName ?? 'un vendedor')} className={'rounded-full px-1.5 text-[10px] font-medium ' + (mine ? 'bg-brand-100 text-brand-700' : 'bg-gray-100 text-gray-500')}>{mine ? 'mío' : '👤'}</span>
+                        )}
                         {c.conversation?.humanTakeover ? <span title="Atiende un vendedor">🧑‍💼</span> : <span title="Atiende el bot">🤖</span>}
                         {unread > 0 && <span className="rounded-full bg-red-500 px-1.5 text-[10px] font-bold text-white">{unread}</span>}
                       </span>

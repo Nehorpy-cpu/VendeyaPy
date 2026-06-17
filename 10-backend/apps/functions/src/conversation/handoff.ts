@@ -20,11 +20,12 @@ export interface HandoffResult {
 /** Mantengo el alias por compatibilidad con código existente. */
 export type ReleaseResult = HandoffResult;
 
-/** Un vendedor toma el chat: el bot deja de responder a este cliente. */
+/** Un vendedor toma el chat: el bot deja de responder y la conversación queda asignada a él. */
 export async function takeoverChat(
   tenantId: string,
   customerId: string,
   by?: string,
+  sellerUid?: string | null,
 ): Promise<HandoffResult> {
   const ref = db().doc(paths.session(tenantId, customerId));
   const snap = await ref.get();
@@ -35,6 +36,11 @@ export async function takeoverChat(
     'context.humanTakeover': true,
     updatedAt: Timestamp.now(),
   });
+  // Asignar la conversación al vendedor que la tomó (P9).
+  await db().doc(paths.customer(tenantId, customerId)).set(
+    { assignedSellerId: sellerUid ?? null, assignedSellerName: by ?? null, updatedAt: Timestamp.now() },
+    { merge: true },
+  );
   await appendMessage(tenantId, customerId, {
     direction: 'out',
     author: 'system',

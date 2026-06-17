@@ -24,6 +24,10 @@ export interface Customer {
   notes: string;
   /** Resumen de la última conversación (denormalizado por el motor del bot). */
   conversation?: CustomerConversationMeta;
+  /** Vendedor (uid de Auth) que tomó/atiende la conversación. null = sin asignar. */
+  assignedSellerId?: string | null;
+  /** Nombre legible del vendedor asignado (para mostrar sin un join). */
+  assignedSellerName?: string | null;
   createdAt: Timestamp;
   updatedAt: Timestamp;
 }

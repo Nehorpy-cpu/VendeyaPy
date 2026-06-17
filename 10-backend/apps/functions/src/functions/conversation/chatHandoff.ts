@@ -42,7 +42,7 @@ function readArgs(req: CallableRequest<HandoffData>): { tenantId: string; custom
 export const chatTakeover = onCall<HandoffData>({ region: 'us-central1' }, async (req) => {
   const { tenantId, customerId } = readArgs(req);
   const by = assertStaff(req, tenantId);
-  return takeoverChat(tenantId, customerId, by);
+  return takeoverChat(tenantId, customerId, by, req.auth?.uid ?? null);
 });
 
 export const chatRelease = onCall<HandoffData>({ region: 'us-central1' }, async (req) => {

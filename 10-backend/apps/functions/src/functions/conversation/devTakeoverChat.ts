@@ -18,7 +18,7 @@ export const devTakeoverChat = onRequest({ region: 'us-central1', cors: true }, 
     res.status(405).json({ ok: false, error: 'Usá POST' });
     return;
   }
-  const body = (req.body ?? {}) as { from?: string; orderId?: string; tenantId?: string; by?: string };
+  const body = (req.body ?? {}) as { from?: string; orderId?: string; tenantId?: string; by?: string; sellerUid?: string };
   const tenantId = body.tenantId ?? 'perfumeria';
 
   let customerId: string | undefined;
@@ -34,7 +34,7 @@ export const devTakeoverChat = onRequest({ region: 'us-central1', cors: true }, 
   }
 
   try {
-    const result = await takeoverChat(tenantId, customerId, body.by ?? 'Vendedor (prueba)');
+    const result = await takeoverChat(tenantId, customerId, body.by ?? 'Vendedor (prueba)', body.sellerUid ?? null);
     res.status(result.ok ? 200 : 404).json(result);
   } catch (e) {
     logger.error('Error en devTakeoverChat', e, { tenantId, customerId });

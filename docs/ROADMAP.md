@@ -23,7 +23,7 @@
 | **P6** | 🔒 Privacidad financiera: `productFinancials`/`orderFinancials` + reglas (el vendedor no ve costo/ganancia ni desde la base) | ✅ Completada |
 | **P7** | Dashboards baratos con agregados (`stats/public`+`private`, `statsDaily`, `platformStats` por trigger/job) | ✅ Completada |
 | **P8** | Promotion Strategy (promos + estados/fechas + sugerencias por reglas → `insights`) | ✅ Completada |
-| **P9** | Hardening multi-tenant + asignación de vendedores + seeders demo + criterios de aceptación | ⏳ |
+| **P9** | Hardening multi-tenant + asignación de vendedores + seeders demo + criterios de aceptación | ✅ Completada — **Track B COMPLETO** 🎉 |
 
 > **Reubicado (por el plan unificado 2026-06-17):** la vieja "P6 Campañas" y "P7 analíticas de
 > anuncios" pasaron al **Track D (Meta)**. La "P10 Hardening" es ahora **P9**.
@@ -105,23 +105,20 @@
 
 ---
 
-# ✅ FASE COMPLETADA: P8 — Promotion Strategy
+# ✅ FASE COMPLETADA: P9 — Hardening multiempresa + asignación · 🎉 TRACK B COMPLETO
 
-Promociones (descuento %, monto fijo, combo, 2x1, envío gratis) con fechas + estado, y
-**sugerencias por reglas** (sin IA cara): "estrella oculta" (buen margen + stock, no destacado) y
-"stock parado" (mucho stock sin ventas), guardadas como `insights` (base del Centro de Decisiones P13).
+Cierre del panel núcleo. **Asignación:** el chat queda asignado (`assignedSellerId`) al vendedor que
+lo toma (el callable pasa su uid); filtro "Mis chats" en Conversaciones. **Blindaje:** auditoría de
+`firestore.rules` + 2ª empresa de prueba (boutique-demo) + **prueba de aceptación con logins reales**.
 
-**Hecho:** enums + tipos `Promotion` e `Insight`; `generatePromotionSuggestions` (idempotente: no revive
-las descartadas, limpia las que dejan de aplicar) + `devGenerateSuggestions`; reglas (promotions: staff lee /
-manager+ edita; insights: manager+ lee y acepta/descarta); página `/promotions` (panel de sugerencias +
-CRUD de promos con productos/fechas/estado + "crear promo desde sugerencia").
+**Verificado:** `typecheck` EXIT 0 · build de producción (12 rutas) · `verify-p9.mjs` **23/23** —
+aislamiento entre empresas (owner A no lee tenant B; Super Admin sí), límites por rol (vendedora 403 en
+finanzas/insights/stats privado/config; 200 en lo operativo), sin sesión = denegado, y la asignación
+funciona. Doc: `docs/criterios-aceptacion.md`.
 
-**Verificado (4 capas):** `typecheck` EXIT 0 · build de producción (12 rutas, +`/promotions`) ·
-sugerencias en vivo 7/7 (genera, no revive lo descartado, limpia lo que ya no aplica) · reglas con auth
-(vendedora 403 en `insights`, 200 en `promotions`; dueña 200). Script: `verify-p8.mjs`.
-
-**Antecede:** P7 — Dashboards con agregados (ADR-0006).
-**Próxima (pendiente, no iniciada):** P9 — Hardening multi-tenant + asignación de vendedores + criterios de aceptación.
+**🎉 Con P9, el Track B (panel SaaS núcleo, P1–P9) queda COMPLETO.**
+**Próximo (pendiente, no iniciado):** Track D (Meta) — empezando por **D1** (Centro de Integración) —
+o Track C (Growth Copilot). Una fase a la vez, como siempre.
 
 ---
 

@@ -30,6 +30,8 @@ const USERS = [
   { email: 'superadmin@aiafg.com', name: 'Marco (Super Admin)', role: 'PLATFORM_ADMIN', tenantId: null },
   { email: 'owner@perfumeria.com', name: 'Dueña Perfumería', role: 'TENANT_OWNER', tenantId: 'perfumeria' },
   { email: 'seller@perfumeria.com', name: 'Vendedora', role: 'SELLER', tenantId: 'perfumeria' },
+  // 2ª empresa: para probar el aislamiento multiempresa (P9).
+  { email: 'owner@boutique.com', name: 'Dueño Boutique', role: 'TENANT_OWNER', tenantId: 'boutique-demo' },
 ];
 
 async function upsertUser(u) {
