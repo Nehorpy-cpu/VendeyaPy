@@ -26,6 +26,7 @@ export const MODULES: NavModule[] = [
   { key: 'analytics', label: 'Vistas y analíticas', href: '/analytics', icon: '📈', roles: ['PLATFORM_ADMIN', 'TENANT_OWNER'] },
   { key: 'promotions', label: 'Promotion Strategy', href: '/promotions', icon: '🎯', roles: ['PLATFORM_ADMIN', 'TENANT_OWNER'] },
   { key: 'agent', label: 'Config. del agente', href: '/agent', icon: '🤖', roles: ['PLATFORM_ADMIN', 'TENANT_OWNER'] },
+  { key: 'simulator', label: 'Simulador', href: '/simulator', icon: '🧪', roles: ['PLATFORM_ADMIN', 'TENANT_OWNER', 'TENANT_MANAGER'] },
   { key: 'company', label: 'Config. de empresa', href: '/company', icon: '⚙️', roles: ['PLATFORM_ADMIN', 'TENANT_OWNER'] },
 ];
 

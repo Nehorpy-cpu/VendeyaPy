@@ -208,6 +208,11 @@ service cloud.firestore {
           && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'resolvedAt']);
       }
 
+      // Simulador del agente (P17): casos de prueba que crea/edita/corre el manager+.
+      match /agentTestCases/{testId} {
+        allow read, write: if isTenantManager(tenantId) || isPlatformAdmin();
+      }
+
       // Entregas
       match /deliveries/{deliveryId} {
         allow read: if isTenantViewer(tenantId) || isPlatformAdmin();

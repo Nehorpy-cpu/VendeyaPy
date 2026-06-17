@@ -60,7 +60,7 @@
 | **P14** | Follow-ups inteligentes (`followUpTasks`, tareas sugeridas, sin envío auto) | ✅ Completada |
 | **P15** | Modo Ganancia del agente (margen/prioridad/descuento + reglas de venta) | ✅ Completada |
 | **P16** | Auditoría del agente (`agentAudits`) | ✅ Completada |
-| **P17** | Simulador del agente — escenarios guardados (`agentTestCases`) | ⏳ |
+| **P17** | Simulador del agente — escenarios guardados (`agentTestCases`) | ✅ Completada |
 | **P18** | Biblioteca de respuestas ganadoras (`winningReplies`) | ⏳ |
 | **P19** | Onboarding rápido + plantillas por rubro | ⏳ |
 
@@ -105,21 +105,21 @@
 
 ---
 
-# ✅ FASE COMPLETADA: P16 — Auditoría del agente
+# ✅ FASE COMPLETADA: P17 — Simulador del agente
 
-El sistema revisa solo las conversaciones (sobre el historial guardado) + el catálogo y marca hallazgos
-para mejorar al bot, en `agentAudits`. Reglas: el bot "no entendió" (≥2 fallbacks), posible reclamo sin
-derivar a un vendedor, y producto con info incompleta (sin notas IA / descripción / costo).
+Banco de escenarios de prueba guardados (`agentTestCases`): la dueña crea casos ("pide descuento",
+"algo barato", "reclamo"…) y los corre con un clic contra el bot real (`devMessage`), viendo la respuesta
+de verdad para compararla con lo esperado y marcar OK / Revisar.
 
-**Hecho:** enums `AUDIT_ISSUE_TYPE/STATUS`; tipo `AgentAudit`; `generateAgentAudits` idempotente +
-`devGenerateAudits`; reglas (manager+ lee y resuelve/descarta); `lib/audits.ts`; sección
-"🔍 Auditoría del agente" en `/agent` (hallazgos + severidad + fix + Resolver/Descartar + Revisar ahora).
+**Hecho:** enum `AGENTTEST_STATUS`; tipo `AgentTestCase`; `lib/simulator.ts` (CRUD + `runTestCase` que
+prima 'hola' + el mensaje y guarda `lastResult`; `seedDefaultTestCases` con 6 escenarios típicos);
+reglas (manager+ lee/escribe); página `/simulator` + ítem de menú.
 
-**Verificado:** `typecheck` EXIT 0 · build de producción · `verify-p16.mjs` **4/4** (detecta los 3 tipos;
-no revive al resolver).
+**Verificado:** `typecheck` EXIT 0 · build de producción (15 rutas) · `verify-p17.mjs` **5/5** (corre y
+guarda la respuesta; vendedora 403, dueña 200).
 
-**Antecede:** P15 — Modo Ganancia. **🎉 Track B (P1–P9) COMPLETO.**
-**Próxima (pendiente, no iniciada):** P17 — Simulador del agente (`agentTestCases`).
+**Antecede:** P16 — Auditoría. **🎉 Track B (P1–P9) COMPLETO.**
+**Próxima (pendiente, no iniciada):** P18 — Biblioteca de respuestas ganadoras (`winningReplies`).
 
 ---
 

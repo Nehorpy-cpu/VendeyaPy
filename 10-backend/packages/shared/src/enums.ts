@@ -165,6 +165,10 @@ export type AuditIssueType = (typeof AUDIT_ISSUE_TYPE)[number];
 export const AUDIT_STATUS = ['OPEN', 'RESOLVED', 'DISMISSED'] as const;
 export type AuditStatus = (typeof AUDIT_STATUS)[number];
 
+// Simulador del agente (Growth Copilot, P17). El dueño marca el resultado de cada caso.
+export const AGENTTEST_STATUS = ['UNTESTED', 'OK', 'NEEDS_WORK'] as const;
+export type AgentTestStatus = (typeof AGENTTEST_STATUS)[number];
+
 // Segmento del cliente (Growth Copilot, P12). Calculado por reglas RFM-lite.
 export const CUSTOMER_TYPE = [
   'NEW', // recién apareció, sin compras
