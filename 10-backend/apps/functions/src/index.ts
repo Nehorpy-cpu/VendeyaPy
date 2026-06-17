@@ -62,3 +62,6 @@ export { devGenerateSuggestions } from './functions/promotions/devGenerateSugges
 
 // Score y segmentación de clientes por reglas (P12): recálculo manual/job.
 export { devRecomputeScores } from './functions/customers/devRecomputeScores.js';
+
+// Centro de Decisiones (P13): genera "acciones de hoy" (promos + reactivación + sin responder).
+export { devGenerateInsights } from './functions/decisions/devGenerateInsights.js';

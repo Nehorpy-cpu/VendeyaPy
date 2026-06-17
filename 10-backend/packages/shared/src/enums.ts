@@ -126,11 +126,12 @@ export type PromotionStatus = (typeof PROMOTION_STATUS)[number];
 // Recomendaciones del sistema (Growth Copilot). P8 genera las de promoción;
 // P13/P14/Track D agregan las demás. Ver ADR-0006.
 export const INSIGHT_TYPE = [
-  'PROMO_SUGGESTION',
-  'FOLLOW_UP',
-  'CAMPAIGN_REVIEW',
-  'CUSTOMER_REACTIVATION',
-  'AGENT_ISSUE',
+  'PROMO_SUGGESTION', // P8 — sugerencia de promoción
+  'CUSTOMER_REACTIVATION', // P13 — reactivar cliente dormido que ya compró
+  'PENDING_REPLY', // P13 — conversación esperando respuesta
+  'FOLLOW_UP', // P14
+  'CAMPAIGN_REVIEW', // Track D
+  'AGENT_ISSUE', // P16
 ] as const;
 export type InsightType = (typeof INSIGHT_TYPE)[number];
 

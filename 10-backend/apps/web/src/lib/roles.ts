@@ -15,6 +15,7 @@ export interface NavModule {
 
 export const MODULES: NavModule[] = [
   { key: 'dashboard', label: 'Dashboard', href: '/dashboard', icon: '📊', roles: ['PLATFORM_ADMIN', 'TENANT_OWNER', 'SELLER'] },
+  { key: 'decisions', label: 'Acciones de hoy', href: '/decisions', icon: '🧭', roles: ['PLATFORM_ADMIN', 'TENANT_OWNER', 'TENANT_MANAGER'] },
   { key: 'companies', label: 'Empresas', href: '/companies', icon: '🏢', roles: ['PLATFORM_ADMIN'] },
   { key: 'catalog', label: 'Catálogo', href: '/catalog', icon: '📦', roles: ['PLATFORM_ADMIN', 'TENANT_OWNER'] },
   { key: 'orders', label: 'Pedidos', href: '/orders', icon: '🧾', roles: ['PLATFORM_ADMIN', 'TENANT_OWNER', 'SELLER'] },

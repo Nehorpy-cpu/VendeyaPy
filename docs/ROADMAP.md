@@ -56,7 +56,7 @@
 |------|--------|--------|
 | **P11** | Tracking propio sin Meta (source/UTM/cupones/QR por campaña) | ⏳ (se hace junto al Track D / atribución) |
 | **P12** | Score de clientes + segmentación (job + reglas) | ✅ Completada |
-| **P13** | Centro de Decisiones / Growth Copilot + "Acciones de hoy" (`insights`) | ⏳ |
+| **P13** | Centro de Decisiones / Growth Copilot + "Acciones de hoy" (`insights`) | ✅ Completada |
 | **P14** | Follow-ups inteligentes (`followUpTasks`, tareas sugeridas, sin envío auto) | ⏳ |
 | **P15** | Modo Ganancia del agente (margen/prioridad/descuento + reglas de venta) | ⏳ |
 | **P16** | Auditoría del agente (`agentAudits`) | ⏳ |
@@ -105,23 +105,22 @@
 
 ---
 
-# ✅ FASE COMPLETADA: P12 — Score y segmentación de clientes (Track C arrancó)
+# ✅ FASE COMPLETADA: P13 — Centro de Decisiones ("Acciones de hoy")
 
-Cada cliente recibe un **segmento** (nuevo/caliente/comprador/recurrente/premium/dormido/perdido) y un
-**score 0-100** (RFM-lite: recencia + frecuencia + monto), por reglas baratas (sin IA). Es la materia
-prima del copiloto "qué hacer hoy".
+Pantalla `/decisions` que junta TODO lo que el sistema detecta por reglas y le dice a la dueña qué hacer
+hoy: promos sugeridas (P8) + reactivar clientes dormidos que ya compraron + conversaciones sin responder.
+Cada acción se marca "Hecho" o "Descartar". Sin IA.
 
-**Hecho:** enum `CUSTOMER_TYPE`; `Customer.customerType`/`customerScore`; `recomputeCustomerScores`
-(lee pedidos PAID + última interacción; actualiza también `stats`); `devRecomputeScores` (job manual).
-Página Clientes: badge de segmento + score + filtro por segmento.
+**Hecho:** enum `PENDING_REPLY`; `decisions/insights.ts` (helper idempotente `syncInsights` +
+`generateReactivationInsights` + `generatePendingReplyInsights` + `generateAllInsights`, que también corre
+las promos P8); `devGenerateInsights`; `lib/insights.ts`; página `/decisions` agrupada por tipo + ítem de
+menú "Acciones de hoy" (owner/manager).
 
-**Verificado:** `typecheck` EXIT 0 · build de producción · `verify-p12.mjs` **7/7** (7 perfiles → el
-segmento correcto).
+**Verificado:** `typecheck` EXIT 0 · build de producción (13 rutas) · `verify-p13.mjs` **4/4** (se crean;
+no reviven al marcarlas "Hecho"; se limpian cuando dejan de aplicar).
 
-**Nota de orden:** dentro del Track C arrancamos por **P12** (base del copiloto). **P11** (tracking de
-campañas/cupones) se hará junto al **Track D** (atribución con Meta), donde luce.
-**🎉 Track B (panel núcleo, P1–P9) COMPLETO.**
-**Próxima (pendiente, no iniciada):** P13 — Centro de Decisiones ("Acciones de hoy").
+**Antecede:** P12 — Score de clientes. **🎉 Track B (panel núcleo, P1–P9) COMPLETO.**
+**Próxima (pendiente, no iniciada):** P14 — Follow-ups inteligentes (tareas sugeridas para el vendedor).
 
 ---
 
