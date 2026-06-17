@@ -41,7 +41,7 @@
 |------|--------|--------|
 | **D1** | Centro de Integración Meta: `metaConnections` (+ tokens seguros) + `metaAssets` + estados de conexión en el panel | ✅ Completada (modo demo) |
 | **D2** | Webhooks + omnicanal: `metaWebhookInbox` (TTL) + `metaExternalIndex` + `processMetaWebhook` + `channel` (whatsapp/instagram/messenger). Incluye ex-F1 | ✅ Completada (modo demo) |
-| **D3** | Meta Ads (solo lectura): campañas/adsets/ads + `metaAdInsightsDaily` por jobs + snapshots diarios | ⏳ |
+| **D3** | Meta Ads (solo lectura): campañas/adsets/ads + `metaAdInsightsDaily` por jobs + snapshots diarios | ✅ Completada (modo demo) |
 | **D4** | Catálogo → Meta: `syncToMeta` + `syncProductToMeta` + `metaCatalogSyncLogs` | ⏳ |
 | **D5** | Atribución: anuncio → conversación → cliente → pedido → ganancia (`attributionType`/confidence) | ⏳ |
 | **D6** | `businessEvents` + Conversions API (`metaConversionEvents`, `sendConversionEventToMeta`) | ⏳ |
@@ -105,23 +105,21 @@
 
 ---
 
-# ✅ FASE COMPLETADA: D2 — Webhooks + omnicanal
+# ✅ FASE COMPLETADA: D3 — Meta Ads (solo lectura)
 
-La entrada de mensajes de Meta: endpoint `metaWebhook` (GET = handshake de verificación — ex-F1 — + POST que
-guarda el evento crudo en `metaWebhookInbox` con TTL y responde rápido), un trigger `onWebhookInbox` que lo
-procesa en segundo plano resolviendo la empresa por `metaExternalIndex` y entregándolo al MISMO motor del bot,
-ahora con `channel` (WhatsApp/Instagram/Messenger) en mensajes y conversaciones.
+Trae las campañas/adsets/anuncios de Meta y sus métricas, guardando **snapshots diarios** para no consultar
+Meta en cada carga (ADR-0009). En modo demo genera datos de ejemplo (2 campañas, 7 días); listo para la sync
+real. La atribución a ventas/ganancia la completa D5.
 
-**Hecho:** enums `MESSAGE_CHANNEL`/`WEBHOOK_STATUS`; tipos `WebhookInboxEvent`/`MetaExternalIndexEntry`;
-`Message.channel` + meta de conversación; motor con canal; `metaWebhook` + `onWebhookInbox` +
-`processWebhookEvent` + `devSimulateInbound`; `connectMetaDemo` puebla el índice; reglas globales (solo Super
-Admin lee; escribe Admin SDK); badge de canal en Conversaciones.
+**Hecho:** tipos `MetaCampaign/Adset/Ad/AdInsightDaily` + `MetaAdMetrics`; `syncMetaAdsDemo` (idempotente) +
+`devSyncMetaAds`; reglas (manager+ lee, escribe solo la sync); `lib/ads.ts`; página `/ads` (campañas con
+gasto/impresiones/clics/CTR/conversaciones + Sincronizar) + nav.
 
-**Verificado:** `typecheck` EXIT 0 · build de producción (18 rutas) · `verify-d2.mjs` **9/9** (handshake
-200/403; entrante de Instagram y WhatsApp → procesado + canal correcto; bandeja solo Super Admin).
+**Verificado:** `typecheck` EXIT 0 · build de producción (19 rutas) · `verify-d3.mjs` **7/7** (campañas/ads/
+14 snapshots; idempotente; vendedora 403 / dueña 200).
 
-**Antecede:** D1 — Centro de Integración Meta. **🎉 Track B + Track C COMPLETOS.**
-**Próxima (pendiente, no iniciada):** D3 — Meta Ads (solo lectura) + snapshots diarios.
+**Antecede:** D2 — Webhooks + omnicanal. **🎉 Track B + Track C COMPLETOS.**
+**Próxima (pendiente, no iniciada):** D4 — Catálogo → Meta (sincronizar nuestro catálogo al Meta Catalog).
 
 ---
 

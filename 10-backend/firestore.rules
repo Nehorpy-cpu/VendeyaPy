@@ -244,6 +244,13 @@ service cloud.firestore {
         allow write: if false;
       }
 
+      // Meta Ads (D3): campañas/adsets/ads + snapshots diarios. Datos sensibles (gasto):
+      // los lee el manager+, los escribe SOLO la sync (Admin SDK).
+      match /metaCampaigns/{id} { allow read: if isTenantManager(tenantId) || isPlatformAdmin(); allow write: if false; }
+      match /metaAdsets/{id} { allow read: if isTenantManager(tenantId) || isPlatformAdmin(); allow write: if false; }
+      match /metaAds/{id} { allow read: if isTenantManager(tenantId) || isPlatformAdmin(); allow write: if false; }
+      match /metaAdInsightsDaily/{id} { allow read: if isTenantManager(tenantId) || isPlatformAdmin(); allow write: if false; }
+
       // Entregas
       match /deliveries/{deliveryId} {
         allow read: if isTenantViewer(tenantId) || isPlatformAdmin();

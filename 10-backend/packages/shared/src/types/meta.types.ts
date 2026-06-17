@@ -73,3 +73,93 @@ export interface MetaExternalIndexEntry {
   status: string;
   updatedAt: Timestamp;
 }
+
+// ----- Meta Ads (solo lectura, D3). Snapshots sincronizados por job (ADR-0009) -----
+
+export interface MetaAdMetrics {
+  impressions: number;
+  reach: number;
+  clicks: number;
+  spend: number; // gasto en la moneda de la cuenta
+  ctr: number; // %
+  cpc: number;
+  cpm: number;
+  conversations: number; // conversaciones iniciadas desde el anuncio
+}
+
+export interface MetaCampaign {
+  id: string;
+  tenantId: string;
+  externalCampaignId: string;
+  name: string;
+  status: string;
+  objective: string;
+  adAccountId: string;
+  dailyBudget: number | null;
+  lifetimeBudget: number | null;
+  spendCap: number | null;
+  latestMetrics: MetaAdMetrics;
+  lastSyncedAt: Timestamp;
+  createdAt: Timestamp;
+  updatedAt: Timestamp;
+}
+
+export interface MetaAdset {
+  id: string;
+  tenantId: string;
+  externalAdsetId: string;
+  externalCampaignId: string;
+  name: string;
+  status: string;
+  budget: number | null;
+  optimizationGoal: string;
+  latestMetrics: MetaAdMetrics;
+  lastSyncedAt: Timestamp;
+  createdAt: Timestamp;
+  updatedAt: Timestamp;
+}
+
+export interface MetaAd {
+  id: string;
+  tenantId: string;
+  externalAdId: string;
+  externalAdsetId: string;
+  externalCampaignId: string;
+  name: string;
+  status: string;
+  creativeSummary: string;
+  previewUrl: string;
+  latestMetrics: MetaAdMetrics;
+  lastSyncedAt: Timestamp;
+  createdAt: Timestamp;
+  updatedAt: Timestamp;
+}
+
+/** Snapshot diario por anuncio. id = `${yyyymmdd}_${externalAdId}`. */
+export interface MetaAdInsightDaily {
+  id: string;
+  date: string; // yyyymmdd
+  tenantId: string;
+  externalCampaignId: string;
+  externalAdsetId: string;
+  externalAdId: string;
+  campaignName: string;
+  adName: string;
+  impressions: number;
+  reach: number;
+  clicks: number;
+  spend: number;
+  ctr: number;
+  cpc: number;
+  cpm: number;
+  conversations: number;
+  /** Atribución (la completa D5): pedidos/ingresos/ganancia que dejó el anuncio. */
+  orders: number;
+  revenue: number;
+  productCost: number | null;
+  grossProfit: number | null;
+  roas: number | null;
+  margin: number | null;
+  createdAt: Timestamp;
+  updatedAt: Timestamp;
+}

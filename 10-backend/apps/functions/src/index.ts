@@ -81,3 +81,6 @@ export { devMetaConnect, devMetaDisconnect } from './functions/meta/devMeta.js';
 // Webhooks + omnicanal (D2): endpoint de Meta (GET verify + POST) + trigger + simulador.
 export { metaWebhook, devSimulateInbound } from './functions/meta/webhookHttp.js';
 export { onWebhookInbox } from './functions/meta/onWebhookInbox.js';
+
+// Meta Ads (D3): sincronización (modo demo) de campañas/anuncios + snapshots diarios.
+export { devSyncMetaAds } from './functions/meta/devSyncMetaAds.js';
