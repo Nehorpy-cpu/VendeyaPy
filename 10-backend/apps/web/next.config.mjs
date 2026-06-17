@@ -8,9 +8,8 @@ const nextConfig = {
       { protocol: 'https', hostname: 'storage.googleapis.com' },
     ],
   },
-  experimental: {
-    typedRoutes: true,
-  },
+  // typedRoutes (experimental) desactivado: exige rutas literales y choca con la
+  // navegación dinámica del panel + módulos que se construyen por fases (P2-P10).
 };
 
 export default nextConfig;
