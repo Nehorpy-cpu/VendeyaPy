@@ -15,7 +15,7 @@
 
 | Fase | Nombre | Estado |
 |------|--------|--------|
-| **P1** | Fundación: auth + roles (SuperAdmin/Owner/Seller) + aislamiento por empresa + cáscara del panel | ⚡ EN CURSO |
+| **P1** | Fundación: auth + roles (SuperAdmin/Owner/Seller) + aislamiento por empresa + cáscara del panel | ✅ Completada |
 | **P2** | Catálogo como fuente de verdad (productos + `costPrice` + `aiNotes` + categorías + imágenes) | ⏳ |
 | **P3** | Pedidos con costo/ganancia + Dashboard (ventas, ingresos, ganancia, margen, tops) | ⏳ |
 | **P4** | Configuración del agente (identidad, tono, reglas, FAQ, bancos, envíos, vendedores, control bot) + chat de prueba | ⏳ |
@@ -30,7 +30,7 @@
 | Sub-fase | Acción | Estado |
 |----------|--------|--------|
 | **P1.1** | Modelo de auth/roles: agregar rol `SELLER`, matriz de permisos, ADR-0005, doc de roles. Verificar typecheck. | ⚡ |
-| **P1.2** | Cáscara del panel en Next.js: login (Firebase Auth) + contexto de rol/empresa + shell (sidebar/header/selector de empresa) + guards de ruta + seed de usuarios de prueba. | ⏳ |
+| **P1.2** | Cáscara del panel en Next.js: login (Firebase Auth) + contexto de rol/empresa + shell (sidebar/header/selector de empresa) + guards de ruta + seed de usuarios de prueba. | ✅ |
 
 ---
 
