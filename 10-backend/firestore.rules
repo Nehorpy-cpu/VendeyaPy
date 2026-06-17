@@ -94,6 +94,12 @@ service cloud.firestore {
         allow write: if isTenantManager(tenantId) || isPlatformAdmin();
       }
 
+      // Configuración del agente / checkout (editable desde el panel por el Owner)
+      match /config/{doc} {
+        allow read: if isTenantViewer(tenantId) || isPlatformAdmin();
+        allow write: if isTenantOwner(tenantId) || isPlatformAdmin();
+      }
+
       // Clientes
       match /customers/{customerId} {
         allow read: if isTenantViewer(tenantId) || isPlatformAdmin();

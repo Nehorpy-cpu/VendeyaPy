@@ -20,6 +20,7 @@ import {
   type CatalogFilters,
 } from '../catalog/search.js';
 import { addToCart, formatCart } from './cart.js';
+import { getAgentConfig } from './agentConfig.js';
 import { createPendingOrder } from '../orders/createPendingOrder.js';
 import { getCheckoutConfig, formatTransferInstructions } from '../orders/checkoutConfig.js';
 
@@ -164,7 +165,7 @@ async function decidirRespuesta(
   customerId: string,
   text: string,
   esNuevo: boolean,
-  prev: { cart: Cart; lastShownSkus: string[] },
+  prev: { cart: Cart; lastShownSkus: string[]; greeting: string },
 ): Promise<{
   reply: string;
   nextState: SessionState;
@@ -174,13 +175,14 @@ async function decidirRespuesta(
 }> {
   const t = text.toLowerCase();
 
-  // 1a. Cliente nuevo → saludo completo
+  // 1a. Cliente nuevo → saludo (configurable desde el panel; si está vacío, el default)
   if (esNuevo) {
     return {
       reply:
+        prev.greeting ||
         '¡Hola! 💖 Bienvenida a *Perfumería AFG*. Soy Sofía, tu asesora.\n' +
-        '¿Buscás algo para vos o para regalar? Contame qué estilo te gusta ' +
-        '(dulce, floral, fresco, intenso...) y te muestro opciones ✨',
+          '¿Buscás algo para vos o para regalar? Contame qué estilo te gusta ' +
+          '(dulce, floral, fresco, intenso...) y te muestro opciones ✨',
       nextState: 'BROWSING',
     };
   }
@@ -288,6 +290,14 @@ export async function handleMessage(input: ConversationInput): Promise<Conversat
     return { reply: '', state: existing.state, handledByHuman: true };
   }
 
+  // Config del agente (editable desde el panel): on/off + saludo.
+  const agentConfig = await getAgentConfig(tenantId);
+  if (!agentConfig.botEnabled) {
+    await sessionRef.set({ context: { lastMessageAt: now }, updatedAt: now }, { merge: true });
+    logger.info('Bot apagado por configuración — sin respuesta', { tenantId, customerId });
+    return { reply: '', state: existing?.state ?? 'IDLE', handledByHuman: true };
+  }
+
   const esNuevo = !existing || existing.state === 'GREETING';
   const prevCart: Cart = existing?.cart ?? { items: [], subtotal: 0 };
   const prevShown: string[] = existing?.context?.lastShownSkus ?? [];
@@ -295,6 +305,7 @@ export async function handleMessage(input: ConversationInput): Promise<Conversat
   const result = await decidirRespuesta(tenantId, customerId, text, esNuevo, {
     cart: prevCart,
     lastShownSkus: prevShown,
+    greeting: agentConfig.greetingMessage,
   });
   const { reply, nextState } = result;
 

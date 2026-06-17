@@ -12,24 +12,8 @@
 
 import { db } from '../lib/firebase.js';
 
-export interface BankAccount {
-  bank: string; // "UENO Bank", "Banco Familiar", ...
-  accountNumber: string;
-  holder: string; // titular
-  document: string; // CI o RUC del titular
-  alias?: string; // alias/celular si aplica
-}
-
-export interface Seller {
-  name: string;
-  whatsapp: string; // E.164, ej "+595981000000"
-  active: boolean;
-}
-
-export interface CheckoutConfig {
-  bankAccounts: BankAccount[];
-  sellers: Seller[];
-}
+import type { BankAccount, Seller, CheckoutConfig } from '@vpw/shared';
+export type { BankAccount, Seller, CheckoutConfig };
 
 /** Default con placeholders — REEMPLAZAR por datos reales del negocio. */
 const DEFAULT_CONFIG: CheckoutConfig = {
