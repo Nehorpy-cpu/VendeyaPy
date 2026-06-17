@@ -110,3 +110,32 @@ export type Country = (typeof COUNTRY)[number];
 
 export const PLAN_TIER = ['FREE', 'STARTER', 'GROWTH', 'PRO'] as const;
 export type PlanTier = (typeof PLAN_TIER)[number];
+
+export const PROMOTION_TYPE = [
+  'PERCENTAGE', // % de descuento
+  'FIXED_AMOUNT', // monto fijo de descuento
+  'BUNDLE', // combo
+  'TWO_FOR_ONE', // 2x1
+  'FREE_SHIPPING', // envío gratis
+] as const;
+export type PromotionType = (typeof PROMOTION_TYPE)[number];
+
+export const PROMOTION_STATUS = ['DRAFT', 'ACTIVE', 'PAUSED', 'FINISHED'] as const;
+export type PromotionStatus = (typeof PROMOTION_STATUS)[number];
+
+// Recomendaciones del sistema (Growth Copilot). P8 genera las de promoción;
+// P13/P14/Track D agregan las demás. Ver ADR-0006.
+export const INSIGHT_TYPE = [
+  'PROMO_SUGGESTION',
+  'FOLLOW_UP',
+  'CAMPAIGN_REVIEW',
+  'CUSTOMER_REACTIVATION',
+  'AGENT_ISSUE',
+] as const;
+export type InsightType = (typeof INSIGHT_TYPE)[number];
+
+export const INSIGHT_STATUS = ['PENDING', 'ACCEPTED', 'DISMISSED', 'RESOLVED'] as const;
+export type InsightStatus = (typeof INSIGHT_STATUS)[number];
+
+export const INSIGHT_PRIORITY = ['LOW', 'MEDIUM', 'HIGH'] as const;
+export type InsightPriority = (typeof INSIGHT_PRIORITY)[number];

@@ -22,7 +22,7 @@
 | **P5** | Clientes + Conversaciones/Bot (historial de mensajes + handoff en UI) | ✅ Completada |
 | **P6** | 🔒 Privacidad financiera: `productFinancials`/`orderFinancials` + reglas (el vendedor no ve costo/ganancia ni desde la base) | ✅ Completada |
 | **P7** | Dashboards baratos con agregados (`stats/public`+`private`, `statsDaily`, `platformStats` por trigger/job) | ✅ Completada |
-| **P8** | Promotion Strategy (promos + calendario + sugerencias IA por reglas) | ⏳ |
+| **P8** | Promotion Strategy (promos + estados/fechas + sugerencias por reglas → `insights`) | ✅ Completada |
 | **P9** | Hardening multi-tenant + asignación de vendedores + seeders demo + criterios de aceptación | ⏳ |
 
 > **Reubicado (por el plan unificado 2026-06-17):** la vieja "P6 Campañas" y "P7 analíticas de
@@ -105,23 +105,23 @@
 
 ---
 
-# ✅ FASE COMPLETADA: P7 — Dashboards baratos con agregados
+# ✅ FASE COMPLETADA: P8 — Promotion Strategy
 
-Las métricas ya NO se calculan leyendo todos los pedidos en cada carga: un **trigger**
-(`onOrderWriteStats`) + un job/endpoint (`devRecomputeStats`) las **precalculan** y las guardan listas;
-la UI solo lee 1-2 docs. Separadas en público vs privado como en P6 (ADR-0006 + ADR-0008).
+Promociones (descuento %, monto fijo, combo, 2x1, envío gratis) con fechas + estado, y
+**sugerencias por reglas** (sin IA cara): "estrella oculta" (buen margen + stock, no destacado) y
+"stock parado" (mucho stock sin ventas), guardadas como `insights` (base del Centro de Decisiones P13).
 
-**Hecho:** tipos `TenantStatsPublic/Private`, `TenantStatsDaily`, `PlatformStats`; `recomputeTenantStats`
-+ `recomputePlatformStats`; trigger por pedido + `devRecomputeStats`; escribe `stats/public`, `stats/private`,
-`statsDaily/{yyyymmdd}`, `platformStats/current`; reglas (público = staff, privado/diario = manager+,
-platformStats = Super Admin); el dashboard lee los agregados (con fallback al cálculo en cliente).
+**Hecho:** enums + tipos `Promotion` e `Insight`; `generatePromotionSuggestions` (idempotente: no revive
+las descartadas, limpia las que dejan de aplicar) + `devGenerateSuggestions`; reglas (promotions: staff lee /
+manager+ edita; insights: manager+ lee y acepta/descarta); página `/promotions` (panel de sugerencias +
+CRUD de promos con productos/fechas/estado + "crear promo desde sugerencia").
 
-**Verificado (4 capas):** `typecheck` EXIT 0 · build de producción · datos + trigger en vivo
-(recalcula solo: pendientes ↑ al crear, ventas/ganancia ↑ al confirmar) · **reglas con auth 11/11**
-(vendedora 200 en `stats/public`, 403 en `private`/`statsDaily`; dueña 200). Script: `verify-p7.mjs`.
+**Verificado (4 capas):** `typecheck` EXIT 0 · build de producción (12 rutas, +`/promotions`) ·
+sugerencias en vivo 7/7 (genera, no revive lo descartado, limpia lo que ya no aplica) · reglas con auth
+(vendedora 403 en `insights`, 200 en `promotions`; dueña 200). Script: `verify-p8.mjs`.
 
-**Antecede:** P6 — Privacidad financiera (`productFinancials`/`orderFinancials`, ADR-0008).
-**Próxima (pendiente, no iniciada):** P8 — Promotion Strategy.
+**Antecede:** P7 — Dashboards con agregados (ADR-0006).
+**Próxima (pendiente, no iniciada):** P9 — Hardening multi-tenant + asignación de vendedores + criterios de aceptación.
 
 ---
 

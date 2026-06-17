@@ -176,6 +176,21 @@ service cloud.firestore {
         allow write: if false;
       }
 
+      // Promociones (P8): las ve el staff (para informar al cliente); las edita el manager+.
+      match /promotions/{promotionId} {
+        allow read: if isTenantStaff(tenantId) || isTenantViewer(tenantId) || isPlatformAdmin();
+        allow write: if isTenantManager(tenantId) || isPlatformAdmin();
+      }
+
+      // Recomendaciones del sistema (P8+): las genera Cloud Functions. El manager+ las lee
+      // y puede aceptar/descartar (solo cambia status/resolvedAt). El vendedor NO las ve.
+      match /insights/{insightId} {
+        allow read: if isTenantManager(tenantId) || isPlatformAdmin();
+        allow create, delete: if false; // Solo Admin SDK (jobs)
+        allow update: if (isTenantManager(tenantId) || isPlatformAdmin())
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'resolvedAt']);
+      }
+
       // Entregas
       match /deliveries/{deliveryId} {
         allow read: if isTenantViewer(tenantId) || isPlatformAdmin();

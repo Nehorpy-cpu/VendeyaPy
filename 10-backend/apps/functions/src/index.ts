@@ -56,3 +56,6 @@ export { chatTakeover, chatRelease } from './functions/conversation/chatHandoff.
 // Agregados para dashboards baratos (P7): trigger por pedido + recálculo manual.
 export { onOrderWriteStats } from './functions/stats/onOrderWriteStats.js';
 export { devRecomputeStats } from './functions/stats/devRecomputeStats.js';
+
+// Sugerencias de promoción por reglas (P8): generación manual/job.
+export { devGenerateSuggestions } from './functions/promotions/devGenerateSuggestions.js';
