@@ -53,8 +53,21 @@ Hechos técnicos relevantes:
 - Las notas olfativas/estilos no están en la tienda → se cargan/mantienen aparte.
 - El catálogo queda "espejado" en dos lados (tienda = fuente, Firestore = copia para el bot); hay que definir cada cuánto sincroniza.
 
+## Estado del dominio / hosting (2026-06-16)
+
+- **Registrador previo de `arfagi.com`:** Spaceship, Inc.
+- **Transferencia del DOMINIO** Spaceship → Hostinger: **en curso** (el sitio WordPress ya
+  estaba en Hostinger; esto es solo el traslado de la registración del nombre).
+- **Incidencia durante la transferencia:** el sitio dejó de ser accesible vía `arfagi.com`.
+  Hostinger muestra "El dominio no está conectado a tu sitio web → conectá tu dominio".
+  Causa: la transferencia reinició el apuntado (DNS/nameservers); falta re-enlazar el dominio
+  con el sitio en el panel de Hostinger ("Conectar dominio"). El contenido del sitio NO se
+  perdió — es un tema de routing. **Acción del owner** (no del proyecto): conectar el dominio
+  y esperar propagación DNS; no cambiar nameservers salvo que Hostinger lo indique.
+
 ## Pendiente de confirmar
 
+- [ ] Reconectar `arfagi.com` al sitio en Hostinger (owner) y verificar que vuelve a abrir.
 - [ ] Confirmar que la tienda es **WooCommerce** (vs otro plugin de tienda WordPress). Se verifica al construir la sincronización.
 - [ ] Versión de WordPress/WooCommerce y disponibilidad de la REST API (claves de API).
 
