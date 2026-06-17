@@ -141,7 +141,6 @@ export type InsightStatus = (typeof INSIGHT_STATUS)[number];
 export const INSIGHT_PRIORITY = ['LOW', 'MEDIUM', 'HIGH'] as const;
 export type InsightPriority = (typeof INSIGHT_PRIORITY)[number];
 
-// Segmento del cliente (Growth Copilot, P12). Calculado por reglas RFM-lite.
 // Tareas de seguimiento para el vendedor (Growth Copilot, P14).
 export const FOLLOWUP_TYPE = [
   'PAYMENT_PENDING', // pedido sin pagar
@@ -154,6 +153,17 @@ export type FollowUpType = (typeof FOLLOWUP_TYPE)[number];
 
 export const FOLLOWUP_STATUS = ['PENDING', 'IN_PROGRESS', 'COMPLETED', 'DISMISSED'] as const;
 export type FollowUpStatus = (typeof FOLLOWUP_STATUS)[number];
+
+// Auditoría del agente (Growth Copilot, P16). Hallazgos por reglas sobre el historial.
+export const AUDIT_ISSUE_TYPE = [
+  'NOT_UNDERSTOOD', // el bot cayó al mensaje de "no entendí" (fallback)
+  'POSSIBLE_COMPLAINT_NO_HANDOFF', // posible reclamo sin pasar a un vendedor
+  'PRODUCT_INCOMPLETE', // producto con info incompleta (sin notas IA / costo / descripción)
+] as const;
+export type AuditIssueType = (typeof AUDIT_ISSUE_TYPE)[number];
+
+export const AUDIT_STATUS = ['OPEN', 'RESOLVED', 'DISMISSED'] as const;
+export type AuditStatus = (typeof AUDIT_STATUS)[number];
 
 // Segmento del cliente (Growth Copilot, P12). Calculado por reglas RFM-lite.
 export const CUSTOMER_TYPE = [

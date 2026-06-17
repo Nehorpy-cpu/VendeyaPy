@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import type { AgentConfig, BankAccount, Seller } from '@vpw/shared';
+import type { AgentConfig, BankAccount, Seller, AuditStatus } from '@vpw/shared';
 import { useActiveCompany } from '@/lib/active-company';
 import {
   getAgentConfig,
@@ -11,6 +11,7 @@ import {
   saveCheckoutConfig,
   DEFAULT_AGENT,
 } from '@/lib/agent-config';
+import { listOpenAudits, setAuditStatus, generateAudits } from '@/lib/audits';
 import { AgentTestChat } from '@/components/AgentTestChat';
 
 const field = 'w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-brand-500 focus:outline-none';
@@ -22,6 +23,12 @@ export default function AgentPage() {
 
   const agentQ = useQuery({ queryKey: ['agentConfig', tenantId], queryFn: () => getAgentConfig(tenantId!), enabled: !!tenantId });
   const checkoutQ = useQuery({ queryKey: ['checkoutConfig', tenantId], queryFn: () => getCheckoutConfig(tenantId!), enabled: !!tenantId });
+  const auditsQ = useQuery({ queryKey: ['agentAudits', tenantId], queryFn: () => listOpenAudits(tenantId!), enabled: !!tenantId });
+  const auditStatusMut = useMutation({
+    mutationFn: ({ id, status }: { id: string; status: AuditStatus }) => setAuditStatus(tenantId!, id, status),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['agentAudits', tenantId] }),
+  });
+  const auditGenMut = useMutation({ mutationFn: () => generateAudits(tenantId!), onSuccess: () => qc.invalidateQueries({ queryKey: ['agentAudits', tenantId] }) });
 
   const [agent, setAgent] = useState<AgentConfig>(DEFAULT_AGENT);
   const [banks, setBanks] = useState<BankAccount[]>([]);
@@ -63,6 +70,33 @@ export default function AgentPage() {
             </button>
           </div>
         </div>
+
+        {/* Auditoría del agente (P16) */}
+        <Section title="🔍 Auditoría del agente">
+          <div className="mb-2 flex items-center justify-between">
+            <span className="text-xs text-gray-500">
+              {(auditsQ.data?.length ?? 0) === 0 ? '✓ Sin hallazgos.' : `${auditsQ.data!.length} hallazgo(s) para revisar.`}
+            </span>
+            <button onClick={() => auditGenMut.mutate()} disabled={auditGenMut.isPending} className="text-xs text-brand-700 hover:underline disabled:opacity-50">
+              {auditGenMut.isPending ? 'Revisando…' : 'Revisar ahora'}
+            </button>
+          </div>
+          <div className="space-y-2">
+            {(auditsQ.data ?? []).map((a) => (
+              <div key={a.id} className="flex items-start gap-2 rounded-lg border border-gray-200 p-2">
+                <span className={'mt-1.5 h-2 w-2 shrink-0 rounded-full ' + (a.severity === 'HIGH' ? 'bg-red-500' : a.severity === 'MEDIUM' ? 'bg-amber-500' : 'bg-gray-400')} />
+                <div className="min-w-0 flex-1">
+                  <div className="text-sm text-gray-800">{a.summary}</div>
+                  <div className="text-xs text-gray-500">👉 {a.recommendedFix}</div>
+                  <div className="mt-1 flex gap-3">
+                    <button onClick={() => auditStatusMut.mutate({ id: a.id, status: 'RESOLVED' })} className="text-xs text-brand-700 hover:underline">Resuelto</button>
+                    <button onClick={() => auditStatusMut.mutate({ id: a.id, status: 'DISMISSED' })} className="text-xs text-gray-500 hover:underline">Descartar</button>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </Section>
 
         {/* Control del bot */}
         <Section title="Estado del bot">

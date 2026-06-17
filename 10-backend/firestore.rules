@@ -200,6 +200,14 @@ service cloud.firestore {
           && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'completedAt']);
       }
 
+      // Auditoría del agente (P16): manager+ la lee y resuelve/descarta. El vendedor NO.
+      match /agentAudits/{auditId} {
+        allow read: if isTenantManager(tenantId) || isPlatformAdmin();
+        allow create, delete: if false; // Solo Admin SDK (jobs)
+        allow update: if (isTenantManager(tenantId) || isPlatformAdmin())
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'resolvedAt']);
+      }
+
       // Entregas
       match /deliveries/{deliveryId} {
         allow read: if isTenantViewer(tenantId) || isPlatformAdmin();

@@ -68,3 +68,6 @@ export { devGenerateInsights } from './functions/decisions/devGenerateInsights.j
 
 // Follow-ups inteligentes (P14): tareas de seguimiento para el vendedor.
 export { devGenerateFollowups } from './functions/followups/devGenerateFollowups.js';
+
+// Auditoría del agente (P16): hallazgos por reglas sobre el historial + catálogo.
+export { devGenerateAudits } from './functions/audits/devGenerateAudits.js';
