@@ -1,42 +1,14 @@
 'use client';
 
-import { useEffect, useState } from 'react';
-import { collection, getDocs } from 'firebase/firestore';
 import { useAuth } from '@/lib/auth-context';
 import { ROLE_LABELS } from '@/lib/roles';
-import { firebaseDb } from '@/lib/firebase';
-
-interface CompanyOption {
-  id: string;
-  name: string;
-}
-
-/** Empresa "activa" que el Super Admin está viendo (se guarda en localStorage). */
-const ACTIVE_KEY = 'aiafg.activeCompany';
+import { useActiveCompany } from '@/lib/active-company';
 
 export function Header() {
   const { user, claims, signOut } = useAuth();
-  const isSuperAdmin = claims.role === 'PLATFORM_ADMIN';
-
-  const [companies, setCompanies] = useState<CompanyOption[]>([]);
-  const [active, setActive] = useState<string>('');
-
-  // Super Admin: cargar lista de empresas para el selector.
-  useEffect(() => {
-    if (!isSuperAdmin) return;
-    (async () => {
-      const snap = await getDocs(collection(firebaseDb(), 'tenants'));
-      const list = snap.docs.map((d) => ({ id: d.id, name: (d.data().name as string) ?? d.id }));
-      setCompanies(list);
-      const stored = typeof window !== 'undefined' ? localStorage.getItem(ACTIVE_KEY) : null;
-      setActive(stored ?? list[0]?.id ?? '');
-    })().catch(() => setCompanies([]));
-  }, [isSuperAdmin]);
-
-  const onSelect = (id: string) => {
-    setActive(id);
-    if (typeof window !== 'undefined') localStorage.setItem(ACTIVE_KEY, id);
-  };
+  const { companies, tenantId, isSuperAdmin, setTenantId } = useActiveCompany();
+  const active = tenantId ?? '';
+  const onSelect = (id: string) => setTenantId(id);
 
   return (
     <header className="flex h-16 items-center justify-between border-b border-gray-200 bg-white px-4 md:px-6">
