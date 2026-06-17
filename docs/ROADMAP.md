@@ -17,7 +17,7 @@
 |------|--------|--------|
 | **P1** | Fundación: auth + roles (SuperAdmin/Owner/Seller) + aislamiento por empresa + cáscara del panel | ✅ Completada |
 | **P2** | Catálogo como fuente de verdad (productos + `costPrice` + `aiNotes` + categorías + imágenes) | ✅ Completada |
-| **P3** | Pedidos con costo/ganancia + Dashboard (ventas, ingresos, ganancia, margen, tops) | ⏳ |
+| **P3** | Pedidos con costo/ganancia + Dashboard (ventas, ingresos, ganancia, margen, tops) | ✅ Completada |
 | **P4** | Configuración del agente (identidad, tono, reglas, FAQ, bancos, envíos, vendedores, control bot) + chat de prueba | ⏳ |
 | **P5** | Clientes + Conversaciones/Bot (historial de mensajes + handoff en UI) | ⏳ |
 | **P6** | Campañas manuales + capa `CampaignDataProvider` (preparada para Meta) | ⏳ |

@@ -13,6 +13,10 @@ export interface OrderItem {
   unitPrice: number;
   quantity: number;
   subtotal: number;
+  /** Costo unitario al momento de la venta (null si el producto no tenía costo cargado). */
+  unitCost: number | null;
+  totalCost: number | null;
+  grossProfit: number | null;
 }
 
 export interface OrderTotals {
@@ -20,6 +24,9 @@ export interface OrderTotals {
   discount: number;
   total: number;
   currency: Currency;
+  /** Costo total y ganancia bruta. null si algún producto no tenía costo (ganancia incompleta). */
+  totalCost: number | null;
+  grossProfit: number | null;
 }
 
 export interface OrderPayment {
@@ -51,6 +58,10 @@ export interface Order {
   delivery: OrderDelivery;
   invoice: OrderInvoice;
   channel: Channel;
+  /** Vendedor asignado (null hasta el handoff/asignación). */
+  sellerId: string | null;
+  /** Origen del pedido para tracking (ej: 'whatsapp-bot', campaña). Prep Track C. */
+  source: string | null;
   notes: string;
   createdAt: Timestamp;
   updatedAt: Timestamp;
