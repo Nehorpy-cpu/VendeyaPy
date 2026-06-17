@@ -4,7 +4,7 @@ import { useQuery } from '@tanstack/react-query';
 import { useAuth } from '@/lib/auth-context';
 import { ROLE_LABELS } from '@/lib/roles';
 import { useActiveCompany } from '@/lib/active-company';
-import { listOrders, computeMetrics } from '@/lib/orders';
+import { listOrders, listOrderFinancials, computeMetrics } from '@/lib/orders';
 import { listProducts } from '@/lib/catalog';
 
 const gs = (n: number | null | undefined) => (n == null ? '—' : '₲ ' + Math.round(n).toLocaleString('es-PY'));
@@ -16,9 +16,15 @@ export default function DashboardPage() {
 
   const ordersQ = useQuery({ queryKey: ['orders', tenantId], queryFn: () => listOrders(tenantId!), enabled: !!tenantId });
   const productsQ = useQuery({ queryKey: ['products', tenantId], queryFn: () => listProducts(tenantId!), enabled: !!tenantId });
+  // Finanzas privadas: el vendedor no puede leerlas (reglas) → no se consultan para su rol.
+  const financialsQ = useQuery({
+    queryKey: ['orderFinancials', tenantId],
+    queryFn: () => listOrderFinancials(tenantId!),
+    enabled: !!tenantId && !isSeller,
+  });
 
   const ready = ordersQ.isSuccess && productsQ.isSuccess;
-  const m = ready ? computeMetrics(ordersQ.data, productsQ.data) : null;
+  const m = ready ? computeMetrics(ordersQ.data, productsQ.data, financialsQ.data ?? {}) : null;
 
   return (
     <div className="space-y-6">

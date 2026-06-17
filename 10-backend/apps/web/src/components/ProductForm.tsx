@@ -18,20 +18,22 @@ const csv = (s: string) => s.split(/[;,]/).map((x) => x.trim()).filter(Boolean);
 
 interface Props {
   initial: Product | null;
+  /** Costo del producto a editar (vive en productFinancials, no en el producto). */
+  initialCost: number | null;
   categories: Category[];
   onCancel: () => void;
   onSubmit: (input: ProductInput) => void;
   saving: boolean;
 }
 
-export function ProductForm({ initial, categories, onCancel, onSubmit, saving }: Props) {
+export function ProductForm({ initial, initialCost, categories, onCancel, onSubmit, saving }: Props) {
   const pf = initial?.perfume ?? null;
   const [f, setF] = useState({
     name: initial?.name ?? '',
     sku: initial?.inventory?.sku ?? '',
     categoryId: initial?.categoryId ?? (categories[0]?.id ?? 'perfumes'),
     price: initial?.price ?? 0,
-    costPrice: initial?.costPrice ?? 0,
+    costPrice: initialCost ?? 0,
     stock: initial?.inventory?.stock ?? 0,
     status: initial?.status ?? ('ACTIVE' as Product['status']),
     featured: initial?.featured ?? false,

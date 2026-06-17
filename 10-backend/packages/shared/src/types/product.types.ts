@@ -52,8 +52,10 @@ export interface Product {
   description: string;
   price: number;
   compareAtPrice: number | null;
-  /** Precio de COSTO (cuánto le cuesta al negocio). null si no se cargó → la ganancia queda incompleta. */
-  costPrice: number | null;
+  /**
+   * El precio de COSTO ya NO vive acá (sería legible por el vendedor: Firestore no
+   * oculta campos). Está en la subcolección privada `productFinancials/{id}`. Ver ADR-0008.
+   */
   /** Info para el agente de IA: notas de venta, beneficios, público ideal, etc. (texto libre). */
   aiNotes: string;
   currency: Currency;

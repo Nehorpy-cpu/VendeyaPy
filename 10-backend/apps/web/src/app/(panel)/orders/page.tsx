@@ -5,7 +5,7 @@ import { useQuery } from '@tanstack/react-query';
 import type { Order, OrderStatus } from '@vpw/shared';
 import { useAuth } from '@/lib/auth-context';
 import { useActiveCompany } from '@/lib/active-company';
-import { listOrders } from '@/lib/orders';
+import { listOrders, listOrderFinancials } from '@/lib/orders';
 
 const gs = (n: number | null | undefined) => (n == null ? '—' : '₲ ' + Math.round(n).toLocaleString('es-PY'));
 
@@ -38,6 +38,18 @@ export default function OrdersPage() {
   const [detail, setDetail] = useState<Order | null>(null);
 
   const ordersQ = useQuery({ queryKey: ['orders', tenantId], queryFn: () => listOrders(tenantId!), enabled: !!tenantId });
+  // Finanzas privadas: el vendedor no puede leerlas (reglas) → no se consultan para su rol.
+  const financialsQ = useQuery({
+    queryKey: ['orderFinancials', tenantId],
+    queryFn: () => listOrderFinancials(tenantId!),
+    enabled: !!tenantId && !isSeller,
+  });
+  const finMap = financialsQ.data ?? {};
+  const orderProfit = (orderId: string) => finMap[orderId]?.grossProfit ?? null;
+  const itemProfit = (orderId: string, productId: string, subtotal: number): number | null => {
+    const fi = finMap[orderId]?.items.find((x) => x.productId === productId);
+    return fi?.totalCostSnapshot == null ? null : subtotal - fi.totalCostSnapshot;
+  };
 
   const filtered = useMemo(() => {
     const list = ordersQ.data ?? [];
@@ -97,7 +109,7 @@ export default function OrdersPage() {
                   <td className="px-4 py-3">{o.customerId}</td>
                   <td className="px-4 py-3 font-medium">{gs(o.totals.total)}</td>
                   {!isSeller && (
-                    <td className="px-4 py-3">{o.totals.grossProfit == null ? <span className="text-amber-600">⚠️</span> : gs(o.totals.grossProfit)}</td>
+                    <td className="px-4 py-3">{orderProfit(o.id) == null ? <span className="text-amber-600">⚠️</span> : gs(orderProfit(o.id))}</td>
                   )}
                   <td className="px-4 py-3">{STATUS_LABEL[o.status] ?? o.status}</td>
                   <td className="px-4 py-3 text-gray-500">{o.source ?? '—'}</td>
@@ -133,14 +145,14 @@ export default function OrdersPage() {
                     <td className="py-1">{it.productName}</td>
                     <td>{it.quantity}</td>
                     <td>{gs(it.subtotal)}</td>
-                    {!isSeller && <td>{it.grossProfit == null ? '⚠️' : gs(it.grossProfit)}</td>}
+                    {!isSeller && <td>{itemProfit(detail.id, it.productId, it.subtotal) == null ? '⚠️' : gs(itemProfit(detail.id, it.productId, it.subtotal))}</td>}
                   </tr>
                 ))}
               </tbody>
             </table>
             <div className="mt-4 border-t border-gray-200 pt-3 text-right text-sm">
               <div>Total: <span className="font-bold">{gs(detail.totals.total)}</span></div>
-              {!isSeller && <div className="text-gray-500">Ganancia: {detail.totals.grossProfit == null ? '⚠️ incompleta' : gs(detail.totals.grossProfit)}</div>}
+              {!isSeller && <div className="text-gray-500">Ganancia: {orderProfit(detail.id) == null ? '⚠️ incompleta' : gs(orderProfit(detail.id))}</div>}
             </div>
           </div>
         </div>

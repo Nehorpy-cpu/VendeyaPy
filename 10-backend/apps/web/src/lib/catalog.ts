@@ -14,12 +14,14 @@ import {
   orderBy,
   serverTimestamp,
 } from 'firebase/firestore';
-import type { Product, Category } from '@vpw/shared';
+import type { Product, Category, ProductFinancials } from '@vpw/shared';
 import { firebaseDb } from './firebase';
 
 const productsCol = (tenantId: string) => collection(firebaseDb(), 'tenants', tenantId, 'products');
 const categoriesCol = (tenantId: string) =>
   collection(firebaseDb(), 'tenants', tenantId, 'categories');
+const productFinancialsCol = (tenantId: string) =>
+  collection(firebaseDb(), 'tenants', tenantId, 'productFinancials');
 
 export async function listProducts(tenantId: string): Promise<Product[]> {
   const snap = await getDocs(query(productsCol(tenantId), orderBy('position')));
@@ -52,7 +54,8 @@ export interface ProductInput {
 export async function upsertProduct(tenantId: string, input: ProductInput): Promise<string> {
   const id = input.id ?? doc(productsCol(tenantId)).id;
   const ref = doc(productsCol(tenantId), id);
-  // setDoc con merge: crea o actualiza sin pisar createdAt en ediciones.
+  // El producto visible NO lleva costPrice (lo vería el vendedor). setDoc con merge:
+  // crea o actualiza sin pisar createdAt en ediciones.
   await setDoc(
     ref,
     {
@@ -62,7 +65,6 @@ export async function upsertProduct(tenantId: string, input: ProductInput): Prom
       description: input.description,
       price: input.price,
       compareAtPrice: null,
-      costPrice: input.costPrice,
       aiNotes: input.aiNotes,
       currency: 'PYG',
       categoryId: input.categoryId,
@@ -78,15 +80,33 @@ export async function upsertProduct(tenantId: string, input: ProductInput): Prom
     },
     { merge: true },
   );
+  // El costo va en la subcolección privada productFinancials (ADR-0008).
+  await setDoc(
+    doc(productFinancialsCol(tenantId), id),
+    { productId: id, tenantId, costPrice: input.costPrice, updatedAt: serverTimestamp() },
+    { merge: true },
+  );
   return id;
 }
 
 export async function deleteProduct(tenantId: string, id: string): Promise<void> {
   await deleteDoc(doc(productsCol(tenantId), id));
+  await deleteDoc(doc(productFinancialsCol(tenantId), id));
 }
 
-/** Margen de ganancia de un producto (null si falta el costo). */
-export function productMargin(p: Pick<Product, 'price' | 'costPrice'>): number | null {
-  if (p.costPrice == null || p.price <= 0) return null;
-  return ((p.price - p.costPrice) / p.price) * 100;
+/** Mapa productId → costo (privado). Solo Owner/Manager pueden leerlo (reglas). */
+export async function listProductFinancials(tenantId: string): Promise<Record<string, number | null>> {
+  const snap = await getDocs(productFinancialsCol(tenantId));
+  const map: Record<string, number | null> = {};
+  snap.docs.forEach((d) => {
+    const f = d.data() as ProductFinancials;
+    map[d.id] = f.costPrice ?? null;
+  });
+  return map;
+}
+
+/** Margen de ganancia (null si falta el costo). */
+export function productMargin(price: number, costPrice: number | null): number | null {
+  if (costPrice == null || price <= 0) return null;
+  return ((price - costPrice) / price) * 100;
 }

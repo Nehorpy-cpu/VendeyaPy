@@ -7,6 +7,7 @@ import { useActiveCompany } from '@/lib/active-company';
 import {
   listProducts,
   listCategories,
+  listProductFinancials,
   upsertProduct,
   deleteProduct,
   productMargin,
@@ -34,11 +35,19 @@ export default function CatalogPage() {
     queryFn: () => listCategories(tenantId!),
     enabled: !!tenantId,
   });
+  // Costos privados (productFinancials): solo Owner/Manager pueden leerlos.
+  const financialsQ = useQuery({
+    queryKey: ['productFinancials', tenantId],
+    queryFn: () => listProductFinancials(tenantId!),
+    enabled: !!tenantId,
+  });
+  const costMap = financialsQ.data ?? {};
 
   const saveMut = useMutation({
     mutationFn: (input: ProductInput) => upsertProduct(tenantId!, input),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['products', tenantId] });
+      qc.invalidateQueries({ queryKey: ['productFinancials', tenantId] });
       setEditing(undefined);
     },
   });
@@ -46,6 +55,7 @@ export default function CatalogPage() {
     mutationFn: (id: string) => deleteProduct(tenantId!, id),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['products', tenantId] });
+      qc.invalidateQueries({ queryKey: ['productFinancials', tenantId] });
       setConfirmDelete(null);
     },
   });
@@ -116,7 +126,8 @@ export default function CatalogPage() {
             </thead>
             <tbody className="divide-y divide-gray-100">
               {filtered.map((p) => {
-                const margin = productMargin(p);
+                const cost = costMap[p.id] ?? null;
+                const margin = productMargin(p.price, cost);
                 return (
                   <tr key={p.id} className="hover:bg-gray-50">
                     <td className="px-4 py-3">
@@ -126,7 +137,7 @@ export default function CatalogPage() {
                       <div className="text-xs text-gray-500">{p.perfume?.brand}</div>
                     </td>
                     <td className="px-4 py-3">{gs(p.price)}</td>
-                    <td className="px-4 py-3">{gs(p.costPrice)}</td>
+                    <td className="px-4 py-3">{gs(cost)}</td>
                     <td className="px-4 py-3">
                       {margin == null ? (
                         <span className="text-amber-600" title="Sin precio de costo → ganancia incompleta">⚠️ sin costo</span>
@@ -159,6 +170,7 @@ export default function CatalogPage() {
       {editing !== undefined && (
         <ProductForm
           initial={editing}
+          initialCost={editing ? (costMap[editing.id] ?? null) : null}
           categories={categoriesQ.data ?? []}
           onCancel={() => setEditing(undefined)}
           onSubmit={(input) => saveMut.mutate(input)}

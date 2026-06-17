@@ -57,11 +57,17 @@ await db.doc(`tenants/${TENANT_ID}/categories/perfumes`).set(
   { merge: true },
 );
 
-// 3. Productos (batch)
+// 3. Productos (batch) — el COSTO va aparte en productFinancials (privado, ADR-0008)
 const batch = db.batch();
 for (const p of productos) {
-  const ref = db.doc(`tenants/${TENANT_ID}/products/${p.id}`);
-  batch.set(ref, { ...p, createdAt: now, updatedAt: now });
+  const { costPrice, ...visible } = p;
+  batch.set(db.doc(`tenants/${TENANT_ID}/products/${p.id}`), { ...visible, createdAt: now, updatedAt: now });
+  batch.set(db.doc(`tenants/${TENANT_ID}/productFinancials/${p.id}`), {
+    productId: p.id,
+    tenantId: TENANT_ID,
+    costPrice: costPrice ?? null,
+    updatedAt: now,
+  });
 }
 await batch.commit();
 

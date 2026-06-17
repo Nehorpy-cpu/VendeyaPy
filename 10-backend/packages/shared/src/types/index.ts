@@ -10,6 +10,7 @@ export * from './customer.types.js';
 export * from './message.types.js';
 export * from './session.types.js';
 export * from './order.types.js';
+export * from './financials.types.js';
 export * from './delivery.types.js';
 export * from './payment.types.js';
 export * from './invoice.types.js';

@@ -13,10 +13,7 @@ export interface OrderItem {
   unitPrice: number;
   quantity: number;
   subtotal: number;
-  /** Costo unitario al momento de la venta (null si el producto no tenía costo cargado). */
-  unitCost: number | null;
-  totalCost: number | null;
-  grossProfit: number | null;
+  // El costo/ganancia por ítem se movió a `orderFinancials/{orderId}.items` (privado). Ver ADR-0008.
 }
 
 export interface OrderTotals {
@@ -24,9 +21,7 @@ export interface OrderTotals {
   discount: number;
   total: number;
   currency: Currency;
-  /** Costo total y ganancia bruta. null si algún producto no tenía costo (ganancia incompleta). */
-  totalCost: number | null;
-  grossProfit: number | null;
+  // El costo total y la ganancia se movieron a `orderFinancials/{orderId}` (privado). Ver ADR-0008.
 }
 
 export interface OrderPayment {

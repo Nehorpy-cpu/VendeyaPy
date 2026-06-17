@@ -98,6 +98,12 @@ service cloud.firestore {
         allow write: if isTenantManager(tenantId) || isPlatformAdmin();
       }
 
+      // Costos privados de productos: el vendedor NO puede leerlos (ADR-0008).
+      match /productFinancials/{productId} {
+        allow read: if isTenantManager(tenantId) || isPlatformAdmin();
+        allow write: if isTenantManager(tenantId) || isPlatformAdmin();
+      }
+
       // Categorías
       match /categories/{categoryId} {
         allow read: if isTenantViewer(tenantId) || isPlatformAdmin();
@@ -142,6 +148,12 @@ service cloud.firestore {
           allow read: if isTenantStaff(tenantId) || isTenantViewer(tenantId) || isPlatformAdmin();
           allow write: if false; // Solo Admin SDK
         }
+      }
+
+      // Finanzas privadas de pedidos (costo/ganancia): el vendedor NO las lee (ADR-0008).
+      match /orderFinancials/{orderId} {
+        allow read: if isTenantManager(tenantId) || isPlatformAdmin();
+        allow write: if false; // Solo Admin SDK (Cloud Functions)
       }
 
       // Entregas

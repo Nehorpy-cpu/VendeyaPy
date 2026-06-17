@@ -20,7 +20,7 @@
 | **P3** | Pedidos con costo/ganancia + Dashboard (ventas, ingresos, ganancia, margen, tops) | ✅ Completada |
 | **P4** | Configuración del agente (identidad, tono, reglas, FAQ, bancos, envíos, vendedores, control bot) + chat de prueba | ✅ Completada |
 | **P5** | Clientes + Conversaciones/Bot (historial de mensajes + handoff en UI) | ✅ Completada |
-| **P6** | 🔒 Privacidad financiera: `productFinancials`/`orderFinancials` + reglas (el vendedor no ve costo/ganancia ni desde la base) | ⚡ ACTIVA |
+| **P6** | 🔒 Privacidad financiera: `productFinancials`/`orderFinancials` + reglas (el vendedor no ve costo/ganancia ni desde la base) | ✅ Completada |
 | **P7** | Dashboards baratos con agregados (`stats/current`, `statsDaily`, `platformStats` por jobs) | ⏳ |
 | **P8** | Promotion Strategy (promos + calendario + sugerencias IA por reglas) | ⏳ |
 | **P9** | Hardening multi-tenant + asignación de vendedores + seeders demo + criterios de aceptación | ⏳ |
@@ -105,26 +105,23 @@
 
 ---
 
-# ⚡ FASE ACTIVA: P6 — Privacidad financiera (separar costo/ganancia del vendedor)
+# ✅ FASE COMPLETADA: P6 — Privacidad financiera (costo/ganancia fuera del alcance del vendedor)
 
-**Objetivo:** que el costo y la ganancia **no sean legibles por el vendedor ni siquiera entrando a
-la base** (Firestore no oculta campos sueltos). Se mueven a colecciones privadas hermanas
-`productFinancials` / `orderFinancials`, que las reglas niegan al rol `SELLER`. Ver **ADR-0008**.
+El costo y la ganancia se movieron a colecciones privadas hermanas `productFinancials` /
+`orderFinancials`, que las reglas niegan al rol `SELLER` (Firestore no oculta campos sueltos). Ver **ADR-0008**.
 
-**Por qué ahora:** en P5 el vendedor recibió lectura de `products` y `orders` para atender, pero esos
-documentos contienen `costPrice` / `grossProfit`. La UI ya lo esconde; falta protegerlo en las reglas.
+**Hecho:** tipos `ProductFinancials`/`OrderFinancials`; `costPrice` fuera de `Product` y costo/ganancia
+fuera de `Order`/`OrderItem`/`OrderTotals`; `createPendingOrder` escribe `orderFinancials` (con snapshot
+de costo por ítem); form de producto + `load-catalog` guardan el costo en la colección privada;
+catálogo/dashboard/pedidos (owner) leen de ahí; reglas `deny SELLER`; **migración** `migrate-product-cost.mjs`
+para productos viejos.
 
-**Sub-fases (2) — se ejecutan DE A UNA, no juntas:**
+**Verificado (4 capas):** `typecheck` EXIT 0 · build de producción (11 rutas) · datos en vivo 7/7
+(producto/pedido visibles sin costo; privados con costo) · **prueba REAL de reglas con auth 5/5**
+(vendedora 403 en `*Financials` y 200 en `products`; dueña 200 en todo). Scripts: `verify-p6.mjs`,
+`verify-p6-rules.mjs`.
 
-| Sub-fase | Acción | Estado | Riesgo |
-|----------|--------|--------|--------|
-| **P6.1** | **Productos:** tipo `ProductFinancials`; sacar `costPrice` de `Product` → `tenants/{t}/productFinancials/{id}`; reglas (deny SELLER); el form de producto y el cargador de catálogo escriben el costo en la colección privada; margen/dashboard (owner) leen de ahí. Verificar typecheck + build prod + emuladores (el vendedor NO puede leer `productFinancials`). | ⚡ | Medio |
-| **P6.2** | **Pedidos:** tipo `OrderFinancials`; sacar costo/ganancia de `Order`/`OrderItem`/`OrderTotals` → `tenants/{t}/orderFinancials/{id}` (con snapshot de costo por ítem); `createPendingOrder` lo escribe; dashboard/pedidos (owner) leen de ahí; reglas (deny SELLER). Verificar + commit. | ⏳ | Medio |
-
-**Dependencia:** ninguna externa — se construye y prueba 100% ahora contra emuladores.
-
-**Regla de oro:** si una sub-fase falla, parar, explicar simple, proponer 2 opciones, el owner elige.
-Y verificar (typecheck + build prod + emuladores) que nada se rompa antes de cerrar/commitear.
+**Próxima (pendiente, no iniciada):** P7 — Dashboards baratos con agregados.
 
 ---
 
