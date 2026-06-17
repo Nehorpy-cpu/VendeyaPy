@@ -17,6 +17,8 @@ export interface CatalogFilters {
   priceRange?: string; // 'ACCESIBLE' | 'MID' | 'PREMIUM' | 'LUJO'
   maxPrice?: number; // tope en Guaraníes
   limit?: number; // por defecto 3
+  /** Modo Ganancia (P15): prioriza por margen + prioridad (lee productFinancials). */
+  profitMode?: boolean;
 }
 
 export async function searchCatalog(
@@ -44,12 +46,27 @@ export async function searchCatalog(
     productos = productos.filter((p) => p.price <= filters.maxPrice!);
   }
 
-  // Score por coincidencia de estilo + destacado/nuevo (aprox. de relevancia)
+  // Modo Ganancia: leer costo/prioridad (privado, server-side) para rankear por rentabilidad.
+  const finMap = new Map<string, { cost: number | null; priority: number }>();
+  if (filters.profitMode) {
+    const fs = await db().collection(paths.productFinancials(tenantId)).get();
+    fs.docs.forEach((d) => {
+      const f = d.data() as { costPrice?: number | null; priorityScore?: number | null };
+      finMap.set(d.id, { cost: f.costPrice ?? null, priority: f.priorityScore ?? 0 });
+    });
+  }
+
+  // Score por coincidencia de estilo + destacado/nuevo (relevancia) + rentabilidad (Modo Ganancia).
   const scored = productos.map((p) => {
     let score = 0;
     if (filters.styleTag && p.perfume?.styleTags?.includes(filters.styleTag)) score += 5;
     if (p.featured) score += 1;
     if (p.perfume?.isNew) score += 0.5;
+    if (filters.profitMode) {
+      const f = finMap.get(p.id);
+      const margin = f?.cost != null && p.price > 0 ? (p.price - f.cost) / p.price : 0;
+      score += margin * 4 + (f?.priority ?? 0); // margen 50% → +2; prioridad 0-10 directo
+    }
     return { p, score };
   });
   scored.sort((a, b) => b.score - a.score || Number(b.p.featured) - Number(a.p.featured));

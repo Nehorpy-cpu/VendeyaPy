@@ -20,13 +20,15 @@ interface Props {
   initial: Product | null;
   /** Costo del producto a editar (vive en productFinancials, no en el producto). */
   initialCost: number | null;
+  /** Prioridad de venta (Modo Ganancia) — también en productFinancials. */
+  initialPriority: number | null;
   categories: Category[];
   onCancel: () => void;
   onSubmit: (input: ProductInput) => void;
   saving: boolean;
 }
 
-export function ProductForm({ initial, initialCost, categories, onCancel, onSubmit, saving }: Props) {
+export function ProductForm({ initial, initialCost, initialPriority, categories, onCancel, onSubmit, saving }: Props) {
   const pf = initial?.perfume ?? null;
   const [f, setF] = useState({
     name: initial?.name ?? '',
@@ -34,6 +36,7 @@ export function ProductForm({ initial, initialCost, categories, onCancel, onSubm
     categoryId: initial?.categoryId ?? (categories[0]?.id ?? 'perfumes'),
     price: initial?.price ?? 0,
     costPrice: initialCost ?? 0,
+    priorityScore: initialPriority ?? 0,
     stock: initial?.inventory?.stock ?? 0,
     status: initial?.status ?? ('ACTIVE' as Product['status']),
     featured: initial?.featured ?? false,
@@ -61,6 +64,7 @@ export function ProductForm({ initial, initialCost, categories, onCancel, onSubm
       description: f.description.trim(),
       price: Number(f.price) || 0,
       costPrice: f.costPrice ? Number(f.costPrice) : null,
+      priorityScore: f.priorityScore ? Number(f.priorityScore) : null,
       aiNotes: f.aiNotes.trim(),
       categoryId: f.categoryId,
       images: f.imageUrl.trim() ? [f.imageUrl.trim()] : [],
@@ -113,6 +117,10 @@ export function ProductForm({ initial, initialCost, categories, onCancel, onSubm
           <div>
             <label className={lbl}>Precio de costo (₲)</label>
             <input className={field} type="number" value={f.costPrice} onChange={(e) => set('costPrice', Number(e.target.value))} placeholder="para calcular ganancia" />
+          </div>
+          <div>
+            <label className={lbl}>Prioridad de venta (0-10)</label>
+            <input className={field} type="number" value={f.priorityScore} onChange={(e) => set('priorityScore', Number(e.target.value))} placeholder="Modo Ganancia: empujar este producto" />
           </div>
           <div>
             <label className={lbl}>Stock</label>

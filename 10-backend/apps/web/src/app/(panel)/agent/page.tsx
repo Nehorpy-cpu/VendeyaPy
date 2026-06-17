@@ -73,6 +73,10 @@ export default function AgentPage() {
           <label className="mt-2 flex items-center gap-2 text-sm text-gray-700">
             <input type="checkbox" checked={agent.testMode} onChange={(e) => set('testMode', e.target.checked)} /> Modo prueba
           </label>
+          <label className="mt-2 flex items-center gap-2 text-sm text-gray-700">
+            <input type="checkbox" checked={agent.profitMode} onChange={(e) => set('profitMode', e.target.checked)} />
+            💰 Modo Ganancia {agent.profitMode ? '(prioriza productos rentables)' : ''}
+          </label>
         </Section>
 
         {/* Identidad */}

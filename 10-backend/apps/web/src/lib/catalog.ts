@@ -40,6 +40,7 @@ export interface ProductInput {
   description: string;
   price: number;
   costPrice: number | null;
+  priorityScore: number | null;
   aiNotes: string;
   categoryId: string;
   images: string[];
@@ -83,7 +84,7 @@ export async function upsertProduct(tenantId: string, input: ProductInput): Prom
   // El costo va en la subcolección privada productFinancials (ADR-0008).
   await setDoc(
     doc(productFinancialsCol(tenantId), id),
-    { productId: id, tenantId, costPrice: input.costPrice, updatedAt: serverTimestamp() },
+    { productId: id, tenantId, costPrice: input.costPrice, priorityScore: input.priorityScore, updatedAt: serverTimestamp() },
     { merge: true },
   );
   return id;
@@ -94,14 +95,11 @@ export async function deleteProduct(tenantId: string, id: string): Promise<void>
   await deleteDoc(doc(productFinancialsCol(tenantId), id));
 }
 
-/** Mapa productId → costo (privado). Solo Owner/Manager pueden leerlo (reglas). */
-export async function listProductFinancials(tenantId: string): Promise<Record<string, number | null>> {
+/** Mapa productId → finanzas privadas (costo + prioridad). Solo Owner/Manager (reglas). */
+export async function listProductFinancials(tenantId: string): Promise<Record<string, ProductFinancials>> {
   const snap = await getDocs(productFinancialsCol(tenantId));
-  const map: Record<string, number | null> = {};
-  snap.docs.forEach((d) => {
-    const f = d.data() as ProductFinancials;
-    map[d.id] = f.costPrice ?? null;
-  });
+  const map: Record<string, ProductFinancials> = {};
+  snap.docs.forEach((d) => { map[d.id] = d.data() as ProductFinancials; });
   return map;
 }
 

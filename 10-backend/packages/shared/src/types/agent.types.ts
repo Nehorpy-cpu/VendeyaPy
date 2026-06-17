@@ -42,4 +42,6 @@ export interface AgentConfig {
   faq: FaqItem[];
   botEnabled: boolean; // apagar/encender el bot
   testMode: boolean; // modo prueba
+  /** Modo Ganancia (P15): el bot prioriza los productos más rentables al recomendar. */
+  profitMode: boolean;
 }

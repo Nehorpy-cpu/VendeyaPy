@@ -58,7 +58,7 @@
 | **P12** | Score de clientes + segmentación (job + reglas) | ✅ Completada |
 | **P13** | Centro de Decisiones / Growth Copilot + "Acciones de hoy" (`insights`) | ✅ Completada |
 | **P14** | Follow-ups inteligentes (`followUpTasks`, tareas sugeridas, sin envío auto) | ✅ Completada |
-| **P15** | Modo Ganancia del agente (margen/prioridad/descuento + reglas de venta) | ⏳ |
+| **P15** | Modo Ganancia del agente (margen/prioridad/descuento + reglas de venta) | ✅ Completada |
 | **P16** | Auditoría del agente (`agentAudits`) | ⏳ |
 | **P17** | Simulador del agente — escenarios guardados (`agentTestCases`) | ⏳ |
 | **P18** | Biblioteca de respuestas ganadoras (`winningReplies`) | ⏳ |
@@ -105,21 +105,21 @@
 
 ---
 
-# ✅ FASE COMPLETADA: P14 — Follow-ups inteligentes
+# ✅ FASE COMPLETADA: P15 — Modo Ganancia del agente
 
-Tareas de seguimiento para el vendedor, con **mensaje sugerido** listo para copiar y enviar a mano (nada
-automático). Reglas: pago pendiente, comprobante a verificar, preguntó y no compró (caliente), recompra
-(compró hace 30+ días). Página `/followups` (copiar mensaje, Hecho/Descartar, filtro "Mis tareas").
+Con el "Modo Ganancia" activado, el bot prioriza los productos más **rentables** al recomendar (lee
+costo/prioridad de `productFinancials` del lado del servidor; el cliente nunca ve el costo). La dueña
+activa el modo en la config del agente y puede fijar "Prioridad de venta" por producto.
 
-**Hecho:** enums `FOLLOWUP_TYPE/STATUS`; tipo `FollowUpTask`; `generateFollowUpTasks` idempotente +
-`devGenerateFollowups` (también se corre dentro de `generateAllInsights`); reglas (staff lee y cambia
-status); `lib/followups.ts`; página + ítem de menú "Seguimientos" (incluye al vendedor).
+**Hecho:** `AgentConfig.profitMode`; `ProductFinancials.priorityScore/targetMargin/allowDiscount/
+maxDiscountPercentage`; `searchCatalog` rerankea por margen + prioridad cuando `profitMode`; toggle
+"💰 Modo Ganancia" en `/agent`; campo "Prioridad de venta" en el form de producto.
 
-**Verificado:** `typecheck` EXIT 0 · build de producción (14 rutas) · `verify-p14.mjs` **6/6** (se crean
-con mensaje; no reviven; se limpian; la vendedora las lee 200).
+**Verificado:** `typecheck` EXIT 0 · build de producción · `verify-p15.mjs` **3/3** (OFF = relevancia;
+ON = el más rentable primero; el costo nunca aparece en la respuesta al cliente).
 
-**Antecede:** P13 — Centro de Decisiones. **🎉 Track B (P1–P9) COMPLETO.**
-**Próxima (pendiente, no iniciada):** P15 — Modo Ganancia del agente (margen/prioridad/descuento).
+**Antecede:** P14 — Follow-ups. **🎉 Track B (P1–P9) COMPLETO.**
+**Próxima (pendiente, no iniciada):** P16 — Auditoría del agente (`agentAudits`).
 
 ---
 

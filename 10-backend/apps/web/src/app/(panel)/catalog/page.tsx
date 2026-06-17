@@ -41,7 +41,7 @@ export default function CatalogPage() {
     queryFn: () => listProductFinancials(tenantId!),
     enabled: !!tenantId,
   });
-  const costMap = financialsQ.data ?? {};
+  const finMap = financialsQ.data ?? {};
 
   const saveMut = useMutation({
     mutationFn: (input: ProductInput) => upsertProduct(tenantId!, input),
@@ -126,7 +126,7 @@ export default function CatalogPage() {
             </thead>
             <tbody className="divide-y divide-gray-100">
               {filtered.map((p) => {
-                const cost = costMap[p.id] ?? null;
+                const cost = finMap[p.id]?.costPrice ?? null;
                 const margin = productMargin(p.price, cost);
                 return (
                   <tr key={p.id} className="hover:bg-gray-50">
@@ -170,7 +170,8 @@ export default function CatalogPage() {
       {editing !== undefined && (
         <ProductForm
           initial={editing}
-          initialCost={editing ? (costMap[editing.id] ?? null) : null}
+          initialCost={editing ? (finMap[editing.id]?.costPrice ?? null) : null}
+          initialPriority={editing ? (finMap[editing.id]?.priorityScore ?? null) : null}
           categories={categoriesQ.data ?? []}
           onCancel={() => setEditing(undefined)}
           onSubmit={(input) => saveMut.mutate(input)}

@@ -166,7 +166,7 @@ async function decidirRespuesta(
   customerId: string,
   text: string,
   esNuevo: boolean,
-  prev: { cart: Cart; lastShownSkus: string[]; greeting: string },
+  prev: { cart: Cart; lastShownSkus: string[]; greeting: string; profitMode: boolean },
 ): Promise<{
   reply: string;
   nextState: SessionState;
@@ -247,6 +247,7 @@ async function decidirRespuesta(
       styleTag: detectarEstilo(t),
       ...detectarPrecio(t),
       limit: 3,
+      profitMode: prev.profitMode,
     };
     const productos = await searchCatalog(tenantId, filtros);
     if (productos.length === 0) {
@@ -323,6 +324,7 @@ export async function handleMessage(input: ConversationInput): Promise<Conversat
     cart: prevCart,
     lastShownSkus: prevShown,
     greeting: agentConfig.greetingMessage,
+    profitMode: agentConfig.profitMode,
   });
   const { reply, nextState } = result;
 

@@ -16,6 +16,12 @@ export interface ProductFinancials {
   tenantId: string;
   /** Precio de COSTO. null si no se cargó → la ganancia queda incompleta. */
   costPrice: number | null;
+  /** Empuje manual de prioridad de venta (0-10) para el Modo Ganancia (P15). */
+  priorityScore?: number | null;
+  /** Margen objetivo y reglas de descuento (para el cerebro de IA / negociación futura). */
+  targetMargin?: number | null;
+  allowDiscount?: boolean | null;
+  maxDiscountPercentage?: number | null;
   updatedAt: Timestamp;
 }
 
