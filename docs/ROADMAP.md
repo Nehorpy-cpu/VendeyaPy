@@ -36,9 +36,9 @@
 | **F9** | Testing E2E + salida a producción | ⏳ Pendiente |
 
 > **Nota de canal:** se usa WhatsApp Cloud API oficial. OpenWA fue descartado (ver ADR-0003).
-> **Nota de hosting:** arquitectura híbrida — tienda WordPress/WooCommerce en Hostinger (fuente del
-> catálogo) + backend del bot en Firebase. Catálogo se sincroniza de la tienda (ver ADR-0004).
-> Nueva sub-fase a insertar: sincronización WooCommerce → Firestore (alrededor de F3/F5).
+> **Nota de hosting:** arquitectura híbrida — tienda **PHP+MySQL a medida** (`arfagi_php`) en
+> Hostinger (fuente del catálogo) + backend del bot en Firebase. NO es WooCommerce (ver ADR-0004).
+> Nueva sub-fase a insertar: sincronización MySQL `products` → Firestore (export CSV / endpoint JSON).
 
 ---
 

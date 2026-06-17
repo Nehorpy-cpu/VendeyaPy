@@ -6,6 +6,28 @@
 
 ---
 
+## ⚠️ CORRECCIÓN (2026-06-16) — la tienda NO es WooCommerce
+
+Al revisar los archivos reales de la tienda (`TUTORIAL_PASO_A_PASO.md` del deploy a Hostinger)
+se confirmó que `arfagi.com` **NO es WordPress/WooCommerce**, sino una **aplicación PHP a
+medida con base de datos MySQL** (`arfagi_php`, desarrollada en WAMP). Evidencia: `config/
+config.production.php` con `DB_HOST/DB_NAME/DB_USER`, tablas propias (`products`, `categories`,
+`orders`, `order_items`, `users`, `cart`, `settings`), panel `/admin` propio, `install_production.php`,
+export/import por phpMyAdmin. (Bonus: ya tenían WhatsApp por **UltraMsg**, no oficial.)
+
+**Qué sigue válido:** la decisión de fondo (arquitectura híbrida — tienda en Hostinger como
+fuente del catálogo + bot en Firebase) **se mantiene**.
+
+**Qué cambia:** NO hay REST API de WooCommerce. La sincronización del catálogo (MySQL `products`)
+se hará por una de estas vías (a decidir al llegar): **(A)** export de la tabla `products` →
+nuestro importador CSV ya existente; **(B)** endpoint JSON `api/products.php` agregado a la app PHP;
+**(C)** lectura directa de MySQL (⚠️ Hostinger compartido suele bloquear MySQL remoto).
+
+> Todas las menciones a "WooCommerce / WooCommerce REST API" más abajo quedan **superadas** por
+> esta corrección (se conservan como registro histórico del supuesto original).
+
+---
+
 ## Contexto
 
 El owner tiene en **Hostinger** (plan hosting compartido básico):
@@ -68,8 +90,9 @@ Hechos técnicos relevantes:
 ## Pendiente de confirmar
 
 - [ ] Reconectar `arfagi.com` al sitio en Hostinger (owner) y verificar que vuelve a abrir.
-- [ ] Confirmar que la tienda es **WooCommerce** (vs otro plugin de tienda WordPress). Se verifica al construir la sincronización.
-- [ ] Versión de WordPress/WooCommerce y disponibilidad de la REST API (claves de API).
+- [x] Identificar la tecnología de la tienda → **app PHP a medida + MySQL** (`arfagi_php`). Ver corrección arriba.
+- [ ] Elegir la vía de sincronización del catálogo MySQL → Firestore (A export CSV / B endpoint JSON / C MySQL remoto).
+- [ ] Acceso necesario: credenciales MySQL de Hostinger (`DB_NAME/DB_USER/DB_PASS`) o export de la tabla `products`.
 
 ## Reversibilidad
 

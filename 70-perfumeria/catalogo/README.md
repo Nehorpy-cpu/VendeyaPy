@@ -2,10 +2,10 @@
 
 Cómo cargás tus perfumes al sistema para que el agente de IA los conozca y recomiende.
 
-> **Fuente principal del catálogo: tu tienda WordPress/WooCommerce en Hostinger** (ver ADR-0004).
-> Los productos se sincronizan automáticamente desde la tienda. Esta planilla CSV es la
-> **vía secundaria / de enriquecimiento**: sirve para cargar las **notas olfativas, estilos y
-> familia olfativa** que la tienda normalmente no tiene, y como respaldo si la sync no está lista.
+> **Fuente principal del catálogo: tu tienda PHP+MySQL en Hostinger** (`arfagi_php`; ver ADR-0004).
+> NO es WooCommerce. La sync traerá los productos de la tabla MySQL `products` (vía export CSV o
+> un endpoint JSON). Esta planilla CSV es la **vía de carga/enriquecimiento**: además sirve para
+> las **notas olfativas, estilos y familia olfativa** que la tienda no tiene, y como respaldo.
 
 ---
 

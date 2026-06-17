@@ -70,7 +70,7 @@ Para cada endpoint:
 - Embeddings solo para recuperación, **no como fuente de verdad**.
 - Devolver **citas** al responder desde contenido recuperado; separar hechos recuperados de la interpretación del modelo.
 - Manejar explícitamente "no hay suficiente evidencia".
-- Estrategia de reindexado cuando las fuentes cambian (ej: sync WooCommerce → Firestore, ADR-0004).
+- Estrategia de reindexado cuando las fuentes cambian (ej: sync MySQL `products` de la tienda PHP → Firestore, ADR-0004).
 
 ## Datos (Firestore — NO SQL)
 

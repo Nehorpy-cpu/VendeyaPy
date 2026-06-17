@@ -109,4 +109,4 @@ Verás los productos en la UI del emulador (link abajo).
 
 - Proyecto de emulador: `demo-aiafg` (el prefijo `demo-` = 100% offline, sin credenciales reales).
 - El backend es Firebase (ver ADR-0001); n8n orquesta (workflows en `20-n8n/workflows`).
-- Hosting de la tienda y catálogo: WordPress/WooCommerce en Hostinger (ver ADR-0004).
+- Hosting de la tienda y catálogo: app PHP+MySQL a medida (`arfagi_php`) en Hostinger (ver ADR-0004).
