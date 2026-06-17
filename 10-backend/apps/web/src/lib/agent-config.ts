@@ -21,6 +21,7 @@ export const DEFAULT_AGENT: AgentConfig = {
   botEnabled: true,
   testMode: false,
   profitMode: false,
+  industry: '',
 };
 
 const agentRef = (t: string) => doc(firebaseDb(), 'tenants', t, 'config', 'agent');

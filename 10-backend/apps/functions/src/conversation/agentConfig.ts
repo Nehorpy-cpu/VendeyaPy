@@ -22,6 +22,7 @@ const DEFAULT: AgentConfig = {
   botEnabled: true,
   testMode: false,
   profitMode: false,
+  industry: '',
 };
 
 export async function getAgentConfig(tenantId: string): Promise<AgentConfig> {

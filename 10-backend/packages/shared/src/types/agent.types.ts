@@ -44,4 +44,6 @@ export interface AgentConfig {
   testMode: boolean; // modo prueba
   /** Modo Ganancia (P15): el bot prioriza los productos más rentables al recomendar. */
   profitMode: boolean;
+  /** Rubro/plantilla aplicada en el onboarding (P19). '' si no se eligió. */
+  industry?: string;
 }

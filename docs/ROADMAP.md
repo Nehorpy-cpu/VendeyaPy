@@ -62,7 +62,7 @@
 | **P16** | Auditoría del agente (`agentAudits`) | ✅ Completada |
 | **P17** | Simulador del agente — escenarios guardados (`agentTestCases`) | ✅ Completada |
 | **P18** | Biblioteca de respuestas ganadoras (`winningReplies`) | ✅ Completada |
-| **P19** | Onboarding rápido + plantillas por rubro | ⏳ |
+| **P19** | Onboarding rápido + plantillas por rubro | ✅ Completada — **Track C COMPLETO** 🎉 |
 
 ### ⚡ P1 — Fundación del panel (sub-fases, de a una)
 | Sub-fase | Acción | Estado |
@@ -105,21 +105,22 @@
 
 ---
 
-# ✅ FASE COMPLETADA: P18 — Biblioteca de respuestas ganadoras
+# ✅ FASE COMPLETADA: P19 — Onboarding rápido + plantillas · 🎉 TRACK C (copiloto) COMPLETO
 
-Biblioteca de respuestas reutilizables (`winningReplies`): un minero detecta las respuestas que
-aparecieron en chats que cerraron venta (con su nº de conversiones) y la dueña/manager cura las mejores;
-cualquiera del staff las copia para reutilizar. Sin IA.
+Onboarding para arrancar en minutos: plantillas por rubro (perfumería / ropa / accesorios) que precargan
+la config del agente (nombre, tono, saludo, reglas, FAQ) + categorías típicas, y una lista de "primeros
+pasos" con progreso (rubro / productos / datos bancarios / probar el bot).
 
-**Hecho:** enum `REPLY_STATUS`; tipo `WinningReply`; `generateWinningReplies` (mina mensajes salientes de
-chats con pedido PAID, cuenta conversiones, idempotente) + `devGenerateWinningReplies`; `lib/replies.ts`;
-página `/replies` (copiar + curar + Buscar ganadoras) + nav; reglas (staff lee/copia, manager+ cura).
+**Hecho:** `AgentConfig.industry`; `lib/templates.ts` (3 plantillas + `applyTemplate` que escribe
+config/agent + categorías); página `/onboarding` (picker de rubro + checklist con barra de progreso) + nav.
 
-**Verificado:** `typecheck` EXIT 0 · build de producción (16 rutas) · `verify-p18.mjs` **5/5** (mina con
-conteo de conversiones; manual; vendedora lee 200 / no edita 403).
+**Verificado:** `typecheck` EXIT 0 · build de producción (17 rutas) · `verify-p19.mjs` **4/4** (la plantilla
+precarga el agente + las categorías del rubro).
 
-**Antecede:** P17 — Simulador. **🎉 Track B (P1–P9) COMPLETO.**
-**Próxima (pendiente, no iniciada):** P19 — Onboarding rápido + plantillas por rubro (última del Track C).
+**🎉 Con P19, el Track C (Growth Copilot, P12–P19) queda COMPLETO.** Resta solo **P11** (tracking propio de
+campañas), que se hace junto al **Track D — Meta** (atribución).
+**Próximo (pendiente, no iniciado):** Track D (Meta) — empezando por **D1** (Centro de Integración).
+Es lo único que queda: el bloque de Meta (D1–D6 + P11).
 
 ---
 
