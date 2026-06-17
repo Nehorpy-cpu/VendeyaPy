@@ -7,6 +7,7 @@ import { initializeApp, getApps, type FirebaseApp } from 'firebase/app';
 import { getAuth, connectAuthEmulator, type Auth } from 'firebase/auth';
 import { getFirestore, connectFirestoreEmulator, type Firestore } from 'firebase/firestore';
 import { getStorage, connectStorageEmulator, type FirebaseStorage } from 'firebase/storage';
+import { getFunctions, connectFunctionsEmulator, type Functions } from 'firebase/functions';
 
 const firebaseConfig = {
   apiKey: process.env['NEXT_PUBLIC_FIREBASE_API_KEY'],
@@ -21,6 +22,7 @@ let _app: FirebaseApp | null = null;
 let _auth: Auth | null = null;
 let _db: Firestore | null = null;
 let _storage: FirebaseStorage | null = null;
+let _functions: Functions | null = null;
 
 export function firebaseApp(): FirebaseApp {
   if (_app) return _app;
@@ -53,4 +55,13 @@ export function firebaseStorage(): FirebaseStorage {
     connectStorageEmulator(_storage, 'localhost', 9199);
   }
   return _storage;
+}
+
+export function firebaseFunctions(): Functions {
+  if (_functions) return _functions;
+  _functions = getFunctions(firebaseApp(), 'us-central1');
+  if (process.env['NEXT_PUBLIC_USE_EMULATORS'] === 'true') {
+    connectFunctionsEmulator(_functions, 'localhost', 5001);
+  }
+  return _functions;
 }

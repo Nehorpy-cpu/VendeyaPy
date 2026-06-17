@@ -48,6 +48,16 @@ service cloud.firestore {
         && userRole() in ['TENANT_OWNER', 'TENANT_MANAGER', 'TENANT_VIEWER'];
     }
 
+    function isTenantSeller(tenantId) {
+      return isTenantMember(tenantId) && userRole() == 'SELLER';
+    }
+
+    // Staff que atiende clientes/pedidos/conversaciones (incluye al vendedor).
+    function isTenantStaff(tenantId) {
+      return isTenantMember(tenantId)
+        && userRole() in ['TENANT_OWNER', 'TENANT_MANAGER', 'SELLER'];
+    }
+
     // ---------- Planes (solo lectura para todos los autenticados) ----------
 
     match /plans/{planId} {
@@ -70,8 +80,8 @@ service cloud.firestore {
     // ---------- Tenants ----------
 
     match /tenants/{tenantId} {
-      // Lectura: cualquier miembro del tenant + platform admin
-      allow read: if isTenantViewer(tenantId) || isPlatformAdmin();
+      // Lectura: cualquier miembro del tenant (incluye vendedor) + platform admin
+      allow read: if isTenantViewer(tenantId) || isTenantSeller(tenantId) || isPlatformAdmin();
 
       // Escritura del documento raíz del tenant: solo el owner y platform admin
       // (cambios sensibles como branding, fiscal, payments)
@@ -82,9 +92,9 @@ service cloud.firestore {
 
       // ---------- Subcolecciones del tenant ----------
 
-      // Productos
+      // Productos (el vendedor necesita verlos para atender; editar solo manager+)
       match /products/{productId} {
-        allow read: if isTenantViewer(tenantId) || isPlatformAdmin();
+        allow read: if isTenantViewer(tenantId) || isTenantSeller(tenantId) || isPlatformAdmin();
         allow write: if isTenantManager(tenantId) || isPlatformAdmin();
       }
 
@@ -100,30 +110,36 @@ service cloud.firestore {
         allow write: if isTenantOwner(tenantId) || isPlatformAdmin();
       }
 
-      // Clientes
+      // Clientes (el vendedor puede ver/atender; escritura de datos: manager+)
       match /customers/{customerId} {
-        allow read: if isTenantViewer(tenantId) || isPlatformAdmin();
+        allow read: if isTenantStaff(tenantId) || isTenantViewer(tenantId) || isPlatformAdmin();
         allow write: if isTenantManager(tenantId) || isPlatformAdmin();
 
         // Sesiones de conversación (solo Cloud Functions las escriben)
         match /sessions/{sessionId} {
-          allow read: if isTenantManager(tenantId) || isPlatformAdmin();
+          allow read: if isTenantStaff(tenantId) || isPlatformAdmin();
+          allow write: if false; // Solo Admin SDK
+        }
+
+        // Historial de mensajes del chat (solo Cloud Functions lo escriben)
+        match /messages/{messageId} {
+          allow read: if isTenantStaff(tenantId) || isPlatformAdmin();
           allow write: if false; // Solo Admin SDK
         }
       }
 
-      // Órdenes
+      // Órdenes (el vendedor las ve y puede cambiar estado/notas)
       match /orders/{orderId} {
-        allow read: if isTenantViewer(tenantId) || isPlatformAdmin();
+        allow read: if isTenantStaff(tenantId) || isTenantViewer(tenantId) || isPlatformAdmin();
         // Cambios de estado críticos solo vía Cloud Functions (Admin SDK)
         allow create, delete: if false;
-        // Update limitado: manager puede cancelar o agregar notas
-        allow update: if (isTenantManager(tenantId) || isPlatformAdmin())
+        // Update limitado: staff puede cambiar estado o agregar notas
+        allow update: if (isTenantStaff(tenantId) || isPlatformAdmin())
           && request.resource.data.diff(resource.data).affectedKeys()
               .hasOnly(['status', 'notes', 'updatedAt']);
 
         match /items/{itemId} {
-          allow read: if isTenantViewer(tenantId) || isPlatformAdmin();
+          allow read: if isTenantStaff(tenantId) || isTenantViewer(tenantId) || isPlatformAdmin();
           allow write: if false; // Solo Admin SDK
         }
       }

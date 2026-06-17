@@ -46,3 +46,9 @@ export { devSubmitComprobante } from './functions/payments/devSubmitComprobante.
 
 // Liberar chat (vendedor devuelve la conversación al bot) — endpoint de prueba (F6b).
 export { devReleaseChat } from './functions/conversation/devReleaseChat.js';
+
+// Tomar chat (vendedor pausa el bot) — endpoint de prueba (P5).
+export { devTakeoverChat } from './functions/conversation/devTakeoverChat.js';
+
+// Handoff desde el panel (callables con auth): tomar / devolver conversación (P5).
+export { chatTakeover, chatRelease } from './functions/conversation/chatHandoff.js';

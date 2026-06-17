@@ -21,6 +21,7 @@ import {
 } from '../catalog/search.js';
 import { addToCart, formatCart } from './cart.js';
 import { getAgentConfig } from './agentConfig.js';
+import { appendMessage } from './messages.js';
 import { createPendingOrder } from '../orders/createPendingOrder.js';
 import { getCheckoutConfig, formatTransferInstructions } from '../orders/checkoutConfig.js';
 
@@ -283,15 +284,31 @@ export async function handleMessage(input: ConversationInput): Promise<Conversat
   const sessionRef = db().doc(paths.session(tenantId, customerId));
   const snap = await sessionRef.get();
   const existing = snap.exists ? (snap.data() as Session) : null;
-  // Atención humana: si un vendedor tomó el chat, el bot NO responde.
-  if (existing?.context?.humanTakeover) {
-    await sessionRef.set({ context: { lastMessageAt: now }, updatedAt: now }, { merge: true });
-    logger.info('Mensaje en modo atención humana (bot en pausa)', { tenantId, customerId });
-    return { reply: '', state: existing.state, handledByHuman: true };
-  }
 
+  const humanTakeover = existing?.context?.humanTakeover ?? false;
   // Config del agente (editable desde el panel): on/off + saludo.
   const agentConfig = await getAgentConfig(tenantId);
+  const botSilent = humanTakeover || !agentConfig.botEnabled;
+
+  // Guardar SIEMPRE el mensaje entrante del cliente (incluso si el bot está en pausa).
+  await appendMessage(tenantId, customerId, {
+    direction: 'in',
+    author: 'customer',
+    text,
+    now,
+    state: existing?.state ?? null,
+    humanTakeover,
+    countUnread: botSilent, // si el bot no atiende, el vendedor tiene algo pendiente
+  });
+
+  // Atención humana: si un vendedor tomó el chat, el bot NO responde.
+  if (humanTakeover) {
+    await sessionRef.set({ context: { lastMessageAt: now }, updatedAt: now }, { merge: true });
+    logger.info('Mensaje en modo atención humana (bot en pausa)', { tenantId, customerId });
+    return { reply: '', state: existing?.state ?? 'IDLE', handledByHuman: true };
+  }
+
+  // Bot apagado desde el panel → sin respuesta.
   if (!agentConfig.botEnabled) {
     await sessionRef.set({ context: { lastMessageAt: now }, updatedAt: now }, { merge: true });
     logger.info('Bot apagado por configuración — sin respuesta', { tenantId, customerId });
@@ -333,6 +350,17 @@ export async function handleMessage(input: ConversationInput): Promise<Conversat
     .doc(paths.customer(tenantId, customerId))
     .set({ id: customerId, tenantId, whatsappPhone: from, updatedAt: now }, { merge: true });
   await sessionRef.set(session);
+
+  // Guardar la respuesta del bot en el historial.
+  if (reply.trim()) {
+    await appendMessage(tenantId, customerId, {
+      direction: 'out',
+      author: 'bot',
+      text: reply,
+      state: nextState,
+      humanTakeover: false,
+    });
+  }
 
   logger.info('Mensaje procesado', { tenantId, customerId, state: nextState });
   return { reply, state: nextState };

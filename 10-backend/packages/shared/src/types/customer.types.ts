@@ -4,6 +4,7 @@
  */
 
 import type { Address, Timestamp } from './common.types.js';
+import type { CustomerConversationMeta } from './message.types.js';
 
 export interface CustomerStats {
   totalOrders: number;
@@ -21,6 +22,8 @@ export interface Customer {
   stats: CustomerStats;
   tags: string[];
   notes: string;
+  /** Resumen de la última conversación (denormalizado por el motor del bot). */
+  conversation?: CustomerConversationMeta;
   createdAt: Timestamp;
   updatedAt: Timestamp;
 }
