@@ -5,7 +5,7 @@
 > tercer paso genuinamente riesgoso, se avisa y se separa; si no, el default son 2.
 > Solo la fase actual está desglosada. Las siguientes se desglosan al cerrar la anterior.
 
-**Última actualización:** 2026-06-16
+**Última actualización:** 2026-06-17
 
 ---
 
@@ -20,13 +20,33 @@
 | **P3** | Pedidos con costo/ganancia + Dashboard (ventas, ingresos, ganancia, margen, tops) | ✅ Completada |
 | **P4** | Configuración del agente (identidad, tono, reglas, FAQ, bancos, envíos, vendedores, control bot) + chat de prueba | ✅ Completada |
 | **P5** | Clientes + Conversaciones/Bot (historial de mensajes + handoff en UI) | ✅ Completada |
-| **P6** | Campañas manuales + capa `CampaignDataProvider` (preparada para Meta) | ⏳ |
-| **P7** | Vistas/analíticas (anuncios / tienda / bot separadas) + embudo | ⏳ |
-| **P8** | Promotion Strategy (promos + calendario + sugerencias IA) | ⏳ |
-| **P9** | Integración tienda PHP (consume el catálogo) — depende de acceso al código PHP | ⏳ |
-| **P10** | Hardening seguridad multi-tenant + seeders demo + criterios de aceptación | ⏳ |
+| **P6** | 🔒 Privacidad financiera: `productFinancials`/`orderFinancials` + reglas (el vendedor no ve costo/ganancia ni desde la base) | ⚡ ACTIVA |
+| **P7** | Dashboards baratos con agregados (`stats/current`, `statsDaily`, `platformStats` por jobs) | ⏳ |
+| **P8** | Promotion Strategy (promos + calendario + sugerencias IA por reglas) | ⏳ |
+| **P9** | Hardening multi-tenant + asignación de vendedores + seeders demo + criterios de aceptación | ⏳ |
 
-### 🚀 TRACK C — Growth Copilot (capa diferenciadora, DESPUÉS de P10)
+> **Reubicado (por el plan unificado 2026-06-17):** la vieja "P6 Campañas" y "P7 analíticas de
+> anuncios" pasaron al **Track D (Meta)**. La "P10 Hardening" es ahora **P9**.
+> **Integración tienda PHP** (`arfagi_php` consume el catálogo): independiente, se hace cuando haya
+> acceso al código PHP; no bloquea las demás fases (ver ADR-0004).
+
+### 🔌 TRACK D — Integración Meta (NUEVO — modo manual→real; ver ADR-0009)
+
+> Conectar **Meta Business Suite**: WhatsApp + Instagram DM + Messenger, Meta Ads, catálogo y
+> Conversions API. Diferencial: **atribución anuncio → conversación → pedido → ganancia real**.
+> Se diseña en **modo manual/demo** (Meta bloqueado) y se "enchufa" al pasar el gate de verificación.
+> **Absorbe y reordena F1 (WhatsApp Cloud API) y F7.** Tokens en Secret Manager, nunca en Firestore.
+
+| Fase | Nombre | Estado |
+|------|--------|--------|
+| **D1** | Centro de Integración Meta: `metaConnections` (+ tokens seguros) + `metaAssets` + estados de conexión en el panel | ⏳ |
+| **D2** | Webhooks + omnicanal: `metaWebhookInbox` (TTL) + `metaExternalIndex` + `processMetaWebhook` + `channel` (whatsapp/instagram/messenger). Incluye ex-F1 | ⏳ |
+| **D3** | Meta Ads (solo lectura): campañas/adsets/ads + `metaAdInsightsDaily` por jobs + snapshots diarios | ⏳ |
+| **D4** | Catálogo → Meta: `syncToMeta` + `syncProductToMeta` + `metaCatalogSyncLogs` | ⏳ |
+| **D5** | Atribución: anuncio → conversación → cliente → pedido → ganancia (`attributionType`/confidence) | ⏳ |
+| **D6** | `businessEvents` + Conversions API (`metaConversionEvents`, `sendConversionEventToMeta`) | ⏳ |
+
+### 🚀 TRACK C — Growth Copilot (capa diferenciadora, DESPUÉS del núcleo del panel)
 > Asistente de decisiones: "qué hacer para vender más y ganar más". Reglas + jobs que precalculan
 > (Firestore), IA solo para redactar. Ver ADR-0006 y `docs/growth-copilot-diferenciador.md`.
 > **Preparar durante P1–P10:** campos de tracking (`source/utm*/couponCode`) en pedidos/
@@ -67,14 +87,14 @@
 | Fase | Nombre | Estado |
 |------|--------|--------|
 | **F0** | Preparación del entorno y estructura | ✅ Completada |
-| **F1** | Setup WhatsApp Cloud API (canal oficial Meta) | ⏸️ Pausada (Meta bloqueado del lado del owner) |
+| **F1** | Setup WhatsApp Cloud API (canal oficial Meta) | ⏸️ Pausada → **absorbida en Track D / D2** (ADR-0009) |
 | **F2** | Diseño de datos (schema Firestore tenant perfumería) | ✅ Completada |
 | **F3** | Entorno ejecutable local + carga del catálogo | ✅ Completada |
 | **F4** | Bot conversacional básico (recibe → responde) | ✅ Completada |
 | **F5** | Catálogo + carrito (el bot vende) | ✅ Completada |
 | **F6** | Cobros — link de pago (simulado) | ✅ Completada |
 | **F6b** | Pago por transferencia + comprobante + handoff a vendedor | ✅ Completada |
-| **F7** | Integración Meta Business Suite (CAPI + catálogo + click-to-WA) | ⏳ Pendiente |
+| **F7** | Integración Meta Business Suite (CAPI + catálogo + click-to-WA) | ⏳ → **absorbida en Track D / D3–D6** (ADR-0009) |
 | **F8** | Posventa + seguimiento + fidelización | ⏳ Pendiente |
 | **F9** | Testing E2E + salida a producción | ⏳ Pendiente |
 
@@ -85,27 +105,26 @@
 
 ---
 
-# ⚡ FASE ACTIVA: F6b — Pago por transferencia + comprobante + handoff a vendedor
+# ⚡ FASE ACTIVA: P6 — Privacidad financiera (separar costo/ganancia del vendedor)
 
-**Objetivo (flujo real de Paraguay):** al pagar, el bot da los **datos bancarios** (UENO,
-Banco Familiar, etc.) para transferir; el cliente manda el **comprobante**; el bot lo guarda,
-marca la orden "en verificación" y **deriva al vendedor real** (el bot deja de responder ese
-chat y le avisa al vendedor). No necesita pasarela de pago.
+**Objetivo:** que el costo y la ganancia **no sean legibles por el vendedor ni siquiera entrando a
+la base** (Firestore no oculta campos sueltos). Se mueven a colecciones privadas hermanas
+`productFinancials` / `orderFinancials`, que las reglas niegan al rol `SELLER`. Ver **ADR-0008**.
 
-**Decisiones (2026-06-16):** handoff = el bot avisa al vendedor y le pasa la conversación ·
-varios vendedores (config) pero arrancamos con uno · solo transferencia (link de tarjeta en pausa).
+**Por qué ahora:** en P5 el vendedor recibió lectura de `products` y `orders` para atender, pero esos
+documentos contienen `costPrice` / `grossProfit`. La UI ya lo esconde; falta protegerlo en las reglas.
 
 **Sub-fases (2) — se ejecutan DE A UNA, no juntas:**
 
 | Sub-fase | Acción | Estado | Riesgo |
 |----------|--------|--------|--------|
-| **F6b.1** | "pagar" → crear orden + mostrar **datos bancarios** (de config) + pedir el comprobante. Config de cuentas + vendedores (con placeholders a reemplazar). Verificar build + E2E. | ⚡ | Medio |
-| **F6b.2** | Recibir comprobante (simulado) → guardarlo, marcar orden `PENDING_VERIFICATION`, **handoff**: el bot deja de responder + avisa al vendedor. Verificar + commit. | ⏳ | Medio |
+| **P6.1** | **Productos:** tipo `ProductFinancials`; sacar `costPrice` de `Product` → `tenants/{t}/productFinancials/{id}`; reglas (deny SELLER); el form de producto y el cargador de catálogo escriben el costo en la colección privada; margen/dashboard (owner) leen de ahí. Verificar typecheck + build prod + emuladores (el vendedor NO puede leer `productFinancials`). | ⚡ | Medio |
+| **P6.2** | **Pedidos:** tipo `OrderFinancials`; sacar costo/ganancia de `Order`/`OrderItem`/`OrderTotals` → `tenants/{t}/orderFinancials/{id}` (con snapshot de costo por ítem); `createPendingOrder` lo escribe; dashboard/pedidos (owner) leen de ahí; reglas (deny SELLER). Verificar + commit. | ⏳ | Medio |
 
-**Dependencia:** recibir la FOTO real del comprobante necesita el WhatsApp real (F1, pausado);
-mientras tanto se simula con un endpoint de prueba. Lo demás se construye y prueba ahora.
+**Dependencia:** ninguna externa — se construye y prueba 100% ahora contra emuladores.
 
 **Regla de oro:** si una sub-fase falla, parar, explicar simple, proponer 2 opciones, el owner elige.
+Y verificar (typecheck + build prod + emuladores) que nada se rompa antes de cerrar/commitear.
 
 ---
 
