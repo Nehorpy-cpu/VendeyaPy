@@ -100,6 +100,8 @@ function main() {
       description: get('descripcion'),
       price: precio,
       compareAtPrice: null,
+      costPrice: parseInt(get('precio_costo').replace(/\D/g, ''), 10) || null,
+      aiNotes: get('notas_ia'),
       currency: 'PYG',
       categoryId: 'perfumes',
       images: get('imagen_url') ? [get('imagen_url')] : [],

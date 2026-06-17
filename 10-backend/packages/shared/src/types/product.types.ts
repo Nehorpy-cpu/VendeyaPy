@@ -52,6 +52,10 @@ export interface Product {
   description: string;
   price: number;
   compareAtPrice: number | null;
+  /** Precio de COSTO (cuánto le cuesta al negocio). null si no se cargó → la ganancia queda incompleta. */
+  costPrice: number | null;
+  /** Info para el agente de IA: notas de venta, beneficios, público ideal, etc. (texto libre). */
+  aiNotes: string;
   currency: Currency;
   categoryId: string;
   images: string[];
