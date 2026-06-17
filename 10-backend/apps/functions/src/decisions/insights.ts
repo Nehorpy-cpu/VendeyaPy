@@ -13,6 +13,7 @@ import type { Customer, Insight } from '@vpw/shared';
 import { db, paths } from '../lib/firebase.js';
 import { logger } from '../lib/logger.js';
 import { generatePromotionSuggestions } from '../promotions/suggest.js';
+import { generateFollowUpTasks } from '../followups/generate.js';
 
 type NewInsight = Omit<Insight, 'id' | 'tenantId' | 'createdAt' | 'resolvedAt' | 'status' | 'generatedBy'>;
 const cname = (c: Customer) => c.name?.trim() || c.whatsappPhone || c.id;
@@ -92,7 +93,8 @@ export async function generateAllInsights(tenantId: string): Promise<Record<stri
   const promo = await generatePromotionSuggestions(tenantId);
   const reactivation = await generateReactivationInsights(tenantId);
   const pendingReply = await generatePendingReplyInsights(tenantId);
-  const out = { promo, reactivation, pendingReply };
+  const followups = await generateFollowUpTasks(tenantId);
+  const out = { promo, reactivation, pendingReply, followups };
   logger.info('Insights del Centro de Decisiones generados', { tenantId, ...out });
   return out;
 }

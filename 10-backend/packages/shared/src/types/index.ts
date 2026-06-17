@@ -14,6 +14,7 @@ export * from './financials.types.js';
 export * from './stats.types.js';
 export * from './promotion.types.js';
 export * from './insight.types.js';
+export * from './followup.types.js';
 export * from './delivery.types.js';
 export * from './payment.types.js';
 export * from './invoice.types.js';

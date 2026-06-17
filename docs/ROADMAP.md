@@ -57,7 +57,7 @@
 | **P11** | Tracking propio sin Meta (source/UTM/cupones/QR por campaña) | ⏳ (se hace junto al Track D / atribución) |
 | **P12** | Score de clientes + segmentación (job + reglas) | ✅ Completada |
 | **P13** | Centro de Decisiones / Growth Copilot + "Acciones de hoy" (`insights`) | ✅ Completada |
-| **P14** | Follow-ups inteligentes (`followUpTasks`, tareas sugeridas, sin envío auto) | ⏳ |
+| **P14** | Follow-ups inteligentes (`followUpTasks`, tareas sugeridas, sin envío auto) | ✅ Completada |
 | **P15** | Modo Ganancia del agente (margen/prioridad/descuento + reglas de venta) | ⏳ |
 | **P16** | Auditoría del agente (`agentAudits`) | ⏳ |
 | **P17** | Simulador del agente — escenarios guardados (`agentTestCases`) | ⏳ |
@@ -105,22 +105,21 @@
 
 ---
 
-# ✅ FASE COMPLETADA: P13 — Centro de Decisiones ("Acciones de hoy")
+# ✅ FASE COMPLETADA: P14 — Follow-ups inteligentes
 
-Pantalla `/decisions` que junta TODO lo que el sistema detecta por reglas y le dice a la dueña qué hacer
-hoy: promos sugeridas (P8) + reactivar clientes dormidos que ya compraron + conversaciones sin responder.
-Cada acción se marca "Hecho" o "Descartar". Sin IA.
+Tareas de seguimiento para el vendedor, con **mensaje sugerido** listo para copiar y enviar a mano (nada
+automático). Reglas: pago pendiente, comprobante a verificar, preguntó y no compró (caliente), recompra
+(compró hace 30+ días). Página `/followups` (copiar mensaje, Hecho/Descartar, filtro "Mis tareas").
 
-**Hecho:** enum `PENDING_REPLY`; `decisions/insights.ts` (helper idempotente `syncInsights` +
-`generateReactivationInsights` + `generatePendingReplyInsights` + `generateAllInsights`, que también corre
-las promos P8); `devGenerateInsights`; `lib/insights.ts`; página `/decisions` agrupada por tipo + ítem de
-menú "Acciones de hoy" (owner/manager).
+**Hecho:** enums `FOLLOWUP_TYPE/STATUS`; tipo `FollowUpTask`; `generateFollowUpTasks` idempotente +
+`devGenerateFollowups` (también se corre dentro de `generateAllInsights`); reglas (staff lee y cambia
+status); `lib/followups.ts`; página + ítem de menú "Seguimientos" (incluye al vendedor).
 
-**Verificado:** `typecheck` EXIT 0 · build de producción (13 rutas) · `verify-p13.mjs` **4/4** (se crean;
-no reviven al marcarlas "Hecho"; se limpian cuando dejan de aplicar).
+**Verificado:** `typecheck` EXIT 0 · build de producción (14 rutas) · `verify-p14.mjs` **6/6** (se crean
+con mensaje; no reviven; se limpian; la vendedora las lee 200).
 
-**Antecede:** P12 — Score de clientes. **🎉 Track B (panel núcleo, P1–P9) COMPLETO.**
-**Próxima (pendiente, no iniciada):** P14 — Follow-ups inteligentes (tareas sugeridas para el vendedor).
+**Antecede:** P13 — Centro de Decisiones. **🎉 Track B (P1–P9) COMPLETO.**
+**Próxima (pendiente, no iniciada):** P15 — Modo Ganancia del agente (margen/prioridad/descuento).
 
 ---
 

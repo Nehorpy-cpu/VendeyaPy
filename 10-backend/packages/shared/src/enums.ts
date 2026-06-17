@@ -142,6 +142,20 @@ export const INSIGHT_PRIORITY = ['LOW', 'MEDIUM', 'HIGH'] as const;
 export type InsightPriority = (typeof INSIGHT_PRIORITY)[number];
 
 // Segmento del cliente (Growth Copilot, P12). Calculado por reglas RFM-lite.
+// Tareas de seguimiento para el vendedor (Growth Copilot, P14).
+export const FOLLOWUP_TYPE = [
+  'PAYMENT_PENDING', // pedido sin pagar
+  'VERIFY_RECEIPT', // comprobante a verificar
+  'ENGAGE', // preguntó y no compró
+  'REPURCHASE', // compró hace tiempo, ofrecer de nuevo
+  'GENERAL',
+] as const;
+export type FollowUpType = (typeof FOLLOWUP_TYPE)[number];
+
+export const FOLLOWUP_STATUS = ['PENDING', 'IN_PROGRESS', 'COMPLETED', 'DISMISSED'] as const;
+export type FollowUpStatus = (typeof FOLLOWUP_STATUS)[number];
+
+// Segmento del cliente (Growth Copilot, P12). Calculado por reglas RFM-lite.
 export const CUSTOMER_TYPE = [
   'NEW', // recién apareció, sin compras
   'HOT', // interactuó hace poco, todavía no compró

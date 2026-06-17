@@ -21,6 +21,7 @@ export const MODULES: NavModule[] = [
   { key: 'orders', label: 'Pedidos', href: '/orders', icon: '🧾', roles: ['PLATFORM_ADMIN', 'TENANT_OWNER', 'SELLER'] },
   { key: 'customers', label: 'Clientes', href: '/customers', icon: '👥', roles: ['PLATFORM_ADMIN', 'TENANT_OWNER', 'SELLER'] },
   { key: 'conversations', label: 'Conversaciones', href: '/conversations', icon: '💬', roles: ['PLATFORM_ADMIN', 'TENANT_OWNER', 'SELLER'] },
+  { key: 'followups', label: 'Seguimientos', href: '/followups', icon: '📌', roles: ['PLATFORM_ADMIN', 'TENANT_OWNER', 'TENANT_MANAGER', 'SELLER'] },
   { key: 'campaigns', label: 'Campañas', href: '/campaigns', icon: '📣', roles: ['PLATFORM_ADMIN', 'TENANT_OWNER'] },
   { key: 'analytics', label: 'Vistas y analíticas', href: '/analytics', icon: '📈', roles: ['PLATFORM_ADMIN', 'TENANT_OWNER'] },
   { key: 'promotions', label: 'Promotion Strategy', href: '/promotions', icon: '🎯', roles: ['PLATFORM_ADMIN', 'TENANT_OWNER'] },

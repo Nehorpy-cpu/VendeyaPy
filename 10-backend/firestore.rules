@@ -191,6 +191,15 @@ service cloud.firestore {
           && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'resolvedAt']);
       }
 
+      // Tareas de seguimiento (P14): el staff (incl. vendedor) las lee y cambia su estado.
+      // Las genera Cloud Functions; nadie las crea/borra desde el cliente.
+      match /followUpTasks/{taskId} {
+        allow read: if isTenantStaff(tenantId) || isPlatformAdmin();
+        allow create, delete: if false; // Solo Admin SDK (jobs)
+        allow update: if (isTenantStaff(tenantId) || isPlatformAdmin())
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'completedAt']);
+      }
+
       // Entregas
       match /deliveries/{deliveryId} {
         allow read: if isTenantViewer(tenantId) || isPlatformAdmin();
