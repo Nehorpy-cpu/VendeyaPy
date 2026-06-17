@@ -26,6 +26,24 @@
 | **P9** | Integración tienda PHP (consume el catálogo) — depende de acceso al código PHP | ⏳ |
 | **P10** | Hardening seguridad multi-tenant + seeders demo + criterios de aceptación | ⏳ |
 
+### 🚀 TRACK C — Growth Copilot (capa diferenciadora, DESPUÉS de P10)
+> Asistente de decisiones: "qué hacer para vender más y ganar más". Reglas + jobs que precalculan
+> (Firestore), IA solo para redactar. Ver ADR-0006 y `docs/growth-copilot-diferenciador.md`.
+> **Preparar durante P1–P10:** campos de tracking (`source/utm*/couponCode`) en pedidos/
+> conversaciones/clientes y guardar historial de mensajes — para que estos módulos tengan datos.
+
+| Fase | Nombre | Estado |
+|------|--------|--------|
+| **P11** | Tracking propio sin Meta (source/UTM/cupones/QR por campaña) | ⏳ |
+| **P12** | Score de clientes + segmentación (job + reglas) | ⏳ |
+| **P13** | Centro de Decisiones / Growth Copilot + "Acciones de hoy" (`insights`) | ⏳ |
+| **P14** | Follow-ups inteligentes (`followUpTasks`, tareas sugeridas, sin envío auto) | ⏳ |
+| **P15** | Modo Ganancia del agente (margen/prioridad/descuento + reglas de venta) | ⏳ |
+| **P16** | Auditoría del agente (`agentAudits`) | ⏳ |
+| **P17** | Simulador del agente — escenarios guardados (`agentTestCases`) | ⏳ |
+| **P18** | Biblioteca de respuestas ganadoras (`winningReplies`) | ⏳ |
+| **P19** | Onboarding rápido + plantillas por rubro | ⏳ |
+
 ### ⚡ P1 — Fundación del panel (sub-fases, de a una)
 | Sub-fase | Acción | Estado |
 |----------|--------|--------|
