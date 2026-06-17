@@ -7,7 +7,7 @@
  * Eventos como "el vendedor tomó el chat" se guardan como author 'system'.
  */
 
-import type { SessionState } from '../enums.js';
+import type { SessionState, MessageChannel } from '../enums.js';
 import type { Timestamp } from './common.types.js';
 
 /** 'in' = lo escribió el cliente; 'out' = se lo enviamos nosotros (bot o vendedor). */
@@ -23,6 +23,8 @@ export interface Message {
   direction: MessageDirection;
   author: MessageAuthor;
   text: string;
+  /** Canal por el que entró/salió (omnicanal, D2). Default 'whatsapp'. */
+  channel?: MessageChannel;
   createdAt: Timestamp;
 }
 
@@ -40,4 +42,6 @@ export interface CustomerConversationMeta {
   humanTakeover: boolean;
   /** Mensajes entrantes sin "leer" por un vendedor (para badges en la bandeja). */
   unreadForSeller: number;
+  /** Canal de la conversación (omnicanal, D2). */
+  channel?: MessageChannel;
 }

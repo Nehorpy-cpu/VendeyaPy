@@ -72,6 +72,19 @@ service cloud.firestore {
       allow write: if false; // Solo Admin SDK (job)
     }
 
+    // ---------- Globales de Meta (D2): bandeja de webhooks + índice externo ----------
+    // Las escribe SOLO Cloud Functions (Admin SDK). Lectura: solo Super Admin (debug).
+
+    match /metaWebhookInbox/{eventId} {
+      allow read: if isPlatformAdmin();
+      allow write: if false;
+    }
+
+    match /metaExternalIndex/{id} {
+      allow read: if isPlatformAdmin();
+      allow write: if false;
+    }
+
     // ---------- Usuarios admin ----------
 
     match /users/{userId} {

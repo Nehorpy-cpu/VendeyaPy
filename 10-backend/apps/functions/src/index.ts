@@ -77,3 +77,7 @@ export { devGenerateWinningReplies } from './functions/replies/devGenerateWinnin
 
 // Integración Meta (D1): conexión en modo demo (reemplaza OAuth real cuando se habilite).
 export { devMetaConnect, devMetaDisconnect } from './functions/meta/devMeta.js';
+
+// Webhooks + omnicanal (D2): endpoint de Meta (GET verify + POST) + trigger + simulador.
+export { metaWebhook, devSimulateInbound } from './functions/meta/webhookHttp.js';
+export { onWebhookInbox } from './functions/meta/onWebhookInbox.js';

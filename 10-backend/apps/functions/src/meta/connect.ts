@@ -52,6 +52,14 @@ export async function connectMetaDemo(tenantId: string, byUid?: string | null): 
       id: a.ext, tenantId, connectionId: 'main', assetType: a.type, externalId: a.ext, name: a.name, status: 'active', selected: true, createdAt: now, updatedAt: now,
     });
   }
+  // Índice global: resuelve qué empresa es cada id externo cuando llega un webhook.
+  const PLATFORM_BY_ASSET: Record<string, string> = { whatsapp_phone_number: 'whatsapp', instagram_account: 'instagram', facebook_page: 'messenger' };
+  for (const a of DEMO_ASSETS) {
+    const platform = PLATFORM_BY_ASSET[a.type];
+    if (!platform) continue;
+    const id = `${platform}_${a.ext}`;
+    batch.set(db().doc(paths.metaExternalIndexEntry(id)), { id, tenantId, connectionId: 'main', assetType: a.type, platform, externalId: a.ext, status: 'active', updatedAt: now });
+  }
   await batch.commit();
   logger.info('Conexión Meta (demo) creada', { tenantId, assets: DEMO_ASSETS.length });
 }
@@ -63,8 +71,10 @@ export async function disconnectMeta(tenantId: string): Promise<void> {
     { merge: true },
   );
   const assets = await db().collection(paths.metaAssets(tenantId)).get();
+  const idx = await db().collection(paths.metaExternalIndex()).where('tenantId', '==', tenantId).get();
   const batch = db().batch();
   assets.docs.forEach((d) => batch.delete(d.ref));
+  idx.docs.forEach((d) => batch.delete(d.ref));
   await batch.commit();
   logger.info('Conexión Meta desconectada', { tenantId });
 }

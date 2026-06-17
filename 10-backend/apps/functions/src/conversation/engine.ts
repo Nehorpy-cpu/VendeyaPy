@@ -10,7 +10,7 @@
  */
 
 import { Timestamp } from 'firebase-admin/firestore';
-import type { Session, SessionState, Product, Cart } from '@vpw/shared';
+import type { Session, SessionState, Product, Cart, MessageChannel } from '@vpw/shared';
 import { db, paths } from '../lib/firebase.js';
 import { logger } from '../lib/logger.js';
 import {
@@ -29,8 +29,10 @@ const SESSION_TTL_MS = 1000 * 60 * 60 * 24; // 24 horas
 
 export interface ConversationInput {
   tenantId: string;
-  from: string; // teléfono del cliente
+  from: string; // teléfono / id del cliente según el canal
   text: string;
+  /** Canal de entrada (omnicanal, D2). Default 'whatsapp'. */
+  channel?: MessageChannel;
 }
 
 export interface ConversationResult {
@@ -276,6 +278,7 @@ async function decidirRespuesta(
 
 export async function handleMessage(input: ConversationInput): Promise<ConversationResult> {
   const { tenantId, from, text } = input;
+  const channel: MessageChannel = input.channel ?? 'whatsapp';
   const customerId = customerIdFromPhone(from);
   if (!customerId) {
     throw new Error('Teléfono inválido (sin dígitos)');
@@ -300,6 +303,7 @@ export async function handleMessage(input: ConversationInput): Promise<Conversat
     state: existing?.state ?? null,
     humanTakeover,
     countUnread: botSilent, // si el bot no atiende, el vendedor tiene algo pendiente
+    channel,
   });
 
   // Atención humana: si un vendedor tomó el chat, el bot NO responde.
@@ -361,6 +365,7 @@ export async function handleMessage(input: ConversationInput): Promise<Conversat
       text: reply,
       state: nextState,
       humanTakeover: false,
+      channel,
     });
   }
 

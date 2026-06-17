@@ -5,7 +5,7 @@
  * Subcolecciones: tenants/{t}/metaConnections/{id} · tenants/{t}/metaAssets/{id}.
  */
 
-import type { MetaConnectionStatus, MetaAssetType } from '../enums.js';
+import type { MetaConnectionStatus, MetaAssetType, WebhookStatus } from '../enums.js';
 import type { Timestamp } from './common.types.js';
 
 export interface MetaConnection {
@@ -36,5 +36,40 @@ export interface MetaAsset {
   status: string;
   selected: boolean;
   createdAt: Timestamp;
+  updatedAt: Timestamp;
+}
+
+/**
+ * Evento crudo de webhook de Meta (colección GLOBAL metaWebhookInbox). Se guarda
+ * rápido, se responde a Meta, y se procesa en segundo plano (D2 · ADR-0009).
+ * `expiresAt` permite TTL para limpieza automática.
+ */
+export interface WebhookInboxEvent {
+  id: string;
+  platform: string; // whatsapp | instagram | messenger
+  objectType: string;
+  eventType: string;
+  externalId: string; // id externo del destinatario/asset (para resolver la empresa)
+  tenantId: string | null;
+  processingStatus: WebhookStatus;
+  payload: unknown; // payload crudo
+  errorMessage: string;
+  receivedAt: Timestamp;
+  processedAt: Timestamp | null;
+  expiresAt: Timestamp | null;
+}
+
+/**
+ * Índice GLOBAL para resolver a qué empresa pertenece un id externo de Meta
+ * (ej: whatsapp_123…, instagram_178…). id = `${platform}_${externalId}`.
+ */
+export interface MetaExternalIndexEntry {
+  id: string;
+  tenantId: string;
+  connectionId: string;
+  assetType: string;
+  platform: string;
+  externalId: string;
+  status: string;
   updatedAt: Timestamp;
 }

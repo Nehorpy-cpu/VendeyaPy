@@ -9,7 +9,7 @@
  */
 
 import { Timestamp, FieldValue } from 'firebase-admin/firestore';
-import type { Message, MessageDirection, MessageAuthor, SessionState } from '@vpw/shared';
+import type { Message, MessageDirection, MessageAuthor, SessionState, MessageChannel } from '@vpw/shared';
 import { db, paths } from '../lib/firebase.js';
 
 export interface AppendMessageInput {
@@ -24,6 +24,8 @@ export interface AppendMessageInput {
   humanTakeover?: boolean;
   /** true = suma 1 a "sin leer" del vendedor (solo cuando el bot no atiende). */
   countUnread?: boolean;
+  /** Canal del mensaje (omnicanal, D2). Default 'whatsapp'. */
+  channel?: MessageChannel;
 }
 
 function preview(text: string): string {
@@ -39,6 +41,7 @@ export async function appendMessage(
 ): Promise<Message> {
   const now = input.now ?? Timestamp.now();
   const ref = db().collection(paths.messages(tenantId, customerId)).doc();
+  const channel: MessageChannel = input.channel ?? 'whatsapp';
   const msg: Message = {
     id: ref.id,
     tenantId,
@@ -46,6 +49,7 @@ export async function appendMessage(
     direction: input.direction,
     author: input.author,
     text: input.text,
+    channel,
     createdAt: now,
   };
   await ref.set(msg);
@@ -55,6 +59,7 @@ export async function appendMessage(
     lastMessageAt: now,
     lastMessagePreview: preview(input.text),
     lastMessageDirection: input.direction,
+    channel,
   };
   if (input.state !== undefined) conv['state'] = input.state ?? null;
   if (input.humanTakeover !== undefined) conv['humanTakeover'] = input.humanTakeover;

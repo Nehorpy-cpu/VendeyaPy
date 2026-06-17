@@ -27,6 +27,8 @@ function name(c: Customer): string {
   return c.name?.trim() || c.whatsappPhone || c.id;
 }
 
+const CHANNEL_ICON: Record<string, string> = { whatsapp: '🟢', instagram: '📸', messenger: '📨' };
+
 function ConversationsInner() {
   const { tenantId, loading: companyLoading } = useActiveCompany();
   const { user } = useAuth();
@@ -133,6 +135,7 @@ function ConversationsInner() {
                     <div className="flex items-center justify-between gap-2">
                       <span className="truncate text-xs text-gray-500">{c.conversation?.lastMessagePreview ?? ''}</span>
                       <span className="flex shrink-0 items-center gap-1">
+                        {c.conversation?.channel && <span title={c.conversation.channel}>{CHANNEL_ICON[c.conversation.channel] ?? ''}</span>}
                         {c.assignedSellerId && (
                           <span title={'Asignado a ' + (c.assignedSellerName ?? 'un vendedor')} className={'rounded-full px-1.5 text-[10px] font-medium ' + (mine ? 'bg-brand-100 text-brand-700' : 'bg-gray-100 text-gray-500')}>{mine ? 'mío' : '👤'}</span>
                         )}

@@ -186,6 +186,14 @@ export const META_CONNECTION_STATUS = [
 ] as const;
 export type MetaConnectionStatus = (typeof META_CONNECTION_STATUS)[number];
 
+// Canal de un mensaje/conversación (omnicanal, D2).
+export const MESSAGE_CHANNEL = ['whatsapp', 'instagram', 'messenger'] as const;
+export type MessageChannel = (typeof MESSAGE_CHANNEL)[number];
+
+// Estado de un evento en la bandeja de webhooks (D2).
+export const WEBHOOK_STATUS = ['received', 'processing', 'processed', 'failed', 'ignored'] as const;
+export type WebhookStatus = (typeof WEBHOOK_STATUS)[number];
+
 export const META_ASSET_TYPE = [
   'business',
   'ad_account',

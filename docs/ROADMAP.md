@@ -40,7 +40,7 @@
 | Fase | Nombre | Estado |
 |------|--------|--------|
 | **D1** | Centro de Integración Meta: `metaConnections` (+ tokens seguros) + `metaAssets` + estados de conexión en el panel | ✅ Completada (modo demo) |
-| **D2** | Webhooks + omnicanal: `metaWebhookInbox` (TTL) + `metaExternalIndex` + `processMetaWebhook` + `channel` (whatsapp/instagram/messenger). Incluye ex-F1 | ⏳ |
+| **D2** | Webhooks + omnicanal: `metaWebhookInbox` (TTL) + `metaExternalIndex` + `processMetaWebhook` + `channel` (whatsapp/instagram/messenger). Incluye ex-F1 | ✅ Completada (modo demo) |
 | **D3** | Meta Ads (solo lectura): campañas/adsets/ads + `metaAdInsightsDaily` por jobs + snapshots diarios | ⏳ |
 | **D4** | Catálogo → Meta: `syncToMeta` + `syncProductToMeta` + `metaCatalogSyncLogs` | ⏳ |
 | **D5** | Atribución: anuncio → conversación → cliente → pedido → ganancia (`attributionType`/confidence) | ⏳ |
@@ -105,22 +105,23 @@
 
 ---
 
-# ✅ FASE COMPLETADA: D1 — Centro de Integración Meta (Track D arrancó)
+# ✅ FASE COMPLETADA: D2 — Webhooks + omnicanal
 
-La estructura para conectar Meta: `metaConnections` (con estados de conexión y el token SOLO por
-referencia — `tokenSecretRef`, nunca en claro, ADR-0009) + `metaAssets` (WhatsApp, IG, página, ad account,
-catálogo, pixel…). En modo DEMO (Meta bloqueado) se simula la conexión para ver/construir el panel; el
-OAuth real se enchufa cuando se habilite Meta.
+La entrada de mensajes de Meta: endpoint `metaWebhook` (GET = handshake de verificación — ex-F1 — + POST que
+guarda el evento crudo en `metaWebhookInbox` con TTL y responde rápido), un trigger `onWebhookInbox` que lo
+procesa en segundo plano resolviendo la empresa por `metaExternalIndex` y entregándolo al MISMO motor del bot,
+ahora con `channel` (WhatsApp/Instagram/Messenger) en mensajes y conversaciones.
 
-**Hecho:** enums `META_CONNECTION_STATUS`/`META_ASSET_TYPE`; tipos `MetaConnection`/`MetaAsset`;
-`connectMetaDemo`/`disconnectMeta` + `devMetaConnect`/`devMetaDisconnect`; reglas (manager+ lee, escribe
-solo Admin SDK); página `/integrations` (estado + activos + Conectar(demo)/Desconectar) + nav.
+**Hecho:** enums `MESSAGE_CHANNEL`/`WEBHOOK_STATUS`; tipos `WebhookInboxEvent`/`MetaExternalIndexEntry`;
+`Message.channel` + meta de conversación; motor con canal; `metaWebhook` + `onWebhookInbox` +
+`processWebhookEvent` + `devSimulateInbound`; `connectMetaDemo` puebla el índice; reglas globales (solo Super
+Admin lee; escribe Admin SDK); badge de canal en Conversaciones.
 
-**Verificado:** `typecheck` EXIT 0 · build de producción (18 rutas) · `verify-d1.mjs` **6/6** (conexión + 8
-activos; sin token en claro; desconectar limpia; vendedora 403 / dueña 200).
+**Verificado:** `typecheck` EXIT 0 · build de producción (18 rutas) · `verify-d2.mjs` **9/9** (handshake
+200/403; entrante de Instagram y WhatsApp → procesado + canal correcto; bandeja solo Super Admin).
 
-**🎉 Track B (P1–P9) + Track C (P12–P19) COMPLETOS.**
-**Próxima (pendiente, no iniciada):** D2 — Webhooks + omnicanal (WhatsApp/IG/Messenger; incluye ex-F1).
+**Antecede:** D1 — Centro de Integración Meta. **🎉 Track B + Track C COMPLETOS.**
+**Próxima (pendiente, no iniciada):** D3 — Meta Ads (solo lectura) + snapshots diarios.
 
 ---
 
