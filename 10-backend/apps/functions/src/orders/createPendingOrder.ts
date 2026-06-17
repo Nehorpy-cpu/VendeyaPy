@@ -98,9 +98,10 @@ export async function createPendingOrder(
     updatedAt: now,
   };
 
-  // Persistir orden visible + finanzas privadas (la orden primero, por si falla el 2º write).
-  await db().doc(paths.order(tenantId, orderId)).set(order);
+  // Finanzas privadas PRIMERO: así el trigger de stats (que escucha la orden) ya las encuentra.
+  // Un orphan de orderFinancials (si fallara el 2º write) es inofensivo: no hay orden visible.
   await db().doc(paths.orderFinancial(tenantId, orderId)).set(orderFinancials);
+  await db().doc(paths.order(tenantId, orderId)).set(order);
 
   logger.info('Pre-orden creada', { tenantId, customerId, orderId });
   return order;

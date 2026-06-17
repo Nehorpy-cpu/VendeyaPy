@@ -1,11 +1,13 @@
 'use client';
 
 import { useQuery } from '@tanstack/react-query';
+import type { TenantStatsPublic, TenantStatsPrivate } from '@vpw/shared';
 import { useAuth } from '@/lib/auth-context';
 import { ROLE_LABELS } from '@/lib/roles';
 import { useActiveCompany } from '@/lib/active-company';
-import { listOrders, listOrderFinancials, computeMetrics } from '@/lib/orders';
+import { listOrders, listOrderFinancials, computeMetrics, type DashboardMetrics } from '@/lib/orders';
 import { listProducts } from '@/lib/catalog';
+import { getStatsPublic, getStatsPrivate } from '@/lib/stats';
 
 const gs = (n: number | null | undefined) => (n == null ? '—' : '₲ ' + Math.round(n).toLocaleString('es-PY'));
 
@@ -14,17 +16,20 @@ export default function DashboardPage() {
   const { tenantId, loading: companyLoading } = useActiveCompany();
   const isSeller = claims.role === 'SELLER';
 
-  const ordersQ = useQuery({ queryKey: ['orders', tenantId], queryFn: () => listOrders(tenantId!), enabled: !!tenantId });
-  const productsQ = useQuery({ queryKey: ['products', tenantId], queryFn: () => listProducts(tenantId!), enabled: !!tenantId });
-  // Finanzas privadas: el vendedor no puede leerlas (reglas) → no se consultan para su rol.
-  const financialsQ = useQuery({
-    queryKey: ['orderFinancials', tenantId],
-    queryFn: () => listOrderFinancials(tenantId!),
-    enabled: !!tenantId && !isSeller,
-  });
+  // Camino barato (P7): leer agregados ya calculados (1-2 docs), no todos los pedidos.
+  const statsPubQ = useQuery({ queryKey: ['statsPublic', tenantId], queryFn: () => getStatsPublic(tenantId!), enabled: !!tenantId });
+  const statsPrivQ = useQuery({ queryKey: ['statsPrivate', tenantId], queryFn: () => getStatsPrivate(tenantId!), enabled: !!tenantId && !isSeller });
 
-  const ready = ordersQ.isSuccess && productsQ.isSuccess;
-  const m = ready ? computeMetrics(ordersQ.data, productsQ.data, financialsQ.data ?? {}) : null;
+  // Fallback (cálculo en el cliente) SOLO si todavía no existen los agregados.
+  const aggMissing = statsPubQ.isSuccess && !statsPubQ.data;
+  const ordersQ = useQuery({ queryKey: ['orders', tenantId], queryFn: () => listOrders(tenantId!), enabled: !!tenantId && aggMissing });
+  const productsQ = useQuery({ queryKey: ['products', tenantId], queryFn: () => listProducts(tenantId!), enabled: !!tenantId && aggMissing });
+  const financialsQ = useQuery({ queryKey: ['orderFinancials', tenantId], queryFn: () => listOrderFinancials(tenantId!), enabled: !!tenantId && aggMissing && !isSeller });
+
+  const fromAgg = statsPubQ.data ? metricsFromStats(statsPubQ.data, statsPrivQ.data ?? null) : null;
+  const fallbackReady = aggMissing && ordersQ.isSuccess && productsQ.isSuccess;
+  const m: DashboardMetrics | null = fromAgg ?? (fallbackReady ? computeMetrics(ordersQ.data, productsQ.data, financialsQ.data ?? {}) : null);
+  const updatedAt = statsPubQ.data?.updatedAt;
 
   return (
     <div className="space-y-6">
@@ -34,9 +39,10 @@ export default function DashboardPage() {
           {user?.email} · {claims.role ? ROLE_LABELS[claims.role] : '—'}
           {claims.tenantId ? ` · ${claims.tenantId}` : tenantId ? ` · ${tenantId}` : ' · Plataforma'}
         </p>
+        {updatedAt && <p className="mt-0.5 text-xs text-gray-400">📊 Métricas precalculadas · actualizado {fmtWhen(updatedAt)}</p>}
       </div>
 
-      {(companyLoading || (!!tenantId && !ready)) && <div className="text-gray-400">Cargando métricas…</div>}
+      {(companyLoading || (!!tenantId && !m)) && <div className="text-gray-400">Cargando métricas…</div>}
       {!tenantId && !companyLoading && (
         <div className="rounded-xl border border-dashed border-gray-300 bg-white p-8 text-center text-sm text-gray-500">
           Seleccioná una empresa para ver sus métricas.
@@ -134,4 +140,30 @@ function Row({ left, right }: { left: React.ReactNode; right: React.ReactNode })
 }
 function Empty({ text = 'Sin datos todavía' }: { text?: string }) {
   return <div className="text-sm text-gray-400">{text}</div>;
+}
+
+/** Mapea los agregados precalculados al formato que ya usa el dashboard. */
+function metricsFromStats(pub: TenantStatsPublic, priv: TenantStatsPrivate | null): DashboardMetrics {
+  return {
+    ventas: pub.ventas,
+    ingresos: pub.ingresos,
+    ticketPromedio: pub.ticketPromedio,
+    costos: priv?.costos ?? null,
+    ganancia: priv?.ganancia ?? null,
+    margen: priv?.margen ?? null,
+    costoIncompleto: priv?.costoIncompleto ?? false,
+    topVendidos: pub.topVendidos.map((p) => ({ productId: p.productId, name: p.name, units: p.units, profit: 0 })),
+    topRentables: (priv?.topRentables ?? []).map((p) => ({ productId: p.productId, name: p.name, units: 0, profit: p.profit })),
+    bajoStock: pub.bajoStock,
+    ventasPorVendedor: priv?.ventasPorVendedor ?? [],
+  };
+}
+
+function fmtWhen(ts: unknown): string {
+  try {
+    const d = (ts as { toDate?: () => Date } | null)?.toDate?.();
+    return d ? d.toLocaleString('es-PY', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '';
+  } catch {
+    return '';
+  }
 }

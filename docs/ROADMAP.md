@@ -21,7 +21,7 @@
 | **P4** | Configuración del agente (identidad, tono, reglas, FAQ, bancos, envíos, vendedores, control bot) + chat de prueba | ✅ Completada |
 | **P5** | Clientes + Conversaciones/Bot (historial de mensajes + handoff en UI) | ✅ Completada |
 | **P6** | 🔒 Privacidad financiera: `productFinancials`/`orderFinancials` + reglas (el vendedor no ve costo/ganancia ni desde la base) | ✅ Completada |
-| **P7** | Dashboards baratos con agregados (`stats/current`, `statsDaily`, `platformStats` por jobs) | ⏳ |
+| **P7** | Dashboards baratos con agregados (`stats/public`+`private`, `statsDaily`, `platformStats` por trigger/job) | ✅ Completada |
 | **P8** | Promotion Strategy (promos + calendario + sugerencias IA por reglas) | ⏳ |
 | **P9** | Hardening multi-tenant + asignación de vendedores + seeders demo + criterios de aceptación | ⏳ |
 
@@ -105,23 +105,23 @@
 
 ---
 
-# ✅ FASE COMPLETADA: P6 — Privacidad financiera (costo/ganancia fuera del alcance del vendedor)
+# ✅ FASE COMPLETADA: P7 — Dashboards baratos con agregados
 
-El costo y la ganancia se movieron a colecciones privadas hermanas `productFinancials` /
-`orderFinancials`, que las reglas niegan al rol `SELLER` (Firestore no oculta campos sueltos). Ver **ADR-0008**.
+Las métricas ya NO se calculan leyendo todos los pedidos en cada carga: un **trigger**
+(`onOrderWriteStats`) + un job/endpoint (`devRecomputeStats`) las **precalculan** y las guardan listas;
+la UI solo lee 1-2 docs. Separadas en público vs privado como en P6 (ADR-0006 + ADR-0008).
 
-**Hecho:** tipos `ProductFinancials`/`OrderFinancials`; `costPrice` fuera de `Product` y costo/ganancia
-fuera de `Order`/`OrderItem`/`OrderTotals`; `createPendingOrder` escribe `orderFinancials` (con snapshot
-de costo por ítem); form de producto + `load-catalog` guardan el costo en la colección privada;
-catálogo/dashboard/pedidos (owner) leen de ahí; reglas `deny SELLER`; **migración** `migrate-product-cost.mjs`
-para productos viejos.
+**Hecho:** tipos `TenantStatsPublic/Private`, `TenantStatsDaily`, `PlatformStats`; `recomputeTenantStats`
++ `recomputePlatformStats`; trigger por pedido + `devRecomputeStats`; escribe `stats/public`, `stats/private`,
+`statsDaily/{yyyymmdd}`, `platformStats/current`; reglas (público = staff, privado/diario = manager+,
+platformStats = Super Admin); el dashboard lee los agregados (con fallback al cálculo en cliente).
 
-**Verificado (4 capas):** `typecheck` EXIT 0 · build de producción (11 rutas) · datos en vivo 7/7
-(producto/pedido visibles sin costo; privados con costo) · **prueba REAL de reglas con auth 5/5**
-(vendedora 403 en `*Financials` y 200 en `products`; dueña 200 en todo). Scripts: `verify-p6.mjs`,
-`verify-p6-rules.mjs`.
+**Verificado (4 capas):** `typecheck` EXIT 0 · build de producción · datos + trigger en vivo
+(recalcula solo: pendientes ↑ al crear, ventas/ganancia ↑ al confirmar) · **reglas con auth 11/11**
+(vendedora 200 en `stats/public`, 403 en `private`/`statsDaily`; dueña 200). Script: `verify-p7.mjs`.
 
-**Próxima (pendiente, no iniciada):** P7 — Dashboards baratos con agregados.
+**Antecede:** P6 — Privacidad financiera (`productFinancials`/`orderFinancials`, ADR-0008).
+**Próxima (pendiente, no iniciada):** P8 — Promotion Strategy.
 
 ---
 

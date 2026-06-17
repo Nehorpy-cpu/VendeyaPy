@@ -65,6 +65,13 @@ service cloud.firestore {
       allow write: if isPlatformAdmin();
     }
 
+    // ---------- Métricas globales de la plataforma (solo Super Admin) ----------
+
+    match /platformStats/{doc} {
+      allow read: if isPlatformAdmin();
+      allow write: if false; // Solo Admin SDK (job)
+    }
+
     // ---------- Usuarios admin ----------
 
     match /users/{userId} {
@@ -154,6 +161,19 @@ service cloud.firestore {
       match /orderFinancials/{orderId} {
         allow read: if isTenantManager(tenantId) || isPlatformAdmin();
         allow write: if false; // Solo Admin SDK (Cloud Functions)
+      }
+
+      // Agregados de dashboard (P7): "public" lo ve el vendedor; "private" solo manager+.
+      match /stats/{doc} {
+        allow read: if isTenantManager(tenantId) || isPlatformAdmin()
+          || (doc == 'public' && isTenantStaff(tenantId));
+        allow write: if false; // Solo Admin SDK (trigger/job)
+      }
+
+      // Snapshots diarios (incluyen ganancia → privados).
+      match /statsDaily/{date} {
+        allow read: if isTenantManager(tenantId) || isPlatformAdmin();
+        allow write: if false;
       }
 
       // Entregas
