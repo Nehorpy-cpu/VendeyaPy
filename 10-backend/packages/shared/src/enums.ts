@@ -169,6 +169,10 @@ export type AuditStatus = (typeof AUDIT_STATUS)[number];
 export const AGENTTEST_STATUS = ['UNTESTED', 'OK', 'NEEDS_WORK'] as const;
 export type AgentTestStatus = (typeof AGENTTEST_STATUS)[number];
 
+// Biblioteca de respuestas ganadoras (Growth Copilot, P18).
+export const REPLY_STATUS = ['ACTIVE', 'ARCHIVED'] as const;
+export type ReplyStatus = (typeof REPLY_STATUS)[number];
+
 // Segmento del cliente (Growth Copilot, P12). Calculado por reglas RFM-lite.
 export const CUSTOMER_TYPE = [
   'NEW', // recién apareció, sin compras

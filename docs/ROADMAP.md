@@ -61,7 +61,7 @@
 | **P15** | Modo Ganancia del agente (margen/prioridad/descuento + reglas de venta) | ✅ Completada |
 | **P16** | Auditoría del agente (`agentAudits`) | ✅ Completada |
 | **P17** | Simulador del agente — escenarios guardados (`agentTestCases`) | ✅ Completada |
-| **P18** | Biblioteca de respuestas ganadoras (`winningReplies`) | ⏳ |
+| **P18** | Biblioteca de respuestas ganadoras (`winningReplies`) | ✅ Completada |
 | **P19** | Onboarding rápido + plantillas por rubro | ⏳ |
 
 ### ⚡ P1 — Fundación del panel (sub-fases, de a una)
@@ -105,21 +105,21 @@
 
 ---
 
-# ✅ FASE COMPLETADA: P17 — Simulador del agente
+# ✅ FASE COMPLETADA: P18 — Biblioteca de respuestas ganadoras
 
-Banco de escenarios de prueba guardados (`agentTestCases`): la dueña crea casos ("pide descuento",
-"algo barato", "reclamo"…) y los corre con un clic contra el bot real (`devMessage`), viendo la respuesta
-de verdad para compararla con lo esperado y marcar OK / Revisar.
+Biblioteca de respuestas reutilizables (`winningReplies`): un minero detecta las respuestas que
+aparecieron en chats que cerraron venta (con su nº de conversiones) y la dueña/manager cura las mejores;
+cualquiera del staff las copia para reutilizar. Sin IA.
 
-**Hecho:** enum `AGENTTEST_STATUS`; tipo `AgentTestCase`; `lib/simulator.ts` (CRUD + `runTestCase` que
-prima 'hola' + el mensaje y guarda `lastResult`; `seedDefaultTestCases` con 6 escenarios típicos);
-reglas (manager+ lee/escribe); página `/simulator` + ítem de menú.
+**Hecho:** enum `REPLY_STATUS`; tipo `WinningReply`; `generateWinningReplies` (mina mensajes salientes de
+chats con pedido PAID, cuenta conversiones, idempotente) + `devGenerateWinningReplies`; `lib/replies.ts`;
+página `/replies` (copiar + curar + Buscar ganadoras) + nav; reglas (staff lee/copia, manager+ cura).
 
-**Verificado:** `typecheck` EXIT 0 · build de producción (15 rutas) · `verify-p17.mjs` **5/5** (corre y
-guarda la respuesta; vendedora 403, dueña 200).
+**Verificado:** `typecheck` EXIT 0 · build de producción (16 rutas) · `verify-p18.mjs` **5/5** (mina con
+conteo de conversiones; manual; vendedora lee 200 / no edita 403).
 
-**Antecede:** P16 — Auditoría. **🎉 Track B (P1–P9) COMPLETO.**
-**Próxima (pendiente, no iniciada):** P18 — Biblioteca de respuestas ganadoras (`winningReplies`).
+**Antecede:** P17 — Simulador. **🎉 Track B (P1–P9) COMPLETO.**
+**Próxima (pendiente, no iniciada):** P19 — Onboarding rápido + plantillas por rubro (última del Track C).
 
 ---
 

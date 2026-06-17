@@ -71,3 +71,6 @@ export { devGenerateFollowups } from './functions/followups/devGenerateFollowups
 
 // Auditoría del agente (P16): hallazgos por reglas sobre el historial + catálogo.
 export { devGenerateAudits } from './functions/audits/devGenerateAudits.js';
+
+// Respuestas ganadoras (P18): mina respuestas de chats que convirtieron.
+export { devGenerateWinningReplies } from './functions/replies/devGenerateWinningReplies.js';

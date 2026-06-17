@@ -213,6 +213,13 @@ service cloud.firestore {
         allow read, write: if isTenantManager(tenantId) || isPlatformAdmin();
       }
 
+      // Respuestas ganadoras (P18): el staff las lee/copia; el manager+ las cura.
+      // Las "auto" las escribe el minero (Admin SDK).
+      match /winningReplies/{replyId} {
+        allow read: if isTenantStaff(tenantId) || isPlatformAdmin();
+        allow write: if isTenantManager(tenantId) || isPlatformAdmin();
+      }
+
       // Entregas
       match /deliveries/{deliveryId} {
         allow read: if isTenantViewer(tenantId) || isPlatformAdmin();
