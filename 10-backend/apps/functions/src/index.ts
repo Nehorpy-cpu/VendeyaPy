@@ -55,6 +55,10 @@ export { platformBillingWebhook } from './functions/billing/platformBillingWebho
 // Observabilidad (Fase 5): bitácora de auditoría de cambios de catálogo.
 export { onProductWriteAudit } from './functions/products/onProductWriteAudit.js';
 
+// Capa de acciones del panel (Hardening F2): callables autenticados (rol+tenant) que
+// reemplazan el uso de dev* desde el frontend. Los dev* quedan para emulador/staging.
+export { runTenantJob, simulateAgentMessage } from './functions/panel/panelActions.js';
+
 // Liberar chat (vendedor devuelve la conversación al bot) — endpoint de prueba (F6b).
 export { devReleaseChat } from './functions/conversation/devReleaseChat.js';
 
