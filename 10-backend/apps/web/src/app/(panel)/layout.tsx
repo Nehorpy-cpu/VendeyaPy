@@ -16,7 +16,7 @@ export default function PanelLayout({ children }: { children: React.ReactNode })
 
   if (loading) {
     return (
-      <div className="flex min-h-screen items-center justify-center text-gray-400">
+      <div className="flex min-h-screen items-center justify-center text-ink-400">
         Cargando…
       </div>
     );
@@ -24,7 +24,7 @@ export default function PanelLayout({ children }: { children: React.ReactNode })
   if (!user) return null; // redirigiendo a /login
 
   return (
-    <div className="flex min-h-screen bg-gray-50">
+    <div className="flex min-h-screen bg-ink-50/50">
       <Sidebar />
       <div className="flex min-w-0 flex-1 flex-col">
         <Header />

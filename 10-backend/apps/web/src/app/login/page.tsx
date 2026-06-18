@@ -1,10 +1,22 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { signInWithEmailAndPassword } from 'firebase/auth';
 import { firebaseAuth } from '@/lib/firebase';
 import { useAuth } from '@/lib/auth-context';
+import { Logo } from '@/components/marketing/ui';
+import { MetricCard } from '@/components/marketing/MetricCard';
+import { AnimatedChart } from '@/components/marketing/AnimatedChart';
+import {
+  ArrowRightIcon,
+  TrendingIcon,
+  BagIcon,
+  CheckIcon,
+  ChatIcon,
+  ShieldIcon,
+} from '@/components/marketing/icons';
 
 export default function LoginPage() {
   const router = useRouter();
@@ -34,66 +46,173 @@ export default function LoginPage() {
   };
 
   return (
-    <main className="flex min-h-screen items-center justify-center bg-gray-50 p-4">
-      <div className="w-full max-w-sm rounded-2xl border border-gray-200 bg-white p-8 shadow-sm">
-        <div className="mb-6 text-center">
-          <div className="text-2xl font-bold text-brand-700">AI_AFG</div>
-          <p className="mt-1 text-sm text-gray-500">Panel de administración</p>
+    <main className="flex min-h-screen bg-white">
+      {/* Panel visual (solo desktop) */}
+      <aside className="relative hidden w-1/2 flex-col justify-between overflow-hidden bg-ink-deep p-12 lg:flex xl:w-[55%]">
+        <div className="bg-grid-dark absolute inset-0 opacity-50" aria-hidden />
+        <div
+          className="absolute -right-20 top-1/3 h-72 w-72 rounded-full bg-mint-brand opacity-20 blur-3xl"
+          aria-hidden
+        />
+
+        <div className="relative">
+          <Logo tone="light" />
         </div>
 
-        <form onSubmit={onSubmit} className="space-y-4">
+        <div className="relative flex flex-col gap-7">
           <div>
-            <label htmlFor="email" className="mb-1 block text-sm font-medium text-gray-700">
-              Email
-            </label>
-            <input
-              id="email"
-              type="email"
-              autoComplete="email"
-              required
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500"
-              placeholder="tu@email.com"
-            />
-          </div>
-          <div>
-            <label htmlFor="password" className="mb-1 block text-sm font-medium text-gray-700">
-              Contraseña
-            </label>
-            <input
-              id="password"
-              type="password"
-              autoComplete="current-password"
-              required
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500"
-              placeholder="••••••••"
-            />
+            <span className="inline-flex items-center gap-2 rounded-full bg-white/10 px-3 py-1 text-xs font-semibold uppercase tracking-wider text-mint-200 ring-1 ring-inset ring-white/15">
+              <span className="h-1.5 w-1.5 rounded-full bg-current" />
+              Panel comercial
+            </span>
+            <h1 className="mt-5 max-w-md text-balance text-3xl font-bold leading-tight tracking-tight text-white">
+              Convertí conversaciones en{' '}
+              <span className="text-gradient">ganancia medible</span>
+            </h1>
+            <p className="mt-3 max-w-md text-sm leading-relaxed text-ink-200">
+              Catálogo, bot, vendedores, pedidos y campañas en un solo lugar. Entrá y mirá qué canal
+              vende y qué deja ganancia real.
+            </p>
           </div>
 
-          {error && (
-            <p className="rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">{error}</p>
-          )}
+          {/* Mini-snapshot de producto */}
+          <div className="glass-dark max-w-md rounded-2xl border border-white/10 p-4">
+            <div className="grid grid-cols-2 gap-3">
+              <MetricCard
+                tone="dark"
+                label="ROAS"
+                value="4.7x"
+                delta="+18%"
+                icon={<TrendingIcon className="h-4 w-4" />}
+              />
+              <MetricCard
+                tone="dark"
+                label="Ganancia"
+                value="₲ 3.6M"
+                delta="+9%"
+                icon={<BagIcon className="h-4 w-4" />}
+              />
+            </div>
+            <div className="mt-3 h-20">
+              <AnimatedChart
+                id="login"
+                tone="dark"
+                data={[12, 16, 14, 22, 20, 28, 26, 34]}
+                labels={['L', 'M', 'M', 'J', 'V', 'S', 'D', 'L']}
+              />
+            </div>
+          </div>
 
-          <button
-            type="submit"
-            disabled={submitting}
-            className="w-full rounded-lg bg-brand-600 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-brand-700 disabled:opacity-60"
+          <ul className="flex flex-col gap-2.5 text-sm text-ink-100">
+            {[
+              { icon: <ChatIcon className="h-4 w-4" />, text: 'WhatsApp, Instagram y Messenger en un flujo' },
+              { icon: <TrendingIcon className="h-4 w-4" />, text: 'Atribución de anuncio a ganancia real' },
+              { icon: <ShieldIcon className="h-4 w-4" />, text: 'Multiempresa y permisos por rol' },
+            ].map((f) => (
+              <li key={f.text} className="flex items-center gap-2.5">
+                <span className="grid h-6 w-6 place-items-center rounded-lg bg-mint-400/15 text-mint-300">
+                  {f.icon}
+                </span>
+                {f.text}
+              </li>
+            ))}
+          </ul>
+        </div>
+
+        <div className="relative text-xs text-ink-300">
+          © {new Date().getFullYear()} AI_AFG · Vendé por chat, medí la ganancia.
+        </div>
+      </aside>
+
+      {/* Panel de formulario */}
+      <section className="flex w-full flex-col px-5 py-8 sm:px-8 lg:w-1/2 xl:w-[45%]">
+        <div className="flex items-center justify-between">
+          <div className="lg:hidden">
+            <Logo />
+          </div>
+          <Link
+            href="/"
+            className="ml-auto inline-flex items-center gap-1 text-sm font-medium text-ink-500 transition-colors hover:text-ink-800"
           >
-            {submitting ? 'Ingresando…' : 'Ingresar'}
-          </button>
-        </form>
+            <ArrowRightIcon className="h-4 w-4 rotate-180" />
+            Volver al inicio
+          </Link>
+        </div>
 
-        {process.env['NEXT_PUBLIC_USE_EMULATORS'] === 'true' && (
-          <div className="mt-6 rounded-lg bg-gray-50 p-3 text-xs text-gray-500">
-            <p className="mb-1 font-medium text-gray-600">Usuarios de prueba (emulador):</p>
-            <p>superadmin@aiafg.com · owner@perfumeria.com · seller@perfumeria.com</p>
-            <p>Contraseña: <span className="font-mono">test1234</span></p>
+        <div className="flex flex-1 items-center justify-center">
+          <div className="w-full max-w-sm">
+            <div className="mb-8">
+              <h2 className="text-2xl font-bold tracking-tight text-ink-900">Entrá a tu panel</h2>
+              <p className="mt-1 text-sm text-ink-500">
+                Usá las credenciales de tu empresa para continuar.
+              </p>
+            </div>
+
+            <form onSubmit={onSubmit} className="space-y-4">
+              <div>
+                <label htmlFor="email" className="mb-1.5 block text-sm font-medium text-ink-700">
+                  Email
+                </label>
+                <input
+                  id="email"
+                  type="email"
+                  autoComplete="email"
+                  required
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  className="w-full rounded-xl border border-ink-200 bg-white px-3.5 py-2.5 text-sm text-ink-900 outline-none transition-colors placeholder:text-ink-300 focus:border-mint-500 focus:ring-2 focus:ring-mint-500/30"
+                  placeholder="tu@email.com"
+                />
+              </div>
+              <div>
+                <label htmlFor="password" className="mb-1.5 block text-sm font-medium text-ink-700">
+                  Contraseña
+                </label>
+                <input
+                  id="password"
+                  type="password"
+                  autoComplete="current-password"
+                  required
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  className="w-full rounded-xl border border-ink-200 bg-white px-3.5 py-2.5 text-sm text-ink-900 outline-none transition-colors placeholder:text-ink-300 focus:border-mint-500 focus:ring-2 focus:ring-mint-500/30"
+                  placeholder="••••••••"
+                />
+              </div>
+
+              {error && (
+                <p className="flex items-center gap-2 rounded-xl bg-coral-50 px-3.5 py-2.5 text-sm text-coral-700 ring-1 ring-inset ring-coral-100">
+                  {error}
+                </p>
+              )}
+
+              <button
+                type="submit"
+                disabled={submitting}
+                className="group inline-flex h-11 w-full items-center justify-center gap-2 rounded-full bg-mint-brand text-sm font-semibold text-white shadow-glow outline-none transition-all duration-200 hover:brightness-[1.05] focus-visible:ring-2 focus-visible:ring-mint-500 focus-visible:ring-offset-2 disabled:opacity-60"
+              >
+                {submitting ? 'Ingresando…' : 'Ingresar'}
+                {!submitting && (
+                  <ArrowRightIcon className="h-4 w-4 transition-transform duration-200 group-hover:translate-x-0.5" />
+                )}
+              </button>
+            </form>
+
+            {process.env['NEXT_PUBLIC_USE_EMULATORS'] === 'true' && (
+              <div className="mt-6 rounded-xl border border-ink-100 bg-ink-50/60 p-3.5 text-xs text-ink-500">
+                <p className="mb-1 flex items-center gap-1.5 font-semibold text-ink-600">
+                  <CheckIcon className="h-3.5 w-3.5 text-mint-600" />
+                  Usuarios de prueba (emulador):
+                </p>
+                <p>superadmin@aiafg.com · owner@perfumeria.com · seller@perfumeria.com</p>
+                <p className="mt-0.5">
+                  Contraseña: <span className="font-mono text-ink-700">test1234</span>
+                </p>
+              </div>
+            )}
           </div>
-        )}
-      </div>
+        </div>
+      </section>
     </main>
   );
 }

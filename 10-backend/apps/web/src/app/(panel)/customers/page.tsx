@@ -13,7 +13,7 @@ const SEGMENT_LABEL: Record<CustomerType, string> = {
 };
 const SEGMENT_STYLE: Record<CustomerType, string> = {
   NEW: 'bg-gray-100 text-gray-600', HOT: 'bg-red-100 text-red-700', BUYER: 'bg-blue-100 text-blue-700',
-  RECURRING: 'bg-brand-100 text-brand-700', PREMIUM: 'bg-purple-100 text-purple-700',
+  RECURRING: 'bg-brand-100 text-brand-700', PREMIUM: 'bg-ink-100 text-ink-700',
   DORMANT: 'bg-amber-100 text-amber-700', LOST: 'bg-gray-100 text-gray-400',
 };
 

@@ -102,6 +102,8 @@ const config: Config = {
         'float-slow': 'float-slow 9s ease-in-out infinite',
         'pulse-soft': 'pulse-soft 2.4s ease-in-out infinite',
         shimmer: 'shimmer 2.5s linear infinite',
+        // Registrada como animación con nombre para que Tailwind emita @keyframes draw.
+        draw: 'draw 1.8s cubic-bezier(0.16, 1, 0.3, 1) forwards',
       },
     },
   },
