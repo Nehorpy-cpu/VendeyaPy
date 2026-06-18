@@ -54,7 +54,7 @@
 
 | Fase | Nombre | Estado |
 |------|--------|--------|
-| **P11** | Tracking propio sin Meta (source/UTM/cupones/QR por campaña) | ⏳ (se hace junto al Track D / atribución) |
+| **P11** | Tracking propio sin Meta (source/UTM/cupones/QR por campaña) | ✅ Completada — **🎉 24/24** |
 | **P12** | Score de clientes + segmentación (job + reglas) | ✅ Completada |
 | **P13** | Centro de Decisiones / Growth Copilot + "Acciones de hoy" (`insights`) | ✅ Completada |
 | **P14** | Follow-ups inteligentes (`followUpTasks`, tareas sugeridas, sin envío auto) | ✅ Completada |
@@ -102,6 +102,23 @@
 > **Nota de hosting:** arquitectura híbrida — tienda **PHP+MySQL a medida** (`arfagi_php`) en
 > Hostinger (fuente del catálogo) + backend del bot en Firebase. NO es WooCommerce (ver ADR-0004).
 > Nueva sub-fase a insertar: sincronización MySQL `products` → Firestore (export CSV / endpoint JSON).
+
+---
+
+# ✅ FASE COMPLETADA: P11 — Tracking propio sin Meta · 🎉🎉 PROYECTO COMPLETO (24/24)
+
+Atribución sin depender de Meta: la dueña crea códigos (cupón/QR/link); el bot detecta el código en el
+mensaje y atribuye la venta a esa promo propia (first-touch: no pisa la atribución de Meta). Rollup de
+ventas/ingresos/ganancia por código en `/tracking`.
+
+**Hecho:** enum `TRACKING_TYPE`; tipo `TrackingSource`; `captureTrackingCode` (en el motor) +
+`computeTrackingAttribution` + `devComputeTracking`; reglas (staff lee, manager+ gestiona); página
+`/tracking` (CRUD de códigos + atribución por código) + nav; `seed-demo` con códigos demo.
+
+**Verificado:** `typecheck` EXIT 0 · build de producción (20 rutas) · `verify-p11.mjs` **5/5** (el bot capta el
+código; first-touch; rollup correcto; vendedora lee 200 / no edita 403).
+
+**🎉🎉 Con P11 se cierran las 24 fases: Track B (panel) + Track C (copiloto) + Track D (Meta) COMPLETOS.**
 
 ---
 

@@ -93,3 +93,6 @@ export { devComputeAttribution } from './functions/meta/devComputeAttribution.js
 
 // businessEvents + Conversions API (D6): eventos del negocio → envío server-side a Meta.
 export { devProcessConversions } from './functions/events/devProcessConversions.js';
+
+// Tracking propio sin Meta (P11): atribución por código/cupón → rollup por fuente.
+export { devComputeTracking } from './functions/tracking/devComputeTracking.js';

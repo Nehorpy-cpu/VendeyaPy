@@ -258,6 +258,12 @@ service cloud.firestore {
       match /businessEvents/{id} { allow read: if isTenantManager(tenantId) || isPlatformAdmin(); allow write: if false; }
       match /metaConversionEvents/{id} { allow read: if isTenantManager(tenantId) || isPlatformAdmin(); allow write: if false; }
 
+      // Tracking propio (P11): el staff ve los códigos (para informar); el manager+ los gestiona.
+      match /trackingSources/{id} {
+        allow read: if isTenantStaff(tenantId) || isTenantViewer(tenantId) || isPlatformAdmin();
+        allow write: if isTenantManager(tenantId) || isPlatformAdmin();
+      }
+
       // Entregas
       match /deliveries/{deliveryId} {
         allow read: if isTenantViewer(tenantId) || isPlatformAdmin();

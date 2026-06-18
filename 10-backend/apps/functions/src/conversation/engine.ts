@@ -24,6 +24,7 @@ import { getAgentConfig } from './agentConfig.js';
 import { appendMessage } from './messages.js';
 import { createPendingOrder } from '../orders/createPendingOrder.js';
 import { getCheckoutConfig, formatTransferInstructions } from '../orders/checkoutConfig.js';
+import { captureTrackingCode } from '../tracking/tracking.js';
 
 const SESSION_TTL_MS = 1000 * 60 * 60 * 24; // 24 horas
 
@@ -305,6 +306,9 @@ export async function handleMessage(input: ConversationInput): Promise<Conversat
     countUnread: botSilent, // si el bot no atiende, el vendedor tiene algo pendiente
     channel,
   });
+
+  // Tracking propio (P11): si el mensaje trae un código/cupón, atribuir la venta a esa fuente.
+  try { await captureTrackingCode(tenantId, customerId, text); } catch { /* no crítico */ }
 
   // Atención humana: si un vendedor tomó el chat, el bot NO responde.
   if (humanTakeover) {

@@ -194,6 +194,10 @@ export type MessageChannel = (typeof MESSAGE_CHANNEL)[number];
 export const WEBHOOK_STATUS = ['received', 'processing', 'processed', 'failed', 'ignored'] as const;
 export type WebhookStatus = (typeof WEBHOOK_STATUS)[number];
 
+// Tracking propio sin Meta (P11): tipo de fuente de una venta atribuida a una promo propia.
+export const TRACKING_TYPE = ['coupon', 'qr', 'link'] as const;
+export type TrackingType = (typeof TRACKING_TYPE)[number];
+
 // Capa de eventos internos del negocio + Conversions API de Meta (D6).
 export const BUSINESS_EVENT_NAME = ['ViewContent', 'Lead', 'Contact', 'AddToCart', 'InitiateCheckout', 'Purchase'] as const;
 export type BusinessEventName = (typeof BUSINESS_EVENT_NAME)[number];

@@ -33,7 +33,7 @@ async function wipe(sub) {
     await d.ref.delete();
   }
 }
-for (const sub of ['customers', 'orders', 'orderFinancials', 'insights', 'followUpTasks']) await wipe(sub);
+for (const sub of ['customers', 'orders', 'orderFinancials', 'insights', 'followUpTasks', 'businessEvents', 'metaConversionEvents', 'trackingSources']) await wipe(sub);
 
 const conv = (preview, daysOld, opts = {}) => ({
   lastMessageAt: daysAgo(daysOld), lastMessagePreview: preview, lastMessageDirection: 'in',
@@ -74,9 +74,14 @@ async function order(id, customerId, status, items, when, campaignId) {
 }
 await order('demo-o1', '595981111111', 'PAID', [{ productId: 'good-girl', productName: 'Good Girl', quantity: 1, subtotal: 565000, cost: 300000 }], daysAgo(3), 'camp-1');
 await order('demo-o2', '595981111111', 'PAID', [{ productId: 'yara', productName: 'Yara', quantity: 1, subtotal: 180000, cost: 95000 }], daysAgo(1), 'camp-1');
-await order('demo-o3', '595984444444', 'PAID', [{ productId: 'yara', productName: 'Yara', quantity: 1, subtotal: 180000, cost: 95000 }], daysAgo(40), 'camp-2');
+await order('demo-o3', '595984444444', 'PAID', [{ productId: 'yara', productName: 'Yara', quantity: 1, subtotal: 180000, cost: 95000 }], daysAgo(40), 'track-verano');
 await order('demo-o4', '595985555555', 'PENDING_PAYMENT', [{ productId: 'la-vie', productName: 'La Vie Est Belle', quantity: 1, subtotal: 650000, cost: 360000 }], now);
 await order('demo-o5', '595983333333', 'PENDING_VERIFICATION', [{ productId: 'good-girl', productName: 'Good Girl', quantity: 1, subtotal: 565000, cost: 300000 }], now);
+
+// Códigos de tracking propio (P11)
+for (const [id, name, code, type] of [['track-verano', 'Promo Verano', 'VERANO20', 'coupon'], ['track-flyer', 'Flyer del Mercado', 'FLYER', 'qr']]) {
+  await db.doc(`tenants/${T}/trackingSources/${id}`).set({ id, tenantId: T, name, code, type, active: true, createdAt: now, updatedAt: now });
+}
 
 // Recalcular todo el copiloto
 const post = (p) => fetch(`${BASE}/${p}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tenantId: T }) });
@@ -88,6 +93,7 @@ await post('devMetaConnect');
 await post('devSyncMetaAds');
 await post('devSyncCatalogToMeta');
 await post('devComputeAttribution');
+await post('devComputeTracking');
 await post('devProcessConversions');
 
 console.log('✅ Demo lista: 5 clientes, 5 pedidos (3 ventas atribuidas), copiloto + Meta (anuncios/atribución) recalculados.');
