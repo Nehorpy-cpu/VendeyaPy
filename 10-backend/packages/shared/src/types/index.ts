@@ -20,6 +20,7 @@ export * from './agenttest.types.js';
 export * from './winningreply.types.js';
 export * from './attribution.types.js';
 export * from './meta.types.js';
+export * from './events.types.js';
 export * from './delivery.types.js';
 export * from './payment.types.js';
 export * from './invoice.types.js';

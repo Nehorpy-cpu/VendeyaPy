@@ -194,6 +194,16 @@ export type MessageChannel = (typeof MESSAGE_CHANNEL)[number];
 export const WEBHOOK_STATUS = ['received', 'processing', 'processed', 'failed', 'ignored'] as const;
 export type WebhookStatus = (typeof WEBHOOK_STATUS)[number];
 
+// Capa de eventos internos del negocio + Conversions API de Meta (D6).
+export const BUSINESS_EVENT_NAME = ['ViewContent', 'Lead', 'Contact', 'AddToCart', 'InitiateCheckout', 'Purchase'] as const;
+export type BusinessEventName = (typeof BUSINESS_EVENT_NAME)[number];
+
+export const EVENT_SOURCE = ['store', 'whatsapp', 'instagram', 'messenger', 'manual', 'bot'] as const;
+export type EventSource = (typeof EVENT_SOURCE)[number];
+
+export const CONVERSION_SEND_STATUS = ['pending', 'sent', 'failed', 'skipped'] as const;
+export type ConversionSendStatus = (typeof CONVERSION_SEND_STATUS)[number];
+
 // Tipo de atribución de una venta a una campaña (D5).
 export const ATTRIBUTION_TYPE = ['direct_meta', 'utm_match', 'coupon_match', 'manual', 'unknown'] as const;
 export type AttributionType = (typeof ATTRIBUTION_TYPE)[number];

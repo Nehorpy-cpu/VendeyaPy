@@ -14,6 +14,7 @@ import { newPaymentId } from '@vpw/shared';
 import type { Order } from '@vpw/shared';
 import { db, paths } from '../lib/firebase.js';
 import { logger } from '../lib/logger.js';
+import { recordBusinessEvent } from '../events/businessEvents.js';
 
 export interface ConfirmPaymentResult {
   ok: boolean;
@@ -59,6 +60,16 @@ export async function confirmPayment(
       // NO se toca humanTakeover: el vendedor sigue en control hasta que libera el chat
       // explícitamente (ver releaseToBot). Así no interrumpe el cierre de la venta.
     });
+
+  // Evento de negocio Purchase (D6) — alimenta atribución + Conversions API. id idempotente.
+  try {
+    await recordBusinessEvent(tenantId, {
+      id: `purchase-${orderId}`, eventName: 'Purchase', eventSource: order.channel === 'INSTAGRAM' ? 'instagram' : order.channel === 'FACEBOOK' ? 'messenger' : 'whatsapp',
+      customerId: order.customerId, conversationId: order.customerId, orderId, value: order.totals.total, currency: order.totals.currency, campaignId: order.attribution?.campaignId ?? null, occurredAt: now,
+    });
+  } catch (e) {
+    logger.error('No se pudo registrar el evento Purchase', e, { tenantId, orderId });
+  }
 
   logger.info('Pago confirmado', { tenantId, customerId: order.customerId, orderId });
   return {

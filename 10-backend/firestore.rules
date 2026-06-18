@@ -254,6 +254,10 @@ service cloud.firestore {
       // Logs de sincronización del catálogo a Meta (D4): manager+ lee; escribe la sync.
       match /metaCatalogSyncLogs/{id} { allow read: if isTenantManager(tenantId) || isPlatformAdmin(); allow write: if false; }
 
+      // Eventos del negocio + Conversions API (D6): manager+ lee; escribe Cloud Functions.
+      match /businessEvents/{id} { allow read: if isTenantManager(tenantId) || isPlatformAdmin(); allow write: if false; }
+      match /metaConversionEvents/{id} { allow read: if isTenantManager(tenantId) || isPlatformAdmin(); allow write: if false; }
+
       // Entregas
       match /deliveries/{deliveryId} {
         allow read: if isTenantViewer(tenantId) || isPlatformAdmin();

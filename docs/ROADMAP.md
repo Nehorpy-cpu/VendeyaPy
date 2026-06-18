@@ -44,7 +44,7 @@
 | **D3** | Meta Ads (solo lectura): campañas/adsets/ads + `metaAdInsightsDaily` por jobs + snapshots diarios | ✅ Completada (modo demo) |
 | **D4** | Catálogo → Meta: `syncToMeta` + `syncProductToMeta` + `metaCatalogSyncLogs` | ✅ Completada (modo demo) |
 | **D5** | Atribución: anuncio → conversación → cliente → pedido → ganancia (`attributionType`/confidence) | ✅ Completada (modo demo) |
-| **D6** | `businessEvents` + Conversions API (`metaConversionEvents`, `sendConversionEventToMeta`) | ⏳ |
+| **D6** | `businessEvents` + Conversions API (`metaConversionEvents`, `sendConversionEventToMeta`) | ✅ Completada (modo demo) |
 
 ### 🚀 TRACK C — Growth Copilot (capa diferenciadora, DESPUÉS del núcleo del panel)
 > Asistente de decisiones: "qué hacer para vender más y ganar más". Reglas + jobs que precalculan
@@ -102,6 +102,25 @@
 > **Nota de hosting:** arquitectura híbrida — tienda **PHP+MySQL a medida** (`arfagi_php`) en
 > Hostinger (fuente del catálogo) + backend del bot en Firebase. NO es WooCommerce (ver ADR-0004).
 > Nueva sub-fase a insertar: sincronización MySQL `products` → Firestore (export CSV / endpoint JSON).
+
+---
+
+# ✅ FASE COMPLETADA: D6 — businessEvents + Conversions API · 🎉 BLOQUE META (D1–D6) COMPLETO
+
+Capa de eventos del negocio (`businessEvents`: Purchase, etc., agnóstica de canal) que se envían a la
+**Conversions API de Meta** (`metaConversionEvents`, server-side, sin depender de cookies). Confirmar un pago
+registra el Purchase en vivo (`confirmPayment`); un job hace el backfill desde pedidos PAID + el envío.
+
+**Hecho:** enums `BUSINESS_EVENT_NAME`/`EVENT_SOURCE`/`CONVERSION_SEND_STATUS`; tipos `BusinessEvent` +
+`MetaConversionEvent`; `recordBusinessEvent` (en `confirmPayment`) + `backfillBusinessEvents` +
+`sendConversionEvents` (demo: 'sent' con pixel; sin conexión 'skipped') + `devProcessConversions`; reglas
+(manager+ lee); sección "Conversions API" en `/integrations`; `seed-demo` procesa los eventos.
+
+**Verificado:** `typecheck` EXIT 0 · build de producción (19 rutas) · `verify-d6.mjs` **6/6** (evento + envío
+con pixel; idempotente; Purchase en vivo al confirmar pago; vendedora 403 / dueña 200).
+
+**🎉 Con D6, el bloque Meta (Track D, D1–D6) queda COMPLETO.** Solo resta **P11** (tracking propio con
+cupones/QR, sin Meta) para cerrar las 24 fases.
 
 ---
 

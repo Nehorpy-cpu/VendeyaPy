@@ -88,6 +88,7 @@ await post('devMetaConnect');
 await post('devSyncMetaAds');
 await post('devSyncCatalogToMeta');
 await post('devComputeAttribution');
+await post('devProcessConversions');
 
 console.log('✅ Demo lista: 5 clientes, 5 pedidos (3 ventas atribuidas), copiloto + Meta (anuncios/atribución) recalculados.');
 console.log('   Entrá a /dashboard, /decisions, /followups, /customers, /promotions, /ads, /integrations.');

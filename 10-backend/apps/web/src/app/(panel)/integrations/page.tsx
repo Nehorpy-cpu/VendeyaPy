@@ -5,7 +5,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import type { MetaConnectionStatus, MetaAssetType } from '@vpw/shared';
 import { useActiveCompany } from '@/lib/active-company';
 import { useAuth } from '@/lib/auth-context';
-import { getMetaConnection, listMetaAssets, connectMetaDemo, disconnectMeta } from '@/lib/integrations';
+import { getMetaConnection, listMetaAssets, connectMetaDemo, disconnectMeta, listConversionEvents, processConversions } from '@/lib/integrations';
 
 const STATUS: Record<MetaConnectionStatus, { label: string; cls: string }> = {
   not_connected: { label: 'Sin conectar', cls: 'bg-gray-100 text-gray-600' },
@@ -38,6 +38,8 @@ export default function IntegrationsPage() {
   const invalidate = () => { qc.invalidateQueries({ queryKey: ['metaConnection', tenantId] }); qc.invalidateQueries({ queryKey: ['metaAssets', tenantId] }); };
   const connectMut = useMutation({ mutationFn: () => connectMetaDemo(tenantId!, user?.uid ?? ''), onSuccess: invalidate });
   const disconnectMut = useMutation({ mutationFn: () => disconnectMeta(tenantId!), onSuccess: invalidate });
+  const convQ = useQuery({ queryKey: ['conversionEvents', tenantId], queryFn: () => listConversionEvents(tenantId!), enabled: !!tenantId });
+  const procMut = useMutation({ mutationFn: () => processConversions(tenantId!), onSuccess: () => qc.invalidateQueries({ queryKey: ['conversionEvents', tenantId] }) });
 
   const conn = connQ.data ?? null;
   const connected = !!conn && conn.status !== 'not_connected';
@@ -100,6 +102,20 @@ export default function IntegrationsPage() {
               </div>
             ))}
           </div>
+        </div>
+      )}
+
+      {/* Conversions API (D6) */}
+      {connected && (
+        <div className="rounded-xl border border-gray-200 bg-white p-5">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <div className="text-lg font-semibold text-gray-900">Conversions API</div>
+              <div className="mt-1 text-sm text-gray-500">{convQ.data?.filter((e) => e.sendStatus === 'sent').length ?? 0} eventos enviados a Meta (server-side)</div>
+            </div>
+            <button onClick={() => procMut.mutate()} disabled={procMut.isPending} className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-60">{procMut.isPending ? 'Procesando…' : 'Procesar eventos (demo)'}</button>
+          </div>
+          <p className="mt-2 text-xs text-gray-400">Manda las ventas y conversiones directo a Meta (sin depender de cookies del navegador), para que los anuncios optimicen mejor y midan las ventas reales.</p>
         </div>
       )}
     </div>
