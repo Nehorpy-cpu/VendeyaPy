@@ -109,18 +109,56 @@ Variables: `STRIPE_WEBHOOK_SECRET` (sin esto el webhook responde **401**, fail-c
 > Bancard se implementa después con el MISMO patrón (firma → idempotente → confirmPayment).
 > `verifyBancardSignature` (en `middleware/webhookSignature.ts`) queda como TODO hasta tener specs.
 
-## 3. Meta OAuth — token por referencia
+## 3. Conexión real de Meta por tenant (Hardening F4B)
 
-`meta/oauth.ts` (`connectMetaReal`): intercambia el `code` del Embedded Signup por el token
-y lo guarda con `SecretStore` → sólo la **referencia** (`secret://...`) va a `MetaConnection.tokenSecretRef`.
-El token NUNCA se guarda en claro.
+Flujo **Embedded Signup** vía **callables autenticados** (no hay endpoint público de redirect).
+Autorización ESTRICTA (`meta/authz.ts`): solo **PLATFORM_ADMIN** (con tenant objetivo) o
+**TENANT_OWNER** de su empresa. Manager/viewer/seller: denegado.
+
+1. **`startMetaConnect`** → emite un **nonce** de un solo uso (`metaOAuthStates/{nonce}`,
+   atado a `tenant`+`uid`, TTL 10 min, Admin-only). El frontend lanza el JS SDK de ES.
+2. **`connectMeta`** ({nonce, code, wabaId?, phoneNumberId?, businessId?}) → consume el nonce
+   (transacción, una sola vez), y orquesta (`meta/connectFlow.ts` `runMetaConnect`):
+   - **exchange** del `code` (token de System User de larga duración) — `MetaGraphClient`.
+   - **`debug_token`**: valida `is_valid`, **scopes** (`whatsapp_business_messaging` +
+     `whatsapp_business_management`), **WABA ids** (de `granular_scopes`) y `expires_at` →
+     `tokenExpiresAt`.
+   - guarda el token en **SecretStore** con **naming seguro** `metaTokenSecretName(tenantId)`
+     = `meta-token-{tenant}` (sin `/`; el bug de F4A queda corregido y `SecretStore.set`
+     ahora **rechaza** nombres inválidos).
+   - **discovery** (`meta/discovery.ts`): `GET /{waba}/phone_numbers` → escribe `metaAssets`
+     (business, WABA, cada `whatsapp_phone_number`) + `metaExternalIndex/whatsapp_{phone_number_id}`.
+   - `subscribed_apps` (best-effort) + **preflight**.
+   - **Falla seguro** (sin guardar token, con estado claro): `token_invalid`→`expired`,
+     scopes faltantes→`permission_missing`, sin WABA/sin número→`error`.
+3. **`verifyMetaChannel`** → preflight on-demand (`meta/preflight.ts`): `debug_token` +
+   `GET /{phone_number_id}` (NO registra el número), actualiza `status`
+   (`active`/`expired`/`permission_missing`/`error`) + `lastVerifiedAt`.
+4. **`selectMetaPhoneNumber`** → fija el `phone_number_id` activo (lo consume el envío de F4A).
+5. **`metaDisconnect`** → `disconnectMeta`: `not_connected` + borra `metaAssets` +
+   `metaExternalIndex` del tenant + **el secreto** (`SecretStore.remove`).
+
+**Seguridad:** el token/`code`/app secret **nunca** se loguean; el token va **solo** a
+SecretStore (cifrado AES-256-GCM; `secrets` con `read,write:false`). `MetaConnection`/`metaAssets`
+con `write:false` desde cliente (solo Admin SDK). Cierra el lazo con F4A: tras conectar,
+`getWhatsAppClient(tenantId)` resuelve el número + token reales del tenant.
+
+**Testabilidad:** todas las llamadas a Graph pasan por `MetaGraphClient` (inyectable). En
+emulador/tests se usa `FixtureMetaGraphClient` (lee `metaTestFixtures/graph`) → **nunca** se
+llama a `graph.facebook.com`.
 
 `lib/secretStore.ts` (`FirestoreSecretStore`): cifra con AES-256-GCM (`lib/crypto`) en la
 colección global `secrets` (Admin SDK only). Punto de extensión a **Google Secret Manager**
-bajo `USE_SECRET_MANAGER` sin tocar a los que llaman.
+bajo `USE_SECRET_MANAGER`.
 
-Variables: `META_APP_ID`, `META_APP_SECRET`, `META_OAUTH_REDIRECT_URI`. Requiere Meta
-habilitado (App Review/verificación — ADR-0010). En demo se usa `connectMetaDemo`.
+Variables: `META_APP_ID`, `META_APP_SECRET`, `META_OAUTH_REDIRECT_URI` (el app access token
+del `debug_token` es `{META_APP_ID}|{META_APP_SECRET}`). Requiere Meta habilitado (App
+Review/verificación — ADR-0010). En demo se sigue usando `connectMetaDemo` (intacto).
+
+**Pendiente / fuera de F4B:** frontend del Embedded Signup (el contrato de callables queda
+listo, sin cablear `apps/web`); registro del número (`POST /{phone_number_id}/register` con
+PIN — acción operativa/F4C, no se hace automático); **refresh automático** de tokens (F4B solo
+detecta `expired`/`revoked` y pide reconexión); envío de plantillas/media; Google Secret Manager.
 
 ## Resumen de variables (Functions, staging/prod → Secret Manager)
 

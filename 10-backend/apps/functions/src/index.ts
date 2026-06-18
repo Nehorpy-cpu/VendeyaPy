@@ -93,6 +93,10 @@ export { devGenerateWinningReplies } from './functions/replies/devGenerateWinnin
 // Integración Meta (D1): conexión en modo demo (reemplaza OAuth real cuando se habilite).
 export { devMetaConnect, devMetaDisconnect } from './functions/meta/devMeta.js';
 
+// Conexión REAL de Meta por tenant (Fase 4B): callables autenticados (owner/admin) del
+// Embedded Signup — nonce + intercambio de code + discovery + preflight. No cablea frontend.
+export { startMetaConnect, connectMeta, verifyMetaChannel, selectMetaPhoneNumber, metaDisconnect } from './functions/meta/metaConnect.js';
+
 // Webhooks + omnicanal (D2): endpoint de Meta (GET verify + POST) + trigger + simulador.
 export { metaWebhook, devSimulateInbound } from './functions/meta/webhookHttp.js';
 export { onWebhookInbox } from './functions/meta/onWebhookInbox.js';

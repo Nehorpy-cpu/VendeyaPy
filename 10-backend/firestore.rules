@@ -98,6 +98,13 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
+    // ---------- Nonces del OAuth de Meta (Fase 4B): solo Cloud Functions (Admin SDK) ----------
+    // Estado de un solo uso del Embedded Signup (atado a tenant+uid, TTL corto). Nadie lo
+    // lee/escribe desde el cliente.
+    match /metaOAuthStates/{id} {
+      allow read, write: if false;
+    }
+
     // ---------- Idempotencia de billing de plataforma (Fase 4): solo Cloud Functions ----------
     match /platformBillingEvents/{eventId} {
       allow read: if isPlatformAdmin();

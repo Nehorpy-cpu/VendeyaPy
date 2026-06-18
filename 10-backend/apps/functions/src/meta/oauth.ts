@@ -12,6 +12,7 @@ import { Timestamp } from 'firebase-admin/firestore';
 import type { MetaConnection } from '@vpw/shared';
 import { db, paths } from '../lib/firebase.js';
 import { getSecretStore } from '../lib/secretStore.js';
+import { metaTokenSecretName } from './secretName.js';
 import { logger } from '../lib/logger.js';
 
 const GRAPH = 'https://graph.facebook.com/v19.0';
@@ -48,7 +49,8 @@ export async function exchangeCodeForToken(code: string): Promise<MetaTokenResul
  */
 export async function connectMetaReal(tenantId: string, code: string, byUid?: string | null): Promise<void> {
   const token = await exchangeCodeForToken(code);
-  const ref = await getSecretStore().set(`meta-token/${tenantId}`, token.accessToken);
+  // Naming SEGURO (Fase 4B): sin '/', válido para SecretStore (antes rompía la ruta del doc).
+  const ref = await getSecretStore().set(metaTokenSecretName(tenantId), token.accessToken);
   const now = Timestamp.now();
   const conn: Partial<MetaConnection> = {
     id: 'main',

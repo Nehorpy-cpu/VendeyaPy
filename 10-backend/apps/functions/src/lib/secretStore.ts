@@ -23,9 +23,15 @@ export interface SecretStore {
 }
 
 const PREFIX = 'secret://firestore/';
+// El name se mapea a secrets/{name} (doc de 2 segmentos): NO puede contener '/' u otros
+// caracteres que rompan la ruta. (Bug histórico de Fase 4A: 'meta-token/${tenantId}'.)
+const VALID_SECRET_NAME = /^[A-Za-z0-9._-]+$/;
 
 export class FirestoreSecretStore implements SecretStore {
   async set(name: string, value: string): Promise<string> {
+    if (!VALID_SECRET_NAME.test(name)) {
+      throw new Error(`SecretStore: nombre de secreto inválido "${name}" (solo [A-Za-z0-9._-], sin '/').`);
+    }
     await db()
       .doc(paths.secret(name))
       .set({ name, ciphertext: encrypt(value), updatedAt: Timestamp.now() });
