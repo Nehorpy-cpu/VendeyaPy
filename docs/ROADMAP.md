@@ -43,7 +43,7 @@
 | **D2** | Webhooks + omnicanal: `metaWebhookInbox` (TTL) + `metaExternalIndex` + `processMetaWebhook` + `channel` (whatsapp/instagram/messenger). Incluye ex-F1 | ✅ Completada (modo demo) |
 | **D3** | Meta Ads (solo lectura): campañas/adsets/ads + `metaAdInsightsDaily` por jobs + snapshots diarios | ✅ Completada (modo demo) |
 | **D4** | Catálogo → Meta: `syncToMeta` + `syncProductToMeta` + `metaCatalogSyncLogs` | ✅ Completada (modo demo) |
-| **D5** | Atribución: anuncio → conversación → cliente → pedido → ganancia (`attributionType`/confidence) | ⏳ |
+| **D5** | Atribución: anuncio → conversación → cliente → pedido → ganancia (`attributionType`/confidence) | ✅ Completada (modo demo) |
 | **D6** | `businessEvents` + Conversions API (`metaConversionEvents`, `sendConversionEventToMeta`) | ⏳ |
 
 ### 🚀 TRACK C — Growth Copilot (capa diferenciadora, DESPUÉS del núcleo del panel)
@@ -102,6 +102,24 @@
 > **Nota de hosting:** arquitectura híbrida — tienda **PHP+MySQL a medida** (`arfagi_php`) en
 > Hostinger (fuente del catálogo) + backend del bot en Firebase. NO es WooCommerce (ver ADR-0004).
 > Nueva sub-fase a insertar: sincronización MySQL `products` → Firestore (export CSV / endpoint JSON).
+
+---
+
+# ✅ FASE COMPLETADA: D5 — Atribución (el diferencial)
+
+El corazón del proyecto: conecta **anuncio → conversación → pedido → ganancia real**. El webhook captura de
+qué campaña vino el cliente (`Customer.attribution`), el pedido la hereda (`Order.attribution`), y
+`computeAttribution` agrega por campaña las ventas/ingresos/ganancia + ROAS. La página `/ads` muestra "qué
+campaña deja plata de verdad": gasto vs. ingresos, **ganancia neta** y ROAS.
+
+**Hecho:** enum `ATTRIBUTION_TYPE`; tipos `Attribution` + `CampaignAttribution`; captura en `processWebhookEvent`
+(adReferral) + copia en `createPendingOrder`; `computeAttribution` + `devComputeAttribution`; `/ads` con
+columnas Ventas/Ingresos/Ganancia/ROAS + ganancia neta; `seed-demo` atribuye pedidos a campañas.
+
+**Verificado:** `typecheck` EXIT 0 · build de producción (19 rutas) · `verify-d5.mjs` **5/5** (rollup correcto:
+ROAS 5.56×, ganancia ₲200.000 atribuida; el webhook captura la campaña del cliente).
+
+**Próxima (pendiente, no iniciada):** D6 — businessEvents + Conversions API (última del bloque Meta).
 
 ---
 

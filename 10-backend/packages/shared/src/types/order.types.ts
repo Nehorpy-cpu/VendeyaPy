@@ -5,6 +5,7 @@
 
 import type { OrderStatus, PaymentMethod, Channel, Currency } from '../enums.js';
 import type { Address, Timestamp } from './common.types.js';
+import type { Attribution } from './attribution.types.js';
 
 export interface OrderItem {
   itemId: string;
@@ -57,6 +58,8 @@ export interface Order {
   sellerId: string | null;
   /** Origen del pedido para tracking (ej: 'whatsapp-bot', campaña). Prep Track C. */
   source: string | null;
+  /** Atribución a la campaña que trajo al cliente (D5). */
+  attribution?: Attribution;
   notes: string;
   createdAt: Timestamp;
   updatedAt: Timestamp;

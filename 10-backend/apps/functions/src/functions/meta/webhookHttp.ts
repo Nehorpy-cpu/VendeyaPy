@@ -51,10 +51,11 @@ export const metaWebhook = onRequest({ region: 'us-central1', cors: true }, asyn
 
 export const devSimulateInbound = onRequest({ region: 'us-central1', cors: true }, async (req, res) => {
   if (req.method !== 'POST') { res.status(405).json({ ok: false, error: 'Usá POST' }); return; }
-  const b = (req.body ?? {}) as { platform?: string; externalId?: string; from?: string; text?: string };
+  const b = (req.body ?? {}) as { platform?: string; externalId?: string; from?: string; text?: string; adReferral?: unknown };
   try {
     const ref = db().collection(paths.metaWebhookInbox()).doc();
-    await ref.set(inboxEvent(ref.id, b.platform ?? 'whatsapp', b.externalId ?? 'wa-595', { from: b.from, text: b.text }));
+    const payload = { from: b.from, text: b.text, ...(b.adReferral ? { adReferral: b.adReferral } : {}) };
+    await ref.set(inboxEvent(ref.id, b.platform ?? 'whatsapp', b.externalId ?? 'wa-595', payload));
     res.json({ ok: true, eventId: ref.id });
   } catch (e) {
     logger.error('Error en devSimulateInbound', e);

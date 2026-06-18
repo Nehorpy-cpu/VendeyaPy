@@ -44,7 +44,7 @@ export async function syncMetaAdsDemo(tenantId: string): Promise<{ campaigns: nu
     const m = metrics(c.ad.impr, c.ad.clicks, c.ad.spend, c.ad.convs);
 
     const campaign: MetaCampaign = { id: c.id, tenantId, externalCampaignId: c.id, name: c.name, status: 'ACTIVE', objective: c.objective, adAccountId: 'act_400', dailyBudget: 50000, lifetimeBudget: null, spendCap: null, latestMetrics: m, lastSyncedAt: now, createdAt: now, updatedAt: now };
-    batch.set(db().doc(paths.metaCampaign(tenantId, c.id)), campaign);
+    batch.set(db().doc(paths.metaCampaign(tenantId, c.id)), campaign, { merge: true }); // merge: preserva la atribución (D5)
 
     const adset: MetaAdset = { id: adsetId, tenantId, externalAdsetId: adsetId, externalCampaignId: c.id, name: `${c.name} — Adset`, status: 'ACTIVE', budget: 50000, optimizationGoal: 'CONVERSATIONS', latestMetrics: m, lastSyncedAt: now, createdAt: now, updatedAt: now };
     batch.set(db().doc(paths.metaAdset(tenantId, adsetId)), adset);

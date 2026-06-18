@@ -68,6 +68,10 @@ export async function createPendingOrder(
   const grossMarginPercentage =
     grossProfit == null || cart.subtotal <= 0 ? null : (grossProfit / cart.subtotal) * 100;
 
+  // Atribución (D5): el pedido hereda de qué campaña vino el cliente.
+  const custData = (await db().doc(paths.customer(tenantId, customerId)).get()).data() as { attribution?: Order['attribution'] } | undefined;
+  const attribution = custData?.attribution;
+
   const order: Order = {
     id: orderId,
     tenantId,
@@ -81,6 +85,7 @@ export async function createPendingOrder(
     channel: 'WHATSAPP',
     sellerId: null, // se asigna en el handoff
     source: 'whatsapp-bot', // tracking (prep Track C)
+    ...(attribution ? { attribution } : {}),
     notes: '',
     createdAt: now,
     updatedAt: now,

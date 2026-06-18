@@ -18,6 +18,7 @@ export * from './followup.types.js';
 export * from './audit.types.js';
 export * from './agenttest.types.js';
 export * from './winningreply.types.js';
+export * from './attribution.types.js';
 export * from './meta.types.js';
 export * from './delivery.types.js';
 export * from './payment.types.js';

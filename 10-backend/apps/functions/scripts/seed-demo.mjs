@@ -58,21 +58,23 @@ for (const c of CUSTOMERS) {
 }
 
 // Pedidos (con finanzas privadas)
-async function order(id, customerId, status, items, when) {
+async function order(id, customerId, status, items, when, campaignId) {
   const total = items.reduce((s, it) => s + it.subtotal, 0);
   await db.doc(`tenants/${T}/orders/${id}`).set({
     id, tenantId: T, customerId, status, items: items.map((it) => ({ itemId: it.productId, productId: it.productId, productName: it.productName, unitPrice: it.subtotal / it.quantity, quantity: it.quantity, subtotal: it.subtotal })),
     totals: { subtotal: total, discount: 0, total, currency: 'PYG' },
     payment: { method: 'BANCARD', paymentId: '', paidAt: null, comprobanteUrl: null },
-    channel: 'WHATSAPP', sellerId: null, source: 'whatsapp-bot', notes: '', createdAt: when, updatedAt: when,
+    channel: 'WHATSAPP', sellerId: null, source: 'whatsapp-bot',
+    ...(campaignId ? { attribution: { campaignId, adId: null, type: 'direct_meta', confidence: 1, platform: 'whatsapp' } } : {}),
+    notes: '', createdAt: when, updatedAt: when,
   });
   const fin = items.map((it) => ({ productId: it.productId, quantity: it.quantity, unitCostSnapshot: it.cost / it.quantity, totalCostSnapshot: it.cost }));
   const totalCost = fin.reduce((s, f) => s + f.totalCostSnapshot, 0);
   await db.doc(`tenants/${T}/orderFinancials/${id}`).set({ orderId: id, tenantId: T, subtotal: total, totalCost, grossProfit: total - totalCost, grossMarginPercentage: ((total - totalCost) / total) * 100, items: fin, createdAt: when, updatedAt: when });
 }
-await order('demo-o1', '595981111111', 'PAID', [{ productId: 'good-girl', productName: 'Good Girl', quantity: 1, subtotal: 565000, cost: 300000 }], daysAgo(3));
-await order('demo-o2', '595981111111', 'PAID', [{ productId: 'yara', productName: 'Yara', quantity: 1, subtotal: 180000, cost: 95000 }], daysAgo(1));
-await order('demo-o3', '595984444444', 'PAID', [{ productId: 'yara', productName: 'Yara', quantity: 1, subtotal: 180000, cost: 95000 }], daysAgo(40));
+await order('demo-o1', '595981111111', 'PAID', [{ productId: 'good-girl', productName: 'Good Girl', quantity: 1, subtotal: 565000, cost: 300000 }], daysAgo(3), 'camp-1');
+await order('demo-o2', '595981111111', 'PAID', [{ productId: 'yara', productName: 'Yara', quantity: 1, subtotal: 180000, cost: 95000 }], daysAgo(1), 'camp-1');
+await order('demo-o3', '595984444444', 'PAID', [{ productId: 'yara', productName: 'Yara', quantity: 1, subtotal: 180000, cost: 95000 }], daysAgo(40), 'camp-2');
 await order('demo-o4', '595985555555', 'PENDING_PAYMENT', [{ productId: 'la-vie', productName: 'La Vie Est Belle', quantity: 1, subtotal: 650000, cost: 360000 }], now);
 await order('demo-o5', '595983333333', 'PENDING_VERIFICATION', [{ productId: 'good-girl', productName: 'Good Girl', quantity: 1, subtotal: 565000, cost: 300000 }], now);
 
@@ -81,7 +83,12 @@ const post = (p) => fetch(`${BASE}/${p}`, { method: 'POST', headers: { 'Content-
 await post('devRecomputeStats');
 await post('devRecomputeScores');
 await post('devGenerateInsights'); // incluye promos + reactivación + sin responder + follow-ups
+// Meta (demo): conexión + anuncios + catálogo + atribución
+await post('devMetaConnect');
+await post('devSyncMetaAds');
+await post('devSyncCatalogToMeta');
+await post('devComputeAttribution');
 
-console.log('✅ Demo lista: 5 clientes, 5 pedidos (3 ventas + 1 por pagar + 1 a verificar), copiloto recalculado.');
-console.log('   Entrá a /dashboard, /decisions, /followups, /customers, /promotions.');
+console.log('✅ Demo lista: 5 clientes, 5 pedidos (3 ventas atribuidas), copiloto + Meta (anuncios/atribución) recalculados.');
+console.log('   Entrá a /dashboard, /decisions, /followups, /customers, /promotions, /ads, /integrations.');
 process.exit(0);

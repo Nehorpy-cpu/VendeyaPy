@@ -6,6 +6,7 @@
 import type { CustomerType } from '../enums.js';
 import type { Address, Timestamp } from './common.types.js';
 import type { CustomerConversationMeta } from './message.types.js';
+import type { Attribution } from './attribution.types.js';
 
 export interface CustomerStats {
   totalOrders: number;
@@ -32,6 +33,8 @@ export interface Customer {
   /** Segmento + puntaje calculados por reglas (P12). */
   customerType?: CustomerType | null;
   customerScore?: number | null;
+  /** De qué anuncio/campaña vino (atribución, D5). */
+  attribution?: Attribution;
   createdAt: Timestamp;
   updatedAt: Timestamp;
 }

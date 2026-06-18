@@ -22,3 +22,8 @@ export async function listAdInsights(tenantId: string): Promise<MetaAdInsightDai
 export async function syncAds(tenantId: string): Promise<void> {
   await fetch(`${API}/devSyncMetaAds`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tenantId }) });
 }
+
+/** Calcula la atribución (anuncio → pedido → ganancia) por campaña (D5). */
+export async function computeAttribution(tenantId: string): Promise<void> {
+  await fetch(`${API}/devComputeAttribution`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tenantId }) });
+}

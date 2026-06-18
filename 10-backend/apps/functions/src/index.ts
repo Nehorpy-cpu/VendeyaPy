@@ -87,3 +87,6 @@ export { devSyncMetaAds } from './functions/meta/devSyncMetaAds.js';
 
 // Catálogo → Meta (D4): sincroniza el catálogo del panel al Meta Catalog (modo demo).
 export { devSyncCatalogToMeta } from './functions/meta/devSyncCatalogToMeta.js';
+
+// Atribución (D5): anuncio → pedido → ganancia real, por campaña.
+export { devComputeAttribution } from './functions/meta/devComputeAttribution.js';

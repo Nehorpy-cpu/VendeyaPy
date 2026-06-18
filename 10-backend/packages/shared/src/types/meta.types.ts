@@ -7,6 +7,7 @@
 
 import type { MetaConnectionStatus, MetaAssetType, WebhookStatus } from '../enums.js';
 import type { Timestamp } from './common.types.js';
+import type { CampaignAttribution } from './attribution.types.js';
 
 export interface MetaConnection {
   id: string;
@@ -99,6 +100,8 @@ export interface MetaCampaign {
   lifetimeBudget: number | null;
   spendCap: number | null;
   latestMetrics: MetaAdMetrics;
+  /** Atribución calculada (D5): ventas/ingresos/ganancia/ROAS reales de la campaña. */
+  attribution?: CampaignAttribution;
   lastSyncedAt: Timestamp;
   createdAt: Timestamp;
   updatedAt: Timestamp;
