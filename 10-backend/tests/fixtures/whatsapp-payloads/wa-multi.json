@@ -1,0 +1,21 @@
+{
+  "object": "whatsapp_business_account",
+  "entry": [
+    {
+      "id": "BUSINESS_ACCOUNT_ID",
+      "changes": [
+        {
+          "field": "messages",
+          "value": {
+            "messaging_product": "whatsapp",
+            "metadata": { "display_phone_number": "595991234567", "phone_number_id": "PHONE_NUMBER_ID" },
+            "messages": [
+              { "from": "595991234567", "id": "wamid.M1", "timestamp": "1716750500", "type": "text", "text": { "body": "hola" } },
+              { "from": "595991234568", "id": "wamid.M2", "timestamp": "1716750501", "type": "text", "text": { "body": "buenas" } }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

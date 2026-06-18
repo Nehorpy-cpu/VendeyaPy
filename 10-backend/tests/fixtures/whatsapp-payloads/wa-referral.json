@@ -1,0 +1,36 @@
+{
+  "object": "whatsapp_business_account",
+  "entry": [
+    {
+      "id": "BUSINESS_ACCOUNT_ID",
+      "changes": [
+        {
+          "field": "messages",
+          "value": {
+            "messaging_product": "whatsapp",
+            "metadata": { "display_phone_number": "595991234567", "phone_number_id": "PHONE_NUMBER_ID" },
+            "contacts": [{ "profile": { "name": "Cliente" }, "wa_id": "595991234567" }],
+            "messages": [
+              {
+                "from": "595991234567",
+                "id": "wamid.REF1",
+                "timestamp": "1716750200",
+                "type": "text",
+                "text": { "body": "vi su anuncio" },
+                "referral": {
+                  "source_url": "https://fb.me/2abcXyz",
+                  "source_id": "120211234567890123",
+                  "source_type": "ad",
+                  "headline": "Promo de verano",
+                  "body": "20% off",
+                  "media_type": "image",
+                  "ctwa_clid": "ARAabcd1234"
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

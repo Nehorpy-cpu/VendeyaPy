@@ -13,6 +13,48 @@ El bot ya calcula la respuesta; ahora se **entrega** vía `messaging/whatsappCli
 
 Variables: `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_ACCESS_TOKEN` (luego, por tenant vía SecretStore).
 
+## 1.b Webhook Meta — formato real, normalización e idempotencia (Hardening F3)
+
+`metaWebhook` (`functions/meta/webhookHttp.ts`) recibe el payload **real** de Meta y lo
+normaliza con un parser **puro** (`meta/parseWebhook.ts`, `parseMetaWebhookPayload`).
+
+**Formato real soportado** (fuente: docs oficiales de Meta — WhatsApp messages webhook, Messenger
+messages, Instagram messaging):
+- **WhatsApp** (`object: whatsapp_business_account`): `entry[].changes[].value`;
+  `externalId = value.metadata.phone_number_id`; `value.messages[]` (texto → `text.body`;
+  interactive button/list → título; `button` de plantilla → `button.text`); `referral.source_id`
+  → `adReferral.adId`; `value.statuses[]` (recibos) → **ignorado**; media/audio/etc → **ignorado**.
+- **Messenger** (`object: page`) e **Instagram** (`object: instagram`): `externalId = entry[].id`;
+  `entry[].messaging[]` con `sender.id` y `message.{mid,text}`; adjuntos sin texto / echoes →
+  ignorado; `referral.ad_id` → `adReferral.adId`.
+
+El parser devuelve `{ messages, ignored }` y **no lanza** ante payload malformado.
+
+**Idempotencia por `messageId`:** se escribe **un evento de inbox por mensaje** con id
+determinístico `${platform}_${messageId}` (sanitizado para Firestore) usando `.create()`. Un
+reenvío de Meta con el mismo `messageId` falla con ALREADY_EXISTS → se cuenta como `duplicate`
+(no se duplica ni se reprocesa). **Otros errores se loguean** (no se ocultan como duplicado).
+
+**`phone_number_id → tenantId`:** el parser extrae `phone_number_id` como `externalId`;
+`process.ts` lo resuelve con `metaExternalIndex[whatsapp_${phone_number_id}].tenantId`. Ese
+índice se **puebla al conectar Meta** (hoy demo: `whatsapp_wa-595 → tenant`; el OAuth real
+registrará el `phone_number_id` real del tenant). Si no resuelve → el evento queda `ignored`.
+
+**Compatibilidad:** el inbox sigue teniendo `payload.{from,text,adReferral}` (+ `messageId`,
+`timestamp`, `rawMessage` para debug, **sin tokens**) → `process.ts` **no cambia**.
+`devSimulateInbound` (payload simplificado) **sigue funcionando** para emulador/seed/tests.
+
+**Firma:** sin cambios — `X-Hub-Signature-256` obligatoria fuera del emulador (fail-closed).
+
+**Pendiente / limitaciones (fuera de F3):**
+- **WhatsApp real por tenant:** falta resolver credenciales por tenant para el ENVÍO
+  (`getWhatsAppClient` usa env global) y registrar el `phone_number_id` real en
+  `metaExternalIndex` al conectar (OAuth real).
+- **`adReferral` sin campaña:** Meta manda `source_id` / `ad_id` (el **anuncio**), **no** el
+  `campaignId`. La atribución por campaña usa `adReferral.campaignId`, así que los clics de
+  anuncio reales **no auto-atribuyen por campaña** hasta mapear `adId → campaignId` (vía el sync
+  de Meta Ads). **Limitación conocida.**
+
 ## 2. Pagos — Stripe (webhook firmado e idempotente)
 
 `stripeWebhook` (`functions/payments/stripeWebhook.ts`):

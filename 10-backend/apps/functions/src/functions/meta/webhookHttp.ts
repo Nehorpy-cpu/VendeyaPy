@@ -14,11 +14,22 @@ import { db, paths } from '../../lib/firebase.js';
 import { logger } from '../../lib/logger.js';
 import { verifyMetaSignature } from '../../middleware/webhookSignature.js';
 import { guardDevEndpoint } from '../../middleware/devGuard.js';
+import { parseMetaWebhookPayload } from '../../meta/parseWebhook.js';
 
 const TTL_MS = 30 * 86_400_000;
 const isEmulator = () => process.env.FUNCTIONS_EMULATOR === 'true';
 // Token del handshake de verificación (Meta). En prod: WHATSAPP_WEBHOOK_VERIFY_TOKEN.
 const verifyToken = () => process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN || (isEmulator() ? 'aiafg-verify-demo' : '');
+
+// Id de inbox determinístico por (platform, messageId) para idempotencia. Sanitiza
+// caracteres no válidos de Firestore (p.ej. '/' en wamid base64).
+const inboxDocId = (platform: string, messageId: string): string =>
+  messageId ? `${platform}_${messageId}`.replace(/[^\w.:=+-]/g, '_').slice(0, 256) : '';
+
+function isAlreadyExists(e: unknown): boolean {
+  const code = (e as { code?: number | string } | null)?.code;
+  return code === 6 || code === 'already-exists' || /already.?exists/i.test(String(e));
+}
 
 function inboxEvent(id: string, platform: string, externalId: string, payload: unknown): WebhookInboxEvent {
   const now = Timestamp.now();
@@ -61,12 +72,39 @@ export const metaWebhook = onRequest({ region: 'us-central1', cors: false }, asy
     }
   }
 
-  // 3) Recepción: guardar crudo + responder rápido (procesa el trigger onWebhookInbox).
+  // 3) Parsear el payload REAL de Meta → un evento NORMALIZADO por mensaje, idempotente
+  //    por messageId (.create() falla si ya existe → duplicado). El trigger onWebhookInbox
+  //    los procesa después. El shape del payload (from/text/adReferral) se mantiene para process.ts.
   try {
-    const body = (req.body ?? {}) as { platform?: string; externalId?: string; from?: string; text?: string };
-    const ref = db().collection(paths.metaWebhookInbox()).doc();
-    await ref.set(inboxEvent(ref.id, body.platform ?? 'whatsapp', body.externalId ?? '', body));
-    res.status(200).json({ ok: true });
+    const parsed = parseMetaWebhookPayload(req.body);
+    let written = 0;
+    let duplicates = 0;
+    for (const m of parsed.messages) {
+      const payload = {
+        from: m.from,
+        text: m.text,
+        messageId: m.messageId,
+        timestamp: m.timestamp,
+        ...(m.adReferral ? { adReferral: m.adReferral } : {}),
+        rawMessage: m.rawMessage, // mínimo para auditoría/debug; sin tokens ni secretos
+      };
+      const id = inboxDocId(m.platform, m.messageId);
+      const ref = id ? db().collection(paths.metaWebhookInbox()).doc(id) : db().collection(paths.metaWebhookInbox()).doc();
+      try {
+        await ref.create(inboxEvent(ref.id, m.platform, m.externalId, payload));
+        written++;
+      } catch (e) {
+        if (isAlreadyExists(e)) {
+          duplicates++;
+          logger.info('metaWebhook: mensaje duplicado (mismo messageId), ignorado', { platform: m.platform, messageId: m.messageId });
+        } else {
+          // NO esconder otros errores como duplicados.
+          logger.error('metaWebhook: no se pudo escribir el evento del inbox', e, { platform: m.platform, messageId: m.messageId });
+        }
+      }
+    }
+    logger.info('metaWebhook recibido', { written, duplicates, ignored: parsed.ignored });
+    res.status(200).json({ ok: true, written, duplicates, ignored: parsed.ignored });
   } catch (e) {
     logger.error('Error en metaWebhook', e);
     res.status(200).json({ ok: false }); // 200 igual: evita reintentos en loop de Meta

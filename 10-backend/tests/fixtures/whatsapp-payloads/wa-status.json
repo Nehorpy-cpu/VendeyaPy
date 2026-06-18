@@ -1,0 +1,26 @@
+{
+  "object": "whatsapp_business_account",
+  "entry": [
+    {
+      "id": "BUSINESS_ACCOUNT_ID",
+      "changes": [
+        {
+          "field": "messages",
+          "value": {
+            "messaging_product": "whatsapp",
+            "metadata": { "display_phone_number": "595991234567", "phone_number_id": "PHONE_NUMBER_ID" },
+            "statuses": [
+              {
+                "id": "wamid.OUT1",
+                "status": "delivered",
+                "timestamp": "1716750400",
+                "recipient_id": "595991234567",
+                "conversation": { "id": "CONVERSATION_ID" }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

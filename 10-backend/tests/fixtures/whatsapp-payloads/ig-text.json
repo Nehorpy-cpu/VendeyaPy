@@ -1,0 +1,17 @@
+{
+  "object": "instagram",
+  "entry": [
+    {
+      "id": "IG_ACCOUNT_ID",
+      "time": 1716750600,
+      "messaging": [
+        {
+          "sender": { "id": "IGSID_123" },
+          "recipient": { "id": "IG_ACCOUNT_ID" },
+          "timestamp": 1716750600000,
+          "message": { "mid": "mid.IG1", "text": "hola por instagram" }
+        }
+      ]
+    }
+  ]
+}

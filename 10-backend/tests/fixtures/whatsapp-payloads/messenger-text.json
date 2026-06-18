@@ -1,0 +1,17 @@
+{
+  "object": "page",
+  "entry": [
+    {
+      "id": "PAGE_ID",
+      "time": 1716750700,
+      "messaging": [
+        {
+          "sender": { "id": "PSID_123" },
+          "recipient": { "id": "PAGE_ID" },
+          "timestamp": 1716750700000,
+          "message": { "mid": "mid.MSGR1", "text": "hola por messenger" }
+        }
+      ]
+    }
+  ]
+}

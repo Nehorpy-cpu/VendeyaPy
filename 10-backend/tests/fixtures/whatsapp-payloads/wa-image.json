@@ -1,0 +1,26 @@
+{
+  "object": "whatsapp_business_account",
+  "entry": [
+    {
+      "id": "BUSINESS_ACCOUNT_ID",
+      "changes": [
+        {
+          "field": "messages",
+          "value": {
+            "messaging_product": "whatsapp",
+            "metadata": { "display_phone_number": "595991234567", "phone_number_id": "PHONE_NUMBER_ID" },
+            "messages": [
+              {
+                "from": "595991234567",
+                "id": "wamid.IMG1",
+                "timestamp": "1716750300",
+                "type": "image",
+                "image": { "id": "MEDIA_ID", "mime_type": "image/jpeg", "sha256": "abc" }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}
