@@ -98,6 +98,12 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
+    // ---------- Idempotencia de billing de plataforma (Fase 4): solo Cloud Functions ----------
+    match /platformBillingEvents/{eventId} {
+      allow read: if isPlatformAdmin();
+      allow write: if false;
+    }
+
     // ---------- Usuarios admin ----------
 
     match /users/{userId} {

@@ -35,6 +35,10 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # Build primero: genera dist de @vpw/shared (lo necesitan typecheck/test de las apps).
+      - name: Build
+        run: pnpm build
+
       - name: Typecheck
         run: pnpm typecheck
 
@@ -43,9 +47,6 @@ jobs:
 
       - name: Test (unit + integración)
         run: pnpm test
-
-      - name: Build
-        run: pnpm build
 
       - name: Validate n8n workflows (JSON)
         working-directory: .

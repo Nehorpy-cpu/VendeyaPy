@@ -11,6 +11,7 @@ import type { WebhookInboxEvent, MetaExternalIndexEntry, MessageChannel } from '
 import { db, paths } from '../lib/firebase.js';
 import { handleMessage } from '../conversation/engine.js';
 import { getWhatsAppClient } from '../messaging/whatsappClient.js';
+import { checkTenantInboundGate, incrementMessageUsage } from '../tenants/lifecycle.js';
 import { logger } from '../lib/logger.js';
 
 const channelOf = (platform: string): MessageChannel =>
@@ -37,8 +38,17 @@ export async function processWebhookEvent(eventId: string): Promise<void> {
       return;
     }
 
+    // Gate de empresa (Fase 4): suspendida o sobre el límite de mensajes → no procesar.
+    const gate = await checkTenantInboundGate(tenantId);
+    if (!gate.allowed) {
+      await ref.update({ processingStatus: 'ignored', tenantId, errorMessage: `empresa ${gate.reason}`, processedAt: Timestamp.now() });
+      logger.info('Inbound bloqueado por gate de empresa', { tenantId, reason: gate.reason });
+      return;
+    }
+
     const platform = channelOf(ev.platform);
     const result = await handleMessage({ tenantId, from: payload.from, text: payload.text, channel: platform });
+    await incrementMessageUsage(tenantId).catch(() => { /* métrica de uso, no crítica */ });
 
     // Entregar la respuesta del bot por el canal (Cloud API en prod; mock en emulador/demo).
     if (result.reply && result.reply.trim() && !result.handledByHuman) {

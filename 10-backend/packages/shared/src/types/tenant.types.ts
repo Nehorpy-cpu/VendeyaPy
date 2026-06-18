@@ -3,8 +3,18 @@
  * Ver ARCHITECTURE.md §4.2.
  */
 
-import type { TenantStatus, Country, Currency } from '../enums.js';
+import type { TenantStatus, Country, Currency, SubscriptionStatus } from '../enums.js';
 import type { Timestamp } from './common.types.js';
+
+/** Suscripción de plataforma del tenant (billing del SaaS) — Fase 4. */
+export interface TenantSubscription {
+  status: SubscriptionStatus;
+  planId: string;
+  stripeCustomerId: string | null;
+  stripeSubscriptionId: string | null;
+  currentPeriodEnd: Timestamp | null;
+  updatedAt: Timestamp;
+}
 
 export interface TenantContact {
   ownerName: string;
@@ -102,6 +112,10 @@ export interface Tenant {
   branding: TenantBranding;
   limits: TenantLimits;
   usage: TenantUsage;
+  /** Rubro del negocio (perfumeria, indumentaria, ...) — para plantillas y saludo. */
+  industry?: string;
+  /** Suscripción de plataforma (billing del SaaS) — Fase 4. */
+  subscription?: TenantSubscription;
   createdAt: Timestamp;
   updatedAt: Timestamp;
   deletedAt: Timestamp | null;

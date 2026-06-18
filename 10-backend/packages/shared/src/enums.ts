@@ -111,6 +111,17 @@ export type Country = (typeof COUNTRY)[number];
 export const PLAN_TIER = ['FREE', 'STARTER', 'GROWTH', 'PRO'] as const;
 export type PlanTier = (typeof PLAN_TIER)[number];
 
+// Estado de la suscripción de plataforma del tenant (billing del SaaS) — Fase 4.
+export const SUBSCRIPTION_STATUS = [
+  'none',
+  'trialing',
+  'active',
+  'past_due',
+  'canceled',
+  'incomplete',
+] as const;
+export type SubscriptionStatus = (typeof SUBSCRIPTION_STATUS)[number];
+
 export const PROMOTION_TYPE = [
   'PERCENTAGE', // % de descuento
   'FIXED_AMOUNT', // monto fijo de descuento

@@ -47,6 +47,11 @@ export { devSubmitComprobante } from './functions/payments/devSubmitComprobante.
 // Webhook REAL de Stripe (Fase 3): verifica firma + idempotente + confirma la orden.
 export { stripeWebhook } from './functions/payments/stripeWebhook.js';
 
+// SaaS multiempresa (Fase 4): alta de empresa + gestión de usuarios + billing de plataforma.
+export { provisionTenant } from './functions/tenants/provisionTenant.js';
+export { inviteUser, setUserRole, setUserActive } from './functions/users/userManagement.js';
+export { platformBillingWebhook } from './functions/billing/platformBillingWebhook.js';
+
 // Liberar chat (vendedor devuelve la conversación al bot) — endpoint de prueba (F6b).
 export { devReleaseChat } from './functions/conversation/devReleaseChat.js';
 
