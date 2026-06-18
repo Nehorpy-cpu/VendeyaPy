@@ -6,3 +6,96 @@
   --color-bg: 250 250 250;
   --color-fg: 17 24 39;
 }
+
+@layer base {
+  html {
+    scroll-behavior: smooth;
+    -webkit-text-size-adjust: 100%;
+  }
+  body {
+    font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
+    text-rendering: optimizeLegibility;
+  }
+  ::selection {
+    background-color: rgba(16, 185, 129, 0.22);
+    color: #0d172c;
+  }
+}
+
+@layer components {
+  /* Contenedor centrado consistente para secciones de marketing. */
+  .mk-container {
+    @apply mx-auto w-full max-w-6xl px-5 sm:px-6 lg:px-8;
+  }
+
+  /* Vidrio controlado para tarjetas flotantes sobre fondos con color. */
+  .glass {
+    background: rgba(255, 255, 255, 0.72);
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
+  }
+  .glass-dark {
+    background: rgba(13, 23, 44, 0.55);
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
+  }
+}
+
+@layer utilities {
+  /* Malla de gradiente suave para el hero (claro y premium). */
+  .bg-mesh {
+    background-image:
+      radial-gradient(42rem 30rem at 12% -8%, rgba(52, 211, 153, 0.18), transparent 60%),
+      radial-gradient(38rem 26rem at 92% 4%, rgba(99, 131, 176, 0.16), transparent 60%),
+      radial-gradient(30rem 22rem at 70% 100%, rgba(251, 113, 133, 0.12), transparent 60%);
+  }
+  /* Cuadrícula sutil para dar profundidad de "producto". */
+  .bg-grid {
+    background-image:
+      linear-gradient(to right, rgba(13, 23, 44, 0.05) 1px, transparent 1px),
+      linear-gradient(to bottom, rgba(13, 23, 44, 0.05) 1px, transparent 1px);
+    background-size: 36px 36px;
+  }
+  .bg-grid-dark {
+    background-image:
+      linear-gradient(to right, rgba(255, 255, 255, 0.06) 1px, transparent 1px),
+      linear-gradient(to bottom, rgba(255, 255, 255, 0.06) 1px, transparent 1px);
+    background-size: 40px 40px;
+  }
+  /* Texto con gradiente de marca. */
+  .text-gradient {
+    background: linear-gradient(120deg, #059669 0%, #22c55e 55%, #34d399 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+  /* Aparición al hacer scroll (controlada por IntersectionObserver). */
+  .reveal {
+    opacity: 0;
+    transform: translateY(22px);
+    transition:
+      opacity 0.7s cubic-bezier(0.16, 1, 0.3, 1),
+      transform 0.7s cubic-bezier(0.16, 1, 0.3, 1);
+  }
+  .reveal.is-visible {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+  .reveal {
+    opacity: 1;
+    transform: none;
+  }
+}
