@@ -11,18 +11,21 @@
  */
 
 import { onRequest } from 'firebase-functions/v2/https';
+import { guardDevEndpoint } from '../../middleware/devGuard.js';
 import { handleMessage } from '../../conversation/engine.js';
 import { logger } from '../../lib/logger.js';
 
 export const devMessage = onRequest(
   { region: 'us-central1', cors: true },
   async (req, res) => {
+    if (!guardDevEndpoint(req, res)) return;
     if (req.method !== 'POST') {
       res.status(405).json({ ok: false, error: 'Usá POST' });
       return;
     }
     const body = (req.body ?? {}) as { from?: string; text?: string; tenantId?: string };
-    const tenantId = body.tenantId ?? 'perfumeria'; // default dev: tenant perfumería
+    if (!body.tenantId) { res.status(400).json({ ok: false, error: 'Falta tenantId' }); return; }
+    const tenantId = body.tenantId;
     if (!body.from || !body.text) {
       res.status(400).json({ ok: false, error: 'Faltan campos: from, text' });
       return;

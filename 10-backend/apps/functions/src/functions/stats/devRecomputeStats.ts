@@ -9,11 +9,13 @@
  */
 
 import { onRequest } from 'firebase-functions/v2/https';
+import { guardDevEndpoint } from '../../middleware/devGuard.js';
 import { recomputeTenantStats, recomputePlatformStats } from '../../stats/computeStats.js';
 import { db, paths } from '../../lib/firebase.js';
 import { logger } from '../../lib/logger.js';
 
 export const devRecomputeStats = onRequest({ region: 'us-central1', cors: true }, async (req, res) => {
+  if (!guardDevEndpoint(req, res)) return;
   if (req.method !== 'POST') {
     res.status(405).json({ ok: false, error: 'Usá POST' });
     return;

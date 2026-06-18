@@ -10,6 +10,7 @@
  */
 
 import { onRequest } from 'firebase-functions/v2/https';
+import { guardDevEndpoint } from '../../middleware/devGuard.js';
 import { submitComprobante } from '../../orders/submitComprobante.js';
 import { db, paths } from '../../lib/firebase.js';
 import { logger } from '../../lib/logger.js';
@@ -17,6 +18,7 @@ import { logger } from '../../lib/logger.js';
 export const devSubmitComprobante = onRequest(
   { region: 'us-central1', cors: true },
   async (req, res) => {
+    if (!guardDevEndpoint(req, res)) return;
     if (req.method !== 'POST') {
       res.status(405).json({ ok: false, error: 'Usá POST' });
       return;
@@ -27,7 +29,8 @@ export const devSubmitComprobante = onRequest(
       tenantId?: string;
       comprobanteUrl?: string;
     };
-    const tenantId = body.tenantId ?? 'perfumeria';
+    if (!body.tenantId) { res.status(400).json({ ok: false, error: 'Falta tenantId' }); return; }
+    const tenantId = body.tenantId;
 
     let orderId = body.orderId;
     if (!orderId && body.from) {

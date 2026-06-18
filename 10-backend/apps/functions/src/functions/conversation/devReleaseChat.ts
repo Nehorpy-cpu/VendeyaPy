@@ -8,6 +8,7 @@
  */
 
 import { onRequest } from 'firebase-functions/v2/https';
+import { guardDevEndpoint } from '../../middleware/devGuard.js';
 import { releaseToBot } from '../../conversation/handoff.js';
 import { db, paths } from '../../lib/firebase.js';
 import { logger } from '../../lib/logger.js';
@@ -16,12 +17,14 @@ import type { Order } from '@vpw/shared';
 export const devReleaseChat = onRequest(
   { region: 'us-central1', cors: true },
   async (req, res) => {
+    if (!guardDevEndpoint(req, res)) return;
     if (req.method !== 'POST') {
       res.status(405).json({ ok: false, error: 'Usá POST' });
       return;
     }
     const body = (req.body ?? {}) as { from?: string; orderId?: string; tenantId?: string };
-    const tenantId = body.tenantId ?? 'perfumeria';
+    if (!body.tenantId) { res.status(400).json({ ok: false, error: 'Falta tenantId' }); return; }
+    const tenantId = body.tenantId;
 
     let customerId: string | undefined;
     if (body.from) {

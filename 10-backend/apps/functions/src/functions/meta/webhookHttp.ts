@@ -12,9 +12,13 @@ import { Timestamp } from 'firebase-admin/firestore';
 import type { WebhookInboxEvent } from '@vpw/shared';
 import { db, paths } from '../../lib/firebase.js';
 import { logger } from '../../lib/logger.js';
+import { verifyMetaSignature } from '../../middleware/webhookSignature.js';
+import { guardDevEndpoint } from '../../middleware/devGuard.js';
 
-const VERIFY_TOKEN = 'aiafg-verify-demo'; // en prod: por empresa/config
 const TTL_MS = 30 * 86_400_000;
+const isEmulator = () => process.env.FUNCTIONS_EMULATOR === 'true';
+// Token del handshake de verificación (Meta). En prod: WHATSAPP_WEBHOOK_VERIFY_TOKEN.
+const verifyToken = () => process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN || (isEmulator() ? 'aiafg-verify-demo' : '');
 
 function inboxEvent(id: string, platform: string, externalId: string, payload: unknown): WebhookInboxEvent {
   const now = Timestamp.now();
@@ -25,19 +29,39 @@ function inboxEvent(id: string, platform: string, externalId: string, payload: u
   };
 }
 
-export const metaWebhook = onRequest({ region: 'us-central1', cors: true }, async (req, res) => {
-  // 1) Verificación (handshake de Meta).
+export const metaWebhook = onRequest({ region: 'us-central1', cors: false }, async (req, res) => {
+  // 1) Verificación (handshake de Meta) — token por entorno, no hardcodeado.
   if (req.method === 'GET') {
-    const mode = req.query['hub.mode'];
-    const token = req.query['hub.verify_token'];
-    const challenge = req.query['hub.challenge'];
-    if (mode === 'subscribe' && token === VERIFY_TOKEN) res.status(200).send(String(challenge ?? ''));
-    else res.status(403).send('forbidden');
+    const expected = verifyToken();
+    if (req.query['hub.mode'] === 'subscribe' && expected && req.query['hub.verify_token'] === expected) {
+      res.status(200).send(String(req.query['hub.challenge'] ?? ''));
+    } else {
+      res.status(403).send('forbidden');
+    }
     return;
   }
   if (req.method !== 'POST') { res.status(405).json({ ok: false }); return; }
 
-  // 2) Recepción: guardar crudo + responder rápido (procesa el trigger onWebhookInbox).
+  // 2) Verificación de FIRMA (X-Hub-Signature-256): impide que cualquiera inyecte eventos.
+  //    Fuera del emulador la firma es OBLIGATORIA (fail-closed). En el emulador se omite para
+  //    poder probar el webhook real localmente (la demo usa devSimulateInbound).
+  if (!isEmulator()) {
+    const appSecret = process.env.WHATSAPP_APP_SECRET;
+    if (!appSecret) {
+      logger.error('metaWebhook: falta WHATSAPP_APP_SECRET; se rechaza por seguridad');
+      res.status(401).json({ ok: false, error: 'not configured' });
+      return;
+    }
+    try {
+      verifyMetaSignature(req.rawBody, req.get('x-hub-signature-256'), appSecret);
+    } catch {
+      logger.warn('metaWebhook: firma inválida, rechazado');
+      res.status(401).json({ ok: false, error: 'invalid signature' });
+      return;
+    }
+  }
+
+  // 3) Recepción: guardar crudo + responder rápido (procesa el trigger onWebhookInbox).
   try {
     const body = (req.body ?? {}) as { platform?: string; externalId?: string; from?: string; text?: string };
     const ref = db().collection(paths.metaWebhookInbox()).doc();
@@ -50,6 +74,7 @@ export const metaWebhook = onRequest({ region: 'us-central1', cors: true }, asyn
 });
 
 export const devSimulateInbound = onRequest({ region: 'us-central1', cors: true }, async (req, res) => {
+  if (!guardDevEndpoint(req, res)) return;
   if (req.method !== 'POST') { res.status(405).json({ ok: false, error: 'Usá POST' }); return; }
   const b = (req.body ?? {}) as { platform?: string; externalId?: string; from?: string; text?: string; adReferral?: unknown };
   try {

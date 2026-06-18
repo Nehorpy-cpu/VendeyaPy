@@ -7,13 +7,16 @@
  */
 
 import { onRequest } from 'firebase-functions/v2/https';
+import { guardDevEndpoint } from '../../middleware/devGuard.js';
 import { connectMetaDemo, disconnectMeta } from '../../meta/connect.js';
 import { logger } from '../../lib/logger.js';
 
 export const devMetaConnect = onRequest({ region: 'us-central1', cors: true }, async (req, res) => {
+  if (!guardDevEndpoint(req, res)) return;
   if (req.method !== 'POST') { res.status(405).json({ ok: false, error: 'Usá POST' }); return; }
   const body = (req.body ?? {}) as { tenantId?: string; byUid?: string };
-  const tenantId = body.tenantId ?? 'perfumeria';
+  if (!body.tenantId) { res.status(400).json({ ok: false, error: 'Falta tenantId' }); return; }
+  const tenantId = body.tenantId;
   try {
     await connectMetaDemo(tenantId, body.byUid ?? null);
     res.json({ ok: true });
@@ -24,9 +27,11 @@ export const devMetaConnect = onRequest({ region: 'us-central1', cors: true }, a
 });
 
 export const devMetaDisconnect = onRequest({ region: 'us-central1', cors: true }, async (req, res) => {
+  if (!guardDevEndpoint(req, res)) return;
   if (req.method !== 'POST') { res.status(405).json({ ok: false, error: 'Usá POST' }); return; }
   const body = (req.body ?? {}) as { tenantId?: string };
-  const tenantId = body.tenantId ?? 'perfumeria';
+  if (!body.tenantId) { res.status(400).json({ ok: false, error: 'Falta tenantId' }); return; }
+  const tenantId = body.tenantId;
   try {
     await disconnectMeta(tenantId);
     res.json({ ok: true });
