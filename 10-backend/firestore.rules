@@ -251,6 +251,9 @@ service cloud.firestore {
       match /metaAds/{id} { allow read: if isTenantManager(tenantId) || isPlatformAdmin(); allow write: if false; }
       match /metaAdInsightsDaily/{id} { allow read: if isTenantManager(tenantId) || isPlatformAdmin(); allow write: if false; }
 
+      // Logs de sincronización del catálogo a Meta (D4): manager+ lee; escribe la sync.
+      match /metaCatalogSyncLogs/{id} { allow read: if isTenantManager(tenantId) || isPlatformAdmin(); allow write: if false; }
+
       // Entregas
       match /deliveries/{deliveryId} {
         allow read: if isTenantViewer(tenantId) || isPlatformAdmin();

@@ -84,3 +84,6 @@ export { onWebhookInbox } from './functions/meta/onWebhookInbox.js';
 
 // Meta Ads (D3): sincronización (modo demo) de campañas/anuncios + snapshots diarios.
 export { devSyncMetaAds } from './functions/meta/devSyncMetaAds.js';
+
+// Catálogo → Meta (D4): sincroniza el catálogo del panel al Meta Catalog (modo demo).
+export { devSyncCatalogToMeta } from './functions/meta/devSyncCatalogToMeta.js';

@@ -42,7 +42,7 @@
 | **D1** | Centro de Integración Meta: `metaConnections` (+ tokens seguros) + `metaAssets` + estados de conexión en el panel | ✅ Completada (modo demo) |
 | **D2** | Webhooks + omnicanal: `metaWebhookInbox` (TTL) + `metaExternalIndex` + `processMetaWebhook` + `channel` (whatsapp/instagram/messenger). Incluye ex-F1 | ✅ Completada (modo demo) |
 | **D3** | Meta Ads (solo lectura): campañas/adsets/ads + `metaAdInsightsDaily` por jobs + snapshots diarios | ✅ Completada (modo demo) |
-| **D4** | Catálogo → Meta: `syncToMeta` + `syncProductToMeta` + `metaCatalogSyncLogs` | ⏳ |
+| **D4** | Catálogo → Meta: `syncToMeta` + `syncProductToMeta` + `metaCatalogSyncLogs` | ✅ Completada (modo demo) |
 | **D5** | Atribución: anuncio → conversación → cliente → pedido → ganancia (`attributionType`/confidence) | ⏳ |
 | **D6** | `businessEvents` + Conversions API (`metaConversionEvents`, `sendConversionEventToMeta`) | ⏳ |
 
@@ -105,21 +105,24 @@
 
 ---
 
-# ✅ FASE COMPLETADA: D3 — Meta Ads (solo lectura)
+# ✅ FASE COMPLETADA: D4 — Catálogo → Meta
 
-Trae las campañas/adsets/anuncios de Meta y sus métricas, guardando **snapshots diarios** para no consultar
-Meta en cada carga (ADR-0009). En modo demo genera datos de ejemplo (2 campañas, 7 días); listo para la sync
-real. La atribución a ventas/ganancia la completa D5.
+Nuestro panel es la fuente del catálogo; Meta lo RECIBE. La sync (modo demo) marca cada producto activo
+como `synced` con su `metaProductItemId` y deja un log por envío (`metaCatalogSyncLogs`). Permite etiquetar
+productos en anuncios e Instagram Shopping. La sync corre en Cloud Functions, no en el frontend (ADR-0009).
 
-**Hecho:** tipos `MetaCampaign/Adset/Ad/AdInsightDaily` + `MetaAdMetrics`; `syncMetaAdsDemo` (idempotente) +
-`devSyncMetaAds`; reglas (manager+ lee, escribe solo la sync); `lib/ads.ts`; página `/ads` (campañas con
-gasto/impresiones/clics/CTR/conversaciones + Sincronizar) + nav.
+**Hecho:** enum `META_SYNC_STATUS`; campos de sync en `Product` + tipo `MetaCatalogSyncLog`;
+`syncProductsToMetaDemo` (idempotente) + `devSyncCatalogToMeta`; reglas (manager+ lee los logs); catálogo con
+badge "🟢 Sincronizado" por producto + botón "Sincronizar a Meta".
 
-**Verificado:** `typecheck` EXIT 0 · build de producción (19 rutas) · `verify-d3.mjs` **7/7** (campañas/ads/
-14 snapshots; idempotente; vendedora 403 / dueña 200).
+**Verificado:** `typecheck` EXIT 0 · build de producción (19 rutas) · `verify-d4.mjs` **5/5** (productos
+synced + logs; idempotente; vendedora 403 / dueña 200).
 
-**Antecede:** D2 — Webhooks + omnicanal. **🎉 Track B + Track C COMPLETOS.**
-**Próxima (pendiente, no iniciada):** D4 — Catálogo → Meta (sincronizar nuestro catálogo al Meta Catalog).
+**Nota operativa:** los emuladores (datos en memoria) se cerraron solos durante la sesión; se reiniciaron y
+se re-sembró la demo. El código no se vio afectado. Para conectar Meta en vivo: ver **ADR-0010**.
+
+**Antecede:** D3 — Meta Ads. **🎉 Track B + Track C COMPLETOS.**
+**Próxima (pendiente, no iniciada):** D5 — Atribución (anuncio → conversación → pedido → ganancia real).
 
 ---
 

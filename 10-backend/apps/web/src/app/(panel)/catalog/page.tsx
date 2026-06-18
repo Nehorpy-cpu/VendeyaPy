@@ -11,6 +11,7 @@ import {
   upsertProduct,
   deleteProduct,
   productMargin,
+  syncCatalogToMeta,
   type ProductInput,
 } from '@/lib/catalog';
 import { ProductForm } from '@/components/ProductForm';
@@ -59,6 +60,7 @@ export default function CatalogPage() {
       setConfirmDelete(null);
     },
   });
+  const syncMut = useMutation({ mutationFn: () => syncCatalogToMeta(tenantId!), onSuccess: () => qc.invalidateQueries({ queryKey: ['products', tenantId] }) });
 
   const filtered = useMemo(() => {
     const list = productsQ.data ?? [];
@@ -82,12 +84,14 @@ export default function CatalogPage() {
     <div className="space-y-5">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <h1 className="text-2xl font-bold text-gray-900">Catálogo</h1>
-        <button
-          onClick={() => setEditing(null)}
-          className="rounded-lg bg-brand-600 px-4 py-2 text-sm font-semibold text-white hover:bg-brand-700"
-        >
-          + Nuevo producto
-        </button>
+        <div className="flex gap-2">
+          <button onClick={() => syncMut.mutate()} disabled={syncMut.isPending} className="rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-50">
+            {syncMut.isPending ? 'Sincronizando…' : '🛒 Sincronizar a Meta'}
+          </button>
+          <button onClick={() => setEditing(null)} className="rounded-lg bg-brand-600 px-4 py-2 text-sm font-semibold text-white hover:bg-brand-700">
+            + Nuevo producto
+          </button>
+        </div>
       </div>
 
       <input
@@ -121,6 +125,7 @@ export default function CatalogPage() {
                 <th className="px-4 py-3">Margen</th>
                 <th className="px-4 py-3">Stock</th>
                 <th className="px-4 py-3">Estado</th>
+                <th className="px-4 py-3">Meta</th>
                 <th className="px-4 py-3"></th>
               </tr>
             </thead>
@@ -154,6 +159,9 @@ export default function CatalogPage() {
                       <span className={p.status === 'ACTIVE' ? 'text-brand-700' : 'text-gray-400'}>
                         {p.status}
                       </span>
+                    </td>
+                    <td className="px-4 py-3">
+                      {p.metaSyncStatus === 'synced' ? <span className="text-xs text-brand-700">🟢 Sincronizado</span> : <span className="text-xs text-gray-400">—</span>}
                     </td>
                     <td className="px-4 py-3 text-right">
                       <button onClick={() => setEditing(p)} className="mr-3 text-brand-700 hover:underline">Editar</button>

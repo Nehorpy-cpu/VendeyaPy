@@ -3,7 +3,7 @@
  * Ver ARCHITECTURE.md §4.3.
  */
 
-import type { ProductStatus, Currency, PerfumeGender, PriceRange } from '../enums.js';
+import type { ProductStatus, Currency, PerfumeGender, PriceRange, MetaSyncStatus } from '../enums.js';
 import type { Timestamp } from './common.types.js';
 
 export interface ProductInventory {
@@ -69,6 +69,13 @@ export interface Product {
   externalIds: ProductExternalIds;
   /** Atributos de perfumería. null para productos que no son perfumes. */
   perfume: PerfumeAttributes | null;
+  // --- Sincronización con el Meta Catalog (D4). Lo escribe la sync (Admin SDK). ---
+  syncToMeta?: boolean;
+  metaSyncStatus?: MetaSyncStatus;
+  metaCatalogId?: string | null;
+  metaProductItemId?: string | null;
+  metaLastSyncAt?: Timestamp | null;
+  metaSyncError?: string;
   createdAt: Timestamp;
   updatedAt: Timestamp;
 }

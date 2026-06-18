@@ -108,3 +108,10 @@ export function productMargin(price: number, costPrice: number | null): number |
   if (costPrice == null || price <= 0) return null;
   return ((price - costPrice) / price) * 100;
 }
+
+const API = process.env['NEXT_PUBLIC_API_BASE_URL'] ?? 'http://localhost:5001/demo-aiafg/us-central1';
+
+/** Sincroniza el catálogo al Meta Catalog (D4, vía Cloud Function). */
+export async function syncCatalogToMeta(tenantId: string): Promise<void> {
+  await fetch(`${API}/devSyncCatalogToMeta`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tenantId }) });
+}

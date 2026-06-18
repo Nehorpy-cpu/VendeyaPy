@@ -135,6 +135,19 @@ export interface MetaAd {
   updatedAt: Timestamp;
 }
 
+/** Registro de cada envío de un producto al Meta Catalog (D4). */
+export interface MetaCatalogSyncLog {
+  id: string;
+  tenantId: string;
+  productId: string;
+  metaCatalogId: string | null;
+  metaProductItemId: string | null;
+  action: string; // create | update | disable | delete
+  status: string; // pending | success | failed
+  errorMessage: string;
+  createdAt: Timestamp;
+}
+
 /** Snapshot diario por anuncio. id = `${yyyymmdd}_${externalAdId}`. */
 export interface MetaAdInsightDaily {
   id: string;

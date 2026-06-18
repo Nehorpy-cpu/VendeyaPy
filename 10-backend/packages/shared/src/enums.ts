@@ -194,6 +194,10 @@ export type MessageChannel = (typeof MESSAGE_CHANNEL)[number];
 export const WEBHOOK_STATUS = ['received', 'processing', 'processed', 'failed', 'ignored'] as const;
 export type WebhookStatus = (typeof WEBHOOK_STATUS)[number];
 
+// Estado de sincronización de un producto con el Meta Catalog (D4).
+export const META_SYNC_STATUS = ['not_synced', 'pending', 'synced', 'failed', 'disabled'] as const;
+export type MetaSyncStatus = (typeof META_SYNC_STATUS)[number];
+
 export const META_ASSET_TYPE = [
   'business',
   'ad_account',
