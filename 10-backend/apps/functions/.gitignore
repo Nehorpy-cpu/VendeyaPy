@@ -1,4 +1,7 @@
-lib/
+# Solo la salida compilada de tsc (apps/functions/lib/), NO el código fuente src/lib/.
+# El patrón sin barra inicial («lib/») también ignoraba src/lib/ — bug histórico (Fase 3).
+/lib/
 node_modules/
 *.tsbuildinfo
 .env
+

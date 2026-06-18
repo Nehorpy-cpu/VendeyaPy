@@ -85,6 +85,19 @@ service cloud.firestore {
       allow write: if false;
     }
 
+    // ---------- Idempotencia de webhooks de pago (Fase 3): solo Cloud Functions ----------
+    // Marca cada evento de Stripe procesado una sola vez. Lectura: solo Super Admin (debug).
+    match /stripeWebhookEvents/{eventId} {
+      allow read: if isPlatformAdmin();
+      allow write: if false; // Admin SDK
+    }
+
+    // ---------- Secretos cifrados (Fase 3): NADIE los lee desde el cliente ----------
+    // Tokens por referencia (Meta/pasarelas), cifrados con AES-GCM. Solo Admin SDK.
+    match /secrets/{name} {
+      allow read, write: if false;
+    }
+
     // ---------- Usuarios admin ----------
 
     match /users/{userId} {

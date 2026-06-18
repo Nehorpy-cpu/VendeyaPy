@@ -10,6 +10,7 @@ import { Timestamp } from 'firebase-admin/firestore';
 import type { WebhookInboxEvent, MetaExternalIndexEntry, MessageChannel } from '@vpw/shared';
 import { db, paths } from '../lib/firebase.js';
 import { handleMessage } from '../conversation/engine.js';
+import { getWhatsAppClient } from '../messaging/whatsappClient.js';
 import { logger } from '../lib/logger.js';
 
 const channelOf = (platform: string): MessageChannel =>
@@ -37,7 +38,17 @@ export async function processWebhookEvent(eventId: string): Promise<void> {
     }
 
     const platform = channelOf(ev.platform);
-    await handleMessage({ tenantId, from: payload.from, text: payload.text, channel: platform });
+    const result = await handleMessage({ tenantId, from: payload.from, text: payload.text, channel: platform });
+
+    // Entregar la respuesta del bot por el canal (Cloud API en prod; mock en emulador/demo).
+    if (result.reply && result.reply.trim() && !result.handledByHuman) {
+      try {
+        const client = await getWhatsAppClient(tenantId);
+        await client.sendText(payload.from, result.reply, { tenantId, channel: platform });
+      } catch (e) {
+        logger.error('No se pudo entregar la respuesta del bot', e, { tenantId });
+      }
+    }
 
     // Atribución (D5): si el mensaje vino de un anuncio (referral de Meta), registrar la campaña.
     if (payload.adReferral?.campaignId) {
