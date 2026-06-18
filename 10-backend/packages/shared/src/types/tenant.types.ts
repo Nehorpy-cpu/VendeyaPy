@@ -5,6 +5,7 @@
 
 import type { TenantStatus, Country, Currency, SubscriptionStatus } from '../enums.js';
 import type { Timestamp } from './common.types.js';
+import type { PlanLimits } from './plan.types.js';
 
 /** Suscripción de plataforma del tenant (billing del SaaS) — Fase 4. */
 export interface TenantSubscription {
@@ -97,6 +98,11 @@ export interface TenantUsage {
   ordersThisMonth: number;
   messagesThisMonth: number;
   currentPeriodStart: Timestamp;
+  // Fase 5A — contadores mensuales adicionales (se reinician con el período).
+  jobsThisMonth?: number;
+  adSyncsThisMonth?: number;
+  aiTokensThisMonth?: number;
+  aiCostUsdThisMonth?: number;
 }
 
 export interface Tenant {
@@ -116,6 +122,10 @@ export interface Tenant {
   industry?: string;
   /** Suscripción de plataforma (billing del SaaS) — Fase 4. */
   subscription?: TenantSubscription;
+  /** Overrides de límites por tenant (Enterprise/deals a medida) — Fase 5A. Solo Admin SDK. */
+  limitOverrides?: Partial<PlanLimits>;
+  /** Cuenta demo / no facturable (no se suspende por billing) — Fase 5A. Solo Admin SDK. */
+  isDemo?: boolean;
   createdAt: Timestamp;
   updatedAt: Timestamp;
   deletedAt: Timestamp | null;

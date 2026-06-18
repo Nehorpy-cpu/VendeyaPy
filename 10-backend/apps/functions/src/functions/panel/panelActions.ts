@@ -13,7 +13,8 @@
  */
 import { onCall, HttpsError, type CallableRequest } from 'firebase-functions/v2/https';
 import { resolvePanelAuth } from '../../panel/auth.js';
-import { isPanelJobAction, runPanelJob, PANEL_JOB_ACTIONS } from '../../panel/jobs.js';
+import { isPanelJobAction, runPanelJob, PANEL_JOB_ACTIONS, JOB_REQUIREMENTS } from '../../panel/jobs.js';
+import { assertFeatureEnabled, assertWithinLimit, meterUsage } from '../../entitlements/entitlements.js';
 import { handleMessage } from '../../conversation/engine.js';
 import { logger } from '../../lib/logger.js';
 
@@ -33,11 +34,17 @@ export const runTenantJob = onCall<{ action?: string; tenantId?: string }>(
       throw new HttpsError('invalid-argument', `Acción inválida. Válidas: ${PANEL_JOB_ACTIONS.join(', ')}.`);
     }
     const tenantId = authorizeTenant(req, req.data?.tenantId);
+    // Entitlements (Fase 5A): feature premium + cuota antes de correr; metering después.
+    const jobReq = JOB_REQUIREMENTS[action];
+    if (jobReq.feature) await assertFeatureEnabled(tenantId, jobReq.feature, { actorUid: req.auth?.uid });
+    if (jobReq.quota === 'adSyncs') await assertWithinLimit(tenantId, 'adSyncs', { actorUid: req.auth?.uid });
     try {
       const result = await runPanelJob(action, tenantId);
+      await meterUsage(tenantId, jobReq.meter).catch(() => { /* metering no crítico */ });
       logger.info('Panel job ejecutado', { tenantId, action });
       return { ok: true, action, tenantId, result };
     } catch (e) {
+      if (e instanceof HttpsError) throw e;
       logger.error('Error en runTenantJob', e, { tenantId, action });
       throw new HttpsError('internal', 'No se pudo ejecutar la acción.');
     }

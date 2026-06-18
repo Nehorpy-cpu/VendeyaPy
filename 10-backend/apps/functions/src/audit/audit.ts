@@ -25,6 +25,7 @@ export const AUDIT_ACTIONS = [
   'chat.released',
   'meta.connected',
   'meta.disconnected',
+  'entitlement.blocked',
 ] as const;
 export type AuditAction = (typeof AUDIT_ACTIONS)[number];
 

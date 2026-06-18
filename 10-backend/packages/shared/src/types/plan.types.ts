@@ -11,6 +11,11 @@ export interface PlanLimits {
   maxOrdersPerMonth: number;
   maxWhatsappMessagesPerMonth: number;
   maxDeliveryPersons: number;
+  // Fase 5A — límites adicionales para vender el SaaS.
+  maxUsers: number;
+  maxWhatsappNumbers: number;
+  maxAdSyncsPerMonth: number;
+  maxAiTokensPerMonth: number;
 }
 
 export interface PlanFeatures {
@@ -21,6 +26,8 @@ export interface PlanFeatures {
   marketingAutomation: boolean;
   multiChannel: boolean;
   prioritySupport: boolean;
+  // Fase 5A — feature flag del asistente IA (scaffold; sin cablear OpenAI todavía).
+  aiAssistant: boolean;
 }
 
 export interface Plan {

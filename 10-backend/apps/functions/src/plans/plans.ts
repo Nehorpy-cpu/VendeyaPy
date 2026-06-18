@@ -1,15 +1,16 @@
 /**
- * plans/plans.ts — Planes del SaaS y sus límites (Fase 4)
- * =======================================================
- * Define los planes por defecto (FREE/STARTER/GROWTH/PRO, ARCHITECTURE §2.4),
- * los siembra en `plans/{id}` si faltan, y permite resolver un plan + sus límites.
+ * plans/plans.ts — Planes del SaaS y sus límites (Fase 4 · ampliado en 5A)
+ * =======================================================================
+ * Define los planes por defecto (FREE/STARTER/GROWTH/PRO/ENTERPRISE), los siembra en
+ * `plans/{id}` si faltan, y resuelve un plan + sus límites/features. `getPlan` rellena
+ * con los defaults del spec los campos nuevos que falten en docs ya seedeados (5A).
  */
 import { Timestamp } from 'firebase-admin/firestore';
 import type { Plan, PlanLimits, PlanFeatures, PlanTier } from '@vpw/shared';
 import { db, paths } from '../lib/firebase.js';
+import { UNLIMITED } from '../entitlements/decide.js';
 
-/** Valor para "ilimitado" (evita comparaciones con Infinity en Firestore). */
-export const UNLIMITED = 1_000_000_000;
+export { UNLIMITED };
 
 interface PlanSpec {
   id: string;
@@ -21,28 +22,49 @@ interface PlanSpec {
   features: PlanFeatures;
 }
 
+const F = (over: Partial<PlanFeatures>): PlanFeatures => ({
+  bancard: false, stripe: false, localWallets: false, electronicInvoicing: false,
+  marketingAutomation: false, multiChannel: false, prioritySupport: false, aiAssistant: false,
+  ...over,
+});
+
 export const DEFAULT_PLANS: PlanSpec[] = [
   {
     id: 'free', tier: 'FREE', name: 'Free', description: 'Para empezar a vender por WhatsApp', priceUsdPerMonth: 0,
-    limits: { maxProducts: 20, maxOrdersPerMonth: 50, maxWhatsappMessagesPerMonth: 500, maxDeliveryPersons: 2 },
-    features: { bancard: false, stripe: false, localWallets: false, electronicInvoicing: false, marketingAutomation: false, multiChannel: false, prioritySupport: false },
+    limits: { maxProducts: 20, maxOrdersPerMonth: 50, maxWhatsappMessagesPerMonth: 500, maxDeliveryPersons: 2, maxUsers: 2, maxWhatsappNumbers: 1, maxAdSyncsPerMonth: 0, maxAiTokensPerMonth: 0 },
+    features: F({}),
   },
   {
     id: 'starter', tier: 'STARTER', name: 'Starter', description: 'Negocios en crecimiento', priceUsdPerMonth: 29,
-    limits: { maxProducts: 200, maxOrdersPerMonth: 500, maxWhatsappMessagesPerMonth: 5_000, maxDeliveryPersons: 10 },
-    features: { bancard: true, stripe: true, localWallets: true, electronicInvoicing: false, marketingAutomation: false, multiChannel: true, prioritySupport: false },
+    limits: { maxProducts: 200, maxOrdersPerMonth: 500, maxWhatsappMessagesPerMonth: 5_000, maxDeliveryPersons: 10, maxUsers: 5, maxWhatsappNumbers: 1, maxAdSyncsPerMonth: 0, maxAiTokensPerMonth: 50_000 },
+    features: F({ bancard: true, stripe: true, localWallets: true, multiChannel: true, aiAssistant: true }),
   },
   {
     id: 'growth', tier: 'GROWTH', name: 'Growth', description: 'Escala tu operación', priceUsdPerMonth: 79,
-    limits: { maxProducts: 1_000, maxOrdersPerMonth: 2_000, maxWhatsappMessagesPerMonth: 20_000, maxDeliveryPersons: 50 },
-    features: { bancard: true, stripe: true, localWallets: true, electronicInvoicing: true, marketingAutomation: true, multiChannel: true, prioritySupport: false },
+    limits: { maxProducts: 1_000, maxOrdersPerMonth: 2_000, maxWhatsappMessagesPerMonth: 20_000, maxDeliveryPersons: 50, maxUsers: 15, maxWhatsappNumbers: 3, maxAdSyncsPerMonth: 30, maxAiTokensPerMonth: 250_000 },
+    features: F({ bancard: true, stripe: true, localWallets: true, electronicInvoicing: true, marketingAutomation: true, multiChannel: true, aiAssistant: true }),
   },
   {
-    id: 'pro', tier: 'PRO', name: 'Pro', description: 'Sin límites + soporte prioritario', priceUsdPerMonth: 199,
-    limits: { maxProducts: UNLIMITED, maxOrdersPerMonth: UNLIMITED, maxWhatsappMessagesPerMonth: UNLIMITED, maxDeliveryPersons: UNLIMITED },
-    features: { bancard: true, stripe: true, localWallets: true, electronicInvoicing: true, marketingAutomation: true, multiChannel: true, prioritySupport: true },
+    id: 'pro', tier: 'PRO', name: 'Pro', description: 'Alto volumen + soporte prioritario', priceUsdPerMonth: 199,
+    limits: { maxProducts: 10_000, maxOrdersPerMonth: 20_000, maxWhatsappMessagesPerMonth: 100_000, maxDeliveryPersons: 200, maxUsers: 50, maxWhatsappNumbers: 10, maxAdSyncsPerMonth: 300, maxAiTokensPerMonth: 1_000_000 },
+    features: F({ bancard: true, stripe: true, localWallets: true, electronicInvoicing: true, marketingAutomation: true, multiChannel: true, prioritySupport: true, aiAssistant: true }),
+  },
+  {
+    id: 'enterprise', tier: 'ENTERPRISE', name: 'Enterprise', description: 'A medida (límites por acuerdo, vía limitOverrides)', priceUsdPerMonth: 0,
+    limits: { maxProducts: UNLIMITED, maxOrdersPerMonth: UNLIMITED, maxWhatsappMessagesPerMonth: UNLIMITED, maxDeliveryPersons: UNLIMITED, maxUsers: UNLIMITED, maxWhatsappNumbers: UNLIMITED, maxAdSyncsPerMonth: UNLIMITED, maxAiTokensPerMonth: UNLIMITED },
+    features: F({ bancard: true, stripe: true, localWallets: true, electronicInvoicing: true, marketingAutomation: true, multiChannel: true, prioritySupport: true, aiAssistant: true }),
   },
 ];
+
+/** Rellena los campos nuevos (5A) que falten en un doc de plan ya seedeado. */
+export function withPlanDefaults(stored: Plan, spec: PlanSpec): Plan {
+  return {
+    ...spec,
+    ...stored,
+    limits: { ...spec.limits, ...(stored.limits ?? {}) },
+    features: { ...spec.features, ...(stored.features ?? {}) },
+  };
+}
 
 /** Siembra los planes por defecto si la colección está vacía (idempotente). */
 export async function ensurePlansSeeded(): Promise<void> {
@@ -57,11 +79,14 @@ export async function ensurePlansSeeded(): Promise<void> {
   await batch.commit();
 }
 
-/** Resuelve un plan por id (de Firestore, con fallback al spec por defecto). */
+/** Resuelve un plan por id (Firestore con backfill de defaults; fallback al spec). */
 export async function getPlan(planId: string): Promise<Plan | null> {
-  const snap = await db().doc(paths.plan(planId)).get();
-  if (snap.exists) return snap.data() as Plan;
   const spec = DEFAULT_PLANS.find((p) => p.id === planId);
+  const snap = await db().doc(paths.plan(planId)).get();
+  if (snap.exists) {
+    const stored = snap.data() as Plan;
+    return spec ? withPlanDefaults(stored, spec) : stored;
+  }
   if (!spec) return null;
   const now = Timestamp.now();
   return { ...spec, isActive: true, createdAt: now, updatedAt: now };

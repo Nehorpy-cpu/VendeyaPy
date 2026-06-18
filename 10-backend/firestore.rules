@@ -129,9 +129,13 @@ service cloud.firestore {
       // Lectura: cualquier miembro del tenant (incluye vendedor) + platform admin
       allow read: if isTenantViewer(tenantId) || isTenantSeller(tenantId) || isPlatformAdmin();
 
-      // Escritura del documento raíz del tenant: solo el owner y platform admin
-      // (cambios sensibles como branding, fiscal, payments)
-      allow update: if isTenantOwner(tenantId) || isPlatformAdmin();
+      // Escritura del documento raíz del tenant: solo el owner y platform admin pueden
+      // editar campos NO sensibles (branding, fiscal, payments, contacto...). Los campos de
+      // entitlements/billing (plan, límites, uso, suscripción, estado, demo) NO son editables
+      // desde el cliente — solo Cloud Functions (Admin SDK). El frontend nunca decide seguridad.
+      allow update: if (isTenantOwner(tenantId) || isPlatformAdmin())
+        && !request.resource.data.diff(resource.data).affectedKeys()
+            .hasAny(['planId', 'limits', 'limitOverrides', 'usage', 'subscription', 'status', 'isDemo', 'deletedAt']);
 
       // Creación y borrado: solo platform admin (vía Cloud Functions con Admin SDK)
       allow create, delete: if false;

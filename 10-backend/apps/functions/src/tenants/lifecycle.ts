@@ -4,11 +4,12 @@
  * Suspender/reactivar empresas (billing) y decidir si un mensaje entrante puede
  * procesarse: empresa ACTIVA y dentro del límite de mensajes del plan.
  */
-import { Timestamp, FieldValue } from 'firebase-admin/firestore';
+import { Timestamp } from 'firebase-admin/firestore';
 import type { TenantStatus } from '@vpw/shared';
 import { db, paths } from '../lib/firebase.js';
 import { logger } from '../lib/logger.js';
 import { recordAudit } from '../audit/audit.js';
+import { checkQuota, meterUsage } from '../entitlements/entitlements.js';
 
 export async function setTenantStatus(tenantId: string, status: TenantStatus): Promise<void> {
   await db().doc(paths.tenant(tenantId)).set({ status, updatedAt: Timestamp.now() }, { merge: true });
@@ -25,23 +26,22 @@ export interface TenantGate {
   reason?: 'suspended' | 'message_limit';
 }
 
-/** Decide si un inbound del bot puede procesarse (empresa activa + bajo el límite). */
+/**
+ * Decide si un inbound del bot puede procesarse: empresa no suspendida + bajo el límite de
+ * mensajes del plan (vía entitlements, con lazy-reset del período). Empresa legacy sin doc
+ * → no bloquear.
+ */
 export async function checkTenantInboundGate(tenantId: string): Promise<TenantGate> {
   const snap = await db().doc(paths.tenant(tenantId)).get();
-  const data = snap.data() as
-    | { status?: TenantStatus; limits?: { maxWhatsappMessagesPerMonth?: number }; usage?: { messagesThisMonth?: number } }
-    | undefined;
-  if (!data) return { allowed: true }; // empresa legacy sin doc completo → no bloquear
-  if (data.status === 'SUSPENDED' || data.status === 'DELETED') return { allowed: false, reason: 'suspended' };
-  const max = data.limits?.maxWhatsappMessagesPerMonth;
-  const used = data.usage?.messagesThisMonth ?? 0;
-  if (typeof max === 'number' && max > 0 && used >= max) return { allowed: false, reason: 'message_limit' };
+  if (!snap.exists) return { allowed: true };
+  const status = snap.data()?.status as TenantStatus | undefined;
+  if (status === 'SUSPENDED' || status === 'DELETED') return { allowed: false, reason: 'suspended' };
+  const q = await checkQuota(tenantId, 'messages');
+  if (!q.allowed) return { allowed: false, reason: q.reason === 'suspended' ? 'suspended' : 'message_limit' };
   return { allowed: true };
 }
 
-/** Incrementa el contador de mensajes del mes (métrica de uso del plan). */
+/** Incrementa el contador de mensajes del mes (delega en meterUsage → lazy-reset). */
 export async function incrementMessageUsage(tenantId: string, by = 1): Promise<void> {
-  await db()
-    .doc(paths.tenant(tenantId))
-    .set({ usage: { messagesThisMonth: FieldValue.increment(by) }, updatedAt: Timestamp.now() }, { merge: true });
+  await meterUsage(tenantId, 'messages', by);
 }

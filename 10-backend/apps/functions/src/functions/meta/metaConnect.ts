@@ -19,6 +19,7 @@ import { verifyWhatsappChannel } from '../../meta/preflight.js';
 import { selectTenantPhoneNumber } from '../../meta/discovery.js';
 import { disconnectMeta } from '../../meta/connect.js';
 import { getMetaGraphClient } from '../../meta/graphClient.js';
+import { assertWhatsappNumbersEntitled } from '../../entitlements/entitlements.js';
 import { logger } from '../../lib/logger.js';
 
 interface Authorized {
@@ -62,6 +63,9 @@ export const connectMeta = onCall<{
   const d = req.data ?? {};
   if (!d.code) throw new HttpsError('invalid-argument', 'Falta el code de Meta.');
 
+  // Entitlements (Fase 5A): el plan debe permitir números de WhatsApp.
+  await assertWhatsappNumbersEntitled(tenantId, { actorUid: uid });
+
   const nonceOk = await consumeMetaConnectNonce(d.nonce ?? '', { tenantId, uid });
   if (!nonceOk) throw new HttpsError('failed-precondition', 'Sesión de conexión inválida o expirada. Reiniciá el proceso.');
 
@@ -87,9 +91,10 @@ export const verifyMetaChannel = onCall<{ tenantId?: string }>({ region: 'us-cen
 });
 
 export const selectMetaPhoneNumber = onCall<{ tenantId?: string; phoneNumberId?: string }>({ region: 'us-central1' }, async (req) => {
-  const { tenantId } = authorize(req, req.data?.tenantId);
+  const { tenantId, uid } = authorize(req, req.data?.tenantId);
   const phoneNumberId = req.data?.phoneNumberId;
   if (!phoneNumberId) throw new HttpsError('invalid-argument', 'Falta phoneNumberId.');
+  await assertWhatsappNumbersEntitled(tenantId, { actorUid: uid });
   const ok = await selectTenantPhoneNumber(tenantId, phoneNumberId);
   if (!ok) throw new HttpsError('not-found', 'Ese número no pertenece a la cuenta conectada.');
   return { ok: true, phoneNumberId };

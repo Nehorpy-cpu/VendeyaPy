@@ -108,7 +108,7 @@ export type Currency = (typeof CURRENCY)[number];
 export const COUNTRY = ['PY', 'AR', 'BR', 'MX', 'CO'] as const;
 export type Country = (typeof COUNTRY)[number];
 
-export const PLAN_TIER = ['FREE', 'STARTER', 'GROWTH', 'PRO'] as const;
+export const PLAN_TIER = ['FREE', 'STARTER', 'GROWTH', 'PRO', 'ENTERPRISE'] as const;
 export type PlanTier = (typeof PLAN_TIER)[number];
 
 // Estado de la suscripción de plataforma del tenant (billing del SaaS) — Fase 4.

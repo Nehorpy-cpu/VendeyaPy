@@ -52,6 +52,11 @@ export { provisionTenant } from './functions/tenants/provisionTenant.js';
 export { inviteUser, setUserRole, setUserActive } from './functions/users/userManagement.js';
 export { platformBillingWebhook } from './functions/billing/platformBillingWebhook.js';
 
+// Entitlements / límites / usage (Fase 5A): alta de producto con cuota (gate preparado para
+// que el panel migre del write directo en 5C) + reinicio mensual proactivo del uso.
+export { productUpsert } from './functions/products/productUpsert.js';
+export { resetUsageMonthly } from './functions/scheduled/resetUsage.js';
+
 // Observabilidad (Fase 5): bitácora de auditoría de cambios de catálogo.
 export { onProductWriteAudit } from './functions/products/onProductWriteAudit.js';
 

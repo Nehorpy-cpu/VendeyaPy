@@ -7,6 +7,7 @@
 import { onCall, HttpsError, type CallableRequest } from 'firebase-functions/v2/https';
 import type { UserRole } from '@vpw/shared';
 import { inviteUser as inviteUserCore, setUserRole as setUserRoleCore, setUserActive as setUserActiveCore } from '../../users/manage.js';
+import { assertWithinLimit } from '../../entitlements/entitlements.js';
 import { recordAudit } from '../../audit/audit.js';
 
 function assertTenantAdmin(req: CallableRequest<unknown>, tenantId: string): void {
@@ -25,6 +26,8 @@ export const inviteUser = onCall<{ tenantId?: string; email?: string; role?: Use
     const { tenantId, email, role, name } = req.data ?? {};
     if (!tenantId || !email || !role) throw new HttpsError('invalid-argument', 'Faltan tenantId, email y role.');
     assertTenantAdmin(req, tenantId);
+    // Entitlements (Fase 5A): no exceder el máximo de usuarios del plan.
+    await assertWithinLimit(tenantId, 'users', { actorUid: req.auth?.uid });
     try {
       const r = await inviteUserCore(tenantId, email, role, name);
       await recordAudit({ tenantId, action: 'user.invited', actorUid: req.auth?.uid ?? null, targetType: 'user', targetId: r.uid, summary: `Usuario invitado (${role}): ${email}` });
