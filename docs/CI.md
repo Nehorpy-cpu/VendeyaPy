@@ -35,5 +35,12 @@ pnpm build       # tsc (functions/shared) + next build (web)
 - `apps/web` usa `next/core-web-vitals`.
 
 ## n8n
-`node scripts/validate-n8n.mjs` (desde la raíz del repo) valida que los workflows
-en `20-n8n/` sean JSON parseable.
+**Fuente única de verdad: `20-n8n/workflows/`.** Validar con
+`pnpm --filter @vpw/n8n-workflows validate` (JSON válido + estructura n8n
+`name/nodes/connections`). Corre en CI. Ver `packages/n8n-workflows/README.md`.
+
+## typecheck del panel (apps/web)
+`apps/web` usa **`tsconfig.typecheck.json`** (separado) para que `tsc` no dependa de
+`.next/types` (que Next genera y reescribe en `tsconfig.json`). Así `pnpm typecheck`
+funciona en checkout limpio sin `next build`/`next dev` previos. El typecheck completo
+de Next (incluyendo rutas) lo sigue haciendo `next build`.

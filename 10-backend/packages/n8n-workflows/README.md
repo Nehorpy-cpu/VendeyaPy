@@ -1,36 +1,27 @@
 # @vpw/n8n-workflows
 
-Workflows de n8n exportados como JSON, versionados en Git.
+Tooling de **validación** de los workflows de n8n.
 
-## Estructura
+> **Fuente única de verdad: `20-n8n/workflows/`** (en la raíz del repo).
+> Este paquete NO almacena los workflows; solo provee la validación (CI + local).
+> Antes había una carpeta `workflows/` vacía acá que hacía validar "nada" — eliminada.
 
-```
-workflows/
-├── WF-001-conversation-router.json
-├── WF-002-catalog-flow.json
-├── WF-003-cart-flow.json
-├── WF-004-checkout-flow.json
-├── WF-005-payment-confirmed-flow.json
-├── WF-006-delivery-assign-flow.json
-├── WF-007-delivery-status-flow.json
-├── WF-008-abandoned-cart-flow.json
-└── WF-009-report-flow.json
+## Validar
+
+```bash
+pnpm --filter @vpw/n8n-workflows validate
 ```
 
-Ver ARCHITECTURE.md §7.3 para la descripción detallada de cada workflow.
+Chequea que cada `*.json` de `20-n8n/workflows` sea JSON válido y tenga la estructura
+mínima de n8n (`name`, `nodes`, `connections`). Soporta `_placeholder`. Corre en CI
+(`.github/workflows/ci.yml`).
 
-## Exportar desde n8n
+## Exportar / importar (n8n self-hosted)
 
-1. En la UI de n8n: abrir el workflow
-2. Menú → Download
-3. Guardar el JSON en `workflows/` con el nombre estandarizado
+- **Exportar:** en la UI de n8n → menú del workflow → *Download* → guardar el JSON en
+  `20-n8n/workflows/` con su nombre (`0X_nombre.json`).
+- **Importar:** UI de n8n → *Workflows → Import from File* (o vía la API REST de n8n
+  como paso de deploy). Ver `20-n8n/README.md`.
 
-## Importar a n8n
-
-1. UI de n8n → Workflows → Import from File
-2. Seleccionar el JSON desde `workflows/`
-
-## Deploy automático
-
-El CI/CD usa la API REST de n8n para importar los workflows automáticamente al
-deployar staging y producción. Ver `.github/workflows/deploy.yml`.
+> Nota: el import automático a n8n en el deploy NO está cableado todavía (n8n es
+> self-hosted aparte de Firebase). Hoy el import es manual o por API.

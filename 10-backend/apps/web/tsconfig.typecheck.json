@@ -1,0 +1,12 @@
+{
+  // Config de TYPECHECK del panel, independiente de archivos generados.
+  // Next reescribe tsconfig.json en cada dev/build (re-agrega .next/types/**/*.ts),
+  // lo que hace fallar `tsc --noEmit` en un checkout limpio (sin `.next`).
+  // Este archivo NO lo toca Next: typechea el código fuente sin depender de `.next`.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "incremental": false
+  },
+  "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx"],
+  "exclude": ["node_modules", ".next"]
+}

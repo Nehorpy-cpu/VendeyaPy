@@ -48,6 +48,5 @@ jobs:
       - name: Test (unit + integración)
         run: pnpm test
 
-      - name: Validate n8n workflows (JSON)
-        working-directory: .
-        run: node scripts/validate-n8n.mjs
+      - name: Validate n8n workflows (fuente única 20-n8n/workflows)
+        run: pnpm --filter @vpw/n8n-workflows validate
