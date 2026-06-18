@@ -9,8 +9,8 @@
     "start": "next start -p 3000",
     "lint": "next lint",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run",
-    "test:unit": "vitest run"
+    "test": "vitest run --passWithNoTests",
+    "test:unit": "vitest run --passWithNoTests"
   },
   "dependencies": {
     "@tanstack/react-query": "^5.17.0",

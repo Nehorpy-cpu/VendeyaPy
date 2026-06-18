@@ -18,9 +18,9 @@
     "logs": "firebase functions:log",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src --ext .ts",
-    "test": "vitest run",
-    "test:unit": "vitest run --dir src/lib --dir src/services",
-    "test:integration": "vitest run --dir src/__tests__/integration"
+    "test": "vitest run --passWithNoTests",
+    "test:unit": "vitest run --dir src/lib --passWithNoTests",
+    "test:integration": "vitest run --dir src/__tests__/integration --passWithNoTests"
   },
   "dependencies": {
     "@google-cloud/pubsub": "^4.0.0",

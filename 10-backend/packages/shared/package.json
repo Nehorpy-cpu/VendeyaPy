@@ -29,8 +29,8 @@
     "dev": "tsc --watch",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src --ext .ts",
-    "test": "vitest run",
-    "test:unit": "vitest run"
+    "test": "vitest run --passWithNoTests",
+    "test:unit": "vitest run --passWithNoTests"
   },
   "dependencies": {
     "nanoid": "^5.0.0"

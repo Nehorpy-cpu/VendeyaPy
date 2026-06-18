@@ -6,7 +6,7 @@
 import { z } from 'zod';
 
 const ConfigSchema = z.object({
-  nodeEnv: z.enum(['development', 'staging', 'production']).default('development'),
+  nodeEnv: z.enum(['development', 'staging', 'production', 'test']).default('development'),
   logLevel: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
 
   // n8n
