@@ -201,6 +201,11 @@ export type MetaConnectionStatus = (typeof META_CONNECTION_STATUS)[number];
 export const MESSAGE_CHANNEL = ['whatsapp', 'instagram', 'messenger'] as const;
 export type MessageChannel = (typeof MESSAGE_CHANNEL)[number];
 
+// Modo de envío de WhatsApp por tenant (Fase 4A). 'live' = envío real por la conexión
+// del tenant; 'mock' (default) = no se envía nada a Meta. Vive en config/channels.
+export const WHATSAPP_SEND_MODE = ['mock', 'live'] as const;
+export type WhatsappSendMode = (typeof WHATSAPP_SEND_MODE)[number];
+
 // Estado de un evento en la bandeja de webhooks (D2).
 export const WEBHOOK_STATUS = ['received', 'processing', 'processed', 'failed', 'ignored'] as const;
 export type WebhookStatus = (typeof WEBHOOK_STATUS)[number];

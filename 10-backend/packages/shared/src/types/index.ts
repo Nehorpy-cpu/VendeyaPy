@@ -8,6 +8,7 @@ export * from './product.types.js';
 export * from './agent.types.js';
 export * from './customer.types.js';
 export * from './message.types.js';
+export * from './channel.types.js';
 export * from './session.types.js';
 export * from './order.types.js';
 export * from './financials.types.js';

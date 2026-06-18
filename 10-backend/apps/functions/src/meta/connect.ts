@@ -10,6 +10,7 @@
 import { Timestamp } from 'firebase-admin/firestore';
 import type { MetaConnection } from '@vpw/shared';
 import { db, paths } from '../lib/firebase.js';
+import { getSecretStore } from '../lib/secretStore.js';
 import { logger } from '../lib/logger.js';
 import { recordAudit } from '../audit/audit.js';
 
@@ -66,12 +67,19 @@ export async function connectMetaDemo(tenantId: string, byUid?: string | null): 
   await recordAudit({ tenantId, action: 'meta.connected', actorUid: byUid ?? null, targetType: 'meta', summary: 'Conexión Meta creada (demo)' });
 }
 
-/** Desconecta: estado not_connected + borra los activos. */
+/** Desconecta: estado not_connected + borra los activos + borra el secreto del token. */
 export async function disconnectMeta(tenantId: string): Promise<void> {
-  await db().doc(paths.metaConnection(tenantId, 'main')).set(
+  const connRef = db().doc(paths.metaConnection(tenantId, 'main'));
+  const prevTokenRef = (await connRef.get()).data()?.tokenSecretRef as string | undefined;
+  await connRef.set(
     { status: 'not_connected', tokenSecretRef: '', tokenType: '', scopes: [], lastVerifiedAt: null, updatedAt: Timestamp.now() },
     { merge: true },
   );
+  // Borra el secreto cifrado del tenant (evita huérfanos en `secrets`). No-op si la
+  // referencia no es de SecretStore (p.ej. la demo usa secret://demo/...).
+  if (prevTokenRef) {
+    await getSecretStore().remove(prevTokenRef).catch(() => logger.warn('disconnectMeta: no se pudo borrar el secreto referenciado', { tenantId }));
+  }
   const assets = await db().collection(paths.metaAssets(tenantId)).get();
   const idx = await db().collection(paths.metaExternalIndex()).where('tenantId', '==', tenantId).get();
   const batch = db().batch();

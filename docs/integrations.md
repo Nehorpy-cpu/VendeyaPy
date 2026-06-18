@@ -8,10 +8,12 @@ activan solas. Nada de esto rompe el flujo actual.
 
 El bot ya calcula la respuesta; ahora se **entrega** vía `messaging/whatsappClient.ts`.
 
-- **Emulador / sin credenciales** → `MockWhatsAppClient` (sólo loguea, no llama a Meta).
-- **Producción** → `CloudAPIClient` (POST a `graph.facebook.com/{phoneNumberId}/messages`).
+- **Emulador** → `MockWhatsAppClient` (sólo loguea, **nunca** llama a Meta).
+- **Producción** → `CloudAPIClient` (POST a `graph.facebook.com/{phoneNumberId}/messages`),
+  **con credenciales por tenant** (ver §1.c). Sin conexión/credenciales → Mock por tenant.
 
-Variables: `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_ACCESS_TOKEN` (luego, por tenant vía SecretStore).
+> Las globales `WHATSAPP_PHONE_NUMBER_ID` / `WHATSAPP_ACCESS_TOKEN` **ya no son la fuente
+> primaria** (Fase 4A): solo se usan como bootstrap deprecado tras `ALLOW_GLOBAL_WHATSAPP_FALLBACK`.
 
 ## 1.b Webhook Meta — formato real, normalización e idempotencia (Hardening F3)
 
@@ -55,6 +57,41 @@ registrará el `phone_number_id` real del tenant). Si no resuelve → el evento 
   anuncio reales **no auto-atribuyen por campaña** hasta mapear `adId → campaignId` (vía el sync
   de Meta Ads). **Limitación conocida.**
 
+## 1.c WhatsApp outbound por tenant (Hardening F4A)
+
+El envío real se resuelve **por tenant** (no global). `getWhatsAppClient(tenantId)` decide así:
+
+1. **Emulador** (`FUNCTIONS_EMULATOR`) → SIEMPRE `MockWhatsAppClient` (nunca toca Graph). Aun
+   así **resuelve** las credenciales para poder testear el aislamiento: el Mock queda
+   *inspeccionable* (lleva el `phone_number_id` del tenant; el token NUNCA se loguea ni se
+   expone). En emulador escribe una traza en `tenants/{t}/_debug/lastWhatsappSend` (solo
+   emulador) para los e2e.
+2. **`whatsappSendMode`** del tenant (`tenants/{t}/config/channels`, default **`'mock'`**):
+   si no es `'live'` → Mock (`reason: mode_mock`). Es el interruptor de "responder en
+   WhatsApp real", **separado** del on/off del agente (`AgentConfig.botEnabled`).
+3. **Resolución de credenciales** (`messaging/resolveWhatsappCreds.ts`, decisión pura
+   `decideWhatsappCreds`): junta `MetaConnection` (estado `active` + `tokenSecretRef`) +
+   `metaAsset` `whatsapp_phone_number` (selected → el `phone_number_id`) + token en claro vía
+   `SecretStore.get(tokenSecretRef)`. Si todo resuelve → `CloudAPIClient(phoneNumberId, token)`
+   (cacheado por tenant, TTL 60s acotado a `tokenExpiresAt`). Si no → Mock con **motivo claro**:
+   `no_tenant` · `not_connected` · `token_expired` · `no_phone_asset` · `token_unavailable`.
+4. **Fallback global DEPRECATED**: solo si `ALLOW_GLOBAL_WHATSAPP_FALLBACK=true` (default
+   `false`) y hay env globales → usa el par global (bootstrap mono-tenant). Si no → Mock.
+
+**Tres estados separados** (Fase 4A): (a) *agente activo* = `AgentConfig.botEnabled` (el bot
+habla); (b) *WhatsApp conectado* = `MetaConnection.status==='active'` + asset + token; (c)
+*responder en WhatsApp real* = `whatsappSendMode==='live'`. El envío real ocurre solo con (a)∧(b)∧(c)
+fuera del emulador.
+
+**SecretStore:** el token nunca va a Firestore en claro (solo `tokenSecretRef`); `disconnectMeta`
+ahora **borra** el secreto referenciado (`SecretStore.remove`) para no dejar huérfanos.
+
+**Pendiente Fase 4B (NO incluido):** OAuth/Embedded Signup self-service completo y **discovery
+real** del `phone_number_id` (poblar `metaAssets` vía Graph al conectar). En F4A se usan assets
+ya seedeados; la conexión real self-service **no está completa todavía**. Tampoco entra el envío
+de plantillas/media ni el refresh automático de tokens (Meta: `190` token, `131047` ventana 24h,
+`131030` destinatario no permitido, `131056`/`80007` rate limit).
+
 ## 2. Pagos — Stripe (webhook firmado e idempotente)
 
 `stripeWebhook` (`functions/payments/stripeWebhook.ts`):
@@ -89,7 +126,9 @@ habilitado (App Review/verificación — ADR-0010). En demo se usa `connectMetaD
 
 | Variable | Integración |
 |---|---|
-| `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_ACCESS_TOKEN` | WhatsApp Cloud API (envío) |
+| `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_ACCESS_TOKEN` | **DEPRECATED** (F4A): solo bootstrap global tras el flag de abajo |
+| `ALLOW_GLOBAL_WHATSAPP_FALLBACK` | F4A: habilita el fallback global deprecado (default `false`) |
+| `tenants/{t}/config/channels.whatsappSendMode` | F4A: `'mock'`(default)/`'live'` — envío real por tenant (no es env var) |
 | `WHATSAPP_WEBHOOK_VERIFY_TOKEN`, `WHATSAPP_APP_SECRET` | Webhook Meta (Fase 2) |
 | `STRIPE_WEBHOOK_SECRET`, `STRIPE_SECRET_KEY` | Pagos Stripe |
 | `META_APP_ID`, `META_APP_SECRET`, `META_OAUTH_REDIRECT_URI` | Meta OAuth |

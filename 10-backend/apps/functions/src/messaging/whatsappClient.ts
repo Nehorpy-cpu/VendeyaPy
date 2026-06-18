@@ -1,16 +1,25 @@
 /**
- * messaging/whatsappClient.ts — Abstracción de envío de WhatsApp (Fase 3)
- * =======================================================================
+ * messaging/whatsappClient.ts — Envío de WhatsApp POR TENANT (Fase 4A)
+ * ===================================================================
  * El bot calcula la respuesta (engine) y la ENTREGA por este cliente. Adapters
  * intercambiables (ADR-0003):
- *   - MockWhatsAppClient: emulador / demo / tests — sólo loguea, NO llama a Meta.
+ *   - MockWhatsAppClient: emulador / demo / no-conectado — sólo loguea, NO llama a Meta.
  *   - CloudAPIClient: producción — POST a WhatsApp Cloud API (graph.facebook.com).
- * La selección es automática (getWhatsAppClient): si hay credenciales reales y NO es
- * emulador, usa Cloud API; si no, Mock. Así el flujo demo nunca llama a Meta.
+ *
+ * Selección (getWhatsAppClient → por tenant):
+ *   - Emulador → SIEMPRE Mock (nunca llama a Graph), pero resuelve credenciales para
+ *     poder testear aislamiento por tenant (Mock inspeccionable con el phone_number_id).
+ *   - Real → CloudAPIClient SOLO si whatsappSendMode==='live' (config/channels) Y la
+ *     conexión Meta del tenant resuelve creds; en cualquier otro caso, Mock con motivo.
+ * El token NUNCA se loguea ni se escribe en Firestore. Ver Fase 4A.
  */
 import axios from 'axios';
+import { Timestamp } from 'firebase-admin/firestore';
 import { logger } from '../lib/logger.js';
-import type { MessageChannel } from '@vpw/shared';
+import { db } from '../lib/firebase.js';
+import type { MessageChannel, WhatsappSendMode } from '@vpw/shared';
+import { getChannelConfig } from './channelConfig.js';
+import { resolveTenantWhatsappCreds, type WhatsappCredsResult } from './resolveWhatsappCreds.js';
 
 export interface SendResult {
   ok: boolean;
@@ -41,15 +50,46 @@ export function buildCloudApiTextBody(to: string, text: string) {
   };
 }
 
-/** Mock: no envía nada a Meta. Para emulador, demo y tests. */
+const isEmulator = () => process.env.FUNCTIONS_EMULATOR === 'true';
+
+/** Metadatos de resolución para el Mock inspeccionable. NUNCA incluye el token. */
+export interface MockResolution {
+  mode?: WhatsappSendMode;
+  phoneNumberId?: string;
+  tokenPresent?: boolean;
+  reason?: string;
+}
+
+/** Mock: no envía nada a Meta. Para emulador, demo, no-conectado y tests. */
 export class MockWhatsAppClient implements WhatsAppClient {
+  constructor(public readonly resolution?: MockResolution) {}
+
   async sendText(to: string, text: string, ctx?: SendContext): Promise<SendResult> {
     logger.info('WhatsApp (mock): respuesta NO enviada a Meta', {
       tenantId: ctx?.tenantId,
       channel: ctx?.channel,
       to,
       chars: text.length,
+      mode: this.resolution?.mode,
+      reason: this.resolution?.reason,
     });
+    // Traza de aislamiento SOLO en emulador (tests). Nunca en producción, nunca el token.
+    if (isEmulator() && ctx?.tenantId) {
+      try {
+        await db().doc(`tenants/${ctx.tenantId}/_debug/lastWhatsappSend`).set({
+          to,
+          channel: ctx.channel ?? null,
+          phoneNumberId: this.resolution?.phoneNumberId ?? null,
+          mode: this.resolution?.mode ?? null,
+          tokenPresent: !!this.resolution?.tokenPresent,
+          reason: this.resolution?.reason ?? null,
+          viaMock: true,
+          at: Timestamp.now(),
+        });
+      } catch {
+        /* la traza de debug nunca debe romper el envío */
+      }
+    }
     return { ok: true, viaMock: true };
   }
 }
@@ -71,6 +111,8 @@ export class CloudAPIClient implements WhatsAppClient {
       const id = res.data?.messages?.[0]?.id as string | undefined;
       return { ok: true, id };
     } catch (e) {
+      // No exponer el token. Loguear solo el cuerpo del error de Meta (códigos: 190 token,
+      // 131047 ventana 24h, 131030 destinatario no permitido, 131056/80007 rate limit).
       const error = axios.isAxiosError(e)
         ? e.response?.data
           ? JSON.stringify(e.response.data)
@@ -82,18 +124,80 @@ export class CloudAPIClient implements WhatsAppClient {
   }
 }
 
-const isEmulator = () => process.env.FUNCTIONS_EMULATOR === 'true';
+// ---- Caché de clientes Cloud por tenant: TTL corto y acotado a tokenExpiresAt ----
+interface CacheEntry {
+  client: CloudAPIClient;
+  expiresAtMs: number;
+}
+const clientCache = new Map<string, CacheEntry>();
+const CACHE_TTL_MS = 60_000; // 1 min: corto, para no leer Secret/Firestore por cada mensaje.
+
+/** Limpia la caché de clientes (para tests). */
+export function clearWhatsappClientCache(): void {
+  clientCache.clear();
+}
+
+function cloudClientFor(tenantId: string, creds: Extract<WhatsappCredsResult, { ok: true }>): CloudAPIClient {
+  const now = Date.now();
+  const hit = clientCache.get(tenantId);
+  if (hit && hit.expiresAtMs > now) return hit.client;
+  const client = new CloudAPIClient(creds.phoneNumberId, creds.accessToken);
+  const expiresAtMs = Math.min(now + CACHE_TTL_MS, creds.tokenExpiresAtMs ?? Number.POSITIVE_INFINITY);
+  clientCache.set(tenantId, { client, expiresAtMs });
+  return client;
+}
+
+/** Fallback global DEPRECATED (bootstrap mono-tenant) detrás de flag explícito. */
+const globalFallbackAllowed = () => process.env.ALLOW_GLOBAL_WHATSAPP_FALLBACK === 'true';
+
+/** Dependencias inyectables (para tests sin Firestore). */
+export interface WhatsappClientDeps {
+  getMode: (tenantId?: string) => Promise<WhatsappSendMode>;
+  resolveCreds: (tenantId?: string) => Promise<WhatsappCredsResult>;
+}
+
+const defaultDeps: WhatsappClientDeps = {
+  getMode: async (t) => (t ? (await getChannelConfig(t)).whatsappSendMode : 'mock'),
+  resolveCreds: (t) => resolveTenantWhatsappCreds(t),
+};
 
 /**
- * Resuelve el cliente de WhatsApp para un tenant.
- * Hoy lee credenciales de entorno (globales). El multi-tenant real (credenciales por
- * conexión Meta vía SecretStore) se enchufa acá SIN tocar a los que llaman. Sin
- * credenciales o en emulador → Mock (la demo nunca llama a Meta).
+ * Resuelve el cliente de WhatsApp para un tenant (Fase 4A). USA el tenantId de verdad.
+ * Si falta tenantId / no conectado / sin asset / token ausente o vencido / sendMode !=
+ * 'live' → Mock con motivo claro. En emulador SIEMPRE Mock (nunca toca Graph).
  */
-export async function getWhatsAppClient(_tenantId?: string): Promise<WhatsAppClient> {
-  if (isEmulator()) return new MockWhatsAppClient();
-  const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
-  const accessToken = process.env.WHATSAPP_ACCESS_TOKEN;
-  if (phoneNumberId && accessToken) return new CloudAPIClient(phoneNumberId, accessToken);
-  return new MockWhatsAppClient();
+export async function getWhatsAppClient(
+  tenantId?: string,
+  deps: WhatsappClientDeps = defaultDeps,
+): Promise<WhatsAppClient> {
+  const mode = await deps.getMode(tenantId);
+
+  // Emulador: nunca llamamos a Graph. Resolvemos creds igual para testear aislamiento,
+  // devolviendo un Mock inspeccionable (con el phone_number_id del tenant, sin el token).
+  if (isEmulator()) {
+    if (mode === 'live') {
+      const creds = await deps.resolveCreds(tenantId);
+      return creds.ok
+        ? new MockWhatsAppClient({ mode, phoneNumberId: creds.phoneNumberId, tokenPresent: true })
+        : new MockWhatsAppClient({ mode, reason: creds.reason });
+    }
+    return new MockWhatsAppClient({ mode, reason: 'mode_mock' });
+  }
+
+  // Producción: solo se envía real si el tenant está en modo 'live'.
+  if (mode !== 'live') return new MockWhatsAppClient({ mode, reason: 'mode_mock' });
+
+  const creds = await deps.resolveCreds(tenantId);
+  if (creds.ok && tenantId) return cloudClientFor(tenantId, creds);
+
+  // Fallback global (DEPRECATED): solo si está habilitado explícitamente y hay env globales.
+  if (globalFallbackAllowed()) {
+    const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
+    const accessToken = process.env.WHATSAPP_ACCESS_TOKEN;
+    if (phoneNumberId && accessToken) {
+      logger.warn('WhatsApp: usando credenciales GLOBALES (ALLOW_GLOBAL_WHATSAPP_FALLBACK, deprecated)', { tenantId });
+      return new CloudAPIClient(phoneNumberId, accessToken);
+    }
+  }
+  return new MockWhatsAppClient({ mode, reason: creds.ok ? 'no_tenant' : creds.reason });
 }
