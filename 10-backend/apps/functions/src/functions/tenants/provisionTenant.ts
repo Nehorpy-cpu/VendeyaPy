@@ -6,6 +6,7 @@
  */
 import { onCall, HttpsError, type CallableRequest } from 'firebase-functions/v2/https';
 import { provisionTenant as provisionTenantCore, type ProvisionTenantInput } from '../../tenants/provision.js';
+import { recordAudit } from '../../audit/audit.js';
 
 export const provisionTenant = onCall<ProvisionTenantInput>(
   { region: 'us-central1' },
@@ -16,7 +17,9 @@ export const provisionTenant = onCall<ProvisionTenantInput>(
       throw new HttpsError('permission-denied', 'Solo el administrador de la plataforma puede dar de alta empresas.');
     }
     try {
-      return await provisionTenantCore(req.data);
+      const result = await provisionTenantCore(req.data);
+      await recordAudit({ tenantId: result.tenantId, action: 'tenant.provisioned', actorUid: req.auth.uid, actorRole: 'PLATFORM_ADMIN', targetType: 'tenant', targetId: result.tenantId, summary: `Empresa creada: ${req.data.name}` });
+      return result;
     } catch (e) {
       throw new HttpsError('invalid-argument', e instanceof Error ? e.message : 'Error al aprovisionar');
     }

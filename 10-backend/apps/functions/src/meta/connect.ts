@@ -11,6 +11,7 @@ import { Timestamp } from 'firebase-admin/firestore';
 import type { MetaConnection } from '@vpw/shared';
 import { db, paths } from '../lib/firebase.js';
 import { logger } from '../lib/logger.js';
+import { recordAudit } from '../audit/audit.js';
 
 const DEMO_ASSETS: Array<{ type: string; ext: string; name: string }> = [
   { type: 'business', ext: 'biz-1', name: 'Mi Negocio (demo)' },
@@ -62,6 +63,7 @@ export async function connectMetaDemo(tenantId: string, byUid?: string | null): 
   }
   await batch.commit();
   logger.info('Conexión Meta (demo) creada', { tenantId, assets: DEMO_ASSETS.length });
+  await recordAudit({ tenantId, action: 'meta.connected', actorUid: byUid ?? null, targetType: 'meta', summary: 'Conexión Meta creada (demo)' });
 }
 
 /** Desconecta: estado not_connected + borra los activos. */
@@ -77,4 +79,5 @@ export async function disconnectMeta(tenantId: string): Promise<void> {
   idx.docs.forEach((d) => batch.delete(d.ref));
   await batch.commit();
   logger.info('Conexión Meta desconectada', { tenantId });
+  await recordAudit({ tenantId, action: 'meta.disconnected', targetType: 'meta', summary: 'Conexión Meta desconectada' });
 }

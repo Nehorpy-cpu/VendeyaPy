@@ -7,6 +7,7 @@
 import { onCall, HttpsError, type CallableRequest } from 'firebase-functions/v2/https';
 import type { UserRole } from '@vpw/shared';
 import { inviteUser as inviteUserCore, setUserRole as setUserRoleCore, setUserActive as setUserActiveCore } from '../../users/manage.js';
+import { recordAudit } from '../../audit/audit.js';
 
 function assertTenantAdmin(req: CallableRequest<unknown>, tenantId: string): void {
   if (!req.auth) throw new HttpsError('unauthenticated', 'Iniciá sesión.');
@@ -25,7 +26,9 @@ export const inviteUser = onCall<{ tenantId?: string; email?: string; role?: Use
     if (!tenantId || !email || !role) throw new HttpsError('invalid-argument', 'Faltan tenantId, email y role.');
     assertTenantAdmin(req, tenantId);
     try {
-      return await inviteUserCore(tenantId, email, role, name);
+      const r = await inviteUserCore(tenantId, email, role, name);
+      await recordAudit({ tenantId, action: 'user.invited', actorUid: req.auth?.uid ?? null, targetType: 'user', targetId: r.uid, summary: `Usuario invitado (${role}): ${email}` });
+      return r;
     } catch (e) {
       throw new HttpsError('invalid-argument', e instanceof Error ? e.message : 'Error');
     }
@@ -40,6 +43,7 @@ export const setUserRole = onCall<{ tenantId?: string; uid?: string; role?: User
     assertTenantAdmin(req, tenantId);
     try {
       await setUserRoleCore(tenantId, uid, role);
+      await recordAudit({ tenantId, action: 'user.role_changed', actorUid: req.auth?.uid ?? null, targetType: 'user', targetId: uid, summary: `Rol cambiado a ${role}` });
       return { ok: true };
     } catch (e) {
       throw new HttpsError('invalid-argument', e instanceof Error ? e.message : 'Error');
@@ -57,6 +61,7 @@ export const setUserActive = onCall<{ tenantId?: string; uid?: string; active?: 
     assertTenantAdmin(req, tenantId);
     try {
       await setUserActiveCore(tenantId, uid, active);
+      await recordAudit({ tenantId, action: active ? 'user.activated' : 'user.deactivated', actorUid: req.auth?.uid ?? null, targetType: 'user', targetId: uid, summary: active ? 'Usuario activado' : 'Usuario desactivado' });
       return { ok: true };
     } catch (e) {
       throw new HttpsError('invalid-argument', e instanceof Error ? e.message : 'Error');

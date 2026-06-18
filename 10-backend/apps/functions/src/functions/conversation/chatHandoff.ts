@@ -8,6 +8,7 @@
 
 import { onCall, HttpsError, type CallableRequest } from 'firebase-functions/v2/https';
 import { takeoverChat, releaseToBot } from '../../conversation/handoff.js';
+import { recordAudit } from '../../audit/audit.js';
 
 interface HandoffData {
   tenantId?: string;
@@ -42,11 +43,15 @@ function readArgs(req: CallableRequest<HandoffData>): { tenantId: string; custom
 export const chatTakeover = onCall<HandoffData>({ region: 'us-central1' }, async (req) => {
   const { tenantId, customerId } = readArgs(req);
   const by = assertStaff(req, tenantId);
-  return takeoverChat(tenantId, customerId, by, req.auth?.uid ?? null);
+  const result = await takeoverChat(tenantId, customerId, by, req.auth?.uid ?? null);
+  await recordAudit({ tenantId, action: 'chat.takeover', actorUid: req.auth?.uid ?? null, targetType: 'customer', targetId: customerId, summary: `${by ?? 'Staff'} tomó la conversación` });
+  return result;
 });
 
 export const chatRelease = onCall<HandoffData>({ region: 'us-central1' }, async (req) => {
   const { tenantId, customerId } = readArgs(req);
   assertStaff(req, tenantId);
-  return releaseToBot(tenantId, customerId);
+  const result = await releaseToBot(tenantId, customerId);
+  await recordAudit({ tenantId, action: 'chat.released', actorUid: req.auth?.uid ?? null, targetType: 'customer', targetId: customerId, summary: 'Conversación devuelta al bot' });
+  return result;
 });

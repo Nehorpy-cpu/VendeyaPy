@@ -283,6 +283,12 @@ service cloud.firestore {
         allow write: if isTenantManager(tenantId) || isPlatformAdmin();
       }
 
+      // Bitácora de auditoría (Fase 5): la leen manager+; la escribe SOLO Cloud Functions.
+      match /auditLogs/{id} {
+        allow read: if isTenantManager(tenantId) || isPlatformAdmin();
+        allow write: if false;
+      }
+
       // Entregas
       match /deliveries/{deliveryId} {
         allow read: if isTenantViewer(tenantId) || isPlatformAdmin();

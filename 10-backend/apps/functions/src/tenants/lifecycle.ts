@@ -8,9 +8,12 @@ import { Timestamp, FieldValue } from 'firebase-admin/firestore';
 import type { TenantStatus } from '@vpw/shared';
 import { db, paths } from '../lib/firebase.js';
 import { logger } from '../lib/logger.js';
+import { recordAudit } from '../audit/audit.js';
 
 export async function setTenantStatus(tenantId: string, status: TenantStatus): Promise<void> {
   await db().doc(paths.tenant(tenantId)).set({ status, updatedAt: Timestamp.now() }, { merge: true });
+  const action = status === 'SUSPENDED' ? 'tenant.suspended' : status === 'ACTIVE' ? 'tenant.reactivated' : null;
+  if (action) await recordAudit({ tenantId, action, targetType: 'tenant', summary: `Empresa ${status}` });
   logger.info('Estado de empresa actualizado', { tenantId, status });
 }
 

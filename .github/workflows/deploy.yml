@@ -1,0 +1,66 @@
+name: Deploy
+
+# Deploy MANUAL (workflow_dispatch) a staging o production.
+# Requiere el secret FIREBASE_SERVICE_ACCOUNT (JSON de una service account con permisos
+# de deploy) configurado en GitHub → Settings → Secrets. Los proyectos están en
+# 10-backend/.firebaserc (staging → vpw-staging, production → vpw-prod).
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'Entorno de destino'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+          - staging
+          - production
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: 10-backend
+
+jobs:
+  deploy:
+    name: Deploy a ${{ github.event.inputs.target }}
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.target }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: 10-backend/pnpm-lock.yaml
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm build
+
+      - name: Authenticate + Deploy
+        env:
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          GOOGLE_APPLICATION_CREDENTIALS: ${{ runner.temp }}/firebase-sa.json
+        run: |
+          if [ -z "$FIREBASE_SERVICE_ACCOUNT" ]; then
+            echo "::error::Falta el secret FIREBASE_SERVICE_ACCOUNT"; exit 1
+          fi
+          printf '%s' "$FIREBASE_SERVICE_ACCOUNT" > "$GOOGLE_APPLICATION_CREDENTIALS"
+          pnpm exec firebase deploy \
+            --only functions,firestore:rules,firestore:indexes,storage,hosting \
+            --project ${{ github.event.inputs.target }} \
+            --non-interactive

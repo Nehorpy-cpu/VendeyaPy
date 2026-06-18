@@ -15,6 +15,7 @@ import type { Order } from '@vpw/shared';
 import { db, paths } from '../lib/firebase.js';
 import { logger } from '../lib/logger.js';
 import { recordBusinessEvent } from '../events/businessEvents.js';
+import { recordAudit } from '../audit/audit.js';
 
 export interface ConfirmPaymentResult {
   ok: boolean;
@@ -72,6 +73,7 @@ export async function confirmPayment(
   }
 
   logger.info('Pago confirmado', { tenantId, customerId: order.customerId, orderId });
+  await recordAudit({ tenantId, action: 'payment.confirmed', targetType: 'order', targetId: orderId, summary: `Pago confirmado del pedido ${orderId}`, metadata: { total: order.totals.total, currency: order.totals.currency } });
   return {
     ok: true,
     message:

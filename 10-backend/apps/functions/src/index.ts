@@ -52,6 +52,9 @@ export { provisionTenant } from './functions/tenants/provisionTenant.js';
 export { inviteUser, setUserRole, setUserActive } from './functions/users/userManagement.js';
 export { platformBillingWebhook } from './functions/billing/platformBillingWebhook.js';
 
+// Observabilidad (Fase 5): bitácora de auditoría de cambios de catálogo.
+export { onProductWriteAudit } from './functions/products/onProductWriteAudit.js';
+
 // Liberar chat (vendedor devuelve la conversación al bot) — endpoint de prueba (F6b).
 export { devReleaseChat } from './functions/conversation/devReleaseChat.js';
 
