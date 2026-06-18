@@ -21,17 +21,12 @@ export function normalizeStripeStatus(s: string): SubscriptionStatus {
   return STRIPE_TO_SUB[s] ?? 'none';
 }
 
-/** Estado de la empresa según el estado de su suscripción. */
-export function tenantStatusForSubscription(sub: SubscriptionStatus): TenantStatus {
-  switch (sub) {
-    case 'active':
-    case 'trialing':
-      return 'ACTIVE';
-    case 'past_due':
-    case 'canceled':
-    case 'incomplete':
-      return 'SUSPENDED';
-    default:
-      return 'ACTIVE';
-  }
+/**
+ * Estado de la empresa según el estado de su suscripción (Fase 5B: política suavizada).
+ * El billing NO suspende la cuenta: los datos y el acceso básico se preservan siempre. El
+ * control de las funciones premium es por `billingPosture` (entitlements). Suspender toda la
+ * cuenta queda como decisión EXPLÍCITA del admin (fuera de billing automático).
+ */
+export function tenantStatusForSubscription(_sub: SubscriptionStatus): TenantStatus {
+  return 'ACTIVE';
 }

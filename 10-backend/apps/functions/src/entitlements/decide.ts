@@ -52,19 +52,28 @@ export function decideQuota(used: number, limit: number, delta = 1): QuotaDecisi
 }
 
 export interface BillingPosture {
-  /** Puede operar (lectura + acciones básicas). Falso solo si suspendido de verdad. */
+  /** Puede operar (lectura + acciones básicas). Datos siempre preservados (no se suspende la cuenta). */
   operational: boolean;
   /** Puede ejecutar acciones premium/costosas (automatizaciones, ads, IA). */
   premiumAllowed: boolean;
   reason: string;
 }
 
+/** Ventana de gracia de past_due (Fase 5B): 7 días desde `pastDueSince`. */
+export const GRACE_MS = 7 * 86_400_000;
+
 /**
- * Postura de billing según el estado de la suscripción (Fase 5A).
- * past_due → gracia: opera básico, premium bloqueado (la ventana de 7 días la afina 5B).
- * canceled/incomplete → premium suspendido, datos preservados. demo/free/active/trialing → todo.
+ * Postura de billing según el estado de la suscripción.
+ * - active/trialing/none/demo → opera + premium.
+ * - past_due CON gracia (5B: nowMs + pastDueSinceMs): premium mientras now < pastDueSince + 7d;
+ *   pasada la gracia → premium bloqueado. Sin esos datos (5A) → premium bloqueado (conservador).
+ * - canceled/incomplete → premium suspendido, datos preservados (la cuenta NO se suspende).
  */
-export function billingPosture(status: SubscriptionStatus | undefined, isDemo: boolean): BillingPosture {
+export function billingPosture(
+  status: SubscriptionStatus | undefined,
+  isDemo: boolean,
+  opts?: { nowMs?: number; pastDueSinceMs?: number | null },
+): BillingPosture {
   if (isDemo) return { operational: true, premiumAllowed: true, reason: 'demo' };
   switch (status) {
     case 'active':
@@ -72,8 +81,13 @@ export function billingPosture(status: SubscriptionStatus | undefined, isDemo: b
     case 'none':
     case undefined:
       return { operational: true, premiumAllowed: true, reason: status ?? 'none' };
-    case 'past_due':
-      return { operational: true, premiumAllowed: false, reason: 'past_due_grace' };
+    case 'past_due': {
+      if (opts && opts.nowMs != null && opts.pastDueSinceMs != null) {
+        const inGrace = opts.nowMs < opts.pastDueSinceMs + GRACE_MS;
+        return { operational: true, premiumAllowed: inGrace, reason: inGrace ? 'past_due_grace' : 'past_due_expired' };
+      }
+      return { operational: true, premiumAllowed: false, reason: 'past_due' };
+    }
     case 'incomplete':
       return { operational: true, premiumAllowed: false, reason: 'incomplete' };
     case 'canceled':

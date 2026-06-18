@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { UNLIMITED, isUnlimited, effectiveLimit, effectiveLimits, isFeatureEnabled, decideQuota, billingPosture } from './decide.js';
+import { UNLIMITED, isUnlimited, effectiveLimit, effectiveLimits, isFeatureEnabled, decideQuota, billingPosture, GRACE_MS } from './decide.js';
 import type { PlanLimits, PlanFeatures } from '@vpw/shared';
 
 const LIMITS: PlanLimits = { maxProducts: 20, maxOrdersPerMonth: 50, maxWhatsappMessagesPerMonth: 500, maxDeliveryPersons: 2, maxUsers: 2, maxWhatsappNumbers: 1, maxAdSyncsPerMonth: 0, maxAiTokensPerMonth: 0 };
@@ -51,6 +51,21 @@ describe('billingPosture', () => {
   });
   it('demo → todo permitido sin importar el estado', () => {
     expect(billingPosture('canceled', true)).toMatchObject({ operational: true, premiumAllowed: true, reason: 'demo' });
+  });
+});
+
+describe('billingPosture — gracia de past_due (5B)', () => {
+  const NOW = 1_700_000_000_000;
+  it('sin info de gracia (5A) → premium bloqueado (conservador)', () => {
+    expect(billingPosture('past_due', false)).toMatchObject({ premiumAllowed: false, reason: 'past_due' });
+  });
+  it('past_due DENTRO de la gracia → premium permitido', () => {
+    const r = billingPosture('past_due', false, { nowMs: NOW, pastDueSinceMs: NOW - 2 * 86_400_000 });
+    expect(r).toMatchObject({ operational: true, premiumAllowed: true, reason: 'past_due_grace' });
+  });
+  it('past_due FUERA de la gracia (>7 días) → premium bloqueado, cuenta operativa', () => {
+    const r = billingPosture('past_due', false, { nowMs: NOW, pastDueSinceMs: NOW - GRACE_MS - 1000 });
+    expect(r).toMatchObject({ operational: true, premiumAllowed: false, reason: 'past_due_expired' });
   });
 });
 

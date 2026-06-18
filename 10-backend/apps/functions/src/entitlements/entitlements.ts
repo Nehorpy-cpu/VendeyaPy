@@ -17,12 +17,18 @@ import { maybeResetUsage } from './usageReset.js';
 
 export interface Entitlements {
   tenantId: string;
-  planId: string;
+  /** Último plan seleccionado (UX/renovación). Alias histórico: `planId`. */
+  selectedPlanId: string;
+  planId: string; // = selectedPlanId (compat)
+  /** Plan EFECTIVO: 'free' cuando el billing no permite premium (canceled/past_due vencido). */
+  effectivePlanId: string;
+  /** El billing degradó a free por falta de pago (selected != free y premium no permitido). */
+  premiumSuspended: boolean;
   tier: PlanTier;
   subscriptionStatus: SubscriptionStatus;
   isDemo: boolean;
-  limits: PlanLimits; // efectivos (plan + overrides)
-  features: PlanFeatures;
+  limits: PlanLimits; // efectivos (plan efectivo + overrides si premium)
+  features: PlanFeatures; // del plan efectivo
   posture: BillingPosture;
 }
 
@@ -39,21 +45,32 @@ export async function resolveEntitlements(tenantId: string): Promise<Entitlement
   if (hit && hit.expiresAtMs > now) return hit.ent;
 
   const tenant = (await db().doc(paths.tenant(tenantId)).get()).data() as Partial<Tenant> | undefined;
-  const planId = tenant?.planId ?? 'free';
-  const plan = (await getPlan(planId)) ?? (await getPlan('free'));
-  if (!plan) throw new Error('No se pudo resolver el plan base (free).');
+  const selectedPlanId = tenant?.planId ?? 'free';
   const status = (tenant?.subscription?.status ?? 'none') as SubscriptionStatus;
   const isDemo = tenant?.isDemo === true;
+  const pastDueSinceMs = tenant?.subscription?.pastDueSince ? tenant.subscription.pastDueSince.toMillis() : null;
+  const posture = billingPosture(status, isDemo, { nowMs: now, pastDueSinceMs });
+
+  // Plan efectivo: si el billing no permite premium (y no es free ni demo) → free.
+  // (El tenant.planId se conserva como "último plan seleccionado" para UX/renovación.)
+  const premiumSuspended = !posture.premiumAllowed && selectedPlanId !== 'free' && !isDemo;
+  const effectivePlanId = premiumSuspended ? 'free' : selectedPlanId;
+  const effPlan = (await getPlan(effectivePlanId)) ?? (await getPlan('free'));
+  if (!effPlan) throw new Error('No se pudo resolver el plan base (free).');
 
   const ent: Entitlements = {
     tenantId,
-    planId,
-    tier: plan.tier,
+    selectedPlanId,
+    planId: selectedPlanId,
+    effectivePlanId,
+    premiumSuspended,
+    tier: effPlan.tier,
     subscriptionStatus: status,
     isDemo,
-    limits: effectiveLimits(plan.limits, tenant?.limitOverrides),
-    features: plan.features,
-    posture: billingPosture(status, isDemo),
+    // Overrides (deals Enterprise) solo aplican con premium habilitado.
+    limits: effectiveLimits(effPlan.limits, premiumSuspended ? undefined : tenant?.limitOverrides),
+    features: effPlan.features,
+    posture,
   };
   cache.set(tenantId, { ent, expiresAtMs: now + TTL_MS });
   return ent;
@@ -124,17 +141,19 @@ export async function assertWithinLimit(tenantId: string, metric: QuotaMetric, o
   throw new HttpsError('resource-exhausted', `Alcanzaste el límite de tu plan (${metric}: ${r.limit}). Actualizá tu plan para continuar.`);
 }
 
-/** Lanza HttpsError si la feature no está en el plan o el billing premium está suspendido. */
+/**
+ * Lanza HttpsError si la feature no está disponible en el plan EFECTIVO. Distingue la causa:
+ * billing (plan degradado por falta de pago → mensaje de pago) vs plan (feature no incluida).
+ */
 export async function assertFeatureEnabled(tenantId: string, feature: keyof PlanFeatures, opts: { actorUid?: string | null } = {}): Promise<void> {
   const ent = await resolveEntitlements(tenantId);
-  if (!isFeatureEnabled(ent.features, feature)) {
-    await auditBlock(tenantId, opts.actorUid, `Feature no incluida en el plan: ${feature}`, { feature, reason: 'feature_not_in_plan' });
-    throw new HttpsError('failed-precondition', `Tu plan no incluye esta función (${feature}). Actualizá tu plan.`);
-  }
-  if (!ent.posture.premiumAllowed) {
+  if (isFeatureEnabled(ent.features, feature)) return;
+  if (ent.premiumSuspended) {
     await auditBlock(tenantId, opts.actorUid, `Feature premium suspendida por billing (${ent.posture.reason}): ${feature}`, { feature, reason: 'billing_premium_suspended', billing: ent.posture.reason });
     throw new HttpsError('failed-precondition', 'Tu suscripción tiene un pago pendiente. Regularizá el pago para usar las funciones premium.');
   }
+  await auditBlock(tenantId, opts.actorUid, `Feature no incluida en el plan: ${feature}`, { feature, reason: 'feature_not_in_plan' });
+  throw new HttpsError('failed-precondition', `Tu plan no incluye esta función (${feature}). Actualizá tu plan.`);
 }
 
 /** Gate del canal WhatsApp: el plan debe permitir al menos un número (multi-número: fase posterior). */

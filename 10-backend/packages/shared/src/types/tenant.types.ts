@@ -7,13 +7,15 @@ import type { TenantStatus, Country, Currency, SubscriptionStatus } from '../enu
 import type { Timestamp } from './common.types.js';
 import type { PlanLimits } from './plan.types.js';
 
-/** Suscripción de plataforma del tenant (billing del SaaS) — Fase 4. */
+/** Suscripción de plataforma del tenant (billing del SaaS) — Fase 4 · 5B. */
 export interface TenantSubscription {
   status: SubscriptionStatus;
   planId: string;
   stripeCustomerId: string | null;
   stripeSubscriptionId: string | null;
   currentPeriodEnd: Timestamp | null;
+  /** Desde cuándo está en past_due (para la ventana de gracia de 7 días) — Fase 5B. */
+  pastDueSince?: Timestamp | null;
   updatedAt: Timestamp;
 }
 

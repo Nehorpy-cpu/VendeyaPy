@@ -60,9 +60,20 @@ denormalizada** (lectura rápida/rules), no como fuente.
   `HttpsError` (`resource-exhausted` / `failed-precondition`) y **auditan** el bloqueo
   (`entitlement.blocked`).
 - **`meterUsage` / `meterAiUsage`** → incrementan contadores mensuales (con lazy-reset).
-- **`billingPosture(status, isDemo)`**: `active/trialing/none/demo` → opera + premium;
-  `past_due` → opera básico, **premium bloqueado** (gracia; la ventana de 7 días la afina 5B);
-  `canceled/incomplete` → premium suspendido, **datos preservados**.
+- **`billingPosture(status, isDemo, { nowMs, pastDueSinceMs })`** (5B): `active/trialing/none/demo`
+  → opera + premium; `past_due` **dentro** de la gracia (7 días desde `pastDueSince`) → premium ✅;
+  `past_due` **vencido** / `canceled` / `incomplete` → premium ❌; **siempre** `operational` (la
+  cuenta nunca se suspende por billing — datos preservados). Sin `pastDueSince` (5A) → premium ❌.
+
+### Plan seleccionado vs efectivo (5B)
+
+- **`selectedPlanId`** (= `tenant.planId`): último plan elegido, para UX/renovación.
+- **`effectivePlanId`**: `selectedPlanId` si el billing permite premium; **`free`** si no
+  (`canceled`/`unpaid`/`past_due` vencido). `resolveEntitlements` deriva **límites y features del
+  plan EFECTIVO** → un tenant `canceled` con `planId=growth` **NO** conserva cuotas/features premium
+  (baja a free); conserva acceso básico y datos. `premiumSuspended` marca esta degradación (y da el
+  mensaje de "pago pendiente" en los gates). Los `limitOverrides` (Enterprise) solo aplican con
+  premium habilitado.
 
 ## Métricas de uso
 
@@ -91,9 +102,34 @@ transacción, lo invocan los gates/metering) + `resetUsageMonthly` (job programa
 | `productUpsert` (callable preparado) | `assertWithinLimit('products')` al crear |
 | IA (futuro) | `assertAiBudget` + `recordAiUsage` (scaffold) |
 
-## Fuera de 5A (próximas sub-fases)
+## Billing: Stripe price→plan + gracia (Fase 5B-i)
 
-- **5B:** mapeo Stripe price→plan, checkout/portal, ventana de gracia de 7 días, cambios de plan.
+El webhook `platformBillingWebhook` (firmado + idempotente, ya existente) ahora **sincroniza el
+plan desde el Price ID** confirmado por Stripe (el frontend nunca decide el plan):
+- **`STRIPE_PRICE_TO_PLAN`** (env JSON `{priceId: planId}`) + `planIdForPrice` (puro). Opcional:
+  `plans/{id}.stripePriceId` solo como referencia/display.
+- **`deriveSubscriptionUpdate`** (puro) calcula desde `customer.subscription.*`:
+  `status`, `planId` (del precio; `null`=no cambia), `currentPeriodEnd`, `stripeCustomerId/SubscriptionId`,
+  y **`pastDueSince`** (se setea al entrar en `past_due`, se limpia al volver a activo → base de la gracia).
+- El webhook escribe `tenant.subscription.{status, planId, currentPeriodEnd, stripeCustomerId,
+  stripeSubscriptionId, pastDueSince}` + `tenant.planId` + `tenant.limits` (caché denormalizada del
+  plan **seleccionado**) e **invalida** los entitlements. **No** suspende la cuenta.
+- **Estados:** `trialing`/`active` → premium; `past_due` → gracia 7 días (premium hasta el corte);
+  `canceled`/`unpaid`/`incomplete`/`past_due` vencido → premium suspendido, **datos y acceso básico
+  preservados** (`tenant.status` sigue `ACTIVE`).
+
+> Verificado en `verify-fase5b-billing` (9/9): sync, idempotencia, firma 401, gracia, vencimiento,
+> canceled (cuenta ACTIVE) y recuperación.
+
+### Contrato preparado para 5B-ii (no implementado en 5B-i)
+
+`createCheckoutSession`, `createBillingPortalSession`, `syncTenantSubscription` — con `StripeClient`
+**inyectable** (SDK real en prod, fake en tests) y authz `resolveOwnerAdminAuth` (solo OWNER/ADMIN).
+
+## Fuera de 5B-i (próximas sub-fases)
+
+- **5B-ii:** `createCheckoutSession` / `createBillingPortalSession` / `syncTenantSubscription` con
+  Stripe SDK (Billing APIs + Checkout para suscripciones, Billing Portal para self-service).
 - **5C:** migración del panel del write directo de productos al callable `productUpsert` (hasta
   entonces el write directo sigue activo → **no considerar el control de productos "seguro"** aún).
-- Frontend de planes, OpenAI real, Stripe productivo, deploy.
+- Frontend de planes, OpenAI real, Stripe productivo, dunning/emails, facturación fiscal, deploy.

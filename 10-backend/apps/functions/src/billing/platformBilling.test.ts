@@ -10,11 +10,9 @@ describe('platformBilling — mapeo de suscripción → estado de empresa', () =
     expect(normalizeStripeStatus('lo-que-sea')).toBe('none');
   });
 
-  it('activa con suscripción al día, suspende con problemas de pago', () => {
-    expect(tenantStatusForSubscription('active')).toBe('ACTIVE');
-    expect(tenantStatusForSubscription('trialing')).toBe('ACTIVE');
-    expect(tenantStatusForSubscription('past_due')).toBe('SUSPENDED');
-    expect(tenantStatusForSubscription('canceled')).toBe('SUSPENDED');
-    expect(tenantStatusForSubscription('incomplete')).toBe('SUSPENDED');
+  it('billing NO suspende la cuenta (5B): siempre ACTIVE; el premium lo controla la posture', () => {
+    for (const s of ['active', 'trialing', 'past_due', 'canceled', 'incomplete', 'none'] as const) {
+      expect(tenantStatusForSubscription(s)).toBe('ACTIVE');
+    }
   });
 });
