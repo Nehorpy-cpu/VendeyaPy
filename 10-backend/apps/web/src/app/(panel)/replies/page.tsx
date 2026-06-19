@@ -5,7 +5,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import type { WinningReply } from '@vpw/shared';
 import { useActiveCompany } from '@/lib/active-company';
 import { useAuth } from '@/lib/auth-context';
-import { listReplies, upsertReply, archiveReply, deleteReply, generateReplies, type ReplyInput } from '@/lib/replies';
+import { listReplies, upsertReply, archiveReply, generateReplies, type ReplyInput } from '@/lib/replies';
 
 const field = 'w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-brand-500 focus:outline-none';
 
@@ -29,7 +29,6 @@ export default function RepliesPage() {
   const invalidate = () => qc.invalidateQueries({ queryKey: ['winningReplies', tenantId] });
   const saveMut = useMutation({ mutationFn: (input: ReplyInput) => upsertReply(tenantId!, input), onSuccess: () => { invalidate(); setForm({ open: false, r: null }); } });
   const archiveMut = useMutation({ mutationFn: (id: string) => archiveReply(tenantId!, id), onSuccess: invalidate });
-  const delMut = useMutation({ mutationFn: (id: string) => deleteReply(tenantId!, id), onSuccess: invalidate });
   const genMut = useMutation({ mutationFn: () => generateReplies(tenantId!), onSuccess: invalidate });
 
   if (companyLoading) return <div className="text-gray-400">Cargando…</div>;
@@ -72,7 +71,6 @@ export default function RepliesPage() {
               <span className="flex-1" />
               {canEdit && r.source === 'manual' && <button onClick={() => setForm({ open: true, r })} className="text-xs text-brand-700 hover:underline">Editar</button>}
               {canEdit && <button onClick={() => archiveMut.mutate(r.id)} className="text-xs text-gray-500 hover:underline">Archivar</button>}
-              {canEdit && r.source === 'manual' && <button onClick={() => delMut.mutate(r.id)} className="text-xs text-red-600 hover:underline">Borrar</button>}
             </div>
           </div>
         ))}
