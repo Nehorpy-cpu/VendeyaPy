@@ -1,13 +1,18 @@
 /**
  * Capa de acceso al Simulador del agente (panel · P17).
- * El dueño guarda casos de prueba y los corre contra el bot real (devMessage).
+ *
+ * LECTURAS directas (las reglas permiten leer al manager+). ESCRITURAS y RUN por callables (Fase 5C):
+ *   - agentTestCaseUpsert (alta/edición de la definición; también el cambio de status)
+ *   - agentTestCaseDelete (hard-delete; dato efímero del simulador)
+ *   - agentTestCaseRun     (corre el bot server-side y persiste lastResult/lastRunAt vía Admin SDK)
+ * El run ya NO pega al endpoint dev `devMessage` ni escribe lastResult/lastRunAt directo.
  */
 
-import { collection, doc, getDocs, setDoc, deleteDoc, updateDoc, query, orderBy, serverTimestamp } from 'firebase/firestore';
+import { collection, getDocs, query, orderBy } from 'firebase/firestore';
+import { httpsCallable } from 'firebase/functions';
 import type { AgentTestCase, AgentTestStatus } from '@vpw/shared';
-import { firebaseDb } from './firebase';
+import { firebaseDb, firebaseFunctions } from './firebase';
 
-const API = process.env['NEXT_PUBLIC_API_BASE_URL'] ?? 'http://localhost:5001/demo-aiafg/us-central1';
 const casesCol = (t: string) => collection(firebaseDb(), 'tenants', t, 'agentTestCases');
 
 export async function listTestCases(tenantId: string): Promise<AgentTestCase[]> {
@@ -23,43 +28,46 @@ export interface TestCaseInput {
   expectedBehavior: string;
 }
 
+type TestCaseUpsertResp = { ok: boolean; id: string; created: boolean };
+
+/**
+ * Alta/edición de la definición vía callable `agentTestCaseUpsert`. El backend descarta
+ * lastResult/lastRunAt (server-only) y en create inicializa status='UNTESTED'. NO escribe directo.
+ */
 export async function upsertTestCase(tenantId: string, input: TestCaseInput): Promise<string> {
-  const id = input.id ?? doc(casesCol(tenantId)).id;
-  await setDoc(
-    doc(casesCol(tenantId), id),
-    {
-      id,
-      tenantId,
-      name: input.name,
-      scenario: input.scenario,
-      userMessage: input.userMessage,
-      expectedBehavior: input.expectedBehavior,
-      updatedAt: serverTimestamp(),
-      ...(input.id ? {} : { lastResult: '', lastRunAt: null, status: 'UNTESTED', createdAt: serverTimestamp() }),
-    },
-    { merge: true },
+  const data = { name: input.name, scenario: input.scenario, userMessage: input.userMessage, expectedBehavior: input.expectedBehavior };
+  const call = httpsCallable<{ tenantId: string; id?: string; data: unknown }, TestCaseUpsertResp>(
+    firebaseFunctions(),
+    'agentTestCaseUpsert',
   );
-  return id;
+  const res = await call({ tenantId, id: input.id, data });
+  return res.data.id;
 }
 
+/** Baja vía callable `agentTestCaseDelete` (hard-delete; dato efímero). NO escribe directo. */
 export async function deleteTestCase(tenantId: string, id: string): Promise<void> {
-  await deleteDoc(doc(casesCol(tenantId), id));
+  const call = httpsCallable<{ tenantId: string; id: string }, { ok: boolean }>(firebaseFunctions(), 'agentTestCaseDelete');
+  await call({ tenantId, id });
 }
 
+/** Cambio de status manual vía `agentTestCaseUpsert` (data:{status}); el backend valida el enum. */
 export async function setTestStatus(tenantId: string, id: string, status: AgentTestStatus): Promise<void> {
-  await updateDoc(doc(casesCol(tenantId), id), { status });
+  const call = httpsCallable<{ tenantId: string; id: string; data: unknown }, { ok: boolean }>(firebaseFunctions(), 'agentTestCaseUpsert');
+  await call({ tenantId, id, data: { status } });
 }
 
-/** Corre el caso contra el bot real: 'hola' (saludo) + el userMessage; guarda la respuesta. */
+/**
+ * Corre el caso server-side vía callable `agentTestCaseRun`: el backend corre el bot real (toma el
+ * userMessage del doc) y persiste lastResult/lastRunAt con Admin SDK. Devuelve el lastResult para
+ * mostrarlo (la UI lo relee del doc tras invalidar). NO pega a `devMessage` ni escribe directo.
+ */
 export async function runTestCase(tenantId: string, tc: AgentTestCase): Promise<string> {
-  const phone = '+595' + Math.floor(900000000 + Math.random() * 99999999);
-  const send = (text: string) =>
-    fetch(`${API}/devMessage`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ from: phone, text, tenantId }) }).then((r) => r.json());
-  await send('hola');
-  const r = await send(tc.userMessage);
-  const reply = r.reply || (r.handledByHuman ? '(el bot está en pausa)' : '(sin respuesta)');
-  await updateDoc(doc(casesCol(tenantId), tc.id), { lastResult: reply, lastRunAt: serverTimestamp() });
-  return reply;
+  const call = httpsCallable<{ tenantId: string; id: string }, { ok: boolean; id: string; lastResult: string; handledByHuman: boolean }>(
+    firebaseFunctions(),
+    'agentTestCaseRun',
+  );
+  const res = await call({ tenantId, id: tc.id });
+  return res.data.lastResult;
 }
 
 const DEFAULTS: TestCaseInput[] = [
