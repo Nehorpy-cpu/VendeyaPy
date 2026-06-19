@@ -61,6 +61,10 @@ export { createPayPalSubscriptionSession, syncPayPalSubscription } from './funct
 export { productUpsert } from './functions/products/productUpsert.js';
 export { resetUsageMonthly } from './functions/scheduled/resetUsage.js';
 
+// Migración de escrituras críticas a callables (Fase 5C-A): config sensible del tenant
+// (checkout/agente/canales) con gate owner/admin + validación + auditoría. No cierra rules aún.
+export { checkoutConfigUpdate, agentConfigUpdate, channelConfigUpdate } from './functions/config/configCallables.js';
+
 // Observabilidad (Fase 5): bitácora de auditoría de cambios de catálogo.
 export { onProductWriteAudit } from './functions/products/onProductWriteAudit.js';
 

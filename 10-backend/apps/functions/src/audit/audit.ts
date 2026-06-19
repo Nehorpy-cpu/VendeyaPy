@@ -26,6 +26,9 @@ export const AUDIT_ACTIONS = [
   'meta.connected',
   'meta.disconnected',
   'entitlement.blocked',
+  'checkout.updated',
+  'agentConfig.updated',
+  'channelConfig.updated',
 ] as const;
 export type AuditAction = (typeof AUDIT_ACTIONS)[number];
 
