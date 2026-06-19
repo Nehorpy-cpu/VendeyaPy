@@ -5,9 +5,10 @@ hacia **callables con gate de backend**. **Autorización ESTRICTA: solo `TENANT_
 `PLATFORM_ADMIN`** (`resolveOwnerAdminAuth`). Nunca `SELLER` ni `TENANT_MANAGER`. Validación estricta
 (whitelist de campos) y auditoría de cada cambio.
 
-> **Convivencia (5C-A):** los callables **conviven** con los writes directos actuales —
-> `firestore.rules` **NO** se cerró todavía. El cierre a `write:false` (Admin SDK only) es un paso
-> posterior, por módulo, cuando el frontend migre a invocar estos callables. El frontend NO fue tocado.
+> **Cierre (G-1, hecho):** el frontend (`agent-config.ts`/`templates.ts`) ya invoca estos callables y
+> `firestore.rules` cerró el wildcard `match /config/{doc}` a **`allow write: if false`** (lectura
+> viewer+ sin cambios). Agent/checkout/channels **solo** se escriben vía backend validado (Admin SDK).
+> Verificado con `verify-rules-config.mjs` (12/12).
 
 Errores comunes: `unauthenticated` (sin sesión), `permission-denied` (rol no autorizado),
 `invalid-argument` (tenantId faltante para admin / payload inválido), `failed-precondition`
@@ -56,13 +57,13 @@ decide el frontend.**
 
 ---
 
-## Migración de frontend (fase posterior, la hace el owner)
+## Migración de frontend (hecha — G-1)
 
-Reemplazar en `apps/web/src/lib/agent-config.ts` / `templates.ts` los `setDoc` a
-`config/{checkout|agent|channels}` por `httpsCallable('checkoutConfigUpdate' | 'agentConfigUpdate' |
-'channelConfigUpdate')` con el mismo payload (`{ tenantId, data }`), y manejar los `HttpsError`
-(`permission-denied`, `invalid-argument`, `failed-precondition`). Una vez migrado, se cierran las
-rules de `config/{doc}` a `write:false`.
+`apps/web/src/lib/agent-config.ts` y `templates.ts` ya invocan los callables:
+`saveAgentConfig`/`applyTemplate` → `agentConfigUpdate`, `saveCheckoutConfig` → `checkoutConfigUpdate`
+(con el payload `{ tenantId, data }`; los `HttpsError` los maneja react-query). Las **lecturas** de
+config siguen directas (`getDoc`). Con la migración aplicada, `firestore.rules` cerró `config/{doc}`
+a `write:false`.
 
 ## Pendiente 5C (otras sub-fases)
 

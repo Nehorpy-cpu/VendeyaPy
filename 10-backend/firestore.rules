@@ -163,10 +163,13 @@ service cloud.firestore {
         allow write: if false;
       }
 
-      // Configuración del agente / checkout (editable desde el panel por el Owner)
+      // Configuración del agente / checkout / canales. La ESCRITURA pasa solo por callables
+      // (agentConfigUpdate / checkoutConfigUpdate / channelConfigUpdate, Admin SDK) — Fase 5C cierre
+      // G-1. El wildcard {doc} cubre agent/checkout/channels y cualquier config doc futuro.
+      // Lectura: viewer+ del tenant o platform admin (sin cambios).
       match /config/{doc} {
         allow read: if isTenantViewer(tenantId) || isPlatformAdmin();
-        allow write: if isTenantOwner(tenantId) || isPlatformAdmin();
+        allow write: if false;
       }
 
       // Clientes (el vendedor puede ver/atender; escritura de datos: manager+)
