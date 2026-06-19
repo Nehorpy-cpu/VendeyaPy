@@ -107,12 +107,16 @@ simulador pasará a un callable **server-set**.
   `winningReplyUpsert`/`winningReplyDelete`, solo "Archivar", **hard-delete eliminado**,
   `listReplies` oculta `ARCHIVED`, editar `auto` bloqueado). `winningReplyDelete` es SOFT
   (`status='ARCHIVED'`). Lectura staff intacta. Sin hard-delete público (lo purga el job minero, Admin SDK).
-- ⏳ **`agentTestCases`** (G-5): callable server-set de run (`agentTestCaseRun`, corre el bot y persiste
-  `lastResult`/`lastRunAt`) **ya construido (GB-B, hecho)**; `upsert`/`delete`/`status` ya cubiertos.
-  Falta migrar `lib/simulator.ts` (run → `agentTestCaseRun`, status → `agentTestCaseUpsert`) y luego cerrar.
+- ✅ **`agentTestCases`** → `allow write: if false` (G-5, cierre final). Frontend ya migrado (GF-4:
+  `agentTestCaseUpsert`/`Delete`, status vía `agentTestCaseUpsert(data:{status})`, run vía
+  `agentTestCaseRun`; ya no pega a `devMessage` ni escribe `lastResult`/`lastRunAt` directo).
+  `lastResult`/`lastRunAt` los escribe **solo** `agentTestCaseRun` (server-set); delete es HARD.
+  Lectura manager+ intacta (rule combinada `read,write` separada en `read` + `write:false`).
 
-`config` (agent/checkout/channels) es un cierre aparte (wildcard `config/{doc}`, callables
-`agentConfigUpdate`/`checkoutConfigUpdate`/`channelConfigUpdate`), tras migrar el frontend.
+**Growth completo blindado:** `deliveryPersons`, `promotions`, `trackingSources`, `winningReplies` y
+`agentTestCases` están en `write:false`; el panel escribe growth **solo** vía callables (Admin SDK).
+
+`config` (agent/checkout/channels) cerrado aparte (G-1, wildcard `config/{doc}` → `write:false`).
 
 ## Pendiente
 

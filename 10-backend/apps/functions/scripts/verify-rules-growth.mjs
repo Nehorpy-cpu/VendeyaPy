@@ -14,13 +14,15 @@
  *   G-4 (winningReplies): write directo manager+ → 403; winningReplyUpsert/Delete (Admin SDK) → ok;
  *     create fuerza source='manual'/status='ACTIVE'; delete SOFT (status='ARCHIVED'); editar una reply
  *     source='auto' → failed-precondition; lectura staff → 200 (sin cambios); seller NO puede; aislamiento.
- *   (G-5 agentTestCases se agrega en su commit.)
+ *   G-5 (agentTestCases): write directo manager+ → 403; agentTestCaseUpsert/Delete/Run (Admin SDK) → ok;
+ *     run persiste lastResult/lastRunAt server-side; el cliente NO puede escribir lastResult ni acepta
+ *     el upsert lastResult/lastRunAt; lectura manager+ (seller NO lee → 403); seller NO ejecuta; aislamiento.
  */
 process.env.FIRESTORE_EMULATOR_HOST = '127.0.0.1:8080';
 process.env.GCLOUD_PROJECT = 'demo-aiafg';
 
 import { initializeApp } from 'firebase-admin/app';
-import { getFirestore, Timestamp } from 'firebase-admin/firestore';
+import { getFirestore, Timestamp, FieldPath } from 'firebase-admin/firestore';
 
 initializeApp({ projectId: 'demo-aiafg' });
 const db = getFirestore();
@@ -204,6 +206,65 @@ const wInPerfu = bwid ? (await db.doc(`tenants/${T}/winningReplies/${bwid}`).get
 const wInBoutique = bwid ? (await db.doc(`tenants/boutique-demo/winningReplies/${bwid}`).get()).exists : false;
 check('G4.8 cross-tenant: boutique NO crea reply en perfumeria (la crea en su tenant)', bWin.status === 200 && !wInPerfu && wInBoutique, `perfu=${wInPerfu} boutique=${wInBoutique}`);
 
+// ===== Cierre G-5 — agentTestCases =====
+// Bot encendido en perfumeria para que el run devuelva una respuesta no vacía.
+await db.doc(`tenants/${T}/config/agent`).set({ botEnabled: true }, { merge: true });
+
+// 1. agentTestCaseUpsert owner (create) → server inicializa status='UNTESTED', lastResult='', lastRunAt=null.
+const aUp = await callFn('agentTestCaseUpsert', { tenantId: T, data: { name: 'Rules Case', userMessage: 'hola, ¿algo barato?', scenario: 's', expectedBehavior: 'e' } }, owner);
+const aid = aUp.result?.id;
+const acase = aid ? (await db.doc(`tenants/${T}/agentTestCases/${aid}`).get()).data() : null;
+check('G5.1 agentTestCaseUpsert owner (create) → ok (status=UNTESTED, lastResult="", lastRunAt=null)', aUp.status === 200 && acase?.status === 'UNTESTED' && acase?.lastResult === '' && acase?.lastRunAt === null, `status=${aUp.status} st=${acase?.status}`);
+
+// 2. write directo del owner (manager+) a agentTestCases → 403 (write cerrado).
+const wCase = await restPatch(`tenants/${T}/agentTestCases/${aid}`, { name: { stringValue: 'HACK' } }, owner);
+check('G5.2 write directo owner a agentTestCases → 403', wCase === 403, `status=${wCase}`);
+
+// 3. agentTestCaseUpsert owner (update) sigue funcionando.
+const aUpd = await callFn('agentTestCaseUpsert', { tenantId: T, id: aid, data: { scenario: 'editado' } }, owner);
+check('G5.3 agentTestCaseUpsert owner (update) → ok', aUpd.status === 200 && (await db.doc(`tenants/${T}/agentTestCases/${aid}`).get()).data()?.scenario === 'editado', `status=${aUpd.status}`);
+
+// 4. status update vía agentTestCaseUpsert(data:{status}) → ok.
+const aStatus = await callFn('agentTestCaseUpsert', { tenantId: T, id: aid, data: { status: 'OK' } }, owner);
+check('G5.4 status update vía agentTestCaseUpsert(data:{status}) → ok', aStatus.status === 200 && (await db.doc(`tenants/${T}/agentTestCases/${aid}`).get()).data()?.status === 'OK', `status=${aStatus.status}`);
+
+// 5. run vía agentTestCaseRun → ok; persiste lastResult (no vacío) + lastRunAt (backend).
+const aRun = await callFn('agentTestCaseRun', { tenantId: T, id: aid }, owner);
+const aAfter = (await db.doc(`tenants/${T}/agentTestCases/${aid}`).get()).data();
+check('G5.5 agentTestCaseRun owner → ok (persiste lastResult no vacío + lastRunAt server-side)', aRun.status === 200 && typeof aRun.result?.lastResult === 'string' && aRun.result.lastResult.length > 0 && aAfter?.lastResult === aRun.result.lastResult && aAfter?.lastRunAt != null, `status=${aRun.status} last="${aRun.result?.lastResult}"`);
+const runResultVal = aAfter?.lastResult;
+
+// 6. cliente NO puede escribir lastResult directo a agentTestCases → 403 (write cerrado).
+const wResult = await restPatch(`tenants/${T}/agentTestCases/${aid}`, { lastResult: { stringValue: 'HACK' } }, owner);
+check('G5.6 cliente NO puede escribir lastResult directo → 403', wResult === 403, `status=${wResult}`);
+
+// 7. agentTestCaseUpsert sigue descartando lastResult/lastRunAt (server-only).
+const aHack = await callFn('agentTestCaseUpsert', { tenantId: T, id: aid, data: { lastResult: 'HACK', lastRunAt: 123 } }, owner);
+const aHackDoc = (await db.doc(`tenants/${T}/agentTestCases/${aid}`).get()).data();
+check('G5.7 agentTestCaseUpsert NO acepta lastResult/lastRunAt (server-only)', aHack.status === 200 && aHackDoc?.lastResult === runResultVal && aHackDoc?.lastResult !== 'HACK', `last="${aHackDoc?.lastResult}"`);
+
+// 8. lectura: read sin cambios (manager+). owner → 200; seller (no manager+) → 403.
+const rOwnerA = await restGet(`tenants/${T}/agentTestCases/${aid}`, owner);
+const rSellerA = await restGet(`tenants/${T}/agentTestCases/${aid}`, seller);
+check('G5.8 owner (manager+) lee agentTestCases → 200; seller → 403 (read sin cambios)', rOwnerA === 200 && rSellerA === 403, `owner=${rOwnerA} seller=${rSellerA}`);
+
+// 9. seller NO puede usar los callables (upsert/delete/run) → 403.
+const sellerAU = await callFn('agentTestCaseUpsert', { tenantId: T, data: { name: 'X' } }, seller);
+const sellerAD = await callFn('agentTestCaseDelete', { tenantId: T, id: aid }, seller);
+const sellerAR = await callFn('agentTestCaseRun', { tenantId: T, id: aid }, seller);
+check('G5.9 seller NO puede agentTestCaseUpsert/Delete/Run → 403', sellerAU.status === 403 && sellerAD.status === 403 && sellerAR.status === 403, `up=${sellerAU.status} del=${sellerAD.status} run=${sellerAR.status}`);
+
+// 10. agentTestCaseDelete owner → hard-delete (doc eliminado).
+const aDel = await callFn('agentTestCaseDelete', { tenantId: T, id: aid }, owner);
+check('G5.10 agentTestCaseDelete owner → hard-delete (doc eliminado)', aDel.status === 200 && !(await db.doc(`tenants/${T}/agentTestCases/${aid}`).get()).exists, `status=${aDel.status}`);
+
+// 11. aislamiento de tenant: owner de boutique con tenantId=perfumeria crea en boutique, NO en perfumeria.
+const bCase = await callFn('agentTestCaseUpsert', { tenantId: T, data: { name: 'Cross' } }, boutiqueOwner);
+const baid = bCase.result?.id;
+const aInPerfu = baid ? (await db.doc(`tenants/${T}/agentTestCases/${baid}`).get()).exists : true;
+const aInBoutique = baid ? (await db.doc(`tenants/boutique-demo/agentTestCases/${baid}`).get()).exists : false;
+check('G5.11 cross-tenant: boutique NO crea test case en perfumeria (la crea en su tenant)', bCase.status === 200 && !aInPerfu && aInBoutique, `perfu=${aInPerfu} boutique=${aInBoutique}`);
+
 // --- Limpieza ---
 if (did) await db.doc(`tenants/${T}/deliveryPersons/${did}`).delete().catch(() => {});
 await db.doc(`tenants/${T}/deliveryPersons/rules-hack`).delete().catch(() => {}); // por si el create directo hubiera pasado
@@ -214,10 +275,14 @@ if (btid) await db.doc(`tenants/boutique-demo/trackingSources/${btid}`).delete()
 if (wid) await db.doc(`tenants/${T}/winningReplies/${wid}`).delete().catch(() => {});
 await db.doc(`tenants/${T}/winningReplies/g4-auto`).delete().catch(() => {});
 if (bwid) await db.doc(`tenants/boutique-demo/winningReplies/${bwid}`).delete().catch(() => {});
+if (aid) await db.doc(`tenants/${T}/agentTestCases/${aid}`).delete().catch(() => {}); // por si el delete no corrió
+if (baid) await db.doc(`tenants/boutique-demo/agentTestCases/${baid}`).delete().catch(() => {});
+// Clientes sintéticos del simulador (from reservado con prefijo '0000…') creados por el run.
+for (const d of (await db.collection(`tenants/${T}/customers`).where(FieldPath.documentId(), '>=', '0000').where(FieldPath.documentId(), '<', '0001').get()).docs) await d.ref.delete().catch(() => {});
 await db.doc(`tenants/${T}`).update({ limitOverrides: {} }).catch(() => {});
 for (const d of (await db.collection(`tenants/${T}/auditLogs`).get()).docs) await d.ref.delete().catch(() => {});
 for (const d of (await db.collection('tenants/boutique-demo/auditLogs').get()).docs) await d.ref.delete().catch(() => {});
 
 const ok = results.every((x) => x);
-console.log(`\nRESULTADO CIERRE RULES GROWTH — G-0 deliveryPersons + G-2 promotions + G-3 trackingSources + G-4 winningReplies: ${ok ? 'TODO OK ✅' : 'HAY FALLOS ❌'} (${results.filter((x) => x).length}/${results.length})`);
+console.log(`\nRESULTADO CIERRE RULES GROWTH — G-0 deliveryPersons + G-2 promotions + G-3 trackingSources + G-4 winningReplies + G-5 agentTestCases: ${ok ? 'TODO OK ✅' : 'HAY FALLOS ❌'} (${results.filter((x) => x).length}/${results.length})`);
 process.exit(ok ? 0 : 1);
