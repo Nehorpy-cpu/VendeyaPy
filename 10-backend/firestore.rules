@@ -131,11 +131,13 @@ service cloud.firestore {
 
       // Escritura del documento raíz del tenant: solo el owner y platform admin pueden
       // editar campos NO sensibles (branding, fiscal, payments, contacto...). Los campos de
-      // entitlements/billing (plan, límites, uso, suscripción, estado, demo) NO son editables
-      // desde el cliente — solo Cloud Functions (Admin SDK). El frontend nunca decide seguridad.
+      // entitlements/billing (plan, límites, uso, suscripción, estado, demo) y el estado de
+      // onboarding NO son editables desde el cliente — solo Cloud Functions (Admin SDK):
+      // onboarding.completed lo marca el callable completeOnboarding (R-1/R-2). El frontend
+      // nunca decide seguridad.
       allow update: if (isTenantOwner(tenantId) || isPlatformAdmin())
         && !request.resource.data.diff(resource.data).affectedKeys()
-            .hasAny(['planId', 'limits', 'limitOverrides', 'usage', 'subscription', 'status', 'isDemo', 'deletedAt']);
+            .hasAny(['planId', 'limits', 'limitOverrides', 'usage', 'subscription', 'status', 'isDemo', 'deletedAt', 'onboarding']);
 
       // Creación y borrado: solo platform admin (vía Cloud Functions con Admin SDK)
       allow create, delete: if false;
