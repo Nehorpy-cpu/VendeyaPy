@@ -1,18 +1,24 @@
 /**
  * Capa de acceso al tracking propio (panel · P11). Códigos/cupones que, al
  * mencionarlos el cliente, atribuyen la venta a una promo propia (sin Meta).
+ *
+ * LECTURAS directas (las reglas permiten leer al staff). ESCRITURAS por callables (Fase 5C):
+ *   - trackingSourceUpsert (alta/edición; el backend NORMALIZA y valida el `code`)
+ *   - trackingSourceDelete (SOFT: active=false, conserva el rollup) — el panel lo muestra como "Desactivar"
  */
 
-import { collection, doc, getDocs, setDoc, deleteDoc, query, orderBy, serverTimestamp } from 'firebase/firestore';
+import { collection, getDocs, query, orderBy } from 'firebase/firestore';
+import { httpsCallable } from 'firebase/functions';
 import type { TrackingSource, TrackingType } from '@vpw/shared';
-import { firebaseDb } from './firebase';
+import { firebaseDb, firebaseFunctions } from './firebase';
 
 const API = process.env['NEXT_PUBLIC_API_BASE_URL'] ?? 'http://localhost:5001/demo-aiafg/us-central1';
 const col = (t: string) => collection(firebaseDb(), 'tenants', t, 'trackingSources');
 
 export async function listTrackingSources(tenantId: string): Promise<TrackingSource[]> {
   const snap = await getDocs(query(col(tenantId), orderBy('createdAt', 'desc')));
-  return snap.docs.map((d) => d.data() as TrackingSource);
+  // El "borrar" ahora es SOFT (active=false); ocultamos los inactivos para que no se vean como activos.
+  return snap.docs.map((d) => d.data() as TrackingSource).filter((s) => s.active !== false);
 }
 
 export interface TrackingInput {
@@ -23,18 +29,29 @@ export interface TrackingInput {
   active: boolean;
 }
 
+type TrackingUpsertResp = { ok: boolean; id: string; created: boolean };
+
+/**
+ * Alta/edición vía callable `trackingSourceUpsert`. El backend valida y NORMALIZA el `code`
+ * (trim + UPPERCASE + formato ^[A-Z0-9_-]{2,32}$); el frontend ya NO normaliza. NO escribe directo.
+ */
 export async function upsertTrackingSource(tenantId: string, input: TrackingInput): Promise<string> {
-  const id = input.id ?? doc(col(tenantId)).id;
-  await setDoc(
-    doc(col(tenantId), id),
-    { id, tenantId, name: input.name, code: input.code.trim().toUpperCase(), type: input.type, active: input.active, updatedAt: serverTimestamp(), ...(input.id ? {} : { createdAt: serverTimestamp() }) },
-    { merge: true },
+  const data = { name: input.name, code: input.code, type: input.type, active: input.active };
+  const call = httpsCallable<{ tenantId: string; id?: string; data: unknown }, TrackingUpsertResp>(
+    firebaseFunctions(),
+    'trackingSourceUpsert',
   );
-  return id;
+  const res = await call({ tenantId, id: input.id, data });
+  return res.data.id;
 }
 
+/**
+ * "Desactivar" vía callable `trackingSourceDelete`. Es SOFT-delete: marca `active=false` (conserva el
+ * rollup de atribución; no borra el doc). La lista oculta los inactivos. NO escribe directo a Firestore.
+ */
 export async function deleteTrackingSource(tenantId: string, id: string): Promise<void> {
-  await deleteDoc(doc(col(tenantId), id));
+  const call = httpsCallable<{ tenantId: string; id: string }, { ok: boolean }>(firebaseFunctions(), 'trackingSourceDelete');
+  await call({ tenantId, id });
 }
 
 export async function computeTracking(tenantId: string): Promise<void> {

@@ -67,7 +67,7 @@ export default function TrackingPage() {
               </div>
               <div className="mt-3 flex justify-end gap-3 text-xs">
                 <button onClick={() => setForm({ open: true, src: s })} className="text-brand-700 hover:underline">Editar</button>
-                <button onClick={() => delMut.mutate(s.id)} className="text-red-600 hover:underline">Borrar</button>
+                <button onClick={() => delMut.mutate(s.id)} className="text-amber-600 hover:underline">Desactivar</button>
               </div>
             </div>
           );
@@ -95,7 +95,7 @@ function TrackingForm({ initial, saving, onCancel, onSubmit }: { initial: Tracki
   const lbl = 'mb-1 block text-xs font-medium text-gray-600';
   return (
     <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/40 p-4">
-      <form onSubmit={(e) => { e.preventDefault(); onSubmit({ ...f, name: f.name.trim(), code: f.code.trim() }); }} className="my-8 w-full max-w-md rounded-2xl bg-white p-6 shadow-xl">
+      <form onSubmit={(e) => { e.preventDefault(); onSubmit({ ...f, name: f.name.trim() }); }} className="my-8 w-full max-w-md rounded-2xl bg-white p-6 shadow-xl">
         <h2 className="mb-4 text-lg font-bold text-gray-900">{initial ? 'Editar código' : 'Nuevo código'}</h2>
         <div className="space-y-3">
           <div><label className={lbl}>Nombre de la promo *</label><input className={field} required value={f.name} onChange={(e) => setF((s) => ({ ...s, name: e.target.value }))} placeholder="Promo Verano" /></div>
