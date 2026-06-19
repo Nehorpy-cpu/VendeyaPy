@@ -132,6 +132,8 @@ export interface Tenant {
   industry?: string;
   /** Suscripción de plataforma (billing del SaaS) — Fase 4. */
   subscription?: TenantSubscription;
+  /** Estado del onboarding inicial (Fase registro). Solo Admin SDK lo escribe (completeOnboarding). */
+  onboarding?: { completed: boolean; completedAt: Timestamp | null };
   /** Overrides de límites por tenant (Enterprise/deals a medida) — Fase 5A. Solo Admin SDK. */
   limitOverrides?: Partial<PlanLimits>;
   /** Cuenta demo / no facturable (no se suspende por billing) — Fase 5A. Solo Admin SDK. */

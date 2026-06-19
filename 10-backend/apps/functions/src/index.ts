@@ -50,6 +50,11 @@ export { stripeWebhook } from './functions/payments/stripeWebhook.js';
 // SaaS multiempresa (Fase 4): alta de empresa + gestión de usuarios + billing de plataforma.
 export { provisionTenant } from './functions/tenants/provisionTenant.js';
 export { inviteUser, setUserRole, setUserActive } from './functions/users/userManagement.js';
+
+// Registro self-service + onboarding (Fase registro, R-1): el visitante crea su empresa y queda
+// TENANT_OWNER (email verificado, anti multi-tenant, rol hardcodeado) + marca de onboarding completo.
+export { registerTenantOwner } from './functions/tenants/registerTenantOwner.js';
+export { completeOnboarding } from './functions/tenants/onboardingCallables.js';
 export { platformBillingWebhook } from './functions/billing/platformBillingWebhook.js';
 
 // Billing multi-proveedor (Fase 5B-ii): PayPal Subscriptions (webhook + callables owner/admin).

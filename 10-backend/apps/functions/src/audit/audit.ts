@@ -11,8 +11,10 @@ import { logger } from '../lib/logger.js';
 
 export const AUDIT_ACTIONS = [
   'tenant.provisioned',
+  'tenant.self_provisioned',
   'tenant.suspended',
   'tenant.reactivated',
+  'onboarding.completed',
   'user.invited',
   'user.role_changed',
   'user.deactivated',

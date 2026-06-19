@@ -5,8 +5,7 @@
  * tenants/provision.ts).
  */
 import { onCall, HttpsError, type CallableRequest } from 'firebase-functions/v2/https';
-import { provisionTenant as provisionTenantCore, type ProvisionTenantInput } from '../../tenants/provision.js';
-import { recordAudit } from '../../audit/audit.js';
+import { provisionTenant as provisionTenantAdmin, TenantSlugTakenError, type ProvisionTenantInput } from '../../tenants/provision.js';
 
 export const provisionTenant = onCall<ProvisionTenantInput>(
   { region: 'us-central1' },
@@ -17,10 +16,10 @@ export const provisionTenant = onCall<ProvisionTenantInput>(
       throw new HttpsError('permission-denied', 'Solo el administrador de la plataforma puede dar de alta empresas.');
     }
     try {
-      const result = await provisionTenantCore(req.data);
-      await recordAudit({ tenantId: result.tenantId, action: 'tenant.provisioned', actorUid: req.auth.uid, actorRole: 'PLATFORM_ADMIN', targetType: 'tenant', targetId: result.tenantId, summary: `Empresa creada: ${req.data.name}` });
-      return result;
+      // El core (provision.ts) audita 'tenant.provisioned' (sin duplicar acá).
+      return await provisionTenantAdmin(req.data);
     } catch (e) {
+      if (e instanceof TenantSlugTakenError) throw new HttpsError('already-exists', 'Ese nombre de empresa ya está en uso, elegí otro.');
       throw new HttpsError('invalid-argument', e instanceof Error ? e.message : 'Error al aprovisionar');
     }
   },
