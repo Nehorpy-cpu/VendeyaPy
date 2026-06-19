@@ -75,11 +75,16 @@ lecturas por rol intactas):
   `productUpsert`/`productDelete` (Admin SDK); la lectura sigue manager+ (seller no lee).
 - ✅ **`products`** → `allow write: if false` (cierre 2). Alta/edición/baja **solo** vía
   `productUpsert`/`productDelete`; la lectura sigue viewer/seller+ intacta.
-- ⏳ **`categories`** (cierre 3, pendiente).
+- ✅ **`categories`** → `allow write: if false` (cierre 3). Alta/edición **solo** vía `categoryUpsert`;
+  baja vía `categoryDelete` (bloquea con `failed-precondition` si hay productos asociados, no deja
+  huérfanos). La lectura sigue back-office (viewer+: owner/manager/viewer) intacta — el seller nunca
+  leyó categorías.
+
+**Catálogo completo blindado:** `productFinancials`, `products` y `categories` están en `write:false`;
+el panel escribe el catálogo **solo** vía callables (`productUpsert`/`productDelete`/`categoryUpsert`/
+`categoryDelete`, Admin SDK).
 
 ## Riesgos / notas
 
-- **`categories` sigue client-writable** hasta su cierre (3). `productFinancials` y `products` ya
-  están blindados (cierres 1 y 2).
 - **Productos archivados consumen cuota** (`maxProducts` cuenta por `count()` todos los docs). Si se
   necesita liberar cuota, el hard-delete admin posterior lo resolverá.

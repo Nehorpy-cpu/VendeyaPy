@@ -156,10 +156,11 @@ service cloud.firestore {
         allow write: if false;
       }
 
-      // Categorías
+      // Categorías. La ESCRITURA pasa solo por callable (categoryUpsert/categoryDelete,
+      // Admin SDK) — Fase 5C cierre 3. categoryDelete bloquea si hay productos asociados.
       match /categories/{categoryId} {
         allow read: if isTenantViewer(tenantId) || isPlatformAdmin();
-        allow write: if isTenantManager(tenantId) || isPlatformAdmin();
+        allow write: if false;
       }
 
       // Configuración del agente / checkout (editable desde el panel por el Owner)

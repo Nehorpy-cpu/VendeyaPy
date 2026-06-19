@@ -6,7 +6,9 @@
  *     owner/manager leen; seller NO lee; seller NO puede productUpsert.
  *   Cierre 2 (products): write directo owner → 403; productUpsert/productDelete owner → ok;
  *     viewer/seller leen products; seller NO puede productUpsert.
- *   (Cierre 3 categories se agrega en su commit.)
+ *   Cierre 3 (categories): write directo owner → 403; categoryUpsert owner (create/update) → ok;
+ *     owner/viewer leen categories; categoryDelete bloquea con productos asociados (failed-precondition)
+ *     y borra sin ellos; seller NO puede categoryUpsert.
  */
 process.env.FIRESTORE_EMULATOR_HOST = '127.0.0.1:8080';
 process.env.GCLOUD_PROJECT = 'demo-aiafg';
@@ -85,14 +87,56 @@ check('C2.4 productDelete owner → archive (status ARCHIVED)', del.status === 2
 const sellerUp2 = await callFn('productUpsert', { tenantId: T, data: { name: 'Y', price: 1 } }, seller);
 check('C2.5 seller NO puede productUpsert → 403', sellerUp2.status === 403, `status=${sellerUp2.status}`);
 
+// ===== Cierre 3 — categories =====
+
+// 1. categoryUpsert owner (create) sigue funcionando (Admin SDK escribe la categoría).
+const catUp = await callFn('categoryUpsert', { tenantId: T, data: { name: 'Rules Cat', position: 1 } }, owner);
+const catId = catUp.result?.id;
+check('C3.1 categoryUpsert owner (create) → ok', catUp.status === 200 && !!catId && (await db.doc(`tenants/${T}/categories/${catId}`).get()).exists, `status=${catUp.status} id=${catId}`);
+
+// 2. write directo del owner a categories → 403 (write cerrado).
+const wCat = await restPatch(`tenants/${T}/categories/${catId}`, { name: { stringValue: 'Hack' } }, owner);
+check('C3.2 write directo owner a categories → 403', wCat === 403, `status=${wCat}`);
+
+// 3. categoryUpsert owner (update) sigue funcionando vía callable.
+const catUpd = await callFn('categoryUpsert', { tenantId: T, id: catId, data: { name: 'Rules Cat 2' } }, owner);
+check('C3.3 categoryUpsert owner (update) → ok', catUpd.status === 200 && (await db.doc(`tenants/${T}/categories/${catId}`).get()).data()?.name === 'Rules Cat 2', `status=${catUpd.status}`);
+
+// 4. lectura de categories: read sin cambios (back-office). owner (viewer+) SÍ lee → 200;
+//    seller (front-line) NO lee → 403, igual que antes del cierre (no es regresión).
+const rOwnerCat = await restGet(`tenants/${T}/categories/${catId}`, owner);
+const rSellerCat = await restGet(`tenants/${T}/categories/${catId}`, seller);
+check('C3.4 owner (viewer+) lee categories → 200; seller (back-office) → 403 (read sin cambios)', rOwnerCat === 200 && rSellerCat === 403, `owner=${rOwnerCat} seller=${rSellerCat}`);
+
+// 5. categoryDelete BLOQUEA si hay productos con ese categoryId → failed-precondition (400).
+const prodInCat = await callFn('productUpsert', { tenantId: T, data: { name: 'In Cat', price: 10, currency: 'PYG', categoryId: catId, status: 'ACTIVE' } }, owner);
+const prodInCatId = prodInCat.result?.id;
+const delBlocked = await callFn('categoryDelete', { tenantId: T, id: catId }, owner);
+check('C3.5 categoryDelete con productos asociados → 400 (bloqueado, no deja huérfanos)', delBlocked.status === 400 && (await db.doc(`tenants/${T}/categories/${catId}`).get()).exists, `status=${delBlocked.status} err=${delBlocked.error?.status}`);
+
+// 6. categoryDelete SIN productos asociados → ok (borra). Categoría vacía aparte.
+const catEmpty = await callFn('categoryUpsert', { tenantId: T, data: { name: 'Empty Cat', position: 2 } }, owner);
+const catEmptyId = catEmpty.result?.id;
+const delOk = await callFn('categoryDelete', { tenantId: T, id: catEmptyId }, owner);
+check('C3.6 categoryDelete sin productos → ok (borrada)', delOk.status === 200 && !(await db.doc(`tenants/${T}/categories/${catEmptyId}`).get()).exists, `status=${delOk.status}`);
+
+// 7. seller NO puede categoryUpsert (authz).
+const sellerCat = await callFn('categoryUpsert', { tenantId: T, data: { name: 'Nope' } }, seller);
+check('C3.7 seller NO puede categoryUpsert → 403', sellerCat.status === 403, `status=${sellerCat.status}`);
+
 // --- Limpieza ---
 if (pid) {
   await db.doc(`tenants/${T}/products/${pid}`).delete().catch(() => {});
   await db.doc(`tenants/${T}/productFinancials/${pid}`).delete().catch(() => {});
 }
+if (catId) await db.doc(`tenants/${T}/categories/${catId}`).delete().catch(() => {});
+if (prodInCatId) {
+  await db.doc(`tenants/${T}/products/${prodInCatId}`).delete().catch(() => {});
+  await db.doc(`tenants/${T}/productFinancials/${prodInCatId}`).delete().catch(() => {});
+}
 await db.doc(`tenants/${T}`).update({ limitOverrides: {} }).catch(() => {});
 for (const d of (await db.collection(`tenants/${T}/auditLogs`).get()).docs) await d.ref.delete().catch(() => {});
 
 const ok = results.every((x) => x);
-console.log(`\nRESULTADO CIERRE RULES CATÁLOGO — C1 productFinancials + C2 products: ${ok ? 'TODO OK ✅' : 'HAY FALLOS ❌'} (${results.filter((x) => x).length}/${results.length})`);
+console.log(`\nRESULTADO CIERRE RULES CATÁLOGO — C1 productFinancials + C2 products + C3 categories: ${ok ? 'TODO OK ✅' : 'HAY FALLOS ❌'} (${results.filter((x) => x).length}/${results.length})`);
 process.exit(ok ? 0 : 1);
