@@ -33,6 +33,7 @@ export const MODULES: NavModule[] = [
   { key: 'tracking', label: 'Tracking propio', href: '/tracking', icon: '🎟️', roles: ['PLATFORM_ADMIN', 'TENANT_OWNER', 'TENANT_MANAGER'] },
   { key: 'integrations', label: 'Integración Meta', href: '/integrations', icon: '🔌', roles: ['PLATFORM_ADMIN', 'TENANT_OWNER'] },
   { key: 'company', label: 'Config. de empresa', href: '/company', icon: '⚙️', roles: ['PLATFORM_ADMIN', 'TENANT_OWNER'] },
+  { key: 'billing', label: 'Plan y facturación', href: '/billing', icon: '💳', roles: ['PLATFORM_ADMIN', 'TENANT_OWNER'] },
 ];
 
 export const ROLE_LABELS: Record<Role, string> = {
