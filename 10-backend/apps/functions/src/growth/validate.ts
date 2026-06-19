@@ -49,6 +49,17 @@ function dateMs(v: unknown, f: string): number | null {
   throw new Error(`Campo "${f}" debe ser fecha (epoch ms, ISO o null).`);
 }
 
+/** Código de tracking normalizado server-side: `trim` + `UPPERCASE`; valida formato. */
+const TRACKING_CODE_RE = /^[A-Z0-9_-]{2,32}$/;
+function trackingCode(v: unknown): string {
+  // reqStr garantiza string no vacío (≤100 de entrada); normalizamos y validamos formato.
+  const code = reqStr(v, 'code', 100).trim().toUpperCase();
+  if (!TRACKING_CODE_RE.test(code)) {
+    throw new Error('Campo "code" inválido: solo A-Z, 0-9, guion y guion bajo (2-32 caracteres, sin espacios ni acentos).');
+  }
+  return code;
+}
+
 /** Patch sanitizado de Promotion. `requireCreate` exige name+type. `startDate`/`endDate` salen como ms|null. */
 export function validatePromotionPatch(data: unknown, opts: { requireCreate: boolean }): Record<string, unknown> {
   const d = asObject(data, 'promoción');
@@ -74,7 +85,7 @@ export function validateTrackingSourcePatch(data: unknown, opts: { requireCreate
   const out: Record<string, unknown> = {};
   if (d.name !== undefined) out.name = reqStr(d.name, 'name', 200);
   else if (opts.requireCreate) throw new Error('La fuente necesita un nombre.');
-  if (d.code !== undefined) out.code = reqStr(d.code, 'code', 100);
+  if (d.code !== undefined) out.code = trackingCode(d.code);
   else if (opts.requireCreate) throw new Error('La fuente necesita un código.');
   if (d.type !== undefined) out.type = inEnum(TRACKING_TYPE, d.type, 'type');
   else if (opts.requireCreate) throw new Error('La fuente necesita un tipo.');

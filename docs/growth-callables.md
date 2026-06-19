@@ -28,6 +28,9 @@ Errores: `unauthenticated`, `permission-denied`, `invalid-argument`, `not-found`
 ### `trackingSourceUpsert`
 - **Payload:** `{ tenantId?, id?, data: { name(req. create), code(req. create), type(enum TRACKING_TYPE, req. create), active(bool) } }`.
   - Descarta `attribution` (rollup que calcula el job).
+  - **`code` normalizado en backend (GB-A):** `trim` + `UPPERCASE`; valida formato `^[A-Z0-9_-]{2,32}$`
+    (sin espacios internos, acentos ni símbolos) → `invalid-argument` si no cumple. El frontend ya no
+    necesita normalizar. La normalización vive en `validateTrackingSourcePatch` (validador puro).
 - **Respuesta:** `{ ok, id, created }`. **Gates:** rol manager+ · audit `trackingSource.created/updated`.
 
 ### `trackingSourceDelete` (SOFT)
@@ -83,8 +86,9 @@ simulador pasará a un callable **server-set**.
   `deliveryPersonDelete` es SOFT (`isActive=false`). Lectura viewer+ intacta.
 - ⏳ **`promotions`** (G-2): migrar `lib/promotions.ts` a `promotionUpsert`/`promotionDelete` (delete
   SOFT = `status='FINISHED'`) y filtrar finalizadas en la UI; luego cerrar.
-- ⏳ **`trackingSources`** (G-3): migrar `lib/tracking.ts` (delete SOFT = `active=false`) y mover
-  `code.trim().toUpperCase()` al callable `trackingSourceUpsert`; luego cerrar.
+- ⏳ **`trackingSources`** (G-3): normalización de `code` (trim+UPPERCASE+formato `^[A-Z0-9_-]{2,32}$`)
+  **ya movida al validador backend (GB-A, hecho)**. Falta migrar `lib/tracking.ts` (delete SOFT =
+  `active=false`; quitar el `.trim().toUpperCase()` redundante del front) y luego cerrar.
 - ⏳ **`winningReplies`** (G-4): migrar `lib/replies.ts` (solo soft-archive vía `winningReplyDelete`; se
   quita el botón hard-delete salvo herramienta admin futura); luego cerrar.
 - ⏳ **`agentTestCases`** (G-5): construir un callable server-set de run (corre el bot y persiste

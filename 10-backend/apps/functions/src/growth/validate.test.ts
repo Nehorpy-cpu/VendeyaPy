@@ -33,6 +33,23 @@ describe('validateTrackingSourcePatch', () => {
     expect(() => validateTrackingSourcePatch({ name: 'X', code: 'C' }, { requireCreate: true })).toThrow();
     expect(() => validateTrackingSourcePatch({ name: 'X', code: 'C', type: 'sms' }, { requireCreate: true })).toThrow();
   });
+  it('normaliza code (trim + UPPERCASE) y valida formato ^[A-Z0-9_-]{2,32}$', () => {
+    // trim + uppercase
+    expect(validateTrackingSourcePatch({ code: 'verano20' }, { requireCreate: false }).code).toBe('VERANO20');
+    expect(validateTrackingSourcePatch({ code: '  qr-local  ' }, { requireCreate: false }).code).toBe('QR-LOCAL');
+    // idempotente: code ya normalizado queda igual
+    expect(validateTrackingSourcePatch({ code: 'VERANO_20' }, { requireCreate: false }).code).toBe('VERANO_20');
+    // formato inválido: espacio interno, símbolo, acento → throw
+    expect(() => validateTrackingSourcePatch({ code: 'VER ANO' }, { requireCreate: false })).toThrow();
+    expect(() => validateTrackingSourcePatch({ code: 'VERANO@!' }, { requireCreate: false })).toThrow();
+    expect(() => validateTrackingSourcePatch({ code: 'caféÑ' }, { requireCreate: false })).toThrow();
+    // longitud tras normalizar: <2 o >32 → throw; solo espacios → throw (requerido)
+    expect(() => validateTrackingSourcePatch({ code: 'A' }, { requireCreate: false })).toThrow();
+    expect(() => validateTrackingSourcePatch({ code: 'A'.repeat(33) }, { requireCreate: false })).toThrow();
+    expect(() => validateTrackingSourcePatch({ code: '   ' }, { requireCreate: false })).toThrow();
+    // update parcial sin code → no exige ni agrega code
+    expect(validateTrackingSourcePatch({ name: 'Solo nombre' }, { requireCreate: false })).toEqual({ name: 'Solo nombre' });
+  });
 });
 
 describe('validateDeliveryPersonPatch', () => {

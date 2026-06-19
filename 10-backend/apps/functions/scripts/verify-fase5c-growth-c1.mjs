@@ -70,6 +70,22 @@ check('8. trackingSourceDelete → soft (active=false)', t3.status === 200 && (a
 const t4 = await callFn('trackingSourceUpsert', { tenantId: T, data: { name: 'X', code: 'C', type: 'qr' } }, seller);
 check('9. trackingSourceUpsert vendedor → 403', t4.status === 403, `status=${t4.status}`);
 
+// 9b. normalización de code: minúsculas → UPPERCASE (la hace el backend, no el front).
+const tn1 = await callFn('trackingSourceUpsert', { tenantId: T, data: { name: 'Norm1', code: 'verano20', type: 'coupon' } }, admin);
+check('9b. trackingSourceUpsert normaliza code (verano20 → VERANO20)', tn1.status === 200 && (await doc(`tenants/${T}/trackingSources/${tn1.result?.id}`))?.code === 'VERANO20', `status=${tn1.status} code=${(await doc(`tenants/${T}/trackingSources/${tn1.result?.id}`))?.code}`);
+
+// 9c. normalización de code: trim + UPPERCASE.
+const tn2 = await callFn('trackingSourceUpsert', { tenantId: T, data: { name: 'Norm2', code: '  qr-local  ', type: 'qr' } }, admin);
+check('9c. trackingSourceUpsert normaliza code ("  qr-local  " → QR-LOCAL)', tn2.status === 200 && (await doc(`tenants/${T}/trackingSources/${tn2.result?.id}`))?.code === 'QR-LOCAL', `status=${tn2.status}`);
+
+// 9d. code con formato inválido (espacio interno / símbolo) → 400.
+const tn3 = await callFn('trackingSourceUpsert', { tenantId: T, data: { name: 'Bad', code: 'inva lido!', type: 'link' } }, admin);
+check('9d. trackingSourceUpsert code formato inválido → 400', tn3.status === 400, `status=${tn3.status}`);
+
+// 9e. update parcial SIN code → ok y no revalida/altera el code guardado.
+const tn5 = await callFn('trackingSourceUpsert', { tenantId: T, id: tn1.result?.id, data: { name: 'Norm1 v2' } }, admin);
+check('9e. trackingSourceUpsert update parcial sin code → ok (code intacto VERANO20)', tn5.status === 200 && (await doc(`tenants/${T}/trackingSources/${tn1.result?.id}`))?.code === 'VERANO20', `status=${tn5.status}`);
+
 // 10. owner (manager+) permitido + auditoría
 const o1 = await callFn('promotionUpsert', { tenantId: 'perfumeria', data: { name: 'owner-promo-c1', type: 'FREE_SHIPPING' } }, owner);
 const audits = await db.collection(`tenants/${T}/auditLogs`).get();
