@@ -19,6 +19,8 @@ import { PlanComparison } from '@/components/billing/PlanComparison';
 import { UpgradeCTA } from '@/components/billing/UpgradeCTA';
 import { PlanGate } from '@/components/billing/PlanGate';
 import { PlanBadge } from '@/components/billing/PlanBadge';
+import { ManualActivationPanel } from '@/components/billing/ManualActivationPanel';
+import { AdminActivationQueue } from '@/components/billing/AdminActivationQueue';
 import { CheckIcon } from '@/components/marketing/icons';
 
 const FEATURE_ORDER: PlanFeatureKey[] = [
@@ -68,11 +70,8 @@ export default function BillingPage() {
         <p className="text-sm text-ink-500">Tu plan, consumo del mes, estado de la suscripción y opciones para crecer.</p>
       </div>
 
-      {/* Aviso de datos mock mientras backend cierra 5B/5C */}
-      <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
-        ⚙️ Datos de demostración. El cambio de plan y el portal de facturación se activan cuando se cierre la
-        integración de billing (Fase 5B).
-      </div>
+      {/* Bandeja del Super Admin: solicitudes de activación manual de todas las empresas. */}
+      {claims.role === 'PLATFORM_ADMIN' && <AdminActivationQueue />}
 
       {!canSee && (
         <EmptyCard
@@ -103,6 +102,9 @@ export default function BillingPage() {
           )}
 
           {subQ.data && <SubscriptionCard subscription={subQ.data} posture={ent.posture} plan={plan} />}
+
+          {/* Solicitar cambio/activación de plan por WhatsApp (activación manual la confirma el admin). */}
+          <ManualActivationPanel tenantId={tenantId} currentPlanId={ent.planId} />
 
           {/* Uso del mes */}
           <section className="space-y-3">
