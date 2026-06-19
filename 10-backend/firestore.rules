@@ -148,10 +148,11 @@ service cloud.firestore {
         allow write: if isTenantManager(tenantId) || isPlatformAdmin();
       }
 
-      // Costos privados de productos: el vendedor NO puede leerlos (ADR-0008).
+      // Costos privados de productos: el vendedor NO puede leerlos (ADR-0008). La ESCRITURA
+      // pasa solo por callable (productUpsert/productDelete, Admin SDK) — Fase 5C cierre 1.
       match /productFinancials/{productId} {
         allow read: if isTenantManager(tenantId) || isPlatformAdmin();
-        allow write: if isTenantManager(tenantId) || isPlatformAdmin();
+        allow write: if false;
       }
 
       // Categorías

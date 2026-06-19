@@ -64,12 +64,21 @@ Reemplazar en `apps/web/src/lib/catalog.ts` / `templates.ts` los `setDoc`/`delet
 `products`/`productFinancials`/`categories` por `httpsCallable('productUpsert' | 'productDelete' |
 'categoryUpsert' | 'categoryDelete')` con el payload de arriba (`{ tenantId, id?, data, financials? }`),
 manejando `HttpsError` (`resource-exhausted` cuota, `permission-denied`, `invalid-argument`,
-`failed-precondition`). Una vez migrado el catálogo, se cierran las rules: **primero**
-`productFinancials` → `write:false` (Admin SDK only), luego `products`/`categories`.
+`failed-precondition`).
+
+## Cierre de rules — estado (F5C, paso B)
+
+Catálogo del panel migrado a callables (commit `e11d6b0`). Cierre de `firestore.rules` por colección,
+un commit por cierre, verificado con `verify-rules-catalog.mjs` (write directo → 403; callable OK;
+lecturas por rol intactas):
+- ✅ **`productFinancials`** → `allow write: if false` (cierre 1). El costo se escribe **solo** vía
+  `productUpsert`/`productDelete` (Admin SDK); la lectura sigue manager+ (seller no lee).
+- ⏳ **`products`** (cierre 2, pendiente).
+- ⏳ **`categories`** (cierre 3, pendiente).
 
 ## Riesgos / notas
 
-- **`productFinancials` sigue client-writable** hasta el cierre de rules (post-migración) → el costo no
-  queda blindado en 5C-B (entrega el camino seguro, no el candado).
+- **`products`/`categories` siguen client-writable** hasta sus cierres (2 y 3). `productFinancials` ya
+  está blindado (cierre 1).
 - **Productos archivados consumen cuota** (`maxProducts` cuenta por `count()` todos los docs). Si se
   necesita liberar cuota, el hard-delete admin posterior lo resolverá.
