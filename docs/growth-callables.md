@@ -71,6 +71,28 @@ salvo `agentTestCaseDelete` (hard). Una vez migrado cada módulo, se cierran sus
 > El `updateDoc` que guarda `lastResult`/`lastRunAt` tras **correr** un caso del simulador NO está cubierto
 > (es server-set); su callable de "run + guardar resultado" queda para una fase posterior.
 
+## Cierre de rules — estado (F5C, paso B)
+
+Cierre de `firestore.rules` por colección, un commit por cierre, verificado con
+`verify-rules-growth.mjs` (write directo → 403; callable OK; lecturas por rol intactas). Decisiones de
+producto fijadas: los `delete` del panel migran a **SOFT** (no hard-delete); el resultado del run del
+simulador pasará a un callable **server-set**.
+
+- ✅ **`deliveryPersons`** → `allow write: if false` (G-0). El panel no escribe directo (CRUD 100% por
+  `deliveryPersonUpsert`/`deliveryPersonDelete`, Admin SDK); cierre **sin migración de frontend**.
+  `deliveryPersonDelete` es SOFT (`isActive=false`). Lectura viewer+ intacta.
+- ⏳ **`promotions`** (G-2): migrar `lib/promotions.ts` a `promotionUpsert`/`promotionDelete` (delete
+  SOFT = `status='FINISHED'`) y filtrar finalizadas en la UI; luego cerrar.
+- ⏳ **`trackingSources`** (G-3): migrar `lib/tracking.ts` (delete SOFT = `active=false`) y mover
+  `code.trim().toUpperCase()` al callable `trackingSourceUpsert`; luego cerrar.
+- ⏳ **`winningReplies`** (G-4): migrar `lib/replies.ts` (solo soft-archive vía `winningReplyDelete`; se
+  quita el botón hard-delete salvo herramienta admin futura); luego cerrar.
+- ⏳ **`agentTestCases`** (G-5): construir un callable server-set de run (corre el bot y persiste
+  `lastResult`/`lastRunAt`) antes de cerrar; `upsert`/`delete`/`status` ya cubiertos.
+
+`config` (agent/checkout/channels) es un cierre aparte (wildcard `config/{doc}`, callables
+`agentConfigUpdate`/`checkoutConfigUpdate`/`channelConfigUpdate`), tras migrar el frontend.
+
 ## Pendiente
 
 5C-D (opcional): marcar resuelto/completado de `insights`/`followUpTasks`/`agentAudits` (updates ya

@@ -314,10 +314,12 @@ service cloud.firestore {
         }
       }
 
-      // Repartidores
+      // Repartidores. La ESCRITURA pasa solo por callable (deliveryPersonUpsert/
+      // deliveryPersonDelete, Admin SDK) — Fase 5C cierre growth G-0. El panel no escribe
+      // deliveryPersons directo (CRUD 100% por callable). deliveryPersonDelete es SOFT.
       match /deliveryPersons/{driverId} {
         allow read: if isTenantViewer(tenantId) || isPlatformAdmin();
-        allow create, update, delete: if isTenantManager(tenantId) || isPlatformAdmin();
+        allow write: if false;
       }
 
       // Pagos (solo lectura, escritura por Cloud Functions)
