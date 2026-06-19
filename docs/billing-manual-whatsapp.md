@@ -36,12 +36,24 @@ como proveedores opcionales/futuros.
   collectionGroup para la bandeja del Super Admin. Índice collectionGroup en `firestore.indexes.json`.
 - E2E `verify-billing-manual.mjs` (guarda): 6/6.
 
+## Estado — MB-2 (callables, hecho)
+
+`functions/billing/manualActivationCallables.ts` (re-export en `index.ts`):
+- **`requestManualPlanActivation`** (`resolveOwnerAdminAuth`: owner/admin; seller/manager/viewer → 403;
+  owner ignora `tenantId` ajeno): valida `planId` (existe, ≠ `free`) y `method`; rechaza si ya hay una
+  `pending` del tenant; crea la solicitud `pending`; **no toca** `subscription`; devuelve `requestId`,
+  `status`, `whatsappText` y `whatsappData` para que el front arme el `wa.me`. audit `billing.activation_requested`.
+- **`manualBillingActivate`** (**solo `PLATFORM_ADMIN`, check literal**; owner → 403): `tenantId`
+  obligatorio + **verifica que el tenant existe** (no docs fantasma); soporta `requestId` (runTransaction
+  `pending→approved`, idempotente) o `planId` directo; activa vía `applySubscriptionUpdate(..., {allowOverrideManual:true})`
+  (`provider:'manual_whatsapp'`, `status:'active'`, `pastDueSinceMs:null`, `providerMetadata` con `source`/
+  `activatedBy`/`paymentReference`/`previousProvider`). audit `billing.activation_approved`.
+- **`manualBillingCancelRequest`**: admin cancela cualquiera; owner solo su propia `pending`
+  (`requestedByUid===uid`); **no toca el plan**. audit `billing.activation_cancelled`.
+- E2E `verify-billing-manual.mjs`: **20/20** (MB-1 guarda 6 + MB-2 callables 14).
+
 ## Pendiente
 
-- **MB-2 (callables):** `requestManualPlanActivation` (owner/admin, crea `pending` + prefill WhatsApp),
-  `manualBillingActivate` (**PLATFORM_ADMIN literal**, `runTransaction` `pending→approved` →
-  `applySubscriptionUpdate(..., { allowOverrideManual:true })`, verifica que el tenant existe → no docs
-  fantasma), `manualBillingCancelRequest` (owner su propia `pending` + admin cualquiera). + `verify-billing-manual.mjs` ampliado.
 - **MB-3 (frontend, owner):** des-mockear `entitlements.ts` (leer doc tenant), UI "Solicitar por WhatsApp",
   bandeja admin (collectionGroup), `NEXT_PUBLIC_SUPPORT_WHATSAPP`.
 
