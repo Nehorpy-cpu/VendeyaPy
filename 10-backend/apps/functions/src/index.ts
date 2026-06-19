@@ -61,6 +61,10 @@ export { createPayPalSubscriptionSession, syncPayPalSubscription } from './funct
 export { productUpsert } from './functions/products/productUpsert.js';
 export { resetUsageMonthly } from './functions/scheduled/resetUsage.js';
 
+// Catálogo por callables (Fase 5C-B): baja por soft-archive + categorías. No cierra rules aún.
+export { productDelete } from './functions/products/productDelete.js';
+export { categoryUpsert, categoryDelete } from './functions/products/categoryCallables.js';
+
 // Migración de escrituras críticas a callables (Fase 5C-A): config sensible del tenant
 // (checkout/agente/canales) con gate owner/admin + validación + auditoría. No cierra rules aún.
 export { checkoutConfigUpdate, agentConfigUpdate, channelConfigUpdate } from './functions/config/configCallables.js';
