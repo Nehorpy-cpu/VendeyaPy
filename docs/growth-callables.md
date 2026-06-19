@@ -99,9 +99,10 @@ simulador pasará a un callable **server-set**.
 - ✅ **`promotions`** → `allow write: if false` (G-2). Frontend ya migrado (GF-1: `promotionUpsert`/
   `promotionDelete`, "Borrar"→"Finalizar", `listPromotions` oculta `FINISHED`). `promotionDelete` es
   SOFT (`status='FINISHED'`). Lectura staff/viewer intacta.
-- ⏳ **`trackingSources`** (G-3): normalización de `code` (trim+UPPERCASE+formato `^[A-Z0-9_-]{2,32}$`)
-  **ya movida al validador backend (GB-A, hecho)**. Falta migrar `lib/tracking.ts` (delete SOFT =
-  `active=false`; quitar el `.trim().toUpperCase()` redundante del front) y luego cerrar.
+- ✅ **`trackingSources`** → `allow write: if false` (G-3). Backend normaliza `code`
+  (trim+UPPERCASE+formato `^[A-Z0-9_-]{2,32}$`, GB-A) y frontend ya migrado (GF-2:
+  `trackingSourceUpsert`/`trackingSourceDelete`, "Borrar"→"Desactivar", `listTrackingSources` oculta
+  inactivos, sin normalización en el front). `trackingSourceDelete` es SOFT (`active=false`). Lectura staff/viewer intacta.
 - ⏳ **`winningReplies`** (G-4): migrar `lib/replies.ts` (solo soft-archive vía `winningReplyDelete`; se
   quita el botón hard-delete salvo herramienta admin futura); luego cerrar.
 - ⏳ **`agentTestCases`** (G-5): callable server-set de run (`agentTestCaseRun`, corre el bot y persiste

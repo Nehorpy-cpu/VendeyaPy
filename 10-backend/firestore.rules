@@ -296,10 +296,12 @@ service cloud.firestore {
       match /businessEvents/{id} { allow read: if isTenantManager(tenantId) || isPlatformAdmin(); allow write: if false; }
       match /metaConversionEvents/{id} { allow read: if isTenantManager(tenantId) || isPlatformAdmin(); allow write: if false; }
 
-      // Tracking propio (P11): el staff ve los códigos (para informar); el manager+ los gestiona.
+      // Tracking propio (P11): el staff ve los códigos (para informar). La ESCRITURA pasa solo por
+      // callable (trackingSourceUpsert/trackingSourceDelete, Admin SDK) — Fase 5C cierre growth G-3.
+      // El backend normaliza el `code`; trackingSourceDelete es SOFT (active=false).
       match /trackingSources/{id} {
         allow read: if isTenantStaff(tenantId) || isTenantViewer(tenantId) || isPlatformAdmin();
-        allow write: if isTenantManager(tenantId) || isPlatformAdmin();
+        allow write: if false;
       }
 
       // Bitácora de auditoría (Fase 5): la leen manager+; la escribe SOLO Cloud Functions.

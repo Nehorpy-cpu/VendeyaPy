@@ -8,7 +8,10 @@
  *   G-2 (promotions): write directo manager+ → 403; promotionUpsert/Delete (Admin SDK) → ok; delete
  *     SOFT (status='FINISHED'); lectura staff (incl. seller) → 200 (sin cambios); seller NO puede
  *     promotionUpsert/Delete; aislamiento de tenant (boutique no escribe promos de perfumeria).
- *   (G-3 trackingSources, G-4 winningReplies, G-5 agentTestCases se agregan en su commit.)
+ *   G-3 (trackingSources): write directo manager+ → 403; trackingSourceUpsert/Delete (Admin SDK) → ok;
+ *     el backend normaliza el code (' verano20 ' → 'VERANO20'); delete SOFT (active=false); lectura
+ *     staff → 200 (sin cambios); seller NO puede; aislamiento de tenant.
+ *   (G-4 winningReplies, G-5 agentTestCases se agregan en su commit.)
  */
 process.env.FIRESTORE_EMULATOR_HOST = '127.0.0.1:8080';
 process.env.GCLOUD_PROJECT = 'demo-aiafg';
@@ -119,15 +122,54 @@ const inPerfu = bid ? (await db.doc(`tenants/${T}/promotions/${bid}`).get()).exi
 const inBoutique = bid ? (await db.doc(`tenants/boutique-demo/promotions/${bid}`).get()).exists : false;
 check('G2.7 cross-tenant: boutique NO crea promo en perfumeria (la crea en su tenant)', bPromo.status === 200 && !inPerfu && inBoutique, `perfu=${inPerfu} boutique=${inBoutique}`);
 
+// ===== Cierre G-3 — trackingSources =====
+
+// 1. trackingSourceUpsert owner (create) + el backend NORMALIZA el code (' verano20 ' → 'VERANO20').
+const tUp = await callFn('trackingSourceUpsert', { tenantId: T, data: { name: 'Rules Track', code: ' verano20 ', type: 'coupon', active: true } }, owner);
+const tid = tUp.result?.id;
+const tsrc = tid ? (await db.doc(`tenants/${T}/trackingSources/${tid}`).get()).data() : null;
+check('G3.1 trackingSourceUpsert owner (create) + normaliza code (" verano20 " → "VERANO20")', tUp.status === 200 && tsrc?.code === 'VERANO20' && tsrc?.active === true, `status=${tUp.status} code=${tsrc?.code}`);
+
+// 2. write directo del owner (manager+) a trackingSources → 403 (write cerrado).
+const wTrack = await restPatch(`tenants/${T}/trackingSources/${tid}`, { code: { stringValue: 'HACK' } }, owner);
+check('G3.2 write directo owner a trackingSources → 403', wTrack === 403, `status=${wTrack}`);
+
+// 3. trackingSourceUpsert owner (update) sigue funcionando.
+const tUpd = await callFn('trackingSourceUpsert', { tenantId: T, id: tid, data: { name: 'Rules Track v2' } }, owner);
+check('G3.3 trackingSourceUpsert owner (update) → ok', tUpd.status === 200 && (await db.doc(`tenants/${T}/trackingSources/${tid}`).get()).data()?.name === 'Rules Track v2', `status=${tUpd.status}`);
+
+// 4. trackingSourceDelete owner → soft (active=false).
+const tDel = await callFn('trackingSourceDelete', { tenantId: T, id: tid }, owner);
+check('G3.4 trackingSourceDelete owner → soft (active=false)', tDel.status === 200 && (await db.doc(`tenants/${T}/trackingSources/${tid}`).get()).data()?.active === false, `status=${tDel.status}`);
+
+// 5. lectura: read sin cambios. owner y seller (staff) → 200.
+const rOwnerT = await restGet(`tenants/${T}/trackingSources/${tid}`, owner);
+const rSellerT = await restGet(`tenants/${T}/trackingSources/${tid}`, seller);
+check('G3.5 owner/seller (staff) leen trackingSources → 200 (read sin cambios)', rOwnerT === 200 && rSellerT === 200, `owner=${rOwnerT} seller=${rSellerT}`);
+
+// 6. seller NO puede trackingSourceUpsert ni trackingSourceDelete (authz manager+).
+const sellerTU = await callFn('trackingSourceUpsert', { tenantId: T, data: { name: 'X', code: 'NOPE1', type: 'qr' } }, seller);
+const sellerTD = await callFn('trackingSourceDelete', { tenantId: T, id: tid }, seller);
+check('G3.6 seller NO puede trackingSourceUpsert/Delete → 403', sellerTU.status === 403 && sellerTD.status === 403, `up=${sellerTU.status} del=${sellerTD.status}`);
+
+// 7. aislamiento de tenant: owner de boutique con tenantId=perfumeria crea en boutique, NO en perfumeria.
+const bTrack = await callFn('trackingSourceUpsert', { tenantId: T, data: { name: 'Cross', code: 'CROSS1', type: 'link' } }, boutiqueOwner);
+const btid = bTrack.result?.id;
+const tInPerfu = btid ? (await db.doc(`tenants/${T}/trackingSources/${btid}`).get()).exists : true;
+const tInBoutique = btid ? (await db.doc(`tenants/boutique-demo/trackingSources/${btid}`).get()).exists : false;
+check('G3.7 cross-tenant: boutique NO crea trackingSource en perfumeria (la crea en su tenant)', bTrack.status === 200 && !tInPerfu && tInBoutique, `perfu=${tInPerfu} boutique=${tInBoutique}`);
+
 // --- Limpieza ---
 if (did) await db.doc(`tenants/${T}/deliveryPersons/${did}`).delete().catch(() => {});
 await db.doc(`tenants/${T}/deliveryPersons/rules-hack`).delete().catch(() => {}); // por si el create directo hubiera pasado
 if (pid) await db.doc(`tenants/${T}/promotions/${pid}`).delete().catch(() => {});
 if (bid) await db.doc(`tenants/boutique-demo/promotions/${bid}`).delete().catch(() => {});
+if (tid) await db.doc(`tenants/${T}/trackingSources/${tid}`).delete().catch(() => {});
+if (btid) await db.doc(`tenants/boutique-demo/trackingSources/${btid}`).delete().catch(() => {});
 await db.doc(`tenants/${T}`).update({ limitOverrides: {} }).catch(() => {});
 for (const d of (await db.collection(`tenants/${T}/auditLogs`).get()).docs) await d.ref.delete().catch(() => {});
 for (const d of (await db.collection('tenants/boutique-demo/auditLogs').get()).docs) await d.ref.delete().catch(() => {});
 
 const ok = results.every((x) => x);
-console.log(`\nRESULTADO CIERRE RULES GROWTH — G-0 deliveryPersons + G-2 promotions: ${ok ? 'TODO OK ✅' : 'HAY FALLOS ❌'} (${results.filter((x) => x).length}/${results.length})`);
+console.log(`\nRESULTADO CIERRE RULES GROWTH — G-0 deliveryPersons + G-2 promotions + G-3 trackingSources: ${ok ? 'TODO OK ✅' : 'HAY FALLOS ❌'} (${results.filter((x) => x).length}/${results.length})`);
 process.exit(ok ? 0 : 1);
