@@ -198,6 +198,13 @@ export default function LoginPage() {
               </button>
             </form>
 
+            <p className="mt-5 text-center text-sm text-ink-500">
+              ¿No tenés cuenta?{' '}
+              <Link href="/register" className="font-semibold text-mint-700 transition-colors hover:text-mint-800">
+                Creá tu empresa
+              </Link>
+            </p>
+
             {process.env['NEXT_PUBLIC_USE_EMULATORS'] === 'true' && (
               <div className="mt-6 rounded-xl border border-ink-100 bg-ink-50/60 p-3.5 text-xs text-ink-500">
                 <p className="mb-1 flex items-center gap-1.5 font-semibold text-ink-600">
