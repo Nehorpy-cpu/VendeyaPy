@@ -73,7 +73,7 @@ export { trackingSourceUpsert, trackingSourceDelete } from './functions/growth/t
 // (solo manual) + casos del simulador. Manager+. No cierra rules aún.
 export { deliveryPersonUpsert, deliveryPersonDelete } from './functions/growth/deliveryCallables.js';
 export { winningReplyUpsert, winningReplyDelete } from './functions/growth/winningReplyCallables.js';
-export { agentTestCaseUpsert, agentTestCaseDelete } from './functions/growth/agentTestCaseCallables.js';
+export { agentTestCaseUpsert, agentTestCaseDelete, agentTestCaseRun } from './functions/growth/agentTestCaseCallables.js';
 
 // Migración de escrituras críticas a callables (Fase 5C-A): config sensible del tenant
 // (checkout/agente/canales) con gate owner/admin + validación + auditoría. No cierra rules aún.

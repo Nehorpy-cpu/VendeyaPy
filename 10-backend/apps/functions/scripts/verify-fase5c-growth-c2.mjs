@@ -96,9 +96,43 @@ const audits = await db.collection('tenants/gr2-test/auditLogs').get();
 const actions = new Set(audits.docs.map((d) => d.data().action));
 check('12. Auditoría (deliveryPerson.deactivated + winningReply.archived + agentTestCase.deleted)', actions.has('deliveryPerson.deactivated') && actions.has('winningReply.archived') && actions.has('agentTestCase.deleted'), `actions=${[...actions].join(',')}`);
 
+// ===== agentTestCaseRun (GB-B) =====
+// Bot encendido en el tenant de prueba para obtener una respuesta no vacía y determinista.
+await db.doc('tenants/gr2-test/config/agent').set({ botEnabled: true }, { merge: true });
+
+// 13. correr un caso → persiste lastResult (no vacío) + lastRunAt (backend); status NO cambia.
+const rc = await callFn('agentTestCaseUpsert', { tenantId: 'gr2-test', data: { name: 'Run case', userMessage: 'hola, ¿algo barato?', status: 'UNTESTED' } }, admin);
+const runId = rc.result?.id;
+const run1 = await callFn('agentTestCaseRun', { tenantId: 'gr2-test', id: runId }, admin);
+const tcRun = await doc(`tenants/gr2-test/agentTestCases/${runId}`);
+check('13. agentTestCaseRun → persiste lastResult (no vacío) + lastRunAt (backend); status intacto', run1.status === 200 && typeof run1.result?.lastResult === 'string' && run1.result.lastResult.length > 0 && tcRun?.lastResult === run1.result.lastResult && tcRun?.lastRunAt != null && tcRun?.status === 'UNTESTED', `status=${run1.status} last="${run1.result?.lastResult}" runAt=${!!tcRun?.lastRunAt} st=${tcRun?.status}`);
+const runResult = tcRun?.lastResult;
+
+// 14. seller NO puede correr → 403 (y no altera lastResult).
+const run2 = await callFn('agentTestCaseRun', { tenantId: 'gr2-test', id: runId }, seller);
+check('14. agentTestCaseRun vendedor → 403 (no escribe)', run2.status === 403 && (await doc(`tenants/gr2-test/agentTestCases/${runId}`))?.lastResult === runResult, `status=${run2.status}`);
+
+// 15. caso inexistente → not-found (404).
+const run3 = await callFn('agentTestCaseRun', { tenantId: 'gr2-test', id: 'no-existe' }, admin);
+check('15. agentTestCaseRun inexistente → 404 (not-found)', run3.status === 404, `status=${run3.status}`);
+
+// 16. caso sin userMessage → failed-precondition (400). Lo creamos vacío vía Admin SDK.
+await db.doc('tenants/gr2-test/agentTestCases/empty-um').set({ id: 'empty-um', tenantId: 'gr2-test', name: 'Sin mensaje', userMessage: '', status: 'UNTESTED', lastResult: '', lastRunAt: null, createdAt: Timestamp.now(), updatedAt: Timestamp.now() });
+const run4 = await callFn('agentTestCaseRun', { tenantId: 'gr2-test', id: 'empty-um' }, admin);
+check('16. agentTestCaseRun sin userMessage → 400 (failed-precondition)', run4.status === 400, `status=${run4.status} err=${run4.error?.status}`);
+
+// 17. agentTestCaseUpsert NO permite que el cliente escriba lastResult/lastRunAt (server-only).
+const upHack = await callFn('agentTestCaseUpsert', { tenantId: 'gr2-test', id: runId, data: { lastResult: 'HACK', lastRunAt: 123 } }, admin);
+const tcHack = await doc(`tenants/gr2-test/agentTestCases/${runId}`);
+check('17. agentTestCaseUpsert NO deja al cliente escribir lastResult/lastRunAt', upHack.status === 200 && tcHack?.lastResult === runResult && tcHack?.lastResult !== 'HACK', `last="${tcHack?.lastResult}"`);
+
+// 18. auditoría incluye agentTestCase.run.
+const audits2 = new Set((await db.collection('tenants/gr2-test/auditLogs').get()).docs.map((d) => d.data().action));
+check('18. Auditoría incluye agentTestCase.run', audits2.has('agentTestCase.run'), `actions=${[...audits2].join(',')}`);
+
 // --- Limpieza ---
 for (const id of created) {
-  for (const sub of ['deliveryPersons', 'winningReplies', 'agentTestCases', 'auditLogs']) {
+  for (const sub of ['deliveryPersons', 'winningReplies', 'agentTestCases', 'auditLogs', 'customers', 'config']) {
     for (const d of (await db.collection(`tenants/${id}/${sub}`).get()).docs) await d.ref.delete();
   }
   await db.doc(`tenants/${id}`).delete().catch(() => {});

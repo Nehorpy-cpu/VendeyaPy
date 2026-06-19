@@ -57,11 +57,23 @@ Errores: `unauthenticated`, `permission-denied`, `invalid-argument`, `not-found`
 - **Payload:** `{ tenantId?, id }`. **Efecto:** `status='ARCHIVED'`. **Respuesta:** `{ ok, id, archived: true }`. Audit `winningReply.archived`.
 
 ### `agentTestCaseUpsert` (definición)
-- **Payload:** `{ tenantId?, id?, data: { name(req. create), scenario, userMessage, expectedBehavior, status(enum AGENTTEST_STATUS: UNTESTED/OK/NEEDS_WORK) } }`. *(descarta `lastResult`/`lastRunAt` — los setea el run, fuera de esta fase; `status` es el estado manual del caso.)*
+- **Payload:** `{ tenantId?, id?, data: { name(req. create), scenario, userMessage, expectedBehavior, status(enum AGENTTEST_STATUS: UNTESTED/OK/NEEDS_WORK) } }`. *(descarta `lastResult`/`lastRunAt` — son **server-only**, solo los escribe `agentTestCaseRun`; `status` es el estado manual del caso.)*
 - **Respuesta:** `{ ok, id, created }`. **Gates:** rol manager+ · audit `agentTestCase.created/updated`.
 
 ### `agentTestCaseDelete` (HARD)
 - **Payload:** `{ tenantId?, id }`. **Efecto:** hard-delete (dato efímero del simulador). **Respuesta:** `{ ok, id, deleted: true }`. Audit `agentTestCase.deleted`.
+
+### `agentTestCaseRun` (GB-B — corre el bot, server-set)
+- **Payload:** `{ tenantId?, id }`. Toma el `userMessage` **del doc** (server-side, no del cliente).
+- **Efecto:** corre el **motor real** del bot (`handleMessage`) en dos turnos (saludo + `userMessage`) con un
+  `from` sintético **reservado/efímero solo-dígitos** (prefijo `0000`, no colisiona con clientes reales) y
+  persiste `lastResult`/`lastRunAt`/`updatedAt` por **Admin SDK**. **No** cambia `status`. Si el bot está en
+  pausa (takeover / `botEnabled=false`) persiste `'(el bot está en pausa)'`. **No** consume cuota de mensajes/tokens.
+- **Errores:** `not-found` (caso inexistente o de otro tenant), `failed-precondition` (`userMessage` vacío),
+  `permission-denied` (no manager+), `invalid-argument` (falta `id`).
+- **Respuesta:** `{ ok, id, lastResult, lastRunAt, handledByHuman }`. **Gates:** rol manager+ · audit `agentTestCase.run`.
+- **Nota:** el simulador comparte el motor real → cada corrida crea una sesión/cliente sintético efímero
+  (de ahí el `from` reservado). Cuando se enchufe el LLM dentro de `handleMessage`, el run lo hereda sin cambios.
 
 ## Migración de frontend (fase posterior, la hace el owner)
 
@@ -71,8 +83,8 @@ manejando `HttpsError` (`resource-exhausted` cuota, `permission-denied`, `failed
 `invalid-argument`). Los `delete` pasan a ser **soft** (FINISHED / active=false / ARCHIVED / isActive=false),
 salvo `agentTestCaseDelete` (hard). Una vez migrado cada módulo, se cierran sus rules a `write:false`.
 
-> El `updateDoc` que guarda `lastResult`/`lastRunAt` tras **correr** un caso del simulador NO está cubierto
-> (es server-set); su callable de "run + guardar resultado" queda para una fase posterior.
+> El run del simulador (`lastResult`/`lastRunAt`) ya está cubierto por `agentTestCaseRun` (GB-B, server-set):
+> el cliente ya no escribe el resultado ni pega al endpoint dev `devMessage`.
 
 ## Cierre de rules — estado (F5C, paso B)
 
@@ -91,8 +103,9 @@ simulador pasará a un callable **server-set**.
   `active=false`; quitar el `.trim().toUpperCase()` redundante del front) y luego cerrar.
 - ⏳ **`winningReplies`** (G-4): migrar `lib/replies.ts` (solo soft-archive vía `winningReplyDelete`; se
   quita el botón hard-delete salvo herramienta admin futura); luego cerrar.
-- ⏳ **`agentTestCases`** (G-5): construir un callable server-set de run (corre el bot y persiste
-  `lastResult`/`lastRunAt`) antes de cerrar; `upsert`/`delete`/`status` ya cubiertos.
+- ⏳ **`agentTestCases`** (G-5): callable server-set de run (`agentTestCaseRun`, corre el bot y persiste
+  `lastResult`/`lastRunAt`) **ya construido (GB-B, hecho)**; `upsert`/`delete`/`status` ya cubiertos.
+  Falta migrar `lib/simulator.ts` (run → `agentTestCaseRun`, status → `agentTestCaseUpsert`) y luego cerrar.
 
 `config` (agent/checkout/channels) es un cierre aparte (wildcard `config/{doc}`, callables
 `agentConfigUpdate`/`checkoutConfigUpdate`/`channelConfigUpdate`), tras migrar el frontend.

@@ -39,6 +39,7 @@ export const AUDIT_ACTIONS = [
   'agentTestCase.created',
   'agentTestCase.updated',
   'agentTestCase.deleted',
+  'agentTestCase.run',
   'payment.confirmed',
   'chat.takeover',
   'chat.released',
