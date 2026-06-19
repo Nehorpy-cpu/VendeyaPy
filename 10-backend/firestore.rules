@@ -142,10 +142,11 @@ service cloud.firestore {
 
       // ---------- Subcolecciones del tenant ----------
 
-      // Productos (el vendedor necesita verlos para atender; editar solo manager+)
+      // Productos (el vendedor necesita verlos para atender). La ESCRITURA pasa solo por
+      // callable (productUpsert/productDelete, Admin SDK) — Fase 5C cierre 2.
       match /products/{productId} {
         allow read: if isTenantViewer(tenantId) || isTenantSeller(tenantId) || isPlatformAdmin();
-        allow write: if isTenantManager(tenantId) || isPlatformAdmin();
+        allow write: if false;
       }
 
       // Costos privados de productos: el vendedor NO puede leerlos (ADR-0008). La ESCRITURA

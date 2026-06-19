@@ -4,7 +4,9 @@
  * funcionando, sin romper lecturas por rol. Crece por cierre:
  *   Cierre 1 (productFinancials): write directo owner → 403; productUpsert con financials → ok;
  *     owner/manager leen; seller NO lee; seller NO puede productUpsert.
- *   (Cierre 2 products / Cierre 3 categories se agregan en sus commits.)
+ *   Cierre 2 (products): write directo owner → 403; productUpsert/productDelete owner → ok;
+ *     viewer/seller leen products; seller NO puede productUpsert.
+ *   (Cierre 3 categories se agrega en su commit.)
  */
 process.env.FIRESTORE_EMULATOR_HOST = '127.0.0.1:8080';
 process.env.GCLOUD_PROJECT = 'demo-aiafg';
@@ -60,6 +62,29 @@ check('C1.4 seller NO lee productFinancials → 403', rSeller === 403, `status=$
 const sellerUp = await callFn('productUpsert', { tenantId: T, data: { name: 'X', price: 1 } }, seller);
 check('C1.5 seller NO puede productUpsert → 403', sellerUp.status === 403, `status=${sellerUp.status}`);
 
+// ===== Cierre 2 — products =====
+
+// 1. write directo del owner a products → 403 (write cerrado).
+const wProd = await restPatch(`tenants/${T}/products/${pid}`, { price: { integerValue: '1' } }, owner);
+check('C2.1 write directo owner a products → 403', wProd === 403, `status=${wProd}`);
+
+// 2. productUpsert owner (update) sigue funcionando.
+const upd = await callFn('productUpsert', { tenantId: T, id: pid, data: { price: 120 } }, owner);
+check('C2.2 productUpsert owner (update) → ok', upd.status === 200 && (await db.doc(`tenants/${T}/products/${pid}`).get()).data()?.price === 120, `status=${upd.status}`);
+
+// 3. lectura de products: seller y owner SÍ leen.
+const rSellerProd = await restGet(`tenants/${T}/products/${pid}`, seller);
+const rOwnerProd = await restGet(`tenants/${T}/products/${pid}`, owner);
+check('C2.3 viewer/seller leen products → 200', rSellerProd === 200 && rOwnerProd === 200, `seller=${rSellerProd} owner=${rOwnerProd}`);
+
+// 4. productDelete owner sigue archivando (soft).
+const del = await callFn('productDelete', { tenantId: T, id: pid }, owner);
+check('C2.4 productDelete owner → archive (status ARCHIVED)', del.status === 200 && (await db.doc(`tenants/${T}/products/${pid}`).get()).data()?.status === 'ARCHIVED', `status=${del.status}`);
+
+// 5. seller NO puede productUpsert.
+const sellerUp2 = await callFn('productUpsert', { tenantId: T, data: { name: 'Y', price: 1 } }, seller);
+check('C2.5 seller NO puede productUpsert → 403', sellerUp2.status === 403, `status=${sellerUp2.status}`);
+
 // --- Limpieza ---
 if (pid) {
   await db.doc(`tenants/${T}/products/${pid}`).delete().catch(() => {});
@@ -69,5 +94,5 @@ await db.doc(`tenants/${T}`).update({ limitOverrides: {} }).catch(() => {});
 for (const d of (await db.collection(`tenants/${T}/auditLogs`).get()).docs) await d.ref.delete().catch(() => {});
 
 const ok = results.every((x) => x);
-console.log(`\nRESULTADO CIERRE RULES CATÁLOGO — C1 productFinancials: ${ok ? 'TODO OK ✅' : 'HAY FALLOS ❌'} (${results.filter((x) => x).length}/${results.length})`);
+console.log(`\nRESULTADO CIERRE RULES CATÁLOGO — C1 productFinancials + C2 products: ${ok ? 'TODO OK ✅' : 'HAY FALLOS ❌'} (${results.filter((x) => x).length}/${results.length})`);
 process.exit(ok ? 0 : 1);
