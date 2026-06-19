@@ -5,7 +5,7 @@
  * qué escribir en tenant.subscription/planId/limits. Maneja `pastDueSince` (inicio de la
  * ventana de gracia): se setea al entrar en past_due y se limpia al volver a activo. PURO/testeable.
  */
-import type { SubscriptionStatus } from '@vpw/shared';
+import type { SubscriptionStatus, PaymentProvider } from '@vpw/shared';
 import { normalizeStripeStatus } from './platformBilling.js';
 import { planIdForPrice } from './priceMap.js';
 
@@ -23,13 +23,20 @@ export interface StripeSubEvent {
   data?: { object?: StripeSubObject };
 }
 
+/**
+ * Update NORMALIZADO de suscripción, AGNÓSTICO del proveedor (Fase 5B-ii). Lo producen los
+ * derivers por proveedor (Stripe/PayPal) y lo aplica applySubscriptionUpdate.
+ */
 export interface SubscriptionUpdate {
   tenantId: string | null;
+  provider: PaymentProvider;
   status: SubscriptionStatus;
-  planId: string | null; // null = no cambiar el plan (precio no mapeado)
+  planId: string | null; // null = no cambiar el plan (ref no mapeada)
   currentPeriodEndMs: number | null;
-  stripeCustomerId: string | null;
-  stripeSubscriptionId: string | null;
+  externalCustomerId: string | null;
+  externalSubscriptionId: string | null;
+  externalPlanRef: string | null; // priceId (Stripe) | plan_id (PayPal)
+  providerMetadata?: Record<string, unknown>;
   pastDueSinceMs: number | null;
 }
 
@@ -53,11 +60,14 @@ export function deriveSubscriptionUpdate(
 
   return {
     tenantId: obj.metadata?.tenantId ?? null,
+    provider: 'stripe' as PaymentProvider,
     status,
     planId,
     currentPeriodEndMs,
-    stripeCustomerId: obj.customer ?? null,
-    stripeSubscriptionId: obj.id ?? null,
+    externalCustomerId: obj.customer ?? null,
+    externalSubscriptionId: obj.id ?? null,
+    externalPlanRef: priceId,
+    providerMetadata: { eventType: event.type ?? '' },
     pastDueSinceMs,
   };
 }

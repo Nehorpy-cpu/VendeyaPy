@@ -122,6 +122,10 @@ export const SUBSCRIPTION_STATUS = [
 ] as const;
 export type SubscriptionStatus = (typeof SUBSCRIPTION_STATUS)[number];
 
+// Proveedor de billing de la SUSCRIPCIÓN del SaaS (Fase 5B). 'manual' = sin proveedor externo.
+export const PLATFORM_PAYMENT_PROVIDER = ['manual', 'stripe', 'paypal', 'bancard'] as const;
+export type PaymentProvider = (typeof PLATFORM_PAYMENT_PROVIDER)[number];
+
 export const PROMOTION_TYPE = [
   'PERCENTAGE', // % de descuento
   'FIXED_AMOUNT', // monto fijo de descuento

@@ -52,6 +52,10 @@ export { provisionTenant } from './functions/tenants/provisionTenant.js';
 export { inviteUser, setUserRole, setUserActive } from './functions/users/userManagement.js';
 export { platformBillingWebhook } from './functions/billing/platformBillingWebhook.js';
 
+// Billing multi-proveedor (Fase 5B-ii): PayPal Subscriptions (webhook + callables owner/admin).
+export { paypalBillingWebhook } from './functions/billing/paypalBillingWebhook.js';
+export { createPayPalSubscriptionSession, syncPayPalSubscription } from './functions/billing/paypalCallables.js';
+
 // Entitlements / límites / usage (Fase 5A): alta de producto con cuota (gate preparado para
 // que el panel migre del write directo en 5C) + reinicio mensual proactivo del uso.
 export { productUpsert } from './functions/products/productUpsert.js';

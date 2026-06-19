@@ -3,7 +3,7 @@
  * Ver ARCHITECTURE.md §4.2.
  */
 
-import type { TenantStatus, Country, Currency, SubscriptionStatus } from '../enums.js';
+import type { TenantStatus, Country, Currency, SubscriptionStatus, PaymentProvider } from '../enums.js';
 import type { Timestamp } from './common.types.js';
 import type { PlanLimits } from './plan.types.js';
 
@@ -11,6 +11,14 @@ import type { PlanLimits } from './plan.types.js';
 export interface TenantSubscription {
   status: SubscriptionStatus;
   planId: string;
+  /** Proveedor que cobra la suscripción (Fase 5B-ii). Legacy sin campo: ver resolvePaymentProvider. */
+  paymentProvider?: PaymentProvider;
+  // Referencias GENÉRICas del proveedor (Fase 5B-ii). Para Stripe se mantienen además los legacy.
+  externalCustomerId?: string | null;
+  externalSubscriptionId?: string | null;
+  externalPlanRef?: string | null; // priceId (Stripe) | plan_id (PayPal)
+  providerMetadata?: Record<string, unknown>;
+  // Legacy específicos de Stripe (Fase 4/5B-i). Se conservan para datos Stripe.
   stripeCustomerId: string | null;
   stripeSubscriptionId: string | null;
   currentPeriodEnd: Timestamp | null;

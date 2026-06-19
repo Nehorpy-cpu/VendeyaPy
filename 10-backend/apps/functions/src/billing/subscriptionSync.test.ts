@@ -7,9 +7,9 @@ const ev = (type: string, obj: Record<string, unknown>): StripeSubEvent => ({ id
 const subObj = (over: Record<string, unknown> = {}) => ({ id: 'sub_1', customer: 'cus_1', current_period_end: 1_700_000_000, metadata: { tenantId: 't1' }, items: { data: [{ price: { id: 'price_growth' } }] }, ...over });
 
 describe('deriveSubscriptionUpdate', () => {
-  it('created activa → plan resuelto + período + sin pastDue', () => {
+  it('created activa → plan resuelto + período + refs genéricas (provider stripe) + sin pastDue', () => {
     const r = deriveSubscriptionUpdate(ev('customer.subscription.created', subObj({ status: 'active' })), MAP, { pastDueSinceMs: null }, NOW);
-    expect(r).toMatchObject({ tenantId: 't1', status: 'active', planId: 'growth', currentPeriodEndMs: 1_700_000_000_000, stripeCustomerId: 'cus_1', stripeSubscriptionId: 'sub_1', pastDueSinceMs: null });
+    expect(r).toMatchObject({ tenantId: 't1', provider: 'stripe', status: 'active', planId: 'growth', currentPeriodEndMs: 1_700_000_000_000, externalCustomerId: 'cus_1', externalSubscriptionId: 'sub_1', externalPlanRef: 'price_growth', pastDueSinceMs: null });
   });
 
   it('deleted → canceled', () => {
