@@ -1,11 +1,18 @@
 /**
  * Capa de acceso a la configuración del agente y de checkout (panel).
  * Docs Firestore: tenants/{t}/config/agent  y  tenants/{t}/config/checkout.
+ *
+ * LECTURAS: directas a Firestore (las reglas permiten leer a Owner/Viewer).
+ * ESCRITURAS: pasan por callables seguros del backend (Fase 5C), NO por write directo:
+ *   - agentConfigUpdate    (config/agent: whitelist de campos del agente)
+ *   - checkoutConfigUpdate  (config/checkout: bankAccounts/sellers)
+ * El tenant sale del token; solo PLATFORM_ADMIN operando otra empresa usa `tenantId`.
  */
 
-import { doc, getDoc, setDoc } from 'firebase/firestore';
+import { doc, getDoc } from 'firebase/firestore';
+import { httpsCallable } from 'firebase/functions';
 import type { AgentConfig, CheckoutConfig } from '@vpw/shared';
-import { firebaseDb } from './firebase';
+import { firebaseDb, firebaseFunctions } from './firebase';
 
 export const DEFAULT_AGENT: AgentConfig = {
   agentName: 'Sofía',
@@ -33,7 +40,9 @@ export async function getAgentConfig(tenantId: string): Promise<AgentConfig> {
 }
 
 export async function saveAgentConfig(tenantId: string, cfg: AgentConfig): Promise<void> {
-  await setDoc(agentRef(tenantId), cfg, { merge: true });
+  // Vía callable `agentConfigUpdate` (whitelist + audit, set merge server-side). NO write directo.
+  const call = httpsCallable<{ tenantId: string; data: unknown }, { ok: boolean }>(firebaseFunctions(), 'agentConfigUpdate');
+  await call({ tenantId, data: cfg });
 }
 
 export async function getCheckoutConfig(tenantId: string): Promise<CheckoutConfig> {
@@ -43,5 +52,7 @@ export async function getCheckoutConfig(tenantId: string): Promise<CheckoutConfi
 }
 
 export async function saveCheckoutConfig(tenantId: string, cfg: CheckoutConfig): Promise<void> {
-  await setDoc(checkoutRef(tenantId), cfg, { merge: true });
+  // Vía callable `checkoutConfigUpdate` (valida bankAccounts/sellers, set merge server-side). NO write directo.
+  const call = httpsCallable<{ tenantId: string; data: unknown }, { ok: boolean }>(firebaseFunctions(), 'checkoutConfigUpdate');
+  await call({ tenantId, data: cfg });
 }

@@ -1,13 +1,12 @@
 /**
  * Plantillas por rubro para el onboarding rápido (P19). Precargan la config del
  * agente (nombre, tono, saludo, reglas, FAQ) + categorías típicas del rubro, para
- * que una empresa nueva arranque en minutos. Aplicar = escribir en Firestore
- * (config/agent + categories); lo hace el Owner (reglas).
+ * que una empresa nueva arranque en minutos. Aplicar = escribir vía callables seguros
+ * (agentConfigUpdate + categoryUpsert, Fase 5C), NO por write directo a Firestore.
  */
 
-import { doc, setDoc, serverTimestamp } from 'firebase/firestore';
 import { httpsCallable } from 'firebase/functions';
-import { firebaseDb, firebaseFunctions } from './firebase';
+import { firebaseFunctions } from './firebase';
 
 export interface IndustryTemplate {
   id: string;
@@ -78,11 +77,16 @@ export const INDUSTRY_TEMPLATES: IndustryTemplate[] = [
 const slug = (s: string) => s.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
 
 export async function applyTemplate(tenantId: string, t: IndustryTemplate): Promise<void> {
-  await setDoc(
-    doc(firebaseDb(), 'tenants', tenantId, 'config', 'agent'),
-    { agentName: t.agent.agentName, tone: t.agent.tone, greetingMessage: t.agent.greetingMessage, salesRules: t.agent.salesRules, faq: t.agent.faq, industry: t.id },
-    { merge: true },
+  // Config del agente por callable seguro (agentConfigUpdate), NO por write directo (Fase 5C).
+  // Los campos de la plantilla caen dentro de la whitelist del callable (set merge server-side).
+  const agentConfigUpdate = httpsCallable<{ tenantId: string; data: unknown }, { ok: boolean }>(
+    firebaseFunctions(),
+    'agentConfigUpdate',
   );
+  await agentConfigUpdate({
+    tenantId,
+    data: { agentName: t.agent.agentName, tone: t.agent.tone, greetingMessage: t.agent.greetingMessage, salesRules: t.agent.salesRules, faq: t.agent.faq, industry: t.id },
+  });
   // Categorías por callable seguro (categoryUpsert), NO por write directo a Firestore (Fase 5C).
   // Id determinístico (slug) para que reaplicar la plantilla no duplique categorías.
   const categoryUpsert = httpsCallable<{ tenantId: string; id?: string; data: unknown }, { ok: boolean; id: string }>(
