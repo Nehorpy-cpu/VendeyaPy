@@ -28,4 +28,5 @@ export * from './payment.types.js';
 export * from './invoice.types.js';
 export * from './user.types.js';
 export * from './plan.types.js';
+export * from './billing.types.js';
 export * from './common.types.js';

@@ -26,13 +26,47 @@ export function resolvePaymentProvider(sub: { paymentProvider?: PaymentProvider;
   return 'manual';
 }
 
+/** Opciones de applySubscriptionUpdate (Billing manual por WhatsApp, MB-1). */
+export interface ApplySubscriptionOpts {
+  /**
+   * Permite PISAR una suscripción manual confirmada (`paymentProvider === 'manual_whatsapp'`).
+   * Default `false`: los updates EXTERNOS (webhooks Stripe/PayPal, syncPayPalSubscription) NO pisan
+   * una activación manual vigente. Solo el flujo admin manual lo pasa en `true`.
+   */
+  allowOverrideManual?: boolean;
+}
+
+/** Resultado de applySubscriptionUpdate: `applied=false` + `skipped='manual_override'` si la guarda omitió. */
+export interface ApplySubscriptionResult {
+  applied: boolean;
+  skipped?: 'manual_override';
+}
+
 /** Aplica el update al tenant. `update.tenantId` se ignora: se usa el `tenantId` del argumento. */
-export async function applySubscriptionUpdate(tenantId: string, update: SubscriptionUpdate): Promise<void> {
+export async function applySubscriptionUpdate(
+  tenantId: string,
+  update: SubscriptionUpdate,
+  opts: ApplySubscriptionOpts = {},
+): Promise<ApplySubscriptionResult> {
   const tenant = (await db().doc(paths.tenant(tenantId)).get()).data() as Partial<Tenant> | undefined;
+
+  // Guarda de precedencia (MB-1): si la suscripción vigente es una activación manual confirmada,
+  // un update externo (sin override) NO la pisa. Solo el flujo admin manual (allowOverrideManual) gana.
+  const currentProvider = tenant?.subscription?.paymentProvider;
+  if (currentProvider === 'manual_whatsapp' && !opts.allowOverrideManual) {
+    return { applied: false, skipped: 'manual_override' };
+  }
+
   const newPlanId = update.planId ?? tenant?.planId ?? 'free';
   const plan = await getPlan(newPlanId);
   const cachedLimits = plan ? effectiveLimits(plan.limits, tenant?.limitOverrides) : undefined;
   const now = Timestamp.now();
+
+  // Si una acción admin (override) pisa otro proveedor, conservar el anterior para trazabilidad.
+  const providerMetadata: Record<string, unknown> = { ...(update.providerMetadata ?? {}) };
+  if (opts.allowOverrideManual && currentProvider && currentProvider !== update.provider) {
+    providerMetadata.previousProvider = currentProvider;
+  }
 
   const subscription: Record<string, unknown> = {
     status: update.status,
@@ -41,7 +75,7 @@ export async function applySubscriptionUpdate(tenantId: string, update: Subscrip
     externalCustomerId: update.externalCustomerId,
     externalSubscriptionId: update.externalSubscriptionId,
     externalPlanRef: update.externalPlanRef,
-    providerMetadata: update.providerMetadata ?? {},
+    providerMetadata,
     currentPeriodEnd: update.currentPeriodEndMs ? Timestamp.fromMillis(update.currentPeriodEndMs) : null,
     pastDueSince: update.pastDueSinceMs ? Timestamp.fromMillis(update.pastDueSinceMs) : null,
     updatedAt: now,
@@ -57,4 +91,5 @@ export async function applySubscriptionUpdate(tenantId: string, update: Subscrip
     { merge: true },
   );
   invalidateEntitlements(tenantId);
+  return { applied: true };
 }

@@ -122,9 +122,18 @@ export const SUBSCRIPTION_STATUS = [
 ] as const;
 export type SubscriptionStatus = (typeof SUBSCRIPTION_STATUS)[number];
 
-// Proveedor de billing de la SUSCRIPCIÓN del SaaS (Fase 5B). 'manual' = sin proveedor externo.
-export const PLATFORM_PAYMENT_PROVIDER = ['manual', 'stripe', 'paypal', 'bancard'] as const;
+// Proveedor de billing de la SUSCRIPCIÓN del SaaS (Fase 5B). 'manual' = legacy sin proveedor externo;
+// 'manual_whatsapp' = activación manual CONFIRMADA por el PLATFORM_ADMIN (billing manual por WhatsApp, MB).
+export const PLATFORM_PAYMENT_PROVIDER = ['manual', 'stripe', 'paypal', 'bancard', 'manual_whatsapp'] as const;
 export type PaymentProvider = (typeof PLATFORM_PAYMENT_PROVIDER)[number];
+
+// Billing manual por WhatsApp (MB): estado de la solicitud de activación de plan.
+export const MANUAL_ACTIVATION_STATUS = ['pending', 'approved', 'cancelled'] as const;
+export type ManualActivationStatus = (typeof MANUAL_ACTIVATION_STATUS)[number];
+
+// Billing manual por WhatsApp (MB): método de pago acordado fuera de la plataforma.
+export const MANUAL_PAYMENT_METHOD = ['transferencia', 'deposito', 'giro'] as const;
+export type ManualPaymentMethod = (typeof MANUAL_PAYMENT_METHOD)[number];
 
 export const PROMOTION_TYPE = [
   'PERCENTAGE', // % de descuento

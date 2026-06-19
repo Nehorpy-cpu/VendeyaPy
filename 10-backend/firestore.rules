@@ -351,11 +351,24 @@ service cloud.firestore {
         allow write: if false;
       }
 
+      // Solicitudes de activación manual de plan (billing manual por WhatsApp, MB). El owner ve las
+      // SUYAS; el admin las gestiona. Escritura SOLO por callable (Admin SDK) — el owner no se autoaprueba.
+      match /manualActivationRequests/{requestId} {
+        allow read: if isTenantOwner(tenantId) || isPlatformAdmin();
+        allow write: if false;
+      }
+
       // Webhook events (solo Cloud Functions, lectura para debug)
       match /webhookEvents/{eventId} {
         allow read: if isPlatformAdmin();
         allow write: if false;
       }
+    }
+
+    // Bandeja del Super Admin: solicitudes de activación manual de TODOS los tenants (collectionGroup).
+    // La lectura por-tenant del owner ya la cubre el match anidado tenants/{t}/manualActivationRequests.
+    match /{path=**}/manualActivationRequests/{requestId} {
+      allow read: if isPlatformAdmin();
     }
 
     // ---------- Default deny ----------
