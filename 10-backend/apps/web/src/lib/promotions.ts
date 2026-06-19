@@ -1,31 +1,24 @@
 /**
  * Capa de acceso a promociones e insights de promoción (panel · P8).
- * Promos: las edita el Owner/Manager. Insights: solo lectura + cambiar status
- * (aceptar/descartar). Las reglas validan permisos del lado servidor.
+ *
+ * PROMOS: LECTURAS directas (las reglas permiten leer al staff). ESCRITURAS por callables (Fase 5C):
+ *   - promotionUpsert (alta/edición; valida whitelist, fechas y status server-side)
+ *   - promotionDelete (SOFT: status='FINISHED', conserva historial) — el panel lo muestra como "Finalizar"
+ * INSIGHTS (fuera de alcance de 5C-growth): siguen con write directo limitado (status/resolvedAt).
  */
 
-import {
-  collection,
-  doc,
-  getDocs,
-  setDoc,
-  deleteDoc,
-  updateDoc,
-  query,
-  orderBy,
-  where,
-  serverTimestamp,
-  Timestamp,
-} from 'firebase/firestore';
+import { collection, doc, getDocs, updateDoc, query, orderBy, where, serverTimestamp } from 'firebase/firestore';
+import { httpsCallable } from 'firebase/functions';
 import type { Promotion, Insight, PromotionType, PromotionStatus, InsightStatus } from '@vpw/shared';
-import { firebaseDb } from './firebase';
+import { firebaseDb, firebaseFunctions } from './firebase';
 
 const promosCol = (t: string) => collection(firebaseDb(), 'tenants', t, 'promotions');
 const insightsCol = (t: string) => collection(firebaseDb(), 'tenants', t, 'insights');
 
 export async function listPromotions(tenantId: string): Promise<Promotion[]> {
   const snap = await getDocs(query(promosCol(tenantId), orderBy('updatedAt', 'desc')));
-  return snap.docs.map((d) => d.data() as Promotion);
+  // El "borrar" ahora es SOFT (status='FINISHED'); ocultamos finalizadas para que no se vean como activas.
+  return snap.docs.map((d) => d.data() as Promotion).filter((p) => p.status !== 'FINISHED');
 }
 
 export interface PromotionInput {
@@ -42,35 +35,44 @@ export interface PromotionInput {
   status: PromotionStatus;
 }
 
-const toTs = (s: string | null) => (s ? Timestamp.fromDate(new Date(`${s}T00:00:00`)) : null);
+// yyyy-mm-dd → epoch ms a medianoche LOCAL (mismo instante que guardaba el write directo anterior;
+// el callable lo convierte a Timestamp y `tsToDateInput` lo lee de vuelta sin corrimiento de día).
+const toMs = (s: string | null) => (s ? new Date(`${s}T00:00:00`).getTime() : null);
 
+type PromotionUpsertResp = { ok: boolean; id: string; created: boolean };
+
+/**
+ * Alta/edición de promoción vía callable `promotionUpsert`. El backend valida (whitelist),
+ * convierte fechas y setea id/tenantId/createdAt/updatedAt. NO escribe directo a Firestore.
+ */
 export async function upsertPromotion(tenantId: string, input: PromotionInput): Promise<string> {
-  const id = input.id ?? doc(promosCol(tenantId)).id;
-  await setDoc(
-    doc(promosCol(tenantId), id),
-    {
-      id,
-      tenantId,
-      name: input.name,
-      description: input.description,
-      type: input.type,
-      discountValue: input.discountValue,
-      objective: input.objective,
-      productIds: input.productIds,
-      categoryIds: input.categoryIds,
-      startDate: toTs(input.startDate),
-      endDate: toTs(input.endDate),
-      status: input.status,
-      updatedAt: serverTimestamp(),
-      ...(input.id ? {} : { createdAt: serverTimestamp() }),
-    },
-    { merge: true },
+  const data = {
+    name: input.name,
+    description: input.description,
+    type: input.type,
+    discountValue: input.discountValue,
+    objective: input.objective,
+    productIds: input.productIds,
+    categoryIds: input.categoryIds,
+    startDate: toMs(input.startDate),
+    endDate: toMs(input.endDate),
+    status: input.status,
+  };
+  const call = httpsCallable<{ tenantId: string; id?: string; data: unknown }, PromotionUpsertResp>(
+    firebaseFunctions(),
+    'promotionUpsert',
   );
-  return id;
+  const res = await call({ tenantId, id: input.id, data });
+  return res.data.id;
 }
 
+/**
+ * "Borrar" vía callable `promotionDelete`. Es SOFT-delete: marca `status='FINISHED'` (conserva
+ * historial; no borra el doc). La lista oculta las finalizadas. NO escribe directo a Firestore.
+ */
 export async function deletePromotion(tenantId: string, id: string): Promise<void> {
-  await deleteDoc(doc(promosCol(tenantId), id));
+  const call = httpsCallable<{ tenantId: string; id: string }, { ok: boolean }>(firebaseFunctions(), 'promotionDelete');
+  await call({ tenantId, id });
 }
 
 /** Sugerencias de promo PENDIENTES (las descartadas/aceptadas no aparecen). */

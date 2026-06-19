@@ -184,7 +184,7 @@ export default function PromotionsPage() {
                       <button onClick={() => statusMut.mutate({ p, status: 'ACTIVE' })} className="mr-3 text-brand-700 hover:underline">Activar</button>
                     ) : null}
                     <button onClick={() => openEdit(p)} className="mr-3 text-brand-700 hover:underline">Editar</button>
-                    <button onClick={() => setConfirmDel(p)} className="text-red-600 hover:underline">Borrar</button>
+                    <button onClick={() => setConfirmDel(p)} className="text-red-600 hover:underline">Finalizar</button>
                   </td>
                 </tr>
               ))}
@@ -207,11 +207,11 @@ export default function PromotionsPage() {
       {confirmDel && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
           <div className="w-full max-w-sm rounded-2xl bg-white p-6 shadow-xl">
-            <h3 className="text-base font-semibold text-gray-900">¿Borrar promoción?</h3>
-            <p className="mt-2 text-sm text-gray-600">Vas a borrar <span className="font-medium">{confirmDel.name}</span>.</p>
+            <h3 className="text-base font-semibold text-gray-900">¿Finalizar promoción?</h3>
+            <p className="mt-2 text-sm text-gray-600">Vas a finalizar <span className="font-medium">{confirmDel.name}</span>. Dejará de estar activa y saldrá del listado (se conserva el historial).</p>
             <div className="mt-5 flex justify-end gap-3">
               <button onClick={() => setConfirmDel(null)} className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-100">Cancelar</button>
-              <button onClick={() => delMut.mutate(confirmDel.id)} disabled={delMut.isPending} className="rounded-lg bg-red-600 px-4 py-2 text-sm font-semibold text-white hover:bg-red-700 disabled:opacity-60">{delMut.isPending ? 'Borrando…' : 'Borrar'}</button>
+              <button onClick={() => delMut.mutate(confirmDel.id)} disabled={delMut.isPending} className="rounded-lg bg-red-600 px-4 py-2 text-sm font-semibold text-white hover:bg-red-700 disabled:opacity-60">{delMut.isPending ? 'Finalizando…' : 'Finalizar'}</button>
             </div>
           </div>
         </div>
