@@ -1,21 +1,19 @@
 /**
- * Capa de acceso al catálogo (panel) — productos y categorías en Firestore.
- * El backend (firestore.rules) valida que solo Owner/Manager de la empresa puedan escribir.
- * Todas las funciones reciben tenantId explícito (lo resuelve quien llama: claims o empresa activa).
+ * Capa de acceso al catálogo (panel) — productos y categorías.
+ *
+ * LECTURAS: directas a Firestore (las reglas permiten leer a Owner/Manager).
+ * ESCRITURAS: pasan por callables seguros del backend (Fase 5C), NO por write directo:
+ *   - productUpsert  (alta/edición de producto + costo privado en un solo batch; valida cuota maxProducts)
+ *   - productDelete  (baja por soft-archive: status='ARCHIVED', preserva financials/pedidos)
+ *   - categoryUpsert (alta/edición de categoría)  ← ver templates.ts para el alta por plantilla
+ * El tenant sale del token; solo PLATFORM_ADMIN operando otra empresa pasa `tenantId`
+ * (lo aceptan los callables vía resolvePanelAuth; para Owner/Manager se ignora).
  */
 
-import {
-  collection,
-  doc,
-  getDocs,
-  setDoc,
-  deleteDoc,
-  query,
-  orderBy,
-  serverTimestamp,
-} from 'firebase/firestore';
+import { collection, getDocs, query, orderBy } from 'firebase/firestore';
+import { httpsCallable } from 'firebase/functions';
 import type { Product, Category, ProductFinancials } from '@vpw/shared';
-import { firebaseDb } from './firebase';
+import { firebaseDb, firebaseFunctions } from './firebase';
 
 const productsCol = (tenantId: string) => collection(firebaseDb(), 'tenants', tenantId, 'products');
 const categoriesCol = (tenantId: string) =>
@@ -52,47 +50,53 @@ export interface ProductInput {
   perfume: Product['perfume'];
 }
 
+type ProductUpsertResp = { ok: boolean; id: string; created: boolean };
+
+/**
+ * Alta/edición de producto vía callable `productUpsert`. El backend valida (whitelist),
+ * aplica la cuota `maxProducts` al crear y escribe el costo privado `productFinancials`
+ * en el mismo batch. NO escribe directo a Firestore.
+ */
 export async function upsertProduct(tenantId: string, input: ProductInput): Promise<string> {
-  const id = input.id ?? doc(productsCol(tenantId)).id;
-  const ref = doc(productsCol(tenantId), id);
-  // El producto visible NO lleva costPrice (lo vería el vendedor). setDoc con merge:
-  // crea o actualiza sin pisar createdAt en ediciones.
-  await setDoc(
-    ref,
-    {
-      id,
-      tenantId,
-      name: input.name,
-      description: input.description,
-      price: input.price,
-      compareAtPrice: null,
-      aiNotes: input.aiNotes,
-      currency: 'PYG',
-      categoryId: input.categoryId,
-      images: input.images,
-      emoji: input.emoji,
-      inventory: { trackStock: true, stock: input.stock, lowStockThreshold: 3, sku: input.sku },
-      status: input.status,
-      featured: input.featured,
-      externalIds: { facebook: null, instagram: null, tiktok: null },
-      perfume: input.perfume,
-      updatedAt: serverTimestamp(),
-      ...(input.id ? {} : { createdAt: serverTimestamp(), position: 999 }),
-    },
-    { merge: true },
+  // `data` = solo campos editables (el backend descarta id/tenantId/timestamps/sync).
+  const data: Record<string, unknown> = {
+    name: input.name,
+    description: input.description,
+    price: input.price,
+    compareAtPrice: null,
+    aiNotes: input.aiNotes,
+    currency: 'PYG',
+    categoryId: input.categoryId,
+    images: input.images,
+    emoji: input.emoji,
+    inventory: { trackStock: true, stock: input.stock, lowStockThreshold: 3, sku: input.sku },
+    status: input.status,
+    featured: input.featured,
+    externalIds: { facebook: null, instagram: null, tiktok: null },
+    perfume: input.perfume,
+  };
+  // En CREATE seteamos `position` para que el producto aparezca en listProducts
+  // (que ordena por `position`; un doc sin ese campo quedaría fuera del orderBy).
+  if (!input.id) data.position = 999;
+
+  // El costo va a la subcolección privada productFinancials (ADR-0008), en el mismo callable.
+  const financials = { costPrice: input.costPrice, priorityScore: input.priorityScore };
+
+  const call = httpsCallable<{ tenantId: string; id?: string; data: unknown; financials: unknown }, ProductUpsertResp>(
+    firebaseFunctions(),
+    'productUpsert',
   );
-  // El costo va en la subcolección privada productFinancials (ADR-0008).
-  await setDoc(
-    doc(productFinancialsCol(tenantId), id),
-    { productId: id, tenantId, costPrice: input.costPrice, priorityScore: input.priorityScore, updatedAt: serverTimestamp() },
-    { merge: true },
-  );
-  return id;
+  const res = await call({ tenantId, id: input.id, data, financials });
+  return res.data.id;
 }
 
+/**
+ * Baja de producto vía callable `productDelete`. Es un SOFT-ARCHIVE (status='ARCHIVED'):
+ * no rompe pedidos/carritos abiertos y preserva el costo. NO borra directo en Firestore.
+ */
 export async function deleteProduct(tenantId: string, id: string): Promise<void> {
-  await deleteDoc(doc(productsCol(tenantId), id));
-  await deleteDoc(doc(productFinancialsCol(tenantId), id));
+  const call = httpsCallable<{ tenantId: string; id: string }, { ok: boolean }>(firebaseFunctions(), 'productDelete');
+  await call({ tenantId, id });
 }
 
 /** Mapa productId → finanzas privadas (costo + prioridad). Solo Owner/Manager (reglas). */
@@ -111,7 +115,10 @@ export function productMargin(price: number, costPrice: number | null): number |
 
 const API = process.env['NEXT_PUBLIC_API_BASE_URL'] ?? 'http://localhost:5001/demo-aiafg/us-central1';
 
-/** Sincroniza el catálogo al Meta Catalog (D4, vía Cloud Function). */
+/**
+ * Sincroniza el catálogo al Meta Catalog (D4). Sigue usando el endpoint dev (job),
+ * NO es un write directo a Firestore. Migrará a `runTenantJob('catalogSync')` aparte.
+ */
 export async function syncCatalogToMeta(tenantId: string): Promise<void> {
   await fetch(`${API}/devSyncCatalogToMeta`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tenantId }) });
 }

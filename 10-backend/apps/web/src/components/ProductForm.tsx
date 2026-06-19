@@ -26,9 +26,11 @@ interface Props {
   onCancel: () => void;
   onSubmit: (input: ProductInput) => void;
   saving: boolean;
+  /** Error del guardado (callable productUpsert): cuota, permiso, validación. */
+  error?: string | null;
 }
 
-export function ProductForm({ initial, initialCost, initialPriority, categories, onCancel, onSubmit, saving }: Props) {
+export function ProductForm({ initial, initialCost, initialPriority, categories, onCancel, onSubmit, saving, error }: Props) {
   const pf = initial?.perfume ?? null;
   const [f, setF] = useState({
     name: initial?.name ?? '',
@@ -190,6 +192,10 @@ export function ProductForm({ initial, initialCost, initialPriority, categories,
             <input type="checkbox" checked={f.isNew} onChange={(e) => set('isNew', e.target.checked)} /> Nuevo
           </label>
         </div>
+
+        {error && (
+          <p className="mt-4 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">{error}</p>
+        )}
 
         <div className="mt-6 flex justify-end gap-3">
           <button type="button" onClick={onCancel} className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-100">

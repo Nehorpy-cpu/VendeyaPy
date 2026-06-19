@@ -62,14 +62,19 @@ export default function CatalogPage() {
   });
   const syncMut = useMutation({ mutationFn: () => syncCatalogToMeta(tenantId!), onSuccess: () => qc.invalidateQueries({ queryKey: ['products', tenantId] }) });
 
+  // Ocultamos los productos dados de baja (status ARCHIVED, por el soft-delete del callable).
+  const activeProducts = useMemo(
+    () => (productsQ.data ?? []).filter((p) => p.status !== 'ARCHIVED'),
+    [productsQ.data],
+  );
+  const archivedCount = (productsQ.data ?? []).length - activeProducts.length;
   const filtered = useMemo(() => {
-    const list = productsQ.data ?? [];
     const s = search.trim().toLowerCase();
-    if (!s) return list;
-    return list.filter(
+    if (!s) return activeProducts;
+    return activeProducts.filter(
       (p) => p.name.toLowerCase().includes(s) || (p.perfume?.brand ?? '').toLowerCase().includes(s),
     );
-  }, [productsQ.data, search]);
+  }, [activeProducts, search]);
 
   if (companyLoading) return <div className="text-gray-400">Cargando…</div>;
   if (!tenantId) {
@@ -100,6 +105,12 @@ export default function CatalogPage() {
         placeholder="Buscar por nombre o marca…"
         className="w-full max-w-sm rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-brand-500 focus:outline-none"
       />
+
+      {archivedCount > 0 && (
+        <p className="text-xs text-gray-400">
+          {archivedCount} producto{archivedCount === 1 ? '' : 's'} dado{archivedCount === 1 ? '' : 's'} de baja (ocultos).
+        </p>
+      )}
 
       {productsQ.isLoading && <div className="text-gray-400">Cargando productos…</div>}
       {productsQ.isError && (
@@ -184,16 +195,20 @@ export default function CatalogPage() {
           onCancel={() => setEditing(undefined)}
           onSubmit={(input) => saveMut.mutate(input)}
           saving={saveMut.isPending}
+          error={saveMut.isError ? errMsg(saveMut.error) : null}
         />
       )}
 
       {confirmDelete && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
           <div className="w-full max-w-sm rounded-2xl bg-white p-6 shadow-xl">
-            <h3 className="text-base font-semibold text-gray-900">¿Borrar producto?</h3>
+            <h3 className="text-base font-semibold text-gray-900">¿Dar de baja el producto?</h3>
             <p className="mt-2 text-sm text-gray-600">
-              Vas a borrar <span className="font-medium">{confirmDelete.name}</span>. Esta acción no se puede deshacer.
+              <span className="font-medium">{confirmDelete.name}</span> se va a archivar: deja de mostrarse en el catálogo y al bot, pero se conservan sus pedidos y su costo. Podés reactivarlo editándolo y poniéndolo en ACTIVE.
             </p>
+            {deleteMut.isError && (
+              <p className="mt-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">{errMsg(deleteMut.error)}</p>
+            )}
             <div className="mt-5 flex justify-end gap-3">
               <button onClick={() => setConfirmDelete(null)} className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-100">
                 Cancelar
@@ -203,7 +218,7 @@ export default function CatalogPage() {
                 disabled={deleteMut.isPending}
                 className="rounded-lg bg-red-600 px-4 py-2 text-sm font-semibold text-white hover:bg-red-700 disabled:opacity-60"
               >
-                {deleteMut.isPending ? 'Borrando…' : 'Borrar'}
+                {deleteMut.isPending ? 'Archivando…' : 'Dar de baja'}
               </button>
             </div>
           </div>
@@ -211,4 +226,10 @@ export default function CatalogPage() {
       )}
     </div>
   );
+}
+
+/** Mensaje legible de un error de callable (HttpsError trae `message` claro). */
+function errMsg(e: unknown): string {
+  const m = (e as { message?: string } | null)?.message;
+  return m && m.trim() ? m : 'No se pudo completar la operación. Revisá tus permisos o tu plan.';
 }

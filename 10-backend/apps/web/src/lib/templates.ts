@@ -6,7 +6,8 @@
  */
 
 import { doc, setDoc, serverTimestamp } from 'firebase/firestore';
-import { firebaseDb } from './firebase';
+import { httpsCallable } from 'firebase/functions';
+import { firebaseDb, firebaseFunctions } from './firebase';
 
 export interface IndustryTemplate {
   id: string;
@@ -82,13 +83,18 @@ export async function applyTemplate(tenantId: string, t: IndustryTemplate): Prom
     { agentName: t.agent.agentName, tone: t.agent.tone, greetingMessage: t.agent.greetingMessage, salesRules: t.agent.salesRules, faq: t.agent.faq, industry: t.id },
     { merge: true },
   );
+  // Categorías por callable seguro (categoryUpsert), NO por write directo a Firestore (Fase 5C).
+  // Id determinístico (slug) para que reaplicar la plantilla no duplique categorías.
+  const categoryUpsert = httpsCallable<{ tenantId: string; id?: string; data: unknown }, { ok: boolean; id: string }>(
+    firebaseFunctions(),
+    'categoryUpsert',
+  );
   let pos = 0;
   for (const name of t.categories) {
-    const id = slug(name);
-    await setDoc(
-      doc(firebaseDb(), 'tenants', tenantId, 'categories', id),
-      { id, tenantId, name, description: '', emoji: '🏷️', position: pos++, isActive: true, createdAt: serverTimestamp(), updatedAt: serverTimestamp() },
-      { merge: true },
-    );
+    await categoryUpsert({
+      tenantId,
+      id: slug(name),
+      data: { name, description: '', emoji: '🏷️', position: pos++, isActive: true },
+    });
   }
 }
