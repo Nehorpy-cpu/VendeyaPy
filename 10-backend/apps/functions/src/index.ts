@@ -65,6 +65,10 @@ export { resetUsageMonthly } from './functions/scheduled/resetUsage.js';
 export { productDelete } from './functions/products/productDelete.js';
 export { categoryUpsert, categoryDelete } from './functions/products/categoryCallables.js';
 
+// Growth tools por callables (Fase 5C-C1): promociones + tracking propio (soft-delete, manager+).
+export { promotionUpsert, promotionDelete } from './functions/growth/promotionCallables.js';
+export { trackingSourceUpsert, trackingSourceDelete } from './functions/growth/trackingCallables.js';
+
 // Migración de escrituras críticas a callables (Fase 5C-A): config sensible del tenant
 // (checkout/agente/canales) con gate owner/admin + validación + auditoría. No cierra rules aún.
 export { checkoutConfigUpdate, agentConfigUpdate, channelConfigUpdate } from './functions/config/configCallables.js';
