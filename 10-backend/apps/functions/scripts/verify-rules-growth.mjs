@@ -11,13 +11,16 @@
  *   G-3 (trackingSources): write directo manager+ → 403; trackingSourceUpsert/Delete (Admin SDK) → ok;
  *     el backend normaliza el code (' verano20 ' → 'VERANO20'); delete SOFT (active=false); lectura
  *     staff → 200 (sin cambios); seller NO puede; aislamiento de tenant.
- *   (G-4 winningReplies, G-5 agentTestCases se agregan en su commit.)
+ *   G-4 (winningReplies): write directo manager+ → 403; winningReplyUpsert/Delete (Admin SDK) → ok;
+ *     create fuerza source='manual'/status='ACTIVE'; delete SOFT (status='ARCHIVED'); editar una reply
+ *     source='auto' → failed-precondition; lectura staff → 200 (sin cambios); seller NO puede; aislamiento.
+ *   (G-5 agentTestCases se agrega en su commit.)
  */
 process.env.FIRESTORE_EMULATOR_HOST = '127.0.0.1:8080';
 process.env.GCLOUD_PROJECT = 'demo-aiafg';
 
 import { initializeApp } from 'firebase-admin/app';
-import { getFirestore } from 'firebase-admin/firestore';
+import { getFirestore, Timestamp } from 'firebase-admin/firestore';
 
 initializeApp({ projectId: 'demo-aiafg' });
 const db = getFirestore();
@@ -159,6 +162,48 @@ const tInPerfu = btid ? (await db.doc(`tenants/${T}/trackingSources/${btid}`).ge
 const tInBoutique = btid ? (await db.doc(`tenants/boutique-demo/trackingSources/${btid}`).get()).exists : false;
 check('G3.7 cross-tenant: boutique NO crea trackingSource en perfumeria (la crea en su tenant)', bTrack.status === 200 && !tInPerfu && tInBoutique, `perfu=${tInPerfu} boutique=${tInBoutique}`);
 
+// ===== Cierre G-4 — winningReplies =====
+
+// 1. winningReplyUpsert owner (create) → backend fuerza source='manual', conversions=0, status='ACTIVE'.
+const wUp = await callFn('winningReplyUpsert', { tenantId: T, data: { text: '¡Gracias por tu compra!', category: 'cierre' } }, owner);
+const wid = wUp.result?.id;
+const wrep = wid ? (await db.doc(`tenants/${T}/winningReplies/${wid}`).get()).data() : null;
+check('G4.1 winningReplyUpsert owner (create) → ok (source=manual, status=ACTIVE, conversions=0)', wUp.status === 200 && wrep?.source === 'manual' && wrep?.status === 'ACTIVE' && wrep?.conversions === 0, `status=${wUp.status} source=${wrep?.source}`);
+
+// 2. write directo del owner (manager+) a winningReplies → 403 (write cerrado).
+const wWin = await restPatch(`tenants/${T}/winningReplies/${wid}`, { text: { stringValue: 'HACK' } }, owner);
+check('G4.2 write directo owner a winningReplies → 403', wWin === 403, `status=${wWin}`);
+
+// 3. winningReplyUpsert owner (update) sigue funcionando.
+const wUpd = await callFn('winningReplyUpsert', { tenantId: T, id: wid, data: { category: 'objeción' } }, owner);
+check('G4.3 winningReplyUpsert owner (update) → ok', wUpd.status === 200 && (await db.doc(`tenants/${T}/winningReplies/${wid}`).get()).data()?.category === 'objeción', `status=${wUpd.status}`);
+
+// 4. winningReplyDelete owner → soft (status ARCHIVED).
+const wDel = await callFn('winningReplyDelete', { tenantId: T, id: wid }, owner);
+check('G4.4 winningReplyDelete owner → soft (status ARCHIVED)', wDel.status === 200 && (await db.doc(`tenants/${T}/winningReplies/${wid}`).get()).data()?.status === 'ARCHIVED', `status=${wDel.status}`);
+
+// 5. editar una reply source='auto' (minada) vía callable → failed-precondition (400).
+await db.doc(`tenants/${T}/winningReplies/g4-auto`).set({ id: 'g4-auto', tenantId: T, text: 'auto', category: 'x', source: 'auto', conversions: 5, status: 'ACTIVE', createdAt: Timestamp.now(), updatedAt: Timestamp.now() });
+const wAuto = await callFn('winningReplyUpsert', { tenantId: T, id: 'g4-auto', data: { text: 'editada' } }, owner);
+check('G4.5 editar reply source=auto vía callable → 400 (failed-precondition)', wAuto.status === 400, `status=${wAuto.status} err=${wAuto.error?.status}`);
+
+// 6. lectura: read sin cambios. owner y seller (staff) → 200.
+const rOwnerW = await restGet(`tenants/${T}/winningReplies/${wid}`, owner);
+const rSellerW = await restGet(`tenants/${T}/winningReplies/${wid}`, seller);
+check('G4.6 owner/seller (staff) leen winningReplies → 200 (read sin cambios)', rOwnerW === 200 && rSellerW === 200, `owner=${rOwnerW} seller=${rSellerW}`);
+
+// 7. seller NO puede winningReplyUpsert ni winningReplyDelete (authz manager+).
+const sellerWU = await callFn('winningReplyUpsert', { tenantId: T, data: { text: 'X', category: 'y' } }, seller);
+const sellerWD = await callFn('winningReplyDelete', { tenantId: T, id: wid }, seller);
+check('G4.7 seller NO puede winningReplyUpsert/Delete → 403', sellerWU.status === 403 && sellerWD.status === 403, `up=${sellerWU.status} del=${sellerWD.status}`);
+
+// 8. aislamiento de tenant: owner de boutique con tenantId=perfumeria crea en boutique, NO en perfumeria.
+const bWin = await callFn('winningReplyUpsert', { tenantId: T, data: { text: 'Cross', category: 'z' } }, boutiqueOwner);
+const bwid = bWin.result?.id;
+const wInPerfu = bwid ? (await db.doc(`tenants/${T}/winningReplies/${bwid}`).get()).exists : true;
+const wInBoutique = bwid ? (await db.doc(`tenants/boutique-demo/winningReplies/${bwid}`).get()).exists : false;
+check('G4.8 cross-tenant: boutique NO crea reply en perfumeria (la crea en su tenant)', bWin.status === 200 && !wInPerfu && wInBoutique, `perfu=${wInPerfu} boutique=${wInBoutique}`);
+
 // --- Limpieza ---
 if (did) await db.doc(`tenants/${T}/deliveryPersons/${did}`).delete().catch(() => {});
 await db.doc(`tenants/${T}/deliveryPersons/rules-hack`).delete().catch(() => {}); // por si el create directo hubiera pasado
@@ -166,10 +211,13 @@ if (pid) await db.doc(`tenants/${T}/promotions/${pid}`).delete().catch(() => {})
 if (bid) await db.doc(`tenants/boutique-demo/promotions/${bid}`).delete().catch(() => {});
 if (tid) await db.doc(`tenants/${T}/trackingSources/${tid}`).delete().catch(() => {});
 if (btid) await db.doc(`tenants/boutique-demo/trackingSources/${btid}`).delete().catch(() => {});
+if (wid) await db.doc(`tenants/${T}/winningReplies/${wid}`).delete().catch(() => {});
+await db.doc(`tenants/${T}/winningReplies/g4-auto`).delete().catch(() => {});
+if (bwid) await db.doc(`tenants/boutique-demo/winningReplies/${bwid}`).delete().catch(() => {});
 await db.doc(`tenants/${T}`).update({ limitOverrides: {} }).catch(() => {});
 for (const d of (await db.collection(`tenants/${T}/auditLogs`).get()).docs) await d.ref.delete().catch(() => {});
 for (const d of (await db.collection('tenants/boutique-demo/auditLogs').get()).docs) await d.ref.delete().catch(() => {});
 
 const ok = results.every((x) => x);
-console.log(`\nRESULTADO CIERRE RULES GROWTH — G-0 deliveryPersons + G-2 promotions + G-3 trackingSources: ${ok ? 'TODO OK ✅' : 'HAY FALLOS ❌'} (${results.filter((x) => x).length}/${results.length})`);
+console.log(`\nRESULTADO CIERRE RULES GROWTH — G-0 deliveryPersons + G-2 promotions + G-3 trackingSources + G-4 winningReplies: ${ok ? 'TODO OK ✅' : 'HAY FALLOS ❌'} (${results.filter((x) => x).length}/${results.length})`);
 process.exit(ok ? 0 : 1);

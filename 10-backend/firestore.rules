@@ -264,11 +264,12 @@ service cloud.firestore {
         allow read, write: if isTenantManager(tenantId) || isPlatformAdmin();
       }
 
-      // Respuestas ganadoras (P18): el staff las lee/copia; el manager+ las cura.
-      // Las "auto" las escribe el minero (Admin SDK).
+      // Respuestas ganadoras (P18): el staff las lee/copia. La ESCRITURA pasa solo por callable
+      // (winningReplyUpsert/winningReplyDelete, Admin SDK) — Fase 5C cierre growth G-4. Las "auto" las
+      // mina el job (Admin SDK); winningReplyDelete es SOFT (status='ARCHIVED').
       match /winningReplies/{replyId} {
         allow read: if isTenantStaff(tenantId) || isPlatformAdmin();
-        allow write: if isTenantManager(tenantId) || isPlatformAdmin();
+        allow write: if false;
       }
 
       // Integración Meta (D1): conexión + activos. El manager+ los lee; los escribe
