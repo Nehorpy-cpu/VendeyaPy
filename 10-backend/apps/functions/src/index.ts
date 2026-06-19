@@ -69,6 +69,12 @@ export { categoryUpsert, categoryDelete } from './functions/products/categoryCal
 export { promotionUpsert, promotionDelete } from './functions/growth/promotionCallables.js';
 export { trackingSourceUpsert, trackingSourceDelete } from './functions/growth/trackingCallables.js';
 
+// Growth tools (Fase 5C-C2): repartidores (cuota maxDeliveryPersons) + respuestas ganadoras
+// (solo manual) + casos del simulador. Manager+. No cierra rules aún.
+export { deliveryPersonUpsert, deliveryPersonDelete } from './functions/growth/deliveryCallables.js';
+export { winningReplyUpsert, winningReplyDelete } from './functions/growth/winningReplyCallables.js';
+export { agentTestCaseUpsert, agentTestCaseDelete } from './functions/growth/agentTestCaseCallables.js';
+
 // Migración de escrituras críticas a callables (Fase 5C-A): config sensible del tenant
 // (checkout/agente/canales) con gate owner/admin + validación + auditoría. No cierra rules aún.
 export { checkoutConfigUpdate, agentConfigUpdate, channelConfigUpdate } from './functions/config/configCallables.js';

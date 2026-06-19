@@ -5,7 +5,7 @@
  * promo → name+type; tracking → name+code+type. Descartan server-only (id, tenantId, timestamps,
  * attribution/rollups). Las fechas se devuelven como epoch ms|null (el callable las pasa a Timestamp).
  */
-import { PROMOTION_TYPE, PROMOTION_STATUS, TRACKING_TYPE } from '@vpw/shared';
+import { PROMOTION_TYPE, PROMOTION_STATUS, TRACKING_TYPE, DRIVER_STATUS, REPLY_STATUS, AGENTTEST_STATUS } from '@vpw/shared';
 
 function asObject(v: unknown, label: string): Record<string, unknown> {
   if (!v || typeof v !== 'object' || Array.isArray(v)) throw new Error(`${label} inválido/a.`);
@@ -79,5 +79,43 @@ export function validateTrackingSourcePatch(data: unknown, opts: { requireCreate
   if (d.type !== undefined) out.type = inEnum(TRACKING_TYPE, d.type, 'type');
   else if (opts.requireCreate) throw new Error('La fuente necesita un tipo.');
   if (d.active !== undefined) out.active = bool(d.active, 'active');
+  return out;
+}
+
+/** Patch sanitizado de DeliveryPerson. `requireCreate` exige name+whatsappPhone. Descarta server-only. */
+export function validateDeliveryPersonPatch(data: unknown, opts: { requireCreate: boolean }): Record<string, unknown> {
+  const d = asObject(data, 'repartidor');
+  const out: Record<string, unknown> = {};
+  if (d.name !== undefined) out.name = reqStr(d.name, 'name', 200);
+  else if (opts.requireCreate) throw new Error('El repartidor necesita un nombre.');
+  if (d.whatsappPhone !== undefined) out.whatsappPhone = reqStr(d.whatsappPhone, 'whatsappPhone', 40);
+  else if (opts.requireCreate) throw new Error('El repartidor necesita un teléfono.');
+  if (d.status !== undefined) out.status = inEnum(DRIVER_STATUS, d.status, 'status');
+  if (d.isActive !== undefined) out.isActive = bool(d.isActive, 'isActive');
+  if (d.area !== undefined) out.area = str(d.area, 'area', 500);
+  return out;
+}
+
+/** Patch sanitizado de WinningReply (solo manual). Descarta `source`/`conversions`. */
+export function validateWinningReplyPatch(data: unknown, opts: { requireCreate: boolean }): Record<string, unknown> {
+  const d = asObject(data, 'respuesta');
+  const out: Record<string, unknown> = {};
+  if (d.text !== undefined) out.text = reqStr(d.text, 'text', 5000);
+  else if (opts.requireCreate) throw new Error('La respuesta necesita texto.');
+  if (d.category !== undefined) out.category = str(d.category, 'category', 200);
+  if (d.status !== undefined) out.status = inEnum(REPLY_STATUS, d.status, 'status');
+  return out;
+}
+
+/** Patch sanitizado de AgentTestCase (definición). Descarta `lastResult`/`lastRunAt`. */
+export function validateAgentTestCasePatch(data: unknown, opts: { requireCreate: boolean }): Record<string, unknown> {
+  const d = asObject(data, 'caso de prueba');
+  const out: Record<string, unknown> = {};
+  if (d.name !== undefined) out.name = reqStr(d.name, 'name', 200);
+  else if (opts.requireCreate) throw new Error('El caso necesita un nombre.');
+  if (d.scenario !== undefined) out.scenario = str(d.scenario, 'scenario', 2000);
+  if (d.userMessage !== undefined) out.userMessage = str(d.userMessage, 'userMessage', 2000);
+  if (d.expectedBehavior !== undefined) out.expectedBehavior = str(d.expectedBehavior, 'expectedBehavior', 2000);
+  if (d.status !== undefined) out.status = inEnum(AGENTTEST_STATUS, d.status, 'status');
   return out;
 }

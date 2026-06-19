@@ -78,8 +78,8 @@ export async function resolveEntitlements(tenantId: string): Promise<Entitlement
 
 // ---- Registro de métricas ----
 type MonthlyMetric = 'messages' | 'orders' | 'adSyncs' | 'aiTokens' | 'jobs';
-type CountMetric = 'products' | 'users';
-export type QuotaMetric = 'messages' | 'orders' | 'adSyncs' | 'aiTokens' | 'products' | 'users';
+type CountMetric = 'products' | 'users' | 'deliveryPersons';
+export type QuotaMetric = 'messages' | 'orders' | 'adSyncs' | 'aiTokens' | 'products' | 'users' | 'deliveryPersons';
 
 const MONTHLY_FIELD: Record<MonthlyMetric, keyof TenantUsage> = {
   messages: 'messagesThisMonth',
@@ -95,12 +95,15 @@ const QUOTA_LIMIT: Record<QuotaMetric, keyof PlanLimits> = {
   aiTokens: 'maxAiTokensPerMonth',
   products: 'maxProducts',
   users: 'maxUsers',
+  deliveryPersons: 'maxDeliveryPersons',
 };
 const COUNT_FN: Record<CountMetric, (tenantId: string) => Promise<number>> = {
   products: async (t) => (await db().collection(paths.products(t)).count().get()).data().count,
   users: async (t) => (await db().collection(paths.users()).where('tenantId', '==', t).count().get()).data().count,
+  // Cuota de repartidores: cuenta SOLO los activos (isActive==true) → los desactivados liberan cupo.
+  deliveryPersons: async (t) => (await db().collection(paths.deliveryPersons(t)).where('isActive', '==', true).count().get()).data().count,
 };
-const isCountMetric = (m: QuotaMetric): m is CountMetric => m === 'products' || m === 'users';
+const isCountMetric = (m: QuotaMetric): m is CountMetric => m === 'products' || m === 'users' || m === 'deliveryPersons';
 
 export interface QuotaResult {
   allowed: boolean;

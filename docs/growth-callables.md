@@ -36,14 +36,42 @@ Errores: `unauthenticated`, `permission-denied`, `invalid-argument`, `not-found`
 
 ---
 
+## 5C-C2 — Repartidores + respuestas ganadoras + casos del simulador
+
+### `deliveryPersonUpsert`
+- **Payload:** `{ tenantId?, id?, data: { name(req. create), whatsappPhone(req. create), status(enum DRIVER_STATUS: AVAILABLE/BUSY/OFFLINE), isActive(bool), area } }`. *(descarta `currentLocation`/`stats`/`activeDeliveryIds` — server/driver-app; en create se inicializan en server.)*
+- **Respuesta:** `{ ok, id, created }`. **Gates:** rol manager+ · **cuota `maxDeliveryPersons`** en CREATE (cuenta **solo `isActive==true`**: los desactivados liberan cupo) · audit `deliveryPerson.created/updated`.
+
+### `deliveryPersonDelete` (SOFT, con bloqueo)
+- **Payload:** `{ tenantId?, id }`. **Regla:** si tiene `activeDeliveryIds` → `failed-precondition` (reasignar entregas primero). Si no → `isActive=false` + `status='OFFLINE'`. **Nunca hard-delete.**
+- **Respuesta:** `{ ok, id, deactivated: true }`. **Gates:** rol manager+ · audit `deliveryPerson.deactivated`.
+
+### `winningReplyUpsert` (solo manual)
+- **Payload:** `{ tenantId?, id?, data: { text(req. create), category, status(enum REPLY_STATUS: ACTIVE/ARCHIVED) } }`. Server fuerza `source:'manual'` + `conversions:0` en create; **descarta `source`/`conversions`** del cliente. **Editar una reply `source:'auto'` (minada) → `failed-precondition`.**
+- **Respuesta:** `{ ok, id, created }`. **Gates:** rol manager+ · audit `winningReply.created/updated`.
+
+### `winningReplyDelete` (SOFT)
+- **Payload:** `{ tenantId?, id }`. **Efecto:** `status='ARCHIVED'`. **Respuesta:** `{ ok, id, archived: true }`. Audit `winningReply.archived`.
+
+### `agentTestCaseUpsert` (definición)
+- **Payload:** `{ tenantId?, id?, data: { name(req. create), scenario, userMessage, expectedBehavior, status(enum AGENTTEST_STATUS: UNTESTED/OK/NEEDS_WORK) } }`. *(descarta `lastResult`/`lastRunAt` — los setea el run, fuera de esta fase; `status` es el estado manual del caso.)*
+- **Respuesta:** `{ ok, id, created }`. **Gates:** rol manager+ · audit `agentTestCase.created/updated`.
+
+### `agentTestCaseDelete` (HARD)
+- **Payload:** `{ tenantId?, id }`. **Efecto:** hard-delete (dato efímero del simulador). **Respuesta:** `{ ok, id, deleted: true }`. Audit `agentTestCase.deleted`.
+
 ## Migración de frontend (fase posterior, la hace el owner)
 
-Reemplazar en `apps/web/src/lib/promotions.ts` / `tracking.ts` los `setDoc`/`deleteDoc` por
-`httpsCallable('promotionUpsert' | 'promotionDelete' | 'trackingSourceUpsert' | 'trackingSourceDelete')`
-con `{ tenantId, id?, data }`, manejando `HttpsError`. El `deleteDoc` pasa a ser **soft** (FINISHED /
-active=false). Una vez migrado, se cierran las rules de `promotions`/`trackingSources` a `write:false`.
+Reemplazar en `apps/web/src/lib/{promotions,tracking,replies,simulator}.ts` (y el panel de delivery
+futuro) los `setDoc`/`updateDoc`/`deleteDoc` por los `httpsCallable` de arriba con `{ tenantId, id?, data }`,
+manejando `HttpsError` (`resource-exhausted` cuota, `permission-denied`, `failed-precondition`,
+`invalid-argument`). Los `delete` pasan a ser **soft** (FINISHED / active=false / ARCHIVED / isActive=false),
+salvo `agentTestCaseDelete` (hard). Una vez migrado cada módulo, se cierran sus rules a `write:false`.
 
-## Pendiente (5C-C2)
+> El `updateDoc` que guarda `lastResult`/`lastRunAt` tras **correr** un caso del simulador NO está cubierto
+> (es server-set); su callable de "run + guardar resultado" queda para una fase posterior.
 
-`deliveryPersonUpsert`/`Delete` (con cuota `maxDeliveryPersons`), `winningReplyUpsert`/`Delete`,
-`agentTestCaseUpsert`/`Delete`. (5C-D: marcar resuelto/completado de `insights`/`followUpTasks`/`agentAudits`.)
+## Pendiente
+
+5C-D (opcional): marcar resuelto/completado de `insights`/`followUpTasks`/`agentAudits` (updates ya
+limitados por rules a `status`/`resolvedAt`/`completedAt`).
