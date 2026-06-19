@@ -225,10 +225,12 @@ service cloud.firestore {
         allow write: if false;
       }
 
-      // Promociones (P8): las ve el staff (para informar al cliente); las edita el manager+.
+      // Promociones (P8): las ve el staff (para informar al cliente). La ESCRITURA pasa solo por
+      // callable (promotionUpsert/promotionDelete, Admin SDK) — Fase 5C cierre growth G-2.
+      // promotionDelete es SOFT (status='FINISHED'); el panel oculta las finalizadas.
       match /promotions/{promotionId} {
         allow read: if isTenantStaff(tenantId) || isTenantViewer(tenantId) || isPlatformAdmin();
-        allow write: if isTenantManager(tenantId) || isPlatformAdmin();
+        allow write: if false;
       }
 
       // Recomendaciones del sistema (P8+): las genera Cloud Functions. El manager+ las lee

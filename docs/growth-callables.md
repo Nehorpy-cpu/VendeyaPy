@@ -96,8 +96,9 @@ simulador pasará a un callable **server-set**.
 - ✅ **`deliveryPersons`** → `allow write: if false` (G-0). El panel no escribe directo (CRUD 100% por
   `deliveryPersonUpsert`/`deliveryPersonDelete`, Admin SDK); cierre **sin migración de frontend**.
   `deliveryPersonDelete` es SOFT (`isActive=false`). Lectura viewer+ intacta.
-- ⏳ **`promotions`** (G-2): migrar `lib/promotions.ts` a `promotionUpsert`/`promotionDelete` (delete
-  SOFT = `status='FINISHED'`) y filtrar finalizadas en la UI; luego cerrar.
+- ✅ **`promotions`** → `allow write: if false` (G-2). Frontend ya migrado (GF-1: `promotionUpsert`/
+  `promotionDelete`, "Borrar"→"Finalizar", `listPromotions` oculta `FINISHED`). `promotionDelete` es
+  SOFT (`status='FINISHED'`). Lectura staff/viewer intacta.
 - ⏳ **`trackingSources`** (G-3): normalización de `code` (trim+UPPERCASE+formato `^[A-Z0-9_-]{2,32}$`)
   **ya movida al validador backend (GB-A, hecho)**. Falta migrar `lib/tracking.ts` (delete SOFT =
   `active=false`; quitar el `.trim().toUpperCase()` redundante del front) y luego cerrar.
