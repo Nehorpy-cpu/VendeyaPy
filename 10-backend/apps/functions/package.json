@@ -23,6 +23,7 @@
     "test:integration": "vitest run --dir src/__tests__/integration --passWithNoTests"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.105.0",
     "@google-cloud/pubsub": "^4.0.0",
     "@vpw/shared": "workspace:*",
     "axios": "^1.6.0",
