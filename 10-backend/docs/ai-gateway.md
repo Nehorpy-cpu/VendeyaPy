@@ -54,9 +54,37 @@ Callable **`askInternalGrowthAssistant`** (`functions/ai/internalAssistantCallab
 - **Contrato:** input `{ message: string, tenantId?: string (solo admin) }` (mensaje validado, ≤2000). Output `{ ok: true, reply }` | `{ ok: false, reason, message }` (error CONTROLADO y amigable: gate/disabled/error/empty — nunca rompe el callable).
 - **Núcleo `ai/internalAssistant.ts`:** gate `assertAiBudget` → `runAgent` contexto `internal_growth_assistant` (tools read-only: `resumen_ventas`) → metering `recordAiUsage`. El asistente SÍ ve agregados privados (ganancia/margen) pero **solo del tenant resuelto** y es **read-only** (no escribe, no envía, no crea promos/campañas, no cambia config). Auditoría en `aiRequests` (metadatos, sin prompt/PII).
 
+## Verificación completa — "todo IA seguro" (AG-5)
+Matriz consolidada de los 20 invariantes de seguridad del módulo IA. **NUNCA** llama a Anthropic real
+(cliente fake en emulador / `disabled` sin API key). Orden recomendado:
+
+```bash
+# 1. Estático (sin emulador)
+pnpm --filter functions typecheck
+pnpm --filter functions lint
+pnpm --filter functions test          # unit: gateway/client/sanitize/registry/salesAgent/internalAssistant/...
+
+# 2. Build + emulador + seed (ver memoria "AI_AFG regresiones emulador": .env.local completo + --project demo-aiafg)
+pnpm --filter functions build
+firebase emulators:start --only auth,functions,firestore --project demo-aiafg   # en otra terminal
+node scripts/seed-users.mjs && node scripts/load-catalog.mjs && node scripts/seed-demo-chats.mjs
+
+# 3. Matriz IA consolidada + e2e de cada superficie
+node scripts/verify-ai-hardening.mjs   # 20 invariantes (estructural + emulador): allowlist, sanitizers,
+                                        # cross-tenant, fallback, metering, aiRequests, rules, fake-client
+node scripts/verify-ai-gateway.mjs     # e2e sales agent + lastShownSkus (webhook real)
+node scripts/verify-ai-internal.mjs    # e2e callable interno (auth/tenant/error)
+
+# 4. Regresiones clave (no debe romperse nada)
+node scripts/verify-fase4-whatsapp.mjs && node scripts/verify-registro.mjs && node scripts/verify-billing-manual.mjs
+```
+`verify-ai-hardening.mjs` importa los módulos REALES compilados (`lib/ai/*`) y los ejercita directo
+(registry/sanitizers/gateway con `FakeAiClient` inyectado/`extractShownSkus`/`resolveOwnerAdminAuth`) +
+usa el emulador para tenant-scoping real, auditoría y rules. No flippea el plan → no necesita settle.
+
 ## Orden por sub-fases
 - **AG-1** (cerrado): gateway core.
 - **AG-2** (cerrado): contextos + data policy + tool/data layer (read-only).
 - **AG-3** (cerrado): sales agent cableado en `handleMessage` detrás de `aiAssistant`+env, con loop de tool-use, fallback rule-based, metering (`assertAiBudget`/`recordAiUsage`) y rules de `aiRequests`. e2e fixture-driven: `scripts/verify-ai-gateway.mjs`.
 - **AG-4** (cerrado): callable `askInternalGrowthAssistant` (owner/admin, contexto internal read-only, gate/metering, error controlado). e2e: `scripts/verify-ai-internal.mjs`.
-- **AG-5**: e2e completo con fake client (no-leak, isolation, fallback, simulador).
+- **AG-5** (cerrado): hardening final — matriz consolidada `scripts/verify-ai-hardening.mjs` (20 invariantes) + doc de verificación completa. Listo para **AI-KEY-1** (configurar `ANTHROPIC_API_KEY` real).
