@@ -150,3 +150,7 @@ export { devProcessConversions } from './functions/events/devProcessConversions.
 
 // Tracking propio sin Meta (P11): atribución por código/cupón → rollup por fuente.
 export { devComputeTracking } from './functions/tracking/devComputeTracking.js';
+
+// Asistente interno de crecimiento (AG-4): callable owner/admin que consulta agregados PRIVADOS del
+// propio tenant vía Claude Haiku (contexto internal, read-only). No cablea frontend.
+export { askInternalGrowthAssistant } from './functions/ai/internalAssistantCallable.js';

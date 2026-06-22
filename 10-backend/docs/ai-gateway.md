@@ -48,9 +48,15 @@ Capa backend que integra **Claude Haiku 4.5** por tenant. Es el **único punto q
 ### Sincronización de recomendaciones ↔ estado (AG-3B)
 Cuando la IA recomienda productos vía `buscar_productos`, `runSalesAgent` captura los **ids del RESULTADO backend** de esa tool (`extractShownSkus`: solo `PublicProduct.id`, sanitizado y tenant-scoped) y los devuelve como `shownSkus`. El modelo **NUNCA** aporta SKUs (no puede inventarlos): la fuente de verdad es el array que devolvió la tool, no su texto. `engine.ts`, si `shownSkus` no está vacío, fija `lastShownSkus = shownSkus` + estado `VIEWING_PRODUCT` (igual que el catálogo rule-based) → "el primero/segundo/tercero" en el turno siguiente selecciona por las **reglas**. Tope `MAX_SHOWN_SKUS=3` (= límite del catálogo y alcance de `ordinalIndex`); dedup; si la búsqueda no devuelve productos → **no** se pisa `lastShownSkus`. El prompt instruye presentar los productos numerados en el orden de la tool (coherencia prosa↔selección).
 
+## Asistente interno (AG-4)
+Callable **`askInternalGrowthAssistant`** (`functions/ai/internalAssistantCallable.ts`) — backend only, sin UI.
+- **Auth (repo: `resolveOwnerAdminAuth`):** `TENANT_OWNER` → SU empresa (se ignora cualquier `tenantId` pedido → cross-tenant bloqueado); `PLATFORM_ADMIN` → la empresa que indique en `tenantId`; `SELLER`/`VIEWER`/`MANAGER` → `permission-denied` (403).
+- **Contrato:** input `{ message: string, tenantId?: string (solo admin) }` (mensaje validado, ≤2000). Output `{ ok: true, reply }` | `{ ok: false, reason, message }` (error CONTROLADO y amigable: gate/disabled/error/empty — nunca rompe el callable).
+- **Núcleo `ai/internalAssistant.ts`:** gate `assertAiBudget` → `runAgent` contexto `internal_growth_assistant` (tools read-only: `resumen_ventas`) → metering `recordAiUsage`. El asistente SÍ ve agregados privados (ganancia/margen) pero **solo del tenant resuelto** y es **read-only** (no escribe, no envía, no crea promos/campañas, no cambia config). Auditoría en `aiRequests` (metadatos, sin prompt/PII).
+
 ## Orden por sub-fases
 - **AG-1** (cerrado): gateway core.
 - **AG-2** (cerrado): contextos + data policy + tool/data layer (read-only).
 - **AG-3** (cerrado): sales agent cableado en `handleMessage` detrás de `aiAssistant`+env, con loop de tool-use, fallback rule-based, metering (`assertAiBudget`/`recordAiUsage`) y rules de `aiRequests`. e2e fixture-driven: `scripts/verify-ai-gateway.mjs`.
-- **AG-4**: callable del internal assistant (sin UI todavía).
+- **AG-4** (cerrado): callable `askInternalGrowthAssistant` (owner/admin, contexto internal read-only, gate/metering, error controlado). e2e: `scripts/verify-ai-internal.mjs`.
 - **AG-5**: e2e completo con fake client (no-leak, isolation, fallback, simulador).
