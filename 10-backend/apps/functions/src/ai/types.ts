@@ -105,3 +105,20 @@ export interface RunAgentDeps {
   writeAudit: (record: AiAuditRecord) => Promise<void>;
   now: () => number;
 }
+
+/**
+ * Herramienta server-side (AG-2). `execute` recibe el `tenantId` YA RESUELTO por el backend y
+ * lo usa para la query; IGNORA por completo cualquier tenantId que venga en `input` (del modelo o
+ * del cliente). En esta fase todas las tools son READ-ONLY (sin writes ni acciones críticas).
+ */
+export interface AiToolHandler {
+  definition: AiTool;
+  execute(tenantId: string, input: Record<string, unknown>): Promise<unknown>;
+}
+
+export interface ToolExecResult {
+  ok: boolean;
+  result?: unknown;
+  /** Mensaje seguro (sin datos sensibles) cuando la tool no está permitida o falla. */
+  error?: string;
+}
