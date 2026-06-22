@@ -261,6 +261,14 @@ service cloud.firestore {
           && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'resolvedAt']);
       }
 
+      // Uso/costo de IA (AG-3): registro por request del gateway de Claude (modelo, tokens, costo,
+      // contexto, status) SIN prompts ni PII. Contiene costos → lectura manager+ (el vendedor NO).
+      // Lo escribe SOLO Cloud Functions (Admin SDK); nada es escribible desde el cliente.
+      match /aiRequests/{requestId} {
+        allow read: if isTenantManager(tenantId) || isPlatformAdmin();
+        allow write: if false; // Solo Admin SDK (gateway de IA)
+      }
+
       // Simulador del agente (P17): casos de prueba que crea/edita/corre el manager+. La ESCRITURA y
       // el run pasan solo por callable (agentTestCaseUpsert/Delete/Run, Admin SDK) — Fase 5C cierre G-5.
       // lastResult/lastRunAt los escribe SOLO agentTestCaseRun (server-set).

@@ -62,4 +62,33 @@ describe('ai/gateway runAgent', () => {
     expect(res.usage).toEqual({ inputTokens: 1_000_000, outputTokens: 1_000_000 });
     expect(res.costUsd).toBeCloseTo(6, 6); // $1 in + $5 out
   });
+
+  it('tool-loop: tool_use → ejecuta server-side → tool_result → texto; suma usage de ambas rondas', async () => {
+    // Ronda 1: el modelo pide una tool. Ronda 2: con el resultado, responde con texto.
+    const client = new FakeAiClient({
+      responses: [
+        { toolUses: [{ id: 'tu_1', name: 'buscar_productos', input: { genero: 'femenino' } }], inputTokens: 100, outputTokens: 20 },
+        { text: 'Encontré 2 opciones dulces 🌸', inputTokens: 60, outputTokens: 30 },
+      ],
+    });
+    const { deps } = makeDeps(client);
+    const toolCalls: Array<[string, Record<string, unknown>]> = [];
+    const res = await runAgent({
+      ...INPUT,
+      tools: [{ name: 'buscar_productos', description: 'busca', inputSchema: { type: 'object' } }],
+      executeTool: async (name, input) => { toolCalls.push([name, input]); return { productos: [{ name: 'X' }] }; },
+    }, deps);
+    expect(res.status).toBe('ok');
+    expect(res.reply).toBe('Encontré 2 opciones dulces 🌸');
+    expect(toolCalls).toEqual([['buscar_productos', { genero: 'femenino' }]]); // se ejecutó server-side
+    expect(res.usage).toEqual({ inputTokens: 160, outputTokens: 50 }); // 100+60 / 20+30
+  });
+
+  it('tool-loop sin executeTool: no entra al loop, responde con el texto que haya', async () => {
+    const client = new FakeAiClient({ toolUses: [{ id: 'tu_1', name: 'buscar_productos', input: {} }], text: 'sin tools disponibles' });
+    const { deps } = makeDeps(client);
+    const res = await runAgent(INPUT, deps); // INPUT no trae executeTool
+    expect(res.status).toBe('ok');
+    expect(res.reply).toBe('sin tools disponibles');
+  });
 });

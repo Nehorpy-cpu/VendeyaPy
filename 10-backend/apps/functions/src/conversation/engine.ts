@@ -21,6 +21,7 @@ import {
 } from '../catalog/search.js';
 import { addToCart, formatCart } from './cart.js';
 import { getAgentConfig } from './agentConfig.js';
+import { runSalesAgent } from '../ai/salesAgent.js';
 import { appendMessage } from './messages.js';
 import { createPendingOrder } from '../orders/createPendingOrder.js';
 import { getCheckoutConfig, formatTransferInstructions } from '../orders/checkoutConfig.js';
@@ -137,6 +138,23 @@ function ordinalIndex(t: string): number | null {
   if (/\b(segundo|segunda|2)\b/.test(t)) return 1;
   if (/\b(tercero|tercera|3)\b/.test(t)) return 2;
   return null;
+}
+
+/**
+ * ¿El motor rule-based mandaría este turno a su fallback genérico? (AG-3)
+ * Es el ÚNICO bucket que se delega al sales agent de Claude: turnos conversacionales que las reglas
+ * NO resuelven (no saludo, no carrito/pagar/seleccionar, no catálogo). Así el flujo de conversión
+ * (navegar → elegir por número → carrito → pagar) y su `lastShownSkus` quedan 100% en las reglas.
+ */
+function ruleEngineWouldFallback(text: string, t: string): boolean {
+  return (
+    !esSaludo(text) &&
+    !quiereVerCarrito(t) &&
+    !quierePagar(t) &&
+    !quiereAgregar(t) &&
+    ordinalIndex(t) === null &&
+    !quiereCatalogo(t)
+  );
 }
 
 /**
@@ -328,12 +346,25 @@ export async function handleMessage(input: ConversationInput): Promise<Conversat
   const prevCart: Cart = existing?.cart ?? { items: [], subtotal: 0 };
   const prevShown: string[] = existing?.context?.lastShownSkus ?? [];
 
-  const result = await decidirRespuesta(tenantId, customerId, text, esNuevo, {
-    cart: prevCart,
-    lastShownSkus: prevShown,
-    greeting: agentConfig.greetingMessage,
-    profitMode: agentConfig.profitMode,
-  });
+  // Ruteo (AG-3): la cola conversacional (lo que el motor mandaría a su fallback) va al sales agent
+  // de Claude — ADVISORY, solo info pública, sin tocar carrito/pedido. El resto (saludo, catálogo,
+  // carrito, pagar, selección) se queda en las reglas. Si la IA está off/sin cupo/falla → fallback.
+  let result: Awaited<ReturnType<typeof decidirRespuesta>> | undefined;
+  if (!esNuevo && ruleEngineWouldFallback(text, text.toLowerCase())) {
+    const ai = await runSalesAgent({ tenantId, agentConfig, messages: [{ role: 'user', content: text }] });
+    if (ai.used) {
+      result = { reply: ai.reply, nextState: existing?.state ?? 'BROWSING' }; // sin cambios de carrito/estado
+      logger.info('Respuesta por sales agent IA', { tenantId, customerId });
+    }
+  }
+  if (!result) {
+    result = await decidirRespuesta(tenantId, customerId, text, esNuevo, {
+      cart: prevCart,
+      lastShownSkus: prevShown,
+      greeting: agentConfig.greetingMessage,
+      profitMode: agentConfig.profitMode,
+    });
+  }
   const { reply, nextState } = result;
 
   const session: Session = {

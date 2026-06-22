@@ -9,9 +9,27 @@
 /** Contextos separados desde el inicio (data policy + prompts distintos en AG-2/AG-3). */
 export type AiContext = 'whatsapp_sales_agent' | 'internal_growth_assistant';
 
+/** Bloques de contenido (para round-trips de tool-use). El texto plano sigue siendo válido. */
+export interface AiTextBlock {
+  type: 'text';
+  text: string;
+}
+export interface AiToolUseBlock {
+  type: 'tool_use';
+  id: string;
+  name: string;
+  input: Record<string, unknown>;
+}
+export interface AiToolResultBlock {
+  type: 'tool_result';
+  toolUseId: string;
+  content: string;
+}
+export type AiContentBlock = AiTextBlock | AiToolUseBlock | AiToolResultBlock;
+
 export interface AiMessage {
   role: 'user' | 'assistant';
-  content: string;
+  content: string | AiContentBlock[];
 }
 
 export interface AiToolSchema {
@@ -71,6 +89,10 @@ export interface RunAgentInput {
   messages: AiMessage[];
   tools?: AiTool[];
   maxTokens?: number;
+  /** Ejecutor server-side de tools (tenant-scoped). Sin él, no hay loop de tool-use. */
+  executeTool?: (name: string, input: Record<string, unknown>) => Promise<unknown>;
+  /** Máximo de rondas de tool-use antes de cerrar con texto (default 4). */
+  maxToolIters?: number;
 }
 
 export interface RunAgentResult {

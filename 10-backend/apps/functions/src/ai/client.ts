@@ -1,17 +1,28 @@
 /**
- * ai/client.ts — Cliente de Claude inyectable (AG-1)
- * ==================================================
+ * ai/client.ts — Cliente de Claude inyectable (AG-1/AG-3)
+ * =======================================================
  * En PRODUCCIÓN: HttpAnthropicClient (SDK oficial @anthropic-ai/sdk) con la API key del backend.
  * En EMULADOR/TESTS: FakeAiClient (respuestas canned desde `aiTestFixtures/ai`) — NUNCA llama a
  * api.anthropic.com. Sin API key en prod → getAiClient() devuelve null (estado disabled, sin crash).
+ * Soporta content-blocks (texto + tool_use + tool_result) para los round-trips de herramientas.
  * La API key vive SOLO en el backend (env ANTHROPIC_API_KEY); nunca se loguea ni va al frontend.
  */
 import Anthropic from '@anthropic-ai/sdk';
 import { db } from '../lib/firebase.js';
-import type { AiClient, AiResponse, AiToolUse, CreateMessageParams } from './types.js';
+import type { AiClient, AiContentBlock, AiMessage, AiResponse, AiToolUse, CreateMessageParams } from './types.js';
 
 const REQUEST_TIMEOUT_MS = 20_000;
 const MAX_RETRIES = 2; // el SDK reintenta 429/5xx con backoff.
+
+/** Mapea el content de un AiMessage al shape del SDK (string o bloques tipados). */
+function toSdkContent(content: AiMessage['content']): Anthropic.MessageParam['content'] {
+  if (typeof content === 'string') return content;
+  return content.map((b: AiContentBlock) => {
+    if (b.type === 'text') return { type: 'text' as const, text: b.text };
+    if (b.type === 'tool_use') return { type: 'tool_use' as const, id: b.id, name: b.name, input: b.input };
+    return { type: 'tool_result' as const, tool_use_id: b.toolUseId, content: b.content };
+  });
+}
 
 /** Cliente real: POST a la Messages API de Anthropic. El token NUNCA se loguea. */
 export class HttpAnthropicClient implements AiClient {
@@ -26,7 +37,7 @@ export class HttpAnthropicClient implements AiClient {
       model: params.model,
       max_tokens: params.maxTokens,
       system: params.system,
-      messages: params.messages.map((m) => ({ role: m.role, content: m.content })),
+      messages: params.messages.map((m) => ({ role: m.role, content: toSdkContent(m.content) })),
       ...(params.tools && params.tools.length
         ? { tools: params.tools.map((t) => ({ name: t.name, description: t.description, input_schema: t.inputSchema })) }
         : {}),
@@ -49,27 +60,36 @@ export class HttpAnthropicClient implements AiClient {
   }
 }
 
-/** Fixture del fake (emulador/tests). Permite simular ok, fallo y usage. */
-export interface AiFixture {
+/** Una respuesta canned del fake (un turno). */
+export interface AiFixtureResponse {
   text?: string;
+  toolUses?: AiToolUse[];
   inputTokens?: number;
   outputTokens?: number;
   fail?: boolean;
   failMessage?: string;
-  toolUses?: AiToolUse[];
+}
+/** Fixture del fake: una respuesta única, o una cola `responses` (para simular tool-use → texto). */
+export interface AiFixture extends AiFixtureResponse {
+  responses?: AiFixtureResponse[];
 }
 
-/** Cliente fake: no toca la red. Devuelve lo del fixture (o un default) o lanza si fail. */
+/** Cliente fake: no toca la red. Devuelve el fixture (o un default) o lanza si fail. */
 export class FakeAiClient implements AiClient {
+  private idx = 0;
   constructor(private readonly fx: AiFixture = {}) {}
 
   async createMessage(_params: CreateMessageParams): Promise<AiResponse> {
-    if (this.fx.fail) throw new Error(this.fx.failMessage ?? 'fixture: el cliente de IA falló');
+    const queue = this.fx.responses;
+    const r: AiFixtureResponse = queue && queue.length ? queue[Math.min(this.idx, queue.length - 1)]! : this.fx;
+    this.idx += 1;
+    if (r.fail) throw new Error(r.failMessage ?? 'fixture: el cliente de IA falló');
+    const toolUses = r.toolUses ?? [];
     return {
-      text: this.fx.text ?? 'respuesta fake del agente',
-      usage: { inputTokens: this.fx.inputTokens ?? 10, outputTokens: this.fx.outputTokens ?? 20 },
-      stopReason: 'end_turn',
-      toolUses: this.fx.toolUses ?? [],
+      text: r.text ?? (toolUses.length ? '' : 'respuesta fake del agente'),
+      usage: { inputTokens: r.inputTokens ?? 10, outputTokens: r.outputTokens ?? 20 },
+      stopReason: toolUses.length ? 'tool_use' : 'end_turn',
+      toolUses,
     };
   }
 }

@@ -1,17 +1,19 @@
 /**
- * ai/gateway.ts — AI Gateway: único punto que habla con Claude (AG-1, core)
- * ========================================================================
- * `runAgent` recibe el tenantId YA resuelto + system/messages/tools que arma el backend, llama al
- * cliente (real o fake), y devuelve { status, reply, usage, costUsd }. NUNCA lanza al caller: ante
- * falta de cliente (sin API key) → status 'disabled'; ante error del modelo → status 'error'. Así el
- * caller (AG-3) hace fallback al motor rule-based y el bot nunca queda mudo. Logging SEGURO: solo
- * metadatos (sin system/messages/PII/API key). AG-1 es infra: no se cablea a handleMessage todavía.
+ * ai/gateway.ts — AI Gateway: único punto que habla con Claude (AG-1/AG-3)
+ * =======================================================================
+ * `runAgent` recibe el tenantId YA resuelto + system/messages/tools que arma el backend, corre el
+ * loop de tool-use (ejecuta las tools server-side entre llamadas) y devuelve { status, reply, usage,
+ * costUsd }. NUNCA lanza al caller: sin cliente (sin API key) → 'disabled'; error del modelo →
+ * 'error'. Así el caller hace fallback al motor rule-based y el bot nunca queda mudo. Logging SEGURO:
+ * solo metadatos (sin system/messages/PII/API key). El metering de entitlements lo hace el caller.
  */
 import { logger } from '../lib/logger.js';
 import { getAiClient } from './client.js';
 import { writeAiRequest, safeErrorCode } from './audit.js';
 import { AI_MODEL, DEFAULT_MAX_TOKENS, estimateCostUsd } from './pricing.js';
-import type { RunAgentDeps, RunAgentInput, RunAgentResult } from './types.js';
+import type { AiContentBlock, AiMessage, RunAgentDeps, RunAgentInput, RunAgentResult } from './types.js';
+
+const DEFAULT_MAX_TOOL_ITERS = 4;
 
 const defaultDeps: RunAgentDeps = {
   getClient: getAiClient,
@@ -20,8 +22,8 @@ const defaultDeps: RunAgentDeps = {
 };
 
 /**
- * Corre un turno del agente. tenantId ya resuelto por el backend (auth/webhook); el modelo no lee
- * Firestore directo. Devuelve siempre un resultado (status ok/error/disabled); no lanza.
+ * Corre un turno del agente (con loop de tool-use). tenantId resuelto por el backend; el modelo no
+ * lee Firestore directo (las tools corren server-side, tenant-scoped). Devuelve siempre un resultado.
  */
 export async function runAgent(input: RunAgentInput, deps: RunAgentDeps = defaultDeps): Promise<RunAgentResult> {
   const t0 = deps.now();
@@ -35,24 +37,56 @@ export async function runAgent(input: RunAgentInput, deps: RunAgentDeps = defaul
     return { status: 'disabled', model, latencyMs };
   }
 
-  try {
-    const res = await client.createMessage({
-      model,
-      system: input.system,
-      messages: input.messages,
-      maxTokens: input.maxTokens ?? DEFAULT_MAX_TOKENS,
-      tools: input.tools,
-    });
-    const latencyMs = deps.now() - t0;
-    const costUsd = estimateCostUsd(res.usage);
-    const toolNames = res.toolUses.map((t) => t.name);
+  const maxIters = input.maxToolIters ?? DEFAULT_MAX_TOOL_ITERS;
+  const maxTokens = input.maxTokens ?? DEFAULT_MAX_TOKENS;
+  const messages: AiMessage[] = [...input.messages];
+  let inputTokens = 0;
+  let outputTokens = 0;
+  const toolNames: string[] = [];
 
-    // Logging SEGURO: solo metadatos. Nunca el system/messages/PII.
+  try {
+    let reply = '';
+    for (let i = 0; i <= maxIters; i++) {
+      const res = await client.createMessage({ model, system: input.system, messages, maxTokens, tools: input.tools });
+      inputTokens += res.usage.inputTokens;
+      outputTokens += res.usage.outputTokens;
+
+      // ¿Pidió herramientas y hay ejecutor y queda presupuesto de rondas? Ejecutar y continuar.
+      if (res.toolUses.length && input.executeTool && i < maxIters) {
+        toolNames.push(...res.toolUses.map((t) => t.name));
+        // Turno del asistente: texto (si hubo) + bloques tool_use.
+        const assistantBlocks: AiContentBlock[] = [];
+        if (res.text) assistantBlocks.push({ type: 'text', text: res.text });
+        for (const tu of res.toolUses) assistantBlocks.push({ type: 'tool_use', id: tu.id, name: tu.name, input: tu.input });
+        messages.push({ role: 'assistant', content: assistantBlocks });
+        // Resultados de las tools (server-side, tenant-scoped). Si una falla, se reporta como error.
+        const resultBlocks: AiContentBlock[] = [];
+        for (const tu of res.toolUses) {
+          let out: unknown;
+          try {
+            out = await input.executeTool(tu.name, tu.input);
+          } catch {
+            out = { error: 'la herramienta no pudo completarse' };
+          }
+          resultBlocks.push({ type: 'tool_result', toolUseId: tu.id, content: JSON.stringify(out) });
+        }
+        messages.push({ role: 'user', content: resultBlocks });
+        continue;
+      }
+
+      reply = res.text;
+      break;
+    }
+
+    const latencyMs = deps.now() - t0;
+    const usage = { inputTokens, outputTokens };
+    const costUsd = estimateCostUsd(usage);
+
     logger.info('AI gateway: ok', {
       tenantId: input.tenantId,
       context: input.context,
-      inputTokens: res.usage.inputTokens,
-      outputTokens: res.usage.outputTokens,
+      inputTokens,
+      outputTokens,
       costUsd,
       latencyMs,
       tools: toolNames.length,
@@ -63,13 +97,13 @@ export async function runAgent(input: RunAgentInput, deps: RunAgentDeps = defaul
       model,
       status: 'ok',
       latencyMs,
-      inputTokens: res.usage.inputTokens,
-      outputTokens: res.usage.outputTokens,
+      inputTokens,
+      outputTokens,
       costUsd,
       toolNames,
     });
 
-    return { status: 'ok', model, latencyMs, reply: res.text, usage: res.usage, costUsd, toolUses: res.toolUses };
+    return { status: 'ok', model, latencyMs, reply, usage, costUsd };
   } catch (e) {
     const latencyMs = deps.now() - t0;
     const errorCode = safeErrorCode(e);
