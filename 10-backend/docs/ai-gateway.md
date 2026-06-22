@@ -43,7 +43,10 @@ Capa backend que integra **Claude Haiku 4.5** por tenant. Es el **único punto q
 3. `status!=='ok'` / reply vacío (sin key, Claude falló, texto inválido) → fallback.
 4. **Metering** `recordAiUsage(tenantId, inTok+outTok, costUsd)` **después** (best-effort; no rompe la respuesta).
 
-**Ruteo en `engine.ts handleMessage`:** solo los turnos que el motor rule-based mandaría a su **fallback genérico** (no saludo, no carrito/pagar/seleccionar, no catálogo) se delegan al agente IA — **advisory**: responde solo con info pública y **no** toca carrito/pedido/estado. El flujo de conversión (navegar → elegir por número → carrito → pagar) y su `lastShownSkus` quedan 100% en las reglas. Si la IA está off / sin cupo / falla → el turno cae al motor rule-based (el bot nunca queda mudo).
+**Ruteo en `engine.ts handleMessage`:** solo los turnos que el motor rule-based mandaría a su **fallback genérico** (no saludo, no carrito/pagar/seleccionar, no catálogo) se delegan al agente IA — **advisory**: responde solo con info pública y **no** toca carrito/pedido. El flujo de conversión (navegar → elegir por número → carrito → pagar) queda 100% en las reglas (predicado puro `ruleEngineWouldFallback`, con test unitario).
+
+### Sincronización de recomendaciones ↔ estado (AG-3B)
+Cuando la IA recomienda productos vía `buscar_productos`, `runSalesAgent` captura los **ids del RESULTADO backend** de esa tool (`extractShownSkus`: solo `PublicProduct.id`, sanitizado y tenant-scoped) y los devuelve como `shownSkus`. El modelo **NUNCA** aporta SKUs (no puede inventarlos): la fuente de verdad es el array que devolvió la tool, no su texto. `engine.ts`, si `shownSkus` no está vacío, fija `lastShownSkus = shownSkus` + estado `VIEWING_PRODUCT` (igual que el catálogo rule-based) → "el primero/segundo/tercero" en el turno siguiente selecciona por las **reglas**. Tope `MAX_SHOWN_SKUS=3` (= límite del catálogo y alcance de `ordinalIndex`); dedup; si la búsqueda no devuelve productos → **no** se pisa `lastShownSkus`. El prompt instruye presentar los productos numerados en el orden de la tool (coherencia prosa↔selección).
 
 ## Orden por sub-fases
 - **AG-1** (cerrado): gateway core.

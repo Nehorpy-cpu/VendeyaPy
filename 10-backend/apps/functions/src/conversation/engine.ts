@@ -146,7 +146,7 @@ function ordinalIndex(t: string): number | null {
  * NO resuelven (no saludo, no carrito/pagar/seleccionar, no catálogo). Así el flujo de conversión
  * (navegar → elegir por número → carrito → pagar) y su `lastShownSkus` quedan 100% en las reglas.
  */
-function ruleEngineWouldFallback(text: string, t: string): boolean {
+export function ruleEngineWouldFallback(text: string, t: string): boolean {
   return (
     !esSaludo(text) &&
     !quiereVerCarrito(t) &&
@@ -353,8 +353,14 @@ export async function handleMessage(input: ConversationInput): Promise<Conversat
   if (!esNuevo && ruleEngineWouldFallback(text, text.toLowerCase())) {
     const ai = await runSalesAgent({ tenantId, agentConfig, messages: [{ role: 'user', content: text }] });
     if (ai.used) {
-      result = { reply: ai.reply, nextState: existing?.state ?? 'BROWSING' }; // sin cambios de carrito/estado
-      logger.info('Respuesta por sales agent IA', { tenantId, customerId });
+      // Si la IA mostró productos REALES (ids del backend de buscar_productos), sincronizamos el estado
+      // conversacional igual que el catálogo rule-based → "el primero/segundo" funciona después.
+      // NUNCA tocamos carrito/pedido (advisory); los ids no vienen del texto del modelo.
+      const showed = ai.shownSkus.length > 0;
+      result = showed
+        ? { reply: ai.reply, nextState: 'VIEWING_PRODUCT', lastShownSkus: ai.shownSkus }
+        : { reply: ai.reply, nextState: existing?.state ?? 'BROWSING' }; // sin productos → no se pisa lastShownSkus
+      logger.info('Respuesta por sales agent IA', { tenantId, customerId, shown: ai.shownSkus.length, tools: ai.usedTools.length });
     }
   }
   if (!result) {

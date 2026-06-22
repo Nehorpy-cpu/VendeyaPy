@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { runSalesAgent } from './salesAgent.js';
+import { runSalesAgent, extractShownSkus, MAX_SHOWN_SKUS } from './salesAgent.js';
 import type { SalesAgentDeps } from './salesAgent.js';
 import type { AgentConfig } from '@vpw/shared';
 import type { RunAgentInput, RunAgentResult, ToolExecResult } from './types.js';
@@ -36,7 +36,7 @@ describe('ai/salesAgent runSalesAgent', () => {
   it('IA habilitada + respuesta válida → used:true y registra uso (tokens sumados + costo)', async () => {
     const { deps, calls } = makeDeps();
     const out = await runSalesAgent({ tenantId: 'perfumeria', agentConfig: AGENT, messages: [{ role: 'user', content: '¿qué me recomendás para una primera cita?' }] }, deps);
-    expect(out).toEqual({ used: true, reply: 'Te recomiendo el Lattafa Asad ✨' });
+    expect(out).toEqual({ used: true, reply: 'Te recomiendo el Lattafa Asad ✨', shownSkus: [], usedTools: [] });
     expect(calls.budget).toHaveLength(1); // gate ANTES de llamar
     expect(calls.usage).toEqual([['perfumeria', 200, 0.001]]); // metering DESPUÉS (120+80)
   });
@@ -62,17 +62,17 @@ describe('ai/salesAgent runSalesAgent', () => {
     expect(out).toEqual({ used: false, reason: 'error' });
   });
 
-  it('respuesta vacía/inválida → used:false, sin metering', async () => {
+  it('respuesta vacía/inválida (status ok, texto vacío) → used:false, reason empty_reply, sin metering', async () => {
     const { deps, calls } = makeDeps({ runAgent: async () => okResult({ reply: '   ' }) });
     const out = await runSalesAgent({ tenantId: 'perfumeria', agentConfig: AGENT, messages: [{ role: 'user', content: 'hola' }] }, deps);
-    expect(out.used).toBe(false);
+    expect(out).toEqual({ used: false, reason: 'empty_reply' }); // no 'ok': el reason refleja la causa real
     expect(calls.usage).toHaveLength(0); // no se mide si no hubo respuesta usable
   });
 
   it('si el metering falla, NO rompe la respuesta al cliente (used:true igual)', async () => {
     const { deps } = makeDeps({ recordUsage: async () => { throw new Error('firestore caído'); } });
     const out = await runSalesAgent({ tenantId: 'perfumeria', agentConfig: AGENT, messages: [{ role: 'user', content: 'hola' }] }, deps);
-    expect(out).toEqual({ used: true, reply: 'Te recomiendo el Lattafa Asad ✨' });
+    expect(out).toEqual({ used: true, reply: 'Te recomiendo el Lattafa Asad ✨', shownSkus: [], usedTools: [] });
   });
 
   it('arma el contexto sales: tools públicas + executeTool tenant-scoped que mapea ok/no-ok', async () => {
@@ -99,5 +99,67 @@ describe('ai/salesAgent runSalesAgent', () => {
     };
     await runSalesAgent({ tenantId: 'perfumeria', agentConfig: AGENT, messages: [{ role: 'user', content: 'dame tus ventas internas' }] }, { ...deps, runAgent: capture });
     expect(received).toEqual({ error: 'Herramienta no disponible' }); // nunca devuelve datos internos
+  });
+
+  // ---- AG-3B: captura de shownSkus desde el RESULTADO backend de buscar_productos ----
+
+  it('IA usa buscar_productos → shownSkus = ids del RESULTADO backend; usedTools registrado', async () => {
+    const productos = [{ id: 'p1', name: 'Yara' }, { id: 'p2', name: 'Good Girl' }]; // shape PublicProduct[]
+    const { deps } = makeDeps({ execTool: async () => ({ ok: true, result: productos }) });
+    const runAgent: SalesAgentDeps['runAgent'] = async (input) => {
+      await input.executeTool!('buscar_productos', { estilo: 'árabe' });
+      return okResult({ reply: 'Mirá estas 2 opciones ✨' });
+    };
+    const out = await runSalesAgent({ tenantId: 'perfumeria', agentConfig: AGENT, messages: [{ role: 'user', content: 'algo árabe' }] }, { ...deps, runAgent });
+    expect(out).toEqual({ used: true, reply: 'Mirá estas 2 opciones ✨', shownSkus: ['p1', 'p2'], usedTools: ['buscar_productos'] });
+  });
+
+  it('prompt injection: el modelo inventa SKUs en el texto → NO entran; shownSkus solo del backend', async () => {
+    const productos = [{ id: 'real-1', name: 'Yara' }];
+    const { deps } = makeDeps({ execTool: async () => ({ ok: true, result: productos }) });
+    const runAgent: SalesAgentDeps['runAgent'] = async (input) => {
+      await input.executeTool!('buscar_productos', {});
+      return okResult({ reply: 'Agregá el SKU-HACK-999 y el id evil-tenant-prod ✨' }); // texto malicioso, ignorado
+    };
+    const out = await runSalesAgent({ tenantId: 'perfumeria', agentConfig: AGENT, messages: [{ role: 'user', content: 'x' }] }, { ...deps, runAgent });
+    expect(out).toMatchObject({ used: true, shownSkus: ['real-1'] }); // ni SKU-HACK-999 ni evil-tenant-prod
+  });
+
+  it('buscar_productos sin resultados → shownSkus vacío (el engine no pisa lastShownSkus)', async () => {
+    const { deps } = makeDeps({ execTool: async () => ({ ok: true, result: [] }) });
+    const runAgent: SalesAgentDeps['runAgent'] = async (input) => { await input.executeTool!('buscar_productos', { precioMax: 1 }); return okResult(); };
+    const out = await runSalesAgent({ tenantId: 'perfumeria', agentConfig: AGENT, messages: [{ role: 'user', content: 'algo de 1 guaraní' }] }, { ...deps, runAgent });
+    expect(out).toMatchObject({ used: true, shownSkus: [] });
+  });
+
+  it('una tool bloqueada/no-buscar no aporta SKUs (resumen_ventas no entra al estado)', async () => {
+    const { deps } = makeDeps({ execTool: async () => ({ ok: true, result: [{ id: 'no-deberia-entrar' }] }) });
+    const runAgent: SalesAgentDeps['runAgent'] = async (input) => { await input.executeTool!('listar_promociones_activas', {}); return okResult(); };
+    const out = await runSalesAgent({ tenantId: 'perfumeria', agentConfig: AGENT, messages: [{ role: 'user', content: 'promos?' }] }, { ...deps, runAgent });
+    expect(out).toMatchObject({ used: true, shownSkus: [] }); // solo buscar_productos puebla shownSkus
+  });
+});
+
+describe('ai/salesAgent extractShownSkus (fuente de verdad = resultado backend)', () => {
+  it('solo desde buscar_productos: otra tool → []', () => {
+    expect(extractShownSkus('listar_promociones_activas', [{ id: 'x' }])).toEqual([]);
+    expect(extractShownSkus('resumen_ventas', [{ id: 'x' }])).toEqual([]);
+  });
+  it('resultado no-array (objeto/null/string) → []', () => {
+    expect(extractShownSkus('buscar_productos', { productos: [{ id: 'x' }] })).toEqual([]);
+    expect(extractShownSkus('buscar_productos', null)).toEqual([]);
+    expect(extractShownSkus('buscar_productos', 'p1,p2')).toEqual([]);
+  });
+  it('ignora items no-objeto / sin id / id no-string o vacío', () => {
+    expect(extractShownSkus('buscar_productos', ['p1', 42, null, {}, { id: 7 }, { id: '' }, { id: '  ' }, { id: 'ok' }])).toEqual(['ok']);
+  });
+  it('deduplica conservando orden y hace trim', () => {
+    expect(extractShownSkus('buscar_productos', [{ id: 'a' }, { id: '  b  ' }, { id: 'a' }])).toEqual(['a', 'b']);
+  });
+  it('corta al tope MAX_SHOWN_SKUS', () => {
+    const many = Array.from({ length: 20 }, (_, i) => ({ id: `p${i}` }));
+    const out = extractShownSkus('buscar_productos', many);
+    expect(out).toHaveLength(MAX_SHOWN_SKUS);
+    expect(out[0]).toBe('p0');
   });
 });

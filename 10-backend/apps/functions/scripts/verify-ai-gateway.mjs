@@ -159,7 +159,91 @@ const writeStatus = (await fetch(`${FS}/tenants/${T}/aiRequests?documentId=hack-
 })).status;
 check('9. escritura de cliente a aiRequests bloqueada (no 200)', writeStatus !== 200, `status=${writeStatus}`);
 
+// ============================================================================
+// AG-3B — recomendaciones de la IA ↔ estado conversacional (lastShownSkus)
+// ============================================================================
+async function sessionDoc(from) {
+  const cid = from.replace(/[^0-9]/g, '');
+  const snap = await db.collection(`tenants/${T}/customers/${cid}/sessions`).get();
+  return snap.docs[0]?.data() ?? null;
+}
+const shownOf = async (from) => (await sessionDoc(from))?.context?.lastShownSkus ?? [];
+/** Envía UN mensaje (turno transaccional/determinista) y espera la respuesta del bot. */
+async function sendOnceAndPoll(from, body, pred, maxMs = 10_000) {
+  await postMsg(from, body);
+  const end = Date.now() + maxMs;
+  let txt = null;
+  while (Date.now() < end) { txt = await lastOut(from); if (txt && pred(txt)) return txt; await sleep(600); }
+  return txt;
+}
+/** Fixture de 2 rondas: el modelo llama buscar_productos y luego responde con texto. */
+const showFixture = (marker, input = {}) => setFixture({ responses: [
+  { toolUses: [{ id: 'tu1', name: 'buscar_productos', input }] },
+  { text: `Te muestro estas opciones ✨ ${marker}` },
+] });
+
+// Habilitar IA con presupuesto disponible y conocer el catálogo real de perfumeria.
+await db.doc(`tenants/${T}`).set({ usage: { aiTokensThisMonth: 0, messagesThisMonth: 0, currentPeriodStart: Timestamp.now() } }, { merge: true });
+const catSnap = await db.collection(`tenants/${T}/products`).get();
+const catIds = catSnap.docs.map((d) => d.id);
+const prodName = (id) => catSnap.docs.find((d) => d.id === id)?.data()?.name ?? null;
+// Producto de OTRO tenant (boutique) para el caso cross-tenant.
+const XTEN = 'XTEN-BOUTIQUE-1';
+await db.doc(`tenants/boutique-demo/products/${XTEN}`).set({ id: XTEN, tenantId: 'boutique-demo', name: 'Cross Tenant Test', price: 1000, currency: 'PYG', status: 'ACTIVE', inventory: { stock: 5 }, createdAt: Timestamp.now(), updatedAt: Timestamp.now() });
+
+// === 10. IA usa buscar_productos → lastShownSkus actualizado con productos REALES del tenant ===
+await showFixture(AI_MARK);
+const c10 = fresh(10);
+const r10 = await probeUntil(c10, (t) => t.includes(AI_MARK), 18_000);
+const sk10 = await shownOf(c10);
+check('10. IA usa buscar_productos → lastShownSkus = productos reales del tenant (del backend, no del texto)',
+  !!r10 && r10.includes(AI_MARK) && sk10.length > 0 && sk10.every((id) => catIds.includes(id)),
+  `shown=${JSON.stringify(sk10)} cat=${JSON.stringify(catIds)}`);
+
+// === 11. "el primero" → el motor rule-based selecciona el producto correcto y lo agrega ===
+const firstId = sk10[0];
+const firstName = prodName(firstId);
+const r11 = await sendOnceAndPoll(c10, 'el primero', (t) => t.includes('Agregué'));
+const cart11 = (await sessionDoc(c10))?.cart;
+check('11. "el primero" → selección rule-based correcta + carrito con 1 ítem (= primer SKU mostrado)',
+  !!r11 && (firstName ? r11.includes(firstName) : true) && cart11?.items?.length === 1 && cart11.items[0]?.productId === firstId,
+  `reply=${JSON.stringify(r11)} firstId=${firstId} cart=${JSON.stringify(cart11?.items)}`);
+
+// === 12. Injection: el modelo inventa un SKU en el texto (sin tool) → NO entra ===
+await setFixture({ text: `Te recomiendo el producto SKU-FAKE-999 ✨ ${AI_MARK}` });
+const c12 = fresh(12);
+const r12 = await probeUntil(c12, (t) => t.includes(AI_MARK), 18_000);
+const sk12 = await shownOf(c12);
+check('12. injection: SKU inventado por el modelo NO entra a lastShownSkus (solo del backend)',
+  !!r12 && r12.includes('SKU-FAKE-999') && !sk12.includes('SKU-FAKE-999') && sk12.length === 0,
+  `reply=${JSON.stringify(r12)} shown=${JSON.stringify(sk12)}`);
+
+// === 13. Cross-tenant: el producto de boutique NUNCA entra al estado de perfumeria ===
+await showFixture(AI_MARK);
+const c13 = fresh(13);
+const r13 = await probeUntil(c13, (t) => t.includes(AI_MARK), 18_000);
+const sk13 = await shownOf(c13);
+check('13. cross-tenant: producto de otro tenant (boutique) NO entra; todo SKU ∈ catálogo de perfumeria',
+  !!r13 && sk13.length > 0 && !sk13.includes(XTEN) && sk13.every((id) => catIds.includes(id)),
+  `shown=${JSON.stringify(sk13)} XTEN=${XTEN}`);
+
+// === 14. Tool sin resultados → NO pisa lastShownSkus (conserva la lista previa) ===
+const c14 = fresh(14);
+await showFixture('[shown-a]');
+await probeUntil(c14, (t) => t.includes('[shown-a]'), 18_000);
+const before14 = await shownOf(c14);
+await setFixture({ responses: [
+  { toolUses: [{ id: 'tu', name: 'buscar_productos', input: { precioMax: 1 } }] }, // precio absurdo → 0 resultados
+  { text: 'no encontré nada bajo ese precio ✨ [empty-b]' },
+] });
+await probeUntil(c14, (t) => t.includes('[empty-b]'), 18_000);
+const after14 = await shownOf(c14);
+check('14. buscar_productos sin resultados → NO pisa lastShownSkus (conserva la lista previa)',
+  before14.length > 0 && JSON.stringify(after14) === JSON.stringify(before14),
+  `before=${JSON.stringify(before14)} after=${JSON.stringify(after14)}`);
+
 // ---- Limpieza: borrar test data y restaurar perfumeria como estaba ----
+await db.doc(`tenants/boutique-demo/products/${XTEN}`).delete().catch(() => {});
 for (const from of customers) {
   const cid = from.replace(/[^0-9]/g, '');
   for (const m of (await db.collection(`tenants/${T}/customers/${cid}/messages`).get()).docs) await m.ref.delete();
@@ -178,6 +262,11 @@ await db.doc(`tenants/${T}`).set({
   usage: before.usage ?? FieldValue.delete(),
 }, { merge: true });
 
+// Settle: este script mutó el plan de perfumeria (free↔starter). El caché de entitlements del proceso
+// de functions (30s) podría seguir sirviendo 'starter' y contaminar la regresión siguiente (p.ej.
+// fase4 caso 6 asume perfumeria en su plan sembrado). Esperamos a que expire → suite order-independent.
+await sleep(31_000);
+
 const ok = results.every((x) => x);
-console.log(`\nRESULTADO AG-3 (sales agent Claude Haiku en el bot real): ${ok ? 'TODO OK ✅' : 'HAY FALLOS ❌'} (${results.filter((x) => x).length}/${results.length})`);
+console.log(`\nRESULTADO AG-3/AG-3B (sales agent + lastShownSkus): ${ok ? 'TODO OK ✅' : 'HAY FALLOS ❌'} (${results.filter((x) => x).length}/${results.length})`);
 process.exit(ok ? 0 : 1);
