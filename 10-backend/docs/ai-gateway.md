@@ -101,13 +101,27 @@ firebase deploy --only functions --project vpw-prod                      # deplo
 **Local / emulador:** el emulador usa el Fake → NO necesita la key real. Si el emulador advierte por el
 secret faltante, poné un dummy en `apps/functions/.secret.local` (gitignored): `ANTHROPIC_API_KEY=emulator-unused`.
 
-**Smoke real (`AI-SMOKE-REAL`, MANUAL — 1 llamada):** ingresá la key en la shell SIN mostrarla y corré:
-```bash
-read -rs ANTHROPIC_API_KEY && export ANTHROPIC_API_KEY && node scripts/smoke-ai-real.mjs
-unset ANTHROPIC_API_KEY   # limpiá la shell al terminar
+**Smoke real (`AI-SMOKE-REAL`, MANUAL — 1 sola llamada):** ingresá la key SIN mostrarla y corré el smoke.
+El smoke hace **1** llamada (maxTokens 32, sin tools, sin reintentos en 4xx) y verifica reply/usage/costo +
+auditoría-sin-prompt + fallback sin key. Si falla, imprime un **diagnóstico SEGURO** del error de Anthropic
+(status HTTP, type/code del proveedor, request-id, mensaje del proveedor recortado) — NUNCA la key, el
+system prompt, el mensaje del usuario ni el stack. No corre en `pnpm test`. **No reintentar en bucle.**
+
+PowerShell (Windows) — ingreso oculto con `Read-Host -AsSecureString`:
+```powershell
+cd 10-backend\apps\functions
+$sec = Read-Host -AsSecureString "ANTHROPIC_API_KEY"
+$env:ANTHROPIC_API_KEY = [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($sec))
+# (opcional) probar el ID datado en vez del alias, SOLO para el smoke:
+# $env:ANTHROPIC_MODEL = 'claude-haiku-4-5-20251001'
+node scripts/smoke-ai-real.mjs
+Remove-Item Env:\ANTHROPIC_API_KEY ; Remove-Item Env:\ANTHROPIC_MODEL -ErrorAction SilentlyContinue
 ```
-`read -rs` no hace eco; la key queda solo en el env de esa shell (no en historial ni en archivos). El smoke
-hace 1 llamada (maxTokens 16) y verifica reply/usage/costo/auditoría-sin-prompt + fallback sin key. No corre en `pnpm test`.
+bash: `read -rs ANTHROPIC_API_KEY && export ANTHROPIC_API_KEY && node scripts/smoke-ai-real.mjs ; unset ANTHROPIC_API_KEY`.
+
+**Si el smoke da `http_400`:** el request del gateway está bien formado, así que un 400 suele ser de **cuenta**,
+no de código. Lo más común es **saldo/créditos insuficientes** en Anthropic → revisá *Plans & Billing* en
+`console.anthropic.com`. Si el diagnóstico apunta al modelo, reintentá con `ANTHROPIC_MODEL=claude-haiku-4-5-20251001`.
 
 ## Orden por sub-fases
 - **AG-1** (cerrado): gateway core.
