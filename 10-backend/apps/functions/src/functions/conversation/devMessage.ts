@@ -13,10 +13,12 @@
 import { onRequest } from 'firebase-functions/v2/https';
 import { guardDevEndpoint } from '../../middleware/devGuard.js';
 import { handleMessage } from '../../conversation/engine.js';
+import { ANTHROPIC_API_KEY } from '../../ai/aiSecret.js';
 import { logger } from '../../lib/logger.js';
 
+// Endpoint dev/staging que corre el motor real (handleMessage → sales agent IA): bindea el secret.
 export const devMessage = onRequest(
-  { region: 'us-central1', cors: true },
+  { region: 'us-central1', cors: true, secrets: [ANTHROPIC_API_KEY] },
   async (req, res) => {
     if (!guardDevEndpoint(req, res)) return;
     if (req.method !== 'POST') {

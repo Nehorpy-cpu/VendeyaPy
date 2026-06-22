@@ -16,6 +16,7 @@ import { db } from '../../lib/firebase.js';
 import { recordAudit } from '../../audit/audit.js';
 import { logger } from '../../lib/logger.js';
 import { handleMessage } from '../../conversation/engine.js';
+import { ANTHROPIC_API_KEY } from '../../ai/aiSecret.js';
 import { validateAgentTestCasePatch } from '../../growth/validate.js';
 
 const COLL = (t: string): string => `tenants/${t}/agentTestCases`;
@@ -65,7 +66,8 @@ export const agentTestCaseDelete = onCall<{ tenantId?: string; id?: string }>({ 
   return { ok: true, id, deleted: true };
 });
 
-export const agentTestCaseRun = onCall<{ tenantId?: string; id?: string }>({ region: 'us-central1' }, async (req) => {
+// agentTestCaseRun corre el MOTOR REAL del bot (handleMessage → sales agent IA): bindea el secret.
+export const agentTestCaseRun = onCall<{ tenantId?: string; id?: string }>({ region: 'us-central1', secrets: [ANTHROPIC_API_KEY] }, async (req) => {
   const tenantId = authorizeTenant(req, req.data?.tenantId);
   const id = req.data?.id;
   if (!id || typeof id !== 'string') throw new HttpsError('invalid-argument', 'Falta el id del caso.');

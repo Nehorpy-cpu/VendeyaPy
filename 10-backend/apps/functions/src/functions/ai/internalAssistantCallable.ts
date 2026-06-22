@@ -13,13 +13,14 @@
 import { onCall, HttpsError } from 'firebase-functions/v2/https';
 import { resolveOwnerAdminAuth, type OwnerAdminToken } from '../../lib/ownerAdminAuth.js';
 import { runInternalAssistant } from '../../ai/internalAssistant.js';
+import { ANTHROPIC_API_KEY } from '../../ai/aiSecret.js';
 import { db } from '../../lib/firebase.js';
 import { logger } from '../../lib/logger.js';
 
 const MAX_MESSAGE_LEN = 2000;
 
 export const askInternalGrowthAssistant = onCall<{ tenantId?: string; message?: unknown }>(
-  { region: 'us-central1' },
+  { region: 'us-central1', secrets: [ANTHROPIC_API_KEY] },
   async (req) => {
     // 1. Auth: OWNER (su empresa) o PLATFORM_ADMIN (tenant indicado). SELLER/VIEWER/MANAGER → 403.
     if (!req.auth) throw new HttpsError('unauthenticated', 'Iniciá sesión para continuar.');

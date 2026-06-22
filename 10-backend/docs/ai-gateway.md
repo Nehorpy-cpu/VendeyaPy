@@ -82,9 +82,37 @@ node scripts/verify-fase4-whatsapp.mjs && node scripts/verify-registro.mjs && no
 (registry/sanitizers/gateway con `FakeAiClient` inyectado/`extractShownSkus`/`resolveOwnerAdminAuth`) +
 usa el emulador para tenant-scoping real, auditoría y rules. No flippea el plan → no necesita settle.
 
+## AI-KEY-1 — configurar `ANTHROPIC_API_KEY` (real)
+La key vive **solo en backend** y NUNCA en código/commits/logs/frontend/`.env.example`. Se modela con
+**Firebase Secret Manager** (`defineSecret` en `ai/aiSecret.ts`) y se bindea (least-privilege) SOLO a las
+functions que llegan al AI Gateway: `onWebhookInbox` (bot WhatsApp real), `askInternalGrowthAssistant`,
+`simulateAgentMessage`, `agentTestCaseRun`, `devMessage`. En runtime Firebase inyecta el valor en
+`process.env.ANTHROPIC_API_KEY`, que es lo que lee `getAiClient()` (nombre estándar del SDK). `client.ts`
+no cambió. En emulador/tests el cliente es el **Fake** (cero red); sin key en prod → `disabled` (fallback).
+
+**Configurar en STAGING/PROD (Secret Manager — entrada oculta, no se muestra):**
+```bash
+firebase functions:secrets:set ANTHROPIC_API_KEY --project vpw-staging   # pide el valor por stdin oculto
+firebase functions:secrets:set ANTHROPIC_API_KEY --project vpw-prod
+firebase deploy --only functions --project vpw-prod                      # deploya con el secret bindeado
+```
+`functions:secrets:set` lee el valor por stdin (oculto) y lo guarda cifrado en Secret Manager; nunca aparece en la terminal ni en archivos.
+
+**Local / emulador:** el emulador usa el Fake → NO necesita la key real. Si el emulador advierte por el
+secret faltante, poné un dummy en `apps/functions/.secret.local` (gitignored): `ANTHROPIC_API_KEY=emulator-unused`.
+
+**Smoke real (`AI-SMOKE-REAL`, MANUAL — 1 llamada):** ingresá la key en la shell SIN mostrarla y corré:
+```bash
+read -rs ANTHROPIC_API_KEY && export ANTHROPIC_API_KEY && node scripts/smoke-ai-real.mjs
+unset ANTHROPIC_API_KEY   # limpiá la shell al terminar
+```
+`read -rs` no hace eco; la key queda solo en el env de esa shell (no en historial ni en archivos). El smoke
+hace 1 llamada (maxTokens 16) y verifica reply/usage/costo/auditoría-sin-prompt + fallback sin key. No corre en `pnpm test`.
+
 ## Orden por sub-fases
 - **AG-1** (cerrado): gateway core.
 - **AG-2** (cerrado): contextos + data policy + tool/data layer (read-only).
 - **AG-3** (cerrado): sales agent cableado en `handleMessage` detrás de `aiAssistant`+env, con loop de tool-use, fallback rule-based, metering (`assertAiBudget`/`recordAiUsage`) y rules de `aiRequests`. e2e fixture-driven: `scripts/verify-ai-gateway.mjs`.
 - **AG-4** (cerrado): callable `askInternalGrowthAssistant` (owner/admin, contexto internal read-only, gate/metering, error controlado). e2e: `scripts/verify-ai-internal.mjs`.
-- **AG-5** (cerrado): hardening final — matriz consolidada `scripts/verify-ai-hardening.mjs` (20 invariantes) + doc de verificación completa. Listo para **AI-KEY-1** (configurar `ANTHROPIC_API_KEY` real).
+- **AG-5** (cerrado): hardening final — matriz consolidada `scripts/verify-ai-hardening.mjs` (20 invariantes) + doc de verificación completa.
+- **AI-KEY-1** (cerrado): patrón seguro de la key real — `defineSecret('ANTHROPIC_API_KEY')` bindeado (least-privilege) a las functions del gateway + `.secret.local` gitignored + `scripts/smoke-ai-real.mjs` (manual) + comandos de config. Falta solo ejecutar **AI-SMOKE-REAL** una vez con la key configurada.

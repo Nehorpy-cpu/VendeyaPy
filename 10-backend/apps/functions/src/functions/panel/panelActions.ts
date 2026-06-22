@@ -16,6 +16,7 @@ import { resolvePanelAuth } from '../../panel/auth.js';
 import { isPanelJobAction, runPanelJob, PANEL_JOB_ACTIONS, JOB_REQUIREMENTS } from '../../panel/jobs.js';
 import { assertFeatureEnabled, assertWithinLimit, meterUsage } from '../../entitlements/entitlements.js';
 import { handleMessage } from '../../conversation/engine.js';
+import { ANTHROPIC_API_KEY } from '../../ai/aiSecret.js';
 import { logger } from '../../lib/logger.js';
 
 /** Valida auth + rol/tenant y devuelve la empresa objetivo (o lanza HttpsError). */
@@ -51,8 +52,9 @@ export const runTenantJob = onCall<{ action?: string; tenantId?: string }>(
   },
 );
 
+// simulateAgentMessage corre el MOTOR REAL (handleMessage → sales agent IA): bindea el secret.
 export const simulateAgentMessage = onCall<{ from?: string; text?: string; tenantId?: string }>(
-  { region: 'us-central1' },
+  { region: 'us-central1', secrets: [ANTHROPIC_API_KEY] },
   async (req) => {
     const { from, text } = req.data ?? {};
     if (!from || !text) throw new HttpsError('invalid-argument', 'Faltan from y text.');

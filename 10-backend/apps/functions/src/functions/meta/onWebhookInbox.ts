@@ -7,10 +7,13 @@
 
 import { onDocumentCreated } from 'firebase-functions/v2/firestore';
 import { processWebhookEvent } from '../../meta/process.js';
+import { ANTHROPIC_API_KEY } from '../../ai/aiSecret.js';
 import { logger } from '../../lib/logger.js';
 
+// Es el camino REAL del bot de WhatsApp (inbound → handleMessage → sales agent IA): bindea el secret
+// de Anthropic (least-privilege) para que getAiClient() lo lea en runtime.
 export const onWebhookInbox = onDocumentCreated(
-  { region: 'us-central1', document: 'metaWebhookInbox/{eventId}' },
+  { region: 'us-central1', document: 'metaWebhookInbox/{eventId}', secrets: [ANTHROPIC_API_KEY] },
   async (event) => {
     try {
       await processWebhookEvent(event.params.eventId);

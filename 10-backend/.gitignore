@@ -54,6 +54,9 @@ desktop.ini
 *.key
 *-credentials.json
 gcp-service-account*.json
+# Secrets locales de Firebase Functions (defineSecret en emulador) y cualquier secret file local
+.secret.local
+*.secret.local
 
 # Cache
 .cache/
