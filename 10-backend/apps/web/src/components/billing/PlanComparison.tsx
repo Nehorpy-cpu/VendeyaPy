@@ -8,15 +8,10 @@ import {
   tierRank,
   planById,
   requestPlanChange,
+  formatPlanPrice,
   type PlanView,
 } from '@/lib/entitlements';
 import { CheckIcon } from '@/components/marketing/icons';
-
-function priceLabel(p: PlanView) {
-  if (p.customPrice) return 'A medida';
-  if (p.priceUsdPerMonth === 0) return 'Gratis';
-  return `$${p.priceUsdPerMonth}`;
-}
 
 function lim(n: number) {
   return isUnlimited(n) ? '∞' : n.toLocaleString('es-PY');
@@ -65,8 +60,7 @@ export function PlanComparison({ currentPlanId }: { currentPlanId: string }) {
                 )}
               </div>
               <div className="mt-2 flex items-baseline gap-1">
-                <span className="text-2xl font-bold tracking-tight text-ink-900">{priceLabel(p)}</span>
-                {!p.customPrice && p.priceUsdPerMonth > 0 && <span className="text-xs text-ink-400">/mes</span>}
+                <span className="text-2xl font-bold tracking-tight text-ink-900">{formatPlanPrice(p)}</span>
               </div>
               <p className="mt-1 min-h-[2rem] text-xs leading-snug text-ink-500">{p.description}</p>
 

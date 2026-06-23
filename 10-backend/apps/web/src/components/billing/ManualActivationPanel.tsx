@@ -5,6 +5,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   PLAN_CATALOG,
   planById,
+  formatPlanPrice,
   MANUAL_METHODS,
   getMyActivationRequest,
   requestManualActivation,
@@ -99,7 +100,7 @@ export function ManualActivationPanel({ tenantId, currentPlanId }: { tenantId: s
           <select className={field} value={planId || choices[0]?.id || ''} onChange={(e) => setPlanId(e.target.value)}>
             {choices.length === 0 && <option value="">Sin planes disponibles</option>}
             {choices.map((p) => (
-              <option key={p.id} value={p.id}>{p.name}{p.customPrice ? ' (a medida)' : ` — USD ${p.priceUsdPerMonth}/mes`}</option>
+              <option key={p.id} value={p.id}>{p.name} — {formatPlanPrice(p)}</option>
             ))}
           </select>
         </div>

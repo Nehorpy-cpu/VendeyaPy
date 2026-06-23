@@ -159,9 +159,22 @@ Solo backend/shared/docs/tests. **No** se añadieron gates de bloqueo (eso es L3
 pagos/facturación/canal (y prender esas features en los planes cuando su gate exista) · confirmar conteo
 `messages` in/out. Frontend (espejo + textos por plan) = PLAN-LIMITS-4. E2E por plan = PLAN-LIMITS-5.
 
-### Riesgo residual (decisión del owner)
-**Moneda:** el precio comercial vive en `pricePygPerMonth` (₲), pero `priceUsdPerMonth` (legacy) sigue
-existiendo y es lo que muestra hoy el texto de billing-manual ("USD X/mes") y el frontend. Migrar la
-visualización a ₲ (y/o deprecar el USD) toca billing-manual/frontend → queda para L4 o una mini-fase aparte.
+## 9. PLAN-LIMITS-2B — moneda comercial PYG (display/prellenado)
 
-**Estado:** PLAN-LIMITS-1 (auditoría) + PLAN-LIMITS-2 (modelo congelado) cerrados. Sigue PLAN-LIMITS-3 (gates).
+Cambio chico y controlado: PYG (`pricePygPerMonth`) es la **fuente comercial** para mostrar/prellenar
+precios. Sin tocar gates, lógica de suscripción ni cobros reales.
+
+- **Backend (`manualActivationCallables.ts`):** el texto prellenado de WhatsApp ahora dice ₲ ("...el plan
+  Básico (₲150.000/mes)...") o "precio a medida" (Enterprise); `whatsappData` agrega `pricePygPerMonth`
+  (mantiene `priceUsdPerMonth` por compatibilidad). `applySubscriptionUpdate` y los cobros PayPal/Stripe/
+  Bancard **sin tocar**.
+- **Frontend (`apps/web`):** `lib/entitlements.ts` agrega `pricePygPerMonth` al espejo + nombres comerciales
+  (Básico/Pro/Max) + helper `formatPlanPrice(plan)` (₲ si hay; "A medida" Enterprise; "Gratis"; fallback
+  `US$` legacy). `PlanComparison`/`AdminActivationQueue`/`ManualActivationPanel` usan el helper → muestran
+  **₲150.000 / ₲350.000 / ₲650.000 / A medida** en vez de USD.
+- **`priceUsdPerMonth` queda como legacy/fallback** (no se elimina): solo se muestra si un plan no tuviera
+  `pricePygPerMonth`. Hoy ningún plan del catálogo cae en ese fallback.
+
+**Estado:** PLAN-LIMITS-1 (auditoría) + 2 (modelo) + 2B (moneda PYG) cerrados. Sigue PLAN-LIMITS-3 (gates de
+bloqueo); el **alineado de FEATURES del frontend** (espejo aún muestra features mock no enforceadas) queda
+para PLAN-LIMITS-4.

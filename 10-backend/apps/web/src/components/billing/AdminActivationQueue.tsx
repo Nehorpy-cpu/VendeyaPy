@@ -4,6 +4,7 @@ import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   planById,
+  formatPlanPrice,
   listPendingActivations,
   approveActivation,
   cancelActivation,
@@ -74,7 +75,7 @@ export function AdminActivationQueue() {
                   <span className="font-semibold text-ink-900">{r.tenantId}</span>
                   <span className="mx-2 text-ink-300">·</span>
                   <span className="text-ink-700">{plan?.name ?? r.planId}</span>
-                  {plan && !plan.customPrice && <span className="text-ink-400"> (USD {plan.priceUsdPerMonth}/mes)</span>}
+                  {plan && <span className="text-ink-400"> ({formatPlanPrice(plan)})</span>}
                 </div>
                 <div className="text-xs text-ink-400">{r.method} · {fmt(r)}</div>
               </div>

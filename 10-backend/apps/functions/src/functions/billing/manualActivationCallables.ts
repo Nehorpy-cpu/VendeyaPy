@@ -64,12 +64,22 @@ export const requestManualPlanActivation = onCall<{ tenantId?: string; planId?: 
     await recordAudit({ tenantId, action: 'billing.activation_requested', actorUid: uid, actorRole: role, targetType: 'subscription', targetId: ref.id, summary: `Solicitud de activación manual del plan ${planId}`, metadata: { planId, method } });
     logger.info('Solicitud de activación manual creada', { tenantId, requestId: ref.id, planId });
 
+    // Precio COMERCIAL en guaraníes (PLAN-LIMITS-2B). Enterprise = "a medida"; fallback legacy a USD solo
+    // si el plan no tiene precio en ₲. Formato de miles con '.' sin depender de ICU.
+    const gs = (n: number) => n.toString().replace(/\B(?=(\d{3})+(?!\d))/g, '.');
+    const priceLabel =
+      plan.tier === 'ENTERPRISE'
+        ? 'precio a medida'
+        : plan.pricePygPerMonth != null
+          ? `₲${gs(plan.pricePygPerMonth)}/mes`
+          : `US$${plan.priceUsdPerMonth}/mes`;
     // Texto prellenado de WhatsApp (el frontend arma el wa.me con NEXT_PUBLIC_SUPPORT_WHATSAPP → solo dígitos).
-    const whatsappText = `Hola, quiero activar el plan ${plan.name} (USD ${plan.priceUsdPerMonth}/mes) para ${businessName} (empresa ${tenantId}). Método de pago: ${method}. Ref de solicitud: ${ref.id}.`;
+    const whatsappText = `Hola, quiero activar el plan ${plan.name} (${priceLabel}) para ${businessName} (empresa ${tenantId}). Método de pago: ${method}. Ref de solicitud: ${ref.id}.`;
     return {
       ok: true, requestId: ref.id, planId, status: 'pending',
       whatsappText,
-      whatsappData: { tenantId, businessName, planId, planName: plan.name, priceUsdPerMonth: plan.priceUsdPerMonth, method, requestId: ref.id },
+      // pricePygPerMonth = precio comercial; priceUsdPerMonth se mantiene por compatibilidad (legacy).
+      whatsappData: { tenantId, businessName, planId, planName: plan.name, pricePygPerMonth: plan.pricePygPerMonth ?? null, priceUsdPerMonth: plan.priceUsdPerMonth, method, requestId: ref.id },
     };
   },
 );

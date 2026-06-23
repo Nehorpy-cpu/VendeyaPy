@@ -40,7 +40,10 @@ export interface PlanView {
   tier: PlanTier;
   name: string;
   description: string;
+  /** Precio de referencia en USD (legacy). El precio COMERCIAL en Paraguay es `pricePygPerMonth`. */
   priceUsdPerMonth: number;
+  /** Precio comercial mensual en guaraníes (PLAN-LIMITS-2B) — fuente para mostrar al cliente. */
+  pricePygPerMonth?: number;
   /** Precio "a medida" (Enterprise): se muestra distinto. */
   customPrice?: boolean;
   popular?: boolean;
@@ -68,27 +71,30 @@ export const PLAN_CATALOG: PlanView[] = [
   {
     id: 'free',
     tier: 'FREE',
-    name: 'Free / Demo',
+    name: 'Prueba gratis',
     description: 'Para probar la plataforma.',
     priceUsdPerMonth: 0,
+    pricePygPerMonth: 0,
     limits: { maxProducts: 20, maxOrdersPerMonth: 50, maxWhatsappMessagesPerMonth: 500, maxDeliveryPersons: 2, maxUsers: 2, maxWhatsappNumbers: 1, maxAdSyncsPerMonth: 0, maxAiTokensPerMonth: 0 },
     features: F({}),
   },
   {
     id: 'starter',
     tier: 'STARTER',
-    name: 'Starter',
+    name: 'Básico',
     description: 'Para empezar a vender por WhatsApp.',
     priceUsdPerMonth: 29,
+    pricePygPerMonth: 150_000,
     limits: { maxProducts: 200, maxOrdersPerMonth: 500, maxWhatsappMessagesPerMonth: 5000, maxDeliveryPersons: 10, maxUsers: 5, maxWhatsappNumbers: 1, maxAdSyncsPerMonth: 0, maxAiTokensPerMonth: 50000 },
     features: F({ bancard: true, stripe: true, localWallets: true, multiChannel: true, aiAssistant: true }),
   },
   {
     id: 'growth',
     tier: 'GROWTH',
-    name: 'Growth',
+    name: 'Pro',
     description: 'Atribución real y automatización.',
     priceUsdPerMonth: 79,
+    pricePygPerMonth: 350_000,
     popular: true,
     limits: { maxProducts: 1000, maxOrdersPerMonth: 2000, maxWhatsappMessagesPerMonth: 20000, maxDeliveryPersons: 50, maxUsers: 15, maxWhatsappNumbers: 3, maxAdSyncsPerMonth: 30, maxAiTokensPerMonth: 250000 },
     features: F({ bancard: true, stripe: true, localWallets: true, multiChannel: true, electronicInvoicing: true, marketingAutomation: true, aiAssistant: true }),
@@ -96,9 +102,10 @@ export const PLAN_CATALOG: PlanView[] = [
   {
     id: 'pro',
     tier: 'PRO',
-    name: 'Pro',
+    name: 'Max',
     description: 'Volumen alto y soporte prioritario.',
     priceUsdPerMonth: 199,
+    pricePygPerMonth: 650_000,
     limits: { maxProducts: 10000, maxOrdersPerMonth: 20000, maxWhatsappMessagesPerMonth: 100000, maxDeliveryPersons: 200, maxUsers: 50, maxWhatsappNumbers: 10, maxAdSyncsPerMonth: 300, maxAiTokensPerMonth: 1000000 },
     features: F({ bancard: true, stripe: true, localWallets: true, multiChannel: true, electronicInvoicing: true, marketingAutomation: true, aiAssistant: true, prioritySupport: true }),
   },
@@ -108,6 +115,7 @@ export const PLAN_CATALOG: PlanView[] = [
     name: 'Enterprise',
     description: 'Límites a medida y multimarca.',
     priceUsdPerMonth: 0,
+    pricePygPerMonth: 0,
     customPrice: true,
     limits: { maxProducts: UNLIMITED, maxOrdersPerMonth: UNLIMITED, maxWhatsappMessagesPerMonth: UNLIMITED, maxDeliveryPersons: UNLIMITED, maxUsers: UNLIMITED, maxWhatsappNumbers: UNLIMITED, maxAdSyncsPerMonth: UNLIMITED, maxAiTokensPerMonth: UNLIMITED },
     features: F({ bancard: true, stripe: true, localWallets: true, multiChannel: true, electronicInvoicing: true, marketingAutomation: true, aiAssistant: true, prioritySupport: true }),
@@ -119,6 +127,18 @@ export const planByTier = (tier: PlanTier): PlanView | undefined => PLAN_CATALOG
 /** Orden de tiers para comparar "más alto / más bajo". */
 export const TIER_ORDER: PlanTier[] = ['FREE', 'STARTER', 'GROWTH', 'PRO', 'ENTERPRISE'];
 export const tierRank = (tier: PlanTier) => TIER_ORDER.indexOf(tier);
+
+/**
+ * Etiqueta de precio COMERCIAL del plan (PLAN-LIMITS-2B). Paraguay = guaraníes:
+ * usa `pricePygPerMonth` si existe; "A medida" para Enterprise; "Gratis" si es 0;
+ * solo cae al USD legacy (`US$…`) si el plan no tiene precio en guaraníes.
+ */
+export function formatPlanPrice(plan: Pick<PlanView, 'customPrice' | 'pricePygPerMonth' | 'priceUsdPerMonth'>): string {
+  if (plan.customPrice) return 'A medida';
+  const pyg = plan.pricePygPerMonth;
+  if (pyg != null) return pyg === 0 ? 'Gratis' : `₲${pyg.toLocaleString('es-PY')}/mes`;
+  return plan.priceUsdPerMonth === 0 ? 'Gratis' : `US$${plan.priceUsdPerMonth}/mes`;
+}
 
 /* --------------------------------- Billing -------------------------------- */
 
