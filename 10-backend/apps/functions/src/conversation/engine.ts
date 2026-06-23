@@ -26,6 +26,7 @@ import { appendMessage } from './messages.js';
 import { createPendingOrder } from '../orders/createPendingOrder.js';
 import { getCheckoutConfig, formatTransferInstructions } from '../orders/checkoutConfig.js';
 import { captureTrackingCode } from '../tracking/tracking.js';
+import { meterUsage } from '../entitlements/entitlements.js';
 
 const SESSION_TTL_MS = 1000 * 60 * 60 * 24; // 24 horas
 
@@ -232,6 +233,9 @@ async function decidirRespuesta(
       };
     }
     const order = await createPendingOrder(tenantId, customerId, prev.cart);
+    // PLAN-LIMITS-2: medición NO bloqueante del contador mensual de órdenes (ordersThisMonth).
+    // El gate de bloqueo (assertWithinLimit('orders') antes de crear) es PLAN-LIMITS-3.
+    await meterUsage(tenantId, 'orders').catch(() => { /* metering no crítico, nunca rompe el pago */ });
     const config = await getCheckoutConfig(tenantId);
     return {
       reply: formatTransferInstructions(config, order.totals.total),

@@ -78,8 +78,10 @@ export async function resolveEntitlements(tenantId: string): Promise<Entitlement
 
 // ---- Registro de métricas ----
 type MonthlyMetric = 'messages' | 'orders' | 'adSyncs' | 'aiTokens' | 'jobs';
-type CountMetric = 'products' | 'users' | 'deliveryPersons';
-export type QuotaMetric = 'messages' | 'orders' | 'adSyncs' | 'aiTokens' | 'products' | 'users' | 'deliveryPersons';
+// PLAN-LIMITS-2: `whatsappNumbers` se suma al modelo como count-metric (conteo de números WA conectados).
+// Queda CABLEADO pero SIN caller todavía: el gate de bloqueo (assertWithinLimit en el connect) es PLAN-LIMITS-3.
+type CountMetric = 'products' | 'users' | 'deliveryPersons' | 'whatsappNumbers';
+export type QuotaMetric = 'messages' | 'orders' | 'adSyncs' | 'aiTokens' | 'products' | 'users' | 'deliveryPersons' | 'whatsappNumbers';
 
 const MONTHLY_FIELD: Record<MonthlyMetric, keyof TenantUsage> = {
   messages: 'messagesThisMonth',
@@ -96,14 +98,17 @@ const QUOTA_LIMIT: Record<QuotaMetric, keyof PlanLimits> = {
   products: 'maxProducts',
   users: 'maxUsers',
   deliveryPersons: 'maxDeliveryPersons',
+  whatsappNumbers: 'maxWhatsappNumbers',
 };
 const COUNT_FN: Record<CountMetric, (tenantId: string) => Promise<number>> = {
   products: async (t) => (await db().collection(paths.products(t)).count().get()).data().count,
   users: async (t) => (await db().collection(paths.users()).where('tenantId', '==', t).count().get()).data().count,
   // Cuota de repartidores: cuenta SOLO los activos (isActive==true) → los desactivados liberan cupo.
   deliveryPersons: async (t) => (await db().collection(paths.deliveryPersons(t)).where('isActive', '==', true).count().get()).data().count,
+  // Números de WhatsApp conectados (assets de Meta). Single-where (sin índice compuesto). El gate = L3.
+  whatsappNumbers: async (t) => (await db().collection(paths.metaAssets(t)).where('assetType', '==', 'whatsapp_phone_number').count().get()).data().count,
 };
-const isCountMetric = (m: QuotaMetric): m is CountMetric => m === 'products' || m === 'users' || m === 'deliveryPersons';
+const isCountMetric = (m: QuotaMetric): m is CountMetric => m === 'products' || m === 'users' || m === 'deliveryPersons' || m === 'whatsappNumbers';
 
 export interface QuotaResult {
   allowed: boolean;

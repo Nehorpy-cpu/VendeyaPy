@@ -35,7 +35,10 @@ export interface Plan {
   tier: PlanTier;
   name: string;
   description: string;
+  /** Precio de referencia en USD (legacy). El precio COMERCIAL es `pricePygPerMonth` (PLAN-LIMITS-2). */
   priceUsdPerMonth: number;
+  /** Precio comercial mensual en guaraníes (PLAN-LIMITS-2). Fuente de verdad para mostrar al cliente. */
+  pricePygPerMonth?: number;
   limits: PlanLimits;
   features: PlanFeatures;
   isActive: boolean;

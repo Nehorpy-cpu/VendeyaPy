@@ -36,8 +36,8 @@
 | `maxWhatsappMessagesPerMonth` | ✅ sí (bloquea inbound) | `lifecycle.ts:39` `checkQuota('messages')` + `:46` meter | **available** |
 | `maxAiTokensPerMonth` | ✅ sí | `entitlements/ai.ts:13` `assertAiBudget` (sales+internal) + `recordAiUsage` | **available** |
 | `maxAdSyncsPerMonth` | ✅ sí | `panelActions.ts:41` `assertWithinLimit('adSyncs')` (vía `runTenantJob`) | **available** |
-| `maxOrdersPerMonth` | ❌ **NO** | métrica muerta: 0 callers; `createPendingOrder` no gatea ni mide; `ordersThisMonth` solo se setea a 0 | **not_started** |
-| `maxWhatsappNumbers` | ⚠️ parcial | `assertWhatsappNumbersEntitled` solo chequea `<1` (booleano "incluye WhatsApp"); el **conteo** por plan (starter=1/growth=3/pro=10) **no** se enforcea; `connectFlow` persiste TODOS los números descubiertos | **partial** |
+| `maxOrdersPerMonth` | ⚠️ **medido** (L2), sin gate | `engine.ts` `meterUsage('orders')` tras `createPendingOrder` (no bloqueante); gate `assertWithinLimit('orders')` = **L3** | **partial** |
+| `maxWhatsappNumbers` | ⚠️ parcial | gate booleano `≥1` (`assertWhatsappNumbersEntitled`); **L2** cableó `whatsappNumbers` al modelo de métricas (`QuotaMetric`+`COUNT_FN`); el gate de **conteo** = **L3** | **partial** |
 
 ### Features (`PlanFeatures`)
 | Feature | ¿Gateada? | Dónde | Clasificación |
@@ -133,5 +133,35 @@ Para **cada plan** se define (resumen; detalle por plan en PLAN-LIMITS-2):
 4. **PLAN-LIMITS-5 — e2e por plan:** `verify-plan-limits.mjs` (matriz por plan: cada límite/feature bloquea
    en el plan que no lo incluye y permite en el que sí; fake client para IA; cero red), + regresiones.
 
-**Estado:** PLAN-LIMITS-1 cerrado (auditoría + esta matriz). Nada implementado. Esperando aprobación de la
-matriz y de PLAN-LIMITS-2.
+## 8. PLAN-LIMITS-2 — cambios aplicados (modelo congelado, sin gates nuevos)
+
+Solo backend/shared/docs/tests. **No** se añadieron gates de bloqueo (eso es L3). IDs internos sin cambiar.
+
+- **Catálogo (`plans/plans.ts`):** `name` comercial → `free`="Prueba gratis" · `starter`="Básico" ·
+  `growth`="Pro" · `pro`="Max" · `enterprise`="Enterprise". `description` comerciales. Nuevo campo
+  `pricePygPerMonth` (₲, fuente de verdad comercial): 0 / **150.000** / **350.000** / **650.000** / 0.
+  `priceUsdPerMonth` se **deja intacto** ($29/79/199) → billing-manual y frontend no cambian de comportamiento
+  (lo leen). **LÍMITES sin cambios.**
+- **Features honestas:** solo se prenden las **realmente enforceadas** → `aiAssistant` (Básico+),
+  `marketingAutomation` (Pro+, modo demo gateado). Las de pago/facturación/multicanal/priority
+  (`bancard`/`stripe`/`localWallets`/`electronicInvoicing`/`multiChannel`/`prioritySupport`) quedan en
+  **`false` en todos los planes** (no se venden como disponibles hasta que L3 implemente sus gates). Cambio
+  **inerte** en backend (nada gatea esas features) y el frontend usa su propio espejo (`apps/web/lib/entitlements.ts`).
+- **Métricas cableadas al modelo:** `whatsappNumbers` agregado a `QuotaMetric`/`CountMetric`/`QUOTA_LIMIT`/
+  `COUNT_FN` (conteo de assets WA). `orders` ahora **se mide** (`meterUsage('orders')` no bloqueante en el
+  pago del bot). **Ningún gate de bloqueo** para ninguno de los dos (L3).
+- **`applySubscriptionUpdate`** intacto (sigue siendo el path canónico). Billing manual / webhooks **sin tocar**.
+- **Tests:** `plans.test.ts` congela ids/nombres/precios/features. Suite 217/217.
+
+### Pendiente para PLAN-LIMITS-3 (gates de bloqueo)
+`assertWithinLimit('orders')` en el pago · gate de **conteo** `whatsappNumbers` en el connect ·
+`assertFeatureEnabled('stripe'/'bancard'/'localWallets'/'electronicInvoicing'/'multiChannel')` en checkout/
+pagos/facturación/canal (y prender esas features en los planes cuando su gate exista) · confirmar conteo
+`messages` in/out. Frontend (espejo + textos por plan) = PLAN-LIMITS-4. E2E por plan = PLAN-LIMITS-5.
+
+### Riesgo residual (decisión del owner)
+**Moneda:** el precio comercial vive en `pricePygPerMonth` (₲), pero `priceUsdPerMonth` (legacy) sigue
+existiendo y es lo que muestra hoy el texto de billing-manual ("USD X/mes") y el frontend. Migrar la
+visualización a ₲ (y/o deprecar el USD) toca billing-manual/frontend → queda para L4 o una mini-fase aparte.
+
+**Estado:** PLAN-LIMITS-1 (auditoría) + PLAN-LIMITS-2 (modelo congelado) cerrados. Sigue PLAN-LIMITS-3 (gates).

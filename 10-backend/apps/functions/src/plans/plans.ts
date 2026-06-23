@@ -18,6 +18,7 @@ interface PlanSpec {
   name: string;
   description: string;
   priceUsdPerMonth: number;
+  pricePygPerMonth?: number;
   limits: PlanLimits;
   features: PlanFeatures;
 }
@@ -28,31 +29,36 @@ const F = (over: Partial<PlanFeatures>): PlanFeatures => ({
   ...over,
 });
 
+// PLAN-LIMITS-2 — matriz oficial congelada (ver docs/plan-limits.md). IDs internos SIN cambiar
+// (free/starter/growth/pro/enterprise) → no rompe billing/webhooks/tenants. `name` = etiqueta COMERCIAL.
+// FEATURES: solo se prenden las realmente enforceadas hoy (aiAssistant + marketingAutomation gateado en
+// modo demo). Las features de pago/facturación/multicanal/priority quedan en `false` (no se venden como
+// disponibles hasta que PLAN-LIMITS-3 implemente sus gates). LÍMITES sin cambios respecto a la auditoría.
 export const DEFAULT_PLANS: PlanSpec[] = [
   {
-    id: 'free', tier: 'FREE', name: 'Free', description: 'Para empezar a vender por WhatsApp', priceUsdPerMonth: 0,
+    id: 'free', tier: 'FREE', name: 'Prueba gratis', description: 'Probá la plataforma con límites básicos', priceUsdPerMonth: 0, pricePygPerMonth: 0,
     limits: { maxProducts: 20, maxOrdersPerMonth: 50, maxWhatsappMessagesPerMonth: 500, maxDeliveryPersons: 2, maxUsers: 2, maxWhatsappNumbers: 1, maxAdSyncsPerMonth: 0, maxAiTokensPerMonth: 0 },
     features: F({}),
   },
   {
-    id: 'starter', tier: 'STARTER', name: 'Starter', description: 'Negocios en crecimiento', priceUsdPerMonth: 29,
+    id: 'starter', tier: 'STARTER', name: 'Básico', description: 'Para empezar a vender por WhatsApp con asistente IA', priceUsdPerMonth: 29, pricePygPerMonth: 150_000,
     limits: { maxProducts: 200, maxOrdersPerMonth: 500, maxWhatsappMessagesPerMonth: 5_000, maxDeliveryPersons: 10, maxUsers: 5, maxWhatsappNumbers: 1, maxAdSyncsPerMonth: 0, maxAiTokensPerMonth: 50_000 },
-    features: F({ bancard: true, stripe: true, localWallets: true, multiChannel: true, aiAssistant: true }),
+    features: F({ aiAssistant: true }),
   },
   {
-    id: 'growth', tier: 'GROWTH', name: 'Growth', description: 'Escala tu operación', priceUsdPerMonth: 79,
+    id: 'growth', tier: 'GROWTH', name: 'Pro', description: 'Escala tu operación: más capacidad + automatización de marketing', priceUsdPerMonth: 79, pricePygPerMonth: 350_000,
     limits: { maxProducts: 1_000, maxOrdersPerMonth: 2_000, maxWhatsappMessagesPerMonth: 20_000, maxDeliveryPersons: 50, maxUsers: 15, maxWhatsappNumbers: 3, maxAdSyncsPerMonth: 30, maxAiTokensPerMonth: 250_000 },
-    features: F({ bancard: true, stripe: true, localWallets: true, electronicInvoicing: true, marketingAutomation: true, multiChannel: true, aiAssistant: true }),
+    features: F({ aiAssistant: true, marketingAutomation: true }),
   },
   {
-    id: 'pro', tier: 'PRO', name: 'Pro', description: 'Alto volumen + soporte prioritario', priceUsdPerMonth: 199,
+    id: 'pro', tier: 'PRO', name: 'Max', description: 'Alto volumen para negocios consolidados', priceUsdPerMonth: 199, pricePygPerMonth: 650_000,
     limits: { maxProducts: 10_000, maxOrdersPerMonth: 20_000, maxWhatsappMessagesPerMonth: 100_000, maxDeliveryPersons: 200, maxUsers: 50, maxWhatsappNumbers: 10, maxAdSyncsPerMonth: 300, maxAiTokensPerMonth: 1_000_000 },
-    features: F({ bancard: true, stripe: true, localWallets: true, electronicInvoicing: true, marketingAutomation: true, multiChannel: true, prioritySupport: true, aiAssistant: true }),
+    features: F({ aiAssistant: true, marketingAutomation: true }),
   },
   {
-    id: 'enterprise', tier: 'ENTERPRISE', name: 'Enterprise', description: 'A medida (límites por acuerdo, vía limitOverrides)', priceUsdPerMonth: 0,
+    id: 'enterprise', tier: 'ENTERPRISE', name: 'Enterprise', description: 'A medida: límites por acuerdo (vía limitOverrides)', priceUsdPerMonth: 0, pricePygPerMonth: 0,
     limits: { maxProducts: UNLIMITED, maxOrdersPerMonth: UNLIMITED, maxWhatsappMessagesPerMonth: UNLIMITED, maxDeliveryPersons: UNLIMITED, maxUsers: UNLIMITED, maxWhatsappNumbers: UNLIMITED, maxAdSyncsPerMonth: UNLIMITED, maxAiTokensPerMonth: UNLIMITED },
-    features: F({ bancard: true, stripe: true, localWallets: true, electronicInvoicing: true, marketingAutomation: true, multiChannel: true, prioritySupport: true, aiAssistant: true }),
+    features: F({ aiAssistant: true, marketingAutomation: true }),
   },
 ];
 
