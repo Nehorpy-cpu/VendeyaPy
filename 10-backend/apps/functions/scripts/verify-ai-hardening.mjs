@@ -164,7 +164,7 @@ const auditJson = auditDoc ? JSON.stringify(auditDoc) : '';
 check('C9. aiRequests NO guarda system prompt / mensaje del usuario / PII / secrets',
   !!auditDoc && !auditJson.includes(SECRET_SYS) && !auditJson.includes(SECRET_MSG) && !auditKeys.some((k) => SENSITIVE.includes(k.toLowerCase())));
 check('C10. aiRequests guarda SOLO metadata (context/model/tokens/cost/latency/toolNames/errorCode)',
-  !!auditDoc && auditKeys.every((k) => ALLOWED.includes(k)) && auditDoc.model === 'claude-haiku-4-5' && auditDoc.inputTokens === 1234 && Math.abs(auditDoc.costUsd - estimateCostUsd({ inputTokens: 1234, outputTokens: 567 })) < 1e-9, `keys=${auditKeys.join(',')}`);
+  !!auditDoc && auditKeys.every((k) => ALLOWED.includes(k)) && auditDoc.model === 'claude-haiku-4-5-20251001' && auditDoc.inputTokens === 1234 && Math.abs(auditDoc.costUsd - estimateCostUsd({ inputTokens: 1234, outputTokens: 567 })) < 1e-9, `keys=${auditKeys.join(',')}`);
 
 // ============================================================================
 // 11. Rules de aiRequests: read solo manager+/owner; write solo Admin SDK

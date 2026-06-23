@@ -33,7 +33,7 @@ describe('ai/gateway runAgent', () => {
     expect(res.reply).toBe('te recomiendo X');
     expect(res.usage).toEqual({ inputTokens: 100, outputTokens: 50 });
     expect(res.costUsd).toBeCloseTo(estimateCostUsd({ inputTokens: 100, outputTokens: 50 }), 9);
-    expect(res.model).toBe('claude-haiku-4-5');
+    expect(res.model).toBe('claude-haiku-4-5-20251001');
     expect(typeof res.latencyMs).toBe('number');
     expect(audits).toHaveLength(1);
     expect(audits[0]).toMatchObject({ status: 'ok', context: 'whatsapp_sales_agent', inputTokens: 100, outputTokens: 50 });

@@ -2,8 +2,8 @@ import { describe, it, expect } from 'vitest';
 import { estimateCostUsd, HAIKU_INPUT_USD_PER_MTOK, HAIKU_OUTPUT_USD_PER_MTOK, AI_MODEL } from './pricing.js';
 
 describe('ai/pricing', () => {
-  it('usa el modelo Haiku', () => {
-    expect(AI_MODEL).toBe('claude-haiku-4-5');
+  it('usa el modelo Haiku (ID datado oficial probado en AI-SMOKE-REAL)', () => {
+    expect(AI_MODEL).toBe('claude-haiku-4-5-20251001');
   });
 
   it('calcula costo por 1M tokens de entrada/salida', () => {

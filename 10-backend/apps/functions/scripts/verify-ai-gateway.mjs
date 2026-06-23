@@ -126,7 +126,7 @@ const SENSITIVE = ['prompt', 'prompts', 'messages', 'message', 'system', 'conten
 const noPromptKeys = !keys.some((k) => SENSITIVE.includes(k.toLowerCase()));
 const noProbeLeak = okDoc ? !JSON.stringify(okDoc).includes('envíos al interior') && !JSON.stringify(okDoc).includes(AI_MARK) : false;
 check('3. aiRequests ok → registra modelo/tokens/costo SIN prompt ni PII',
-  !!okDoc && okDoc.model === 'claude-haiku-4-5' && typeof okDoc.inputTokens === 'number' && typeof okDoc.costUsd === 'number' && noPromptKeys && noProbeLeak,
+  !!okDoc && okDoc.model === 'claude-haiku-4-5-20251001' && typeof okDoc.inputTokens === 'number' && typeof okDoc.costUsd === 'number' && noPromptKeys && noProbeLeak,
   `keys=${keys.join(',')}`);
 
 // === 4. fixture fail (Claude falla) → fallback ===

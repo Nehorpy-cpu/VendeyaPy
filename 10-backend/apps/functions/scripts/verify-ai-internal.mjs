@@ -143,7 +143,7 @@ const SENSITIVE = ['prompt', 'prompts', 'messages', 'message', 'system', 'conten
 const noPromptKeys = !keys.some((k) => SENSITIVE.includes(k.toLowerCase()));
 const noLeak = okDoc ? !JSON.stringify(okDoc).includes('cómo van mis ventas') && !JSON.stringify(okDoc).includes(MARK) : false;
 check('11. aiRequests (contexto internal) → metadatos sin prompt ni PII',
-  !!okDoc && okDoc.context === 'internal_growth_assistant' && okDoc.model === 'claude-haiku-4-5' && noPromptKeys && noLeak,
+  !!okDoc && okDoc.context === 'internal_growth_assistant' && okDoc.model === 'claude-haiku-4-5-20251001' && noPromptKeys && noLeak,
   `keys=${keys.join(',')}`);
 
 const anyId = okDoc?.id ?? myReqs[0]?.id;

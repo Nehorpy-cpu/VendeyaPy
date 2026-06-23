@@ -11,7 +11,7 @@ const AGENT = {
 } as AgentConfig;
 
 const okResult = (over: Partial<RunAgentResult> = {}): RunAgentResult => ({
-  status: 'ok', model: 'claude-haiku-4-5', latencyMs: 5,
+  status: 'ok', model: 'claude-haiku-4-5-20251001', latencyMs: 5,
   reply: 'Te recomiendo el Lattafa Asad ✨', usage: { inputTokens: 120, outputTokens: 80 }, costUsd: 0.001,
   ...over,
 });

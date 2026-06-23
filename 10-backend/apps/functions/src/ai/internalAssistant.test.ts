@@ -5,7 +5,7 @@ import { executeTool } from './tools/registry.js';
 import type { RunAgentInput, RunAgentResult, ToolExecResult } from './types.js';
 
 const okResult = (over: Partial<RunAgentResult> = {}): RunAgentResult => ({
-  status: 'ok', model: 'claude-haiku-4-5', latencyMs: 5,
+  status: 'ok', model: 'claude-haiku-4-5-20251001', latencyMs: 5,
   reply: 'Tus ventas crecieron 12% este mes 📈', usage: { inputTokens: 200, outputTokens: 90 }, costUsd: 0.002,
   ...over,
 });

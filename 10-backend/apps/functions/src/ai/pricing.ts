@@ -6,7 +6,9 @@
  */
 import type { AiUsage } from './types.js';
 
-export const AI_MODEL = 'claude-haiku-4-5';
+// ID DATADO oficial (no el alias): es el snapshot probado con éxito en AI-SMOKE-REAL → determinista
+// para producción. Mismo pricing que Haiku 4.5. Para experimentar otro modelo en el smoke: env ANTHROPIC_MODEL.
+export const AI_MODEL = 'claude-haiku-4-5-20251001';
 export const DEFAULT_MAX_TOKENS = 1024;
 
 export const HAIKU_INPUT_USD_PER_MTOK = 1.0;

@@ -29,7 +29,7 @@ Capa backend que integra **Claude Haiku 4.5** por tenant. Es el **único punto q
 - **Sanitizadores** (`sanitize.ts`): construyen objetos nuevos por whitelist (sin spread del doc original).
 
 ## Gateway core (AG-1)
-- `gateway.ts` `runAgent(input, deps)` — modelo `claude-haiku-4-5`; nunca lanza (status `ok`/`error`/`disabled`) → el caller hace **fallback al motor rule-based**.
+- `gateway.ts` `runAgent(input, deps)` — modelo `claude-haiku-4-5-20251001` (ID datado, probado en AI-SMOKE-REAL); nunca lanza (status `ok`/`error`/`disabled`) → el caller hace **fallback al motor rule-based**.
 - `client.ts` — `AiClient` inyectable: real (`@anthropic-ai/sdk`) con timeout+retries; fake (fixtures `aiTestFixtures/ai`) en emulador. Sin API key en prod → `disabled` (sin crash).
 - `pricing.ts` — costo aproximado por constante (Haiku $1/$5 por 1M).
 
