@@ -123,10 +123,19 @@ bash: `read -rs ANTHROPIC_API_KEY && export ANTHROPIC_API_KEY && node scripts/sm
 no de código. Lo más común es **saldo/créditos insuficientes** en Anthropic → revisá *Plans & Billing* en
 `console.anthropic.com`. Si el diagnóstico apunta al modelo, reintentá con `ANTHROPIC_MODEL=claude-haiku-4-5-20251001`.
 
+**Resultado AI-SMOKE-REAL (✅ pasó, 6/6):** la API real de Anthropic funciona. Se corrió con una API key
+**nueva** (la cuenta/key anterior daba `http_400`) y el modelo **datado `claude-haiku-4-5-20251001`**:
+llamada OK, reply `"ok"`, inputTokens 20 / outputTokens 4, costUsd ~0.00004, latencyMs ~894; auditoría solo
+metadata (sin prompt/mensaje/PII); fallback sin key → `disabled` OK. El **alias** `claude-haiku-4-5` NO se
+asume válido para la cuenta hasta decidir si se fija el modelo de producción (ver sub-fase AI-MODEL-PIN).
+Ningún secreto/valor de key se versiona.
+
 ## Orden por sub-fases
 - **AG-1** (cerrado): gateway core.
 - **AG-2** (cerrado): contextos + data policy + tool/data layer (read-only).
 - **AG-3** (cerrado): sales agent cableado en `handleMessage` detrás de `aiAssistant`+env, con loop de tool-use, fallback rule-based, metering (`assertAiBudget`/`recordAiUsage`) y rules de `aiRequests`. e2e fixture-driven: `scripts/verify-ai-gateway.mjs`.
 - **AG-4** (cerrado): callable `askInternalGrowthAssistant` (owner/admin, contexto internal read-only, gate/metering, error controlado). e2e: `scripts/verify-ai-internal.mjs`.
 - **AG-5** (cerrado): hardening final — matriz consolidada `scripts/verify-ai-hardening.mjs` (20 invariantes) + doc de verificación completa.
-- **AI-KEY-1** (cerrado): patrón seguro de la key real — `defineSecret('ANTHROPIC_API_KEY')` bindeado (least-privilege) a las functions del gateway + `.secret.local` gitignored + `scripts/smoke-ai-real.mjs` (manual) + comandos de config. Falta solo ejecutar **AI-SMOKE-REAL** una vez con la key configurada.
+- **AI-KEY-1** (cerrado): patrón seguro de la key real — `defineSecret('ANTHROPIC_API_KEY')` bindeado (least-privilege) a las functions del gateway + `.secret.local` gitignored + `scripts/smoke-ai-real.mjs` (manual) + comandos de config.
+- **AI-SMOKE-REAL** (✅ cerrado): smoke real ejecutado 1 vez con key nueva — la API real funciona; modelo datado `claude-haiku-4-5-20251001` OK; auditoría sin prompt/PII; fallback OK. No re-ejecutar por ahora.
+- **AI-MODEL-PIN** (propuesta): fijar `AI_MODEL='claude-haiku-4-5-20251001'` (el modelo probado) + actualizar asserts/fixtures/docs. Backend/tests/docs only; sin deploy.
