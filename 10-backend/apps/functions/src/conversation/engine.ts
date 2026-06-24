@@ -26,7 +26,7 @@ import { appendMessage } from './messages.js';
 import { createPendingOrder } from '../orders/createPendingOrder.js';
 import { getCheckoutConfig, formatTransferInstructions } from '../orders/checkoutConfig.js';
 import { captureTrackingCode } from '../tracking/tracking.js';
-import { meterUsage } from '../entitlements/entitlements.js';
+import { meterUsage, checkQuota } from '../entitlements/entitlements.js';
 
 const SESSION_TTL_MS = 1000 * 60 * 60 * 24; // 24 horas
 
@@ -232,10 +232,24 @@ async function decidirRespuesta(
         nextState: 'BROWSING',
       };
     }
+    // PLAN-LIMITS-3A: gate de órdenes. Hoy lo que bloquea es el CUPO MENSUAL (maxOrdersPerMonth); checkQuota
+    // también cubriría una suspensión por billing, pero por diseño la cuenta NUNCA se suspende
+    // (billingPosture.operational siempre true → los datos se preservan). Si se bloquea: NO creamos la orden
+    // ni medimos, y al CLIENTE final le damos un mensaje SEGURO (sin exponer el plan): lo derivamos a un
+    // asesor. Auditoría segura (logger, sin PII). Nota: cuota mensual "blanda" (read+increment no atómico,
+    // igual que el resto de las cuotas del repo) → bajo concurrencia puede sobrepasarse por ~1 orden.
+    const oq = await checkQuota(tenantId, 'orders');
+    if (!oq.allowed) {
+      logger.info('Orden bloqueada por cuota del plan', { tenantId, metric: 'orders', used: oq.used, limit: oq.limit, reason: oq.reason });
+      return {
+        reply: 'En un momento un asesor te contacta para finalizar tu pedido 🙌',
+        nextState: 'CART',
+      };
+    }
     const order = await createPendingOrder(tenantId, customerId, prev.cart);
-    // PLAN-LIMITS-2: medición NO bloqueante del contador mensual de órdenes (ordersThisMonth).
-    // El gate de bloqueo (assertWithinLimit('orders') antes de crear) es PLAN-LIMITS-3.
-    await meterUsage(tenantId, 'orders').catch(() => { /* metering no crítico, nunca rompe el pago */ });
+    // Medición 1:1 con la creación EXITOSA (va después de createPendingOrder; si la creación lanza, no
+    // se incrementa ordersThisMonth). No bloqueante: el metering nunca rompe el pago.
+    await meterUsage(tenantId, 'orders').catch(() => { /* metering no crítico */ });
     const config = await getCheckoutConfig(tenantId);
     return {
       reply: formatTransferInstructions(config, order.totals.total),

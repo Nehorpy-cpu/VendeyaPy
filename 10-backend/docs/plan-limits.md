@@ -175,6 +175,46 @@ precios. Sin tocar gates, lógica de suscripción ni cobros reales.
 - **`priceUsdPerMonth` queda como legacy/fallback** (no se elimina): solo se muestra si un plan no tuviera
   `pricePygPerMonth`. Hoy ningún plan del catálogo cae en ese fallback.
 
-**Estado:** PLAN-LIMITS-1 (auditoría) + 2 (modelo) + 2B (moneda PYG) cerrados. Sigue PLAN-LIMITS-3 (gates de
-bloqueo); el **alineado de FEATURES del frontend** (espejo aún muestra features mock no enforceadas) queda
-para PLAN-LIMITS-4.
+## 10. PLAN-LIMITS-3A — primeros gates de bloqueo (orders + whatsappNumbers)
+
+Backend/tests/docs only. **No** gates de pagos/facturación/multicanal (eso es 3B). Sin frontend, sin deploy.
+
+- **Órdenes (`conversation/engine.ts`, rama "pagar"):** ANTES de `createPendingOrder` se hace
+  `checkQuota(tenantId,'orders')` (no-throw). Si llegó al tope de `maxOrdersPerMonth`: **no** crea la orden,
+  **no** mide, y le responde al CLIENTE FINAL un mensaje **seguro** ("…un asesor te contacta…") — sin exponer
+  plan/cuota. El `meterUsage('orders')` queda **después** de `createPendingOrder` → 1:1 con creación exitosa
+  (si la creación lanza, no incrementa). Auditoría segura (logger, sin PII). Cierra **H1**. *Nota:* `checkQuota`
+  también devolvería `suspended`, pero por diseño la cuenta nunca se suspende (`billingPosture.operational`
+  siempre true) → hoy el billing caído **no** frena órdenes; solo el cupo mensual lo hace.
+- **Números WhatsApp (`meta/connectFlow.ts` `runMetaConnect`):** tras `listWabaPhoneNumbers` y **antes** de
+  persistir nada, si `phones.length > maxWhatsappNumbers` (de `resolveEntitlements`) → falla con
+  `failed-precondition` (`over_number_limit` → `CONNECT_FAIL_MESSAGE`). **No** escribe token/conexión/assets
+  ni toca una conexión existente. Idempotente: reconectar el mismo WABA repite el mismo conteo;
+  `selectMetaPhoneNumber` no agrega assets (single-select) → no consume cupo. Conteo tenant-scoped
+  (`COUNT_FN` por `tenants/{t}/metaAssets`). **Sin** override de admin (no existía; no se inventó). Cierra **H3**.
+- **e2e `scripts/verify-plan-limits.mjs` (6/6):** orden dentro/sobre el límite (crea+mide / bloquea sin medir,
+  mensaje seguro), primer número ok, re-select idempotente, número nuevo sobre el límite → failed-precondition
+  con conexión previa intacta, cross-tenant. `verify-fase4b-meta` ajustado (su test de 2 números fija el plan
+  a `growth`).
+
+**Pendiente para PLAN-LIMITS-3B:** gates de features `stripe`/`bancard`/`localWallets` (checkout/pagos),
+`electronicInvoicing` (factura), `multiChannel` (IG/FB) — y prender esas features en los planes cuando su gate
+exista (H2/H4). Confirmar conteo `messages` in/out (H7). Frontend (espejo + alineado de features + textos por
+plan) = PLAN-LIMITS-4. E2E por plan completa = PLAN-LIMITS-5.
+
+**Riesgos restantes 3A** (revisión adversarial — 5 hallazgos, todos low):
+1. El gate de números falla el connect entero si el WABA tiene más números que el plan (no permite "elegir
+   cuál" usar) — UX a mejorar en una fase posterior.
+2. El mensaje de bloqueo de órdenes no dispara handoff humano real (el vendedor ve la conversación y atiende
+   manualmente).
+3. **Cuota mensual de órdenes "blanda":** `checkQuota` lee `ordersThisMonth` y `meterUsage` incrementa por
+   separado (no atómico, igual que el resto de las cuotas del repo) → bajo concurrencia (dos "pagar" a la vez
+   en `limit-1`) puede sobrepasarse por ~1 orden. Enforcement estricto = transacción Firestore (fase posterior).
+4. **Billing caído no frena órdenes** (ver nota arriba): por diseño la cuenta nunca se suspende; solo el cupo
+   mensual enforcea. Si se quisiera frenar pedidos con billing vencido, hay que introducir una postura real
+   `operational:false`.
+5. **`connectMetaDemo`** (`meta/connect.ts`, vía `devMetaConnect`) persiste 1 número demo SIN el gate, pero es
+   un endpoint **dev-only** (404 en prod por `guardDevEndpoint`) y escribe 1 número fijo → impacto nulo en prod.
+
+**Estado:** PLAN-LIMITS-1 (auditoría) + 2 (modelo) + 2B (moneda PYG) + 3A (gates orders/números) cerrados.
+Sigue **PLAN-LIMITS-3B** (gates de pagos/facturación/multicanal).

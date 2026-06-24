@@ -41,6 +41,7 @@ const CONNECT_FAIL_MESSAGE: Record<ConnectFailReason, string> = {
   scopes_insuficientes: 'Faltan permisos de WhatsApp. Aceptá todos los permisos al conectar.',
   no_waba: 'No se encontró una cuenta de WhatsApp Business en tu Meta Business.',
   no_phone_number: 'No se encontró un número de WhatsApp en tu cuenta.',
+  over_number_limit: 'Tu plan no alcanza para todos los números de WhatsApp de esta cuenta. Actualizá tu plan o conectá una cuenta con menos números.',
 };
 
 export const startMetaConnect = onCall<{ tenantId?: string }>({ region: 'us-central1' }, async (req) => {

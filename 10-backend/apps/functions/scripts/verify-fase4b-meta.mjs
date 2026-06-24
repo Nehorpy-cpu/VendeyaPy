@@ -60,6 +60,12 @@ const admin = await signIn('superadmin@aiafg.com');
 await setFixture(BASE_FIXTURE);
 await db.doc(`tenants/${T}/config/channels`).delete().catch(() => {});
 
+// PLAN-LIMITS-3A: el connect ahora gatea el conteo de números vs maxWhatsappNumbers. El test 11 conecta
+// 2 números → fijamos perfumeria a un plan que los permite (growth=3) + settle del caché de entitlements.
+const planBefore4b = (await db.doc(`tenants/${T}`).get()).data()?.planId;
+await db.doc(`tenants/${T}`).set({ planId: 'growth' }, { merge: true });
+await sleep(31_000);
+
 // 1. startMetaConnect (owner) → nonce
 const start = await callFn('startMetaConnect', {}, owner);
 const nonce = start.result?.nonce;
@@ -149,6 +155,8 @@ check('16. Disconnect limpia conexión/assets/índice/secreto',
   `status=${c2?.status} assets=${assetsAfter.size} idx=${idxAfter.size} secret=${secretAfter.exists}`);
 
 // --- Limpieza ---
+await db.doc(`tenants/${T}`).set({ planId: planBefore4b ?? 'free' }, { merge: true }); // restaurar plan
+await sleep(31_000); // settle del caché → no contaminar las regresiones siguientes
 await db.doc('metaTestFixtures/graph').delete().catch(() => {});
 await db.doc(`tenants/${T}/config/channels`).delete().catch(() => {});
 await db.doc(`tenants/${T}/_debug/lastWhatsappSend`).delete().catch(() => {});
