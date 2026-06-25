@@ -408,5 +408,37 @@ entitlements 30s** (en memoria por instancia): tras activar, el desbloqueo puede
 caché stale (eventual-consistency existente, no nuevo). (3) **Sin bypass de admin** para acciones de uso (ver
 decisión). (4) El vencimiento NO envía aviso/recordatorio al owner (notificaciones = fase futura).
 
-**Estado:** TRIAL-ENFORCEMENT-1A cerrado (vencimiento del trial enforceado). Pendiente: migración legacy en prod,
-1B (bypass admin si se requiere), notificaciones de vencimiento, FRONTEND-UX-1.
+**Estado:** TRIAL-ENFORCEMENT-1A cerrado (vencimiento del trial enforceado). Pendiente: 1B (frontend), migración
+legacy, notificaciones.
+
+## 15. TRIAL-ENFORCEMENT-1B/1C — UX del trial + migración de legacy
+
+**1B (frontend, `apps/web`):** UX del free trial sobre el enforcement de 1A (solo presentación; el backend
+sigue siendo la fuente de verdad). `lib/trial.ts` = helpers PUROS (`getTrialState`/`isTrialExpired`/
+`trialDaysLeft`/`formatTrialStatus` + `toMillis` que normaliza Timestamp/Date/number/ISO; pago/demo/legacy
+sin trial → no es trial). `lib/entitlements.ts` expone `trial` en `ResolvedEntitlements`. `TrialGuard`
+(en `(panel)/layout.tsx`): banner con días restantes / "termina hoy" / "terminó", y al vencer **bloquea el
+contenido de las rutas de USO dejando `/billing` accesible** (render condicional, NO redirige → sin loops);
+CTA → `/billing` (reusa PlanComparison + ManualActivationPanel). Textos owner-facing, sin tecnicismos. Tests
+`trial.test.ts` 14/14.
+
+**1C (migración legacy — `scripts/backfill-free-trials.mjs`):** asigna `trial` a tenants `free` **creados
+antes de 1A** (sin `trial`). 1A/1B solo enforcean/muestran a free **con** `trial`; los legacy no se bloquean
+hasta migrarlos.
+- **Seguro por defecto:** dry-run (no escribe) salvo `--apply`. **Idempotente** (un tenant con `trial` se
+  omite → correrlo 2× no extiende). Flags: `--prefix <p>` (acota a ids con ese prefijo), `--as-of <ms>`
+  (fecha de inicio fija, para pruebas). `trialDays` sale de `DEFAULT_PLANS.free` (misma fuente que el alta).
+- **Elegible:** plan `free` (o sin plan) + sin `trial` + suscripción `none`/ausente + **no** `isDemo` + no
+  suspendido/borrado. Resumen: `scanned/eligible/skippedPaid/skippedDemo/skippedAlreadyHasTrial/
+  skippedInactive/updated`. La función `backfillFreeTrials(db, opts)` se exporta (testeable; el CLI solo
+  corre al ejecutarlo directo). e2e `verify-trial-backfill.mjs` 8/8 (dry-run/apply/idempotencia/exclusiones/
+  enforceable-tras-migrar, con tenants efímeros prefix-scoped).
+- **⚠️ Riesgo para prod (verificado):** los tenants de seed/demo **`perfumeria` y `boutique-demo` NO están
+  marcados `isDemo`** → el backfill **SÍ los considera elegibles**. En prod: (1) correr SIEMPRE dry-run
+  primero y guardar el resumen; (2) marcar los demos reales con `isDemo:true` **o** usar `--prefix`; (3)
+  recién entonces `--apply`. El script NO se ejecutó con `--apply` contra ningún dato real en esta fase
+  (solo dry-run + e2e efímero en el emulador).
+
+**Estado:** TRIAL-ENFORCEMENT 1A (enforcement) + 1B (UX frontend) + 1C (script de migración legacy, dry-run)
+cerrados. Pendiente: **ejecutar la migración legacy en prod** (con el cuidado de arriba), notificaciones de
+vencimiento, bypass admin si se requiere, FRONTEND-UX-1.
