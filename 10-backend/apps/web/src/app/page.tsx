@@ -2,6 +2,7 @@ import type { Metadata } from 'next';
 import { MarketingHeader } from '@/components/marketing/MarketingHeader';
 import { MarketingFooter } from '@/components/marketing/MarketingFooter';
 import { HeroDashboardMockup } from '@/components/marketing/HeroDashboardMockup';
+import { HeroBackground } from '@/components/marketing/HeroBackground';
 import { AttributionFlow } from '@/components/marketing/AttributionFlow';
 import { AnimatedChart } from '@/components/marketing/AnimatedChart';
 import { MetricCard } from '@/components/marketing/MetricCard';
@@ -21,7 +22,6 @@ import {
   UsersIcon,
   ShieldIcon,
   CompassIcon,
-  ClockIcon,
   MegaphoneIcon,
   ChatIcon,
   BagIcon,
@@ -124,11 +124,11 @@ const BENEFITS: Feature[] = [
   },
 ];
 
-const STEPS = [
-  { icon: <BagIcon className="h-5 w-5" />, title: 'Conectás tu catálogo', description: 'Cargás productos, precios y costos. El bot ya sabe qué ofrecer y a cuánto.' },
-  { icon: <ChatIcon className="h-5 w-5" />, title: 'Entran clientes por chat', description: 'Desde tus anuncios de Meta o tu número, te escriben por WhatsApp y todo queda en un solo flujo.' },
-  { icon: <BotIcon className="h-5 w-5" />, title: 'El bot responde y arma pedidos', description: 'Contesta, sugiere, cierra la venta y deja todo registrado. Tus vendedores intervienen cuando suma.' },
-  { icon: <ChartIcon className="h-5 w-5" />, title: 'El panel mide la ganancia real', description: 'Ventas, ingresos, costos, margen y qué campaña los generó. Decisiones con números.' },
+const PROCESS_STEPS = [
+  { icon: <WhatsappIcon className="h-6 w-6" />, title: 'Cliente escribe por WhatsApp', description: 'Te escribe desde tu número o desde un anuncio de Meta, y todo queda en un solo flujo.' },
+  { icon: <BotIcon className="h-6 w-6" />, title: 'El bot responde con tu catálogo', description: 'Contesta al instante con tus precios y stock reales, sin hacer esperar al cliente.' },
+  { icon: <BagIcon className="h-6 w-6" />, title: 'Recomienda, reserva o toma el pedido', description: 'Sugiere productos, arma el pedido y coordina el pago por WhatsApp.' },
+  { icon: <ChartIcon className="h-6 w-6" />, title: 'Vos revisás ventas y próximos pasos', description: 'Desde el panel ves ventas, ganancia y a quién seguir hoy para no perder ninguna.' },
 ];
 
 /* --------------------------------- página -------------------------------- */
@@ -140,9 +140,9 @@ export default function HomePage() {
       <main>
         <Hero />
         <TrustStrip />
+        <ProcessSection />
         <ProductSection />
         <DifferentialShowcase />
-        <HowItWorks />
 
         <section className="mk-container scroll-mt-24 py-20 sm:py-24">
           <FeatureSection
@@ -171,14 +171,21 @@ export default function HomePage() {
 
 function Hero() {
   return (
-    <section className="bg-mesh relative overflow-hidden">
-      <div className="bg-grid pointer-events-none absolute inset-0 opacity-[0.4]" aria-hidden />
-      <div className="mk-container relative grid items-center gap-12 py-16 lg:grid-cols-[1.05fr_1fr] lg:gap-10 lg:py-24">
+    <section className="relative overflow-hidden bg-white">
+      {/* Fondo claro: wash sutil + grilla muy tenue + red de nodos (sin orbs/blobs). */}
+      <div className="pointer-events-none absolute inset-0" aria-hidden>
+        <div className="absolute inset-0 bg-gradient-to-b from-mint-50/50 via-white to-white" />
+        <div className="bg-grid absolute inset-0 opacity-[0.18]" />
+        <HeroBackground className="absolute inset-0 opacity-70" />
+        <div className="absolute inset-x-0 bottom-0 h-24 bg-gradient-to-b from-transparent to-white" />
+      </div>
+
+      <div className="mk-container relative grid items-center gap-12 py-16 lg:grid-cols-[0.92fr_1.08fr] lg:gap-14 lg:py-24">
         <div className="flex flex-col items-start animate-fade-up">
           <Eyebrow>Ventas por WhatsApp · Atribución de Meta Ads</Eyebrow>
           <h1 className="mt-5 text-balance text-4xl font-bold leading-[1.08] tracking-tight text-ink-900 sm:text-5xl lg:text-[3.4rem]">
-            Convertí conversaciones de WhatsApp en{' '}
-            <span className="text-gradient">ventas medibles</span>
+            Vendé más por WhatsApp con tu{' '}
+            <span className="text-gradient">copiloto comercial</span>
           </h1>
           <p className="mt-5 max-w-xl text-pretty text-lg leading-relaxed text-ink-500">
             AI_AFG conecta catálogo, bot, vendedores, pedidos y campañas para saber qué canal vende y
@@ -193,7 +200,7 @@ function Hero() {
             </Button>
           </div>
           <div className="mt-8 flex flex-wrap items-center gap-x-6 gap-y-2 text-sm text-ink-500">
-            {['Sin perder pedidos', 'Atribución real', 'Listo en días'].map((t) => (
+            {['Prueba gratis 7 días', 'Atribución real', 'Listo en días'].map((t) => (
               <span key={t} className="inline-flex items-center gap-1.5">
                 <CheckIcon className="h-4 w-4 text-mint-600" />
                 {t}
@@ -375,30 +382,33 @@ function DifferentialShowcase() {
   );
 }
 
-/* ------------------------------ Cómo funciona ----------------------------- */
+/* --------------------- Proceso: de la charla a la venta ------------------- */
 
-function HowItWorks() {
+function ProcessSection() {
   return (
     <section id="como-funciona" className="mk-container scroll-mt-24 py-20 sm:py-24">
-      <div className="flex flex-col gap-12">
+      <div className="flex flex-col gap-14">
         <SectionHeading
           eyebrow="Cómo funciona"
           title="De la primera charla a la venta, en 4 pasos"
-          description="Sin migrar tu forma de trabajar: AI_AFG se monta sobre los canales que ya usás."
+          description="Más ventas, menos gasto, menos caos."
         />
-        <div className="grid grid-cols-1 gap-4 sm:gap-5 md:grid-cols-2 lg:grid-cols-4">
-          {STEPS.map((s, i) => (
-            <Reveal key={s.title} delay={i * 80}>
-              <div className="relative flex h-full flex-col gap-3 rounded-2xl border border-ink-100 bg-white p-5 shadow-soft">
-                <div className="flex items-center justify-between">
-                  <span className="grid h-11 w-11 place-items-center rounded-xl bg-mint-50 text-mint-600">
-                    {s.icon}
-                  </span>
-                  <span className="text-3xl font-bold text-ink-100">{String(i + 1).padStart(2, '0')}</span>
-                </div>
-                <h3 className="text-base font-semibold text-ink-900">{s.title}</h3>
-                <p className="text-sm leading-relaxed text-ink-500">{s.description}</p>
+        <div className="relative grid grid-cols-1 gap-y-10 sm:grid-cols-2 sm:gap-x-8 lg:grid-cols-4">
+          {/* Línea conectora del timeline (solo desktop, detrás de los nodos). */}
+          <div
+            className="absolute left-[12.5%] right-[12.5%] top-9 hidden h-px -translate-y-1/2 bg-gradient-to-r from-mint-200/0 via-ink-200 to-mint-200/0 lg:block"
+            aria-hidden
+          />
+          {PROCESS_STEPS.map((s, i) => (
+            <Reveal key={s.title} delay={i * 90} className="relative flex flex-col items-center text-center">
+              <div className="relative z-10 grid h-[4.5rem] w-[4.5rem] place-items-center rounded-2xl bg-white text-mint-600 shadow-card ring-1 ring-ink-100">
+                {s.icon}
+                <span className="absolute -right-2 -top-2 grid h-6 w-6 place-items-center rounded-full bg-mint-brand text-[0.7rem] font-bold text-white shadow-glow">
+                  {i + 1}
+                </span>
               </div>
+              <h3 className="mt-5 text-base font-semibold text-ink-900">{s.title}</h3>
+              <p className="mt-2 max-w-[16rem] text-sm leading-relaxed text-ink-500">{s.description}</p>
             </Reveal>
           ))}
         </div>
