@@ -16,6 +16,7 @@ export * from './stats.types.js';
 export * from './promotion.types.js';
 export * from './insight.types.js';
 export * from './followup.types.js';
+export * from './notification.types.js';
 export * from './audit.types.js';
 export * from './agenttest.types.js';
 export * from './winningreply.types.js';

@@ -440,5 +440,44 @@ hasta migrarlos.
   (solo dry-run + e2e efímero en el emulador).
 
 **Estado:** TRIAL-ENFORCEMENT 1A (enforcement) + 1B (UX frontend) + 1C (script de migración legacy, dry-run)
-cerrados. Pendiente: **ejecutar la migración legacy en prod** (con el cuidado de arriba), notificaciones de
-vencimiento, bypass admin si se requiere, FRONTEND-UX-1.
+cerrados. Pendiente: ejecutar la migración legacy en prod, notificaciones, bypass admin.
+
+## 16. TRIAL-NOTIFICATIONS-1 — notificaciones INTERNAS del free trial (sin envíos externos)
+
+Primera capa de avisos del trial: detecta tenants cuyo trial está por vencer / venció y crea
+**notificaciones internas** + auditoría para owner/admin. **NO envía WhatsApp/email/push real** en esta fase.
+
+**Qué se genera** (subcolección `tenants/{t}/notifications/{id}`):
+- `trial_ending_soon` — quedan **2–3 días** y el trial sigue activo.
+- `trial_ending_today` — **último día** (≤1 día restante).
+- `trial_expired` — ya **venció**.
+Con 5+ días no se genera nada. El contenido es owner-facing, sin tecnicismos (`trialExpired`/`quota`/…) ni PII.
+
+**Cómo:** función PURA `computeTrialNotificationState(tenant, now)` (decisión + umbrales; unit-testeada,
+espeja los excluidos del enforcement) + callable **admin** `generateTrialNotifications({ tenantId? })`
+(PLATFORM_ADMIN; targeteado o scan-all). **NO pasa por gates de uso** → funciona aunque el trial esté
+vencido. Pensado para que un **scheduler** lo dispare a futuro (no implementado acá).
+
+**Idempotencia / dedupe:** el id del doc es **determinístico = el tipo** (`trial_ending_soon`/
+`trial_ending_today`/`trial_expired`) vía `.create()` → **1 notificación por (tenant, tipo) por trial**. Re-correr
+el job no duplica. **Decisión:** `trial_expired` se crea **una sola vez total** (no una por día) — el aviso
+persistente al owner es el banner/bloqueo de 1B; la notificación es un alta única por etapa. A lo largo del
+trial un tenant puede acumular hasta 3 (soon → today → expired).
+
+**No se notifica:** tenants pagos (`planId != free`), con suscripción (`status != none`), demo, legacy sin
+`trial`, suspendidos/borrados. (Misma lógica conservadora que el enforcement.)
+
+**Rules (`tenants/{t}/notifications/{id}`):** `read` solo **OWNER + PLATFORM_ADMIN** (es info de billing; no
+seller/manager/viewer). `create`/`delete` = **`if false`** (solo Admin SDK / el callable). `update` solo para
+marcar leído (`hasOnly(['read','readAt'])`). **Auditoría** `trial.notification_created` con metadata `{type,
+daysLeft}` — sin PII, sin mensajes externos, sin tokens.
+
+**e2e `verify-trial-notifications.mjs` (10/10, efímeros, no toca perfumeria):** umbrales 5/3/hoy/vencido,
+idempotencia, exclusiones pago/demo/legacy, rules (owner lee / seller 403 / cliente no escribe), audit sin PII.
+
+**Fase futura:** inbox/banner en el frontend que lea estas notificaciones; y/o envío real (email/WhatsApp)
+con un scheduler — recién cuando se decida (esta fase NO envía nada externo).
+
+**Estado:** TRIAL 1A (enforcement) + 1B (UX) + 1C (migración legacy script) + NOTIFICATIONS-1 (avisos internos)
+cerrados. Pendiente: ejecutar migración legacy en prod, scheduler + envío externo de notificaciones (si se
+decide), frontend inbox de notificaciones, FRONTEND-UX-1.

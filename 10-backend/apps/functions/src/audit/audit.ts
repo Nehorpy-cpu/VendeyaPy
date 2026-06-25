@@ -51,6 +51,7 @@ export const AUDIT_ACTIONS = [
   'meta.connected',
   'meta.disconnected',
   'entitlement.blocked',
+  'trial.notification_created',
   'checkout.updated',
   'agentConfig.updated',
   'channelConfig.updated',

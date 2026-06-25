@@ -64,6 +64,9 @@ export { createPayPalSubscriptionSession, syncPayPalSubscription } from './funct
 // Billing manual por WhatsApp (MB-2): solicitud (owner/admin) + activación (admin) + cancelación.
 export { requestManualPlanActivation, manualBillingActivate, manualBillingCancelRequest } from './functions/billing/manualActivationCallables.js';
 
+// Notificaciones internas del free trial (TRIAL-NOTIFICATIONS-1): admin job, sin envíos externos.
+export { generateTrialNotifications } from './functions/trial/generateTrialNotifications.js';
+
 // Entitlements / límites / usage (Fase 5A): alta de producto con cuota (gate preparado para
 // que el panel migre del write directo en 5C) + reinicio mensual proactivo del uso.
 export { productUpsert } from './functions/products/productUpsert.js';

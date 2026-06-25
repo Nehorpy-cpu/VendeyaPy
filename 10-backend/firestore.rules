@@ -263,6 +263,16 @@ service cloud.firestore {
           && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'resolvedAt']);
       }
 
+      // Notificaciones internas del free trial (TRIAL-NOTIFICATIONS-1): info de billing → solo OWNER + admin
+      // las leen (no seller/manager/viewer). Las crea Cloud Functions; el cliente NO crea/borra. El owner
+      // solo puede marcarlas leídas (read/readAt).
+      match /notifications/{notificationId} {
+        allow read: if isTenantOwner(tenantId) || isPlatformAdmin();
+        allow create, delete: if false; // Solo Admin SDK (generateTrialNotifications)
+        allow update: if (isTenantOwner(tenantId) || isPlatformAdmin())
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['read', 'readAt']);
+      }
+
       // Uso/costo de IA (AG-3): registro por request del gateway de Claude (modelo, tokens, costo,
       // contexto, status) SIN prompts ni PII. Contiene costos → lectura manager+ (el vendedor NO).
       // Lo escribe SOLO Cloud Functions (Admin SDK); nada es escribible desde el cliente.
