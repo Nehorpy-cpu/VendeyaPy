@@ -28,6 +28,13 @@ function name(c: Customer): string {
 }
 
 const CHANNEL_ICON: Record<string, string> = { whatsapp: '🟢', instagram: '📸', messenger: '📨' };
+// El canal es solo un label de origen: hoy únicamente WhatsApp tiene respuesta saliente. IG/Messenger se
+// reciben pero NO se responden desde el panel → se marcan "(próximamente)" para no prometer atención saliente.
+const CHANNEL_LABEL: Record<string, string> = {
+  whatsapp: 'WhatsApp',
+  instagram: 'Instagram (entrante · respuesta próximamente)',
+  messenger: 'Messenger (entrante · respuesta próximamente)',
+};
 
 function ConversationsInner() {
   const { tenantId, loading: companyLoading } = useActiveCompany();
@@ -135,7 +142,7 @@ function ConversationsInner() {
                     <div className="flex items-center justify-between gap-2">
                       <span className="truncate text-xs text-gray-500">{c.conversation?.lastMessagePreview ?? ''}</span>
                       <span className="flex shrink-0 items-center gap-1">
-                        {c.conversation?.channel && <span title={c.conversation.channel}>{CHANNEL_ICON[c.conversation.channel] ?? ''}</span>}
+                        {c.conversation?.channel && <span title={CHANNEL_LABEL[c.conversation.channel] ?? c.conversation.channel}>{CHANNEL_ICON[c.conversation.channel] ?? ''}</span>}
                         {c.assignedSellerId && (
                           <span title={'Asignado a ' + (c.assignedSellerName ?? 'un vendedor')} className={'rounded-full px-1.5 text-[10px] font-medium ' + (mine ? 'bg-brand-100 text-brand-700' : 'bg-gray-100 text-gray-500')}>{mine ? 'mío' : '👤'}</span>
                         )}

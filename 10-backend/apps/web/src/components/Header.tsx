@@ -7,7 +7,7 @@ import { NotificationBell } from '@/components/NotificationBell';
 
 export function Header() {
   const { user, claims, signOut } = useAuth();
-  const { companies, tenantId, isSuperAdmin, setTenantId } = useActiveCompany();
+  const { companies, tenantId, companyName, isSuperAdmin, setTenantId } = useActiveCompany();
   const active = tenantId ?? '';
   const onSelect = (id: string) => setTenantId(id);
 
@@ -29,8 +29,8 @@ export function Header() {
             </select>
           </div>
         ) : (
-          <span className="text-sm font-medium text-ink-700">
-            {claims.tenantId ?? 'Mi empresa'}
+          <span className="text-sm font-medium text-ink-700" title={claims.tenantId ?? undefined}>
+            {companyName ?? claims.tenantId ?? 'Mi empresa'}
           </span>
         )}
       </div>

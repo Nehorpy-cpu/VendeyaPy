@@ -3,13 +3,13 @@
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useAuth } from '@/lib/auth-context';
-import { modulesForRole } from '@/lib/roles';
+import { navSectionsForRole } from '@/lib/roles';
 import { cn } from '@/lib/cn';
 
 export function Sidebar() {
   const { claims } = useAuth();
   const pathname = usePathname();
-  const modules = modulesForRole(claims.role);
+  const sections = navSectionsForRole(claims.role);
 
   return (
     <aside className="flex w-16 shrink-0 flex-col border-r border-ink-100 bg-white md:w-60">
@@ -30,24 +30,31 @@ export function Sidebar() {
           AI<span className="text-mint-600">_AFG</span>
         </span>
       </Link>
-      <nav className="flex-1 space-y-1 overflow-y-auto p-2">
-        {modules.map((m) => {
-          const active = pathname === m.href || pathname.startsWith(m.href + '/');
-          return (
-            <Link
-              key={m.key}
-              href={m.href}
-              title={m.label}
-              className={cn(
-                'flex items-center justify-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors md:justify-start',
-                active ? 'bg-mint-50 text-mint-700' : 'text-ink-600 hover:bg-ink-50 hover:text-ink-900',
-              )}
-            >
-              <span className="text-lg" aria-hidden>{m.icon}</span>
-              <span className="hidden md:inline">{m.label}</span>
-            </Link>
-          );
-        })}
+      <nav className="flex-1 space-y-4 overflow-y-auto p-2">
+        {sections.map((group) => (
+          <div key={group.section} className="space-y-1">
+            <div className="hidden px-3 pb-0.5 pt-1 text-[0.65rem] font-semibold uppercase tracking-wider text-ink-400 md:block">
+              {group.label}
+            </div>
+            {group.modules.map((m) => {
+              const active = pathname === m.href || pathname.startsWith(m.href + '/');
+              return (
+                <Link
+                  key={m.key}
+                  href={m.href}
+                  title={m.label}
+                  className={cn(
+                    'flex items-center justify-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors md:justify-start',
+                    active ? 'bg-mint-50 text-mint-700' : 'text-ink-600 hover:bg-ink-50 hover:text-ink-900',
+                  )}
+                >
+                  <span className="text-lg" aria-hidden>{m.icon}</span>
+                  <span className="hidden md:inline">{m.label}</span>
+                </Link>
+              );
+            })}
+          </div>
+        ))}
       </nav>
     </aside>
   );
