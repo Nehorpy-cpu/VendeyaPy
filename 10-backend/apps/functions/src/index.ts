@@ -66,6 +66,8 @@ export { requestManualPlanActivation, manualBillingActivate, manualBillingCancel
 
 // Notificaciones internas del free trial (TRIAL-NOTIFICATIONS-1): admin job, sin envíos externos.
 export { generateTrialNotifications } from './functions/trial/generateTrialNotifications.js';
+// Scheduler diario (TN-3) que dispara el mismo core (09:00 America/Asuncion). Solo notificaciones internas.
+export { trialNotificationsDaily } from './functions/scheduled/trialNotifications.js';
 
 // Entitlements / límites / usage (Fase 5A): alta de producto con cuota (gate preparado para
 // que el panel migre del write directo en 5C) + reinicio mensual proactivo del uso.

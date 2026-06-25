@@ -479,5 +479,36 @@ idempotencia, exclusiones pago/demo/legacy, rules (owner lee / seller 403 / clie
 con un scheduler — recién cuando se decida (esta fase NO envía nada externo).
 
 **Estado:** TRIAL 1A (enforcement) + 1B (UX) + 1C (migración legacy script) + NOTIFICATIONS-1 (avisos internos)
-cerrados. Pendiente: ejecutar migración legacy en prod, scheduler + envío externo de notificaciones (si se
-decide), frontend inbox de notificaciones, FRONTEND-UX-1.
+cerrados. Pendiente: scheduler de las notificaciones, frontend inbox, envío externo.
+
+## 17. TRIAL-NOTIFICATIONS-2/3 — frontend de avisos + scheduler diario
+
+**2 (frontend `apps/web`):** muestra en el panel las notificaciones de §16. `lib/notifications.ts`:
+`listNotifications` (lee `tenants/{t}/notifications`; `permission-denied` de roles sin acceso → `[]` en
+silencio), `markNotificationRead` (updateDoc SOLO `{read, readAt}` — lo permitido por rules; el frontend NO
+crea/borra), `selectUnreadSorted` (puro). `NotificationBell` en el `Header`: campana discreta con badge +
+dropdown (título/texto, "Marcar como leído", CTA → `/billing`); no muestra nada si no hay no-leídas / pago /
+rol sin permiso; no duplica el banner de `TrialGuard`.
+
+**3 (scheduler — backend):** automatiza la generación. **Core reutilizable** `runTrialNotificationsJob(db,
+{nowMs, dryRun?, actorUid?, tenantId?})` (`trial/runTrialNotificationsJob.ts`) que comparten el callable admin
+`generateTrialNotifications` (ahora wrapper fino) y la nueva **scheduled function** `trialNotificationsDaily`.
+
+- **Frecuencia:** **diaria** a las **09:00**, **timezone `America/Asuncion`**, region `us-central1`
+  (`onSchedule`, mismo patrón que `resetUsageMonthly`). Cron `0 9 * * *`.
+- **Solo crea notificaciones INTERNAS** (subcolección `notifications`). **NO envía WhatsApp/email/push real.**
+- **Idempotente** (ids determinísticos = el tipo → `.create()`), `dryRun` no escribe (cuenta lo que crearía).
+  **Aislamiento por tenant:** un doc con datos raros se salta + cuenta en `errors`, sin tumbar el job entero.
+  Loguea el resumen `{scanned, created, skipped, errors, byType}`.
+- **Ejecución manual / desactivar:** correr a demanda con el callable admin `generateTrialNotifications`
+  (opcional `{tenantId}` targeteado, `{dryRun:true}` para previsualizar). Para **desactivar** el cron: quitar
+  el `export { trialNotificationsDaily }` de `index.ts` (y, en prod, deshabilitar/borrar el job en Cloud
+  Scheduler) — no afecta al callable ni al enforcement.
+- **⚠️ Deploy real:** la scheduled function **requiere Cloud Scheduler habilitado** en el proyecto de
+  Firebase/Google Cloud (puede pedir habilitar APIs + permisos). En el **emulador NO se dispara** (no hay
+  scheduler emulator); por eso el e2e `verify-trial-notification-scheduler.mjs` (6/6) prueba el **core directo**
+  (genera/idempotencia/dry-run/tenant-inválido/export-existe/rules), no el cron.
+
+**Estado:** TRIAL 1A/1B/1C + NOTIFICATIONS 1 (backend) / 2 (frontend) / 3 (scheduler) cerrados. Pendiente:
+**ejecutar la migración legacy en prod**, habilitar/configurar Cloud Scheduler en el deploy real, envío externo
+(email/WhatsApp) si se decide, FRONTEND-UX-1.
