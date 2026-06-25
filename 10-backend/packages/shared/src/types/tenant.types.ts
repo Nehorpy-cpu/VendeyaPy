@@ -5,7 +5,7 @@
 
 import type { TenantStatus, Country, Currency, SubscriptionStatus, PaymentProvider } from '../enums.js';
 import type { Timestamp } from './common.types.js';
-import type { PlanLimits } from './plan.types.js';
+import type { PlanLimits, PlanFeatures } from './plan.types.js';
 
 /** Suscripción de plataforma del tenant (billing del SaaS) — Fase 4 · 5B. */
 export interface TenantSubscription {
@@ -136,6 +136,10 @@ export interface Tenant {
   onboarding?: { completed: boolean; completedAt: Timestamp | null };
   /** Overrides de límites por tenant (Enterprise/deals a medida) — Fase 5A. Solo Admin SDK. */
   limitOverrides?: Partial<PlanLimits>;
+  /** Overrides de features por tenant (demos/Enterprise/deals) — PLAN-LIMITS-3B. Solo Admin SDK.
+   *  Permite habilitar una feature a un tenant puntual sin encenderla en el plan (p.ej. multiChannel
+   *  en un demo) — espejo de limitOverrides; solo aplica con premium habilitado. */
+  featureOverrides?: Partial<PlanFeatures>;
   /** Cuenta demo / no facturable (no se suspende por billing) — Fase 5A. Solo Admin SDK. */
   isDemo?: boolean;
   createdAt: Timestamp;

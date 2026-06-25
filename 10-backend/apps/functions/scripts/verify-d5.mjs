@@ -7,7 +7,7 @@ process.env.FIRESTORE_EMULATOR_HOST = '127.0.0.1:8080';
 process.env.GCLOUD_PROJECT = 'demo-aiafg';
 
 import { initializeApp } from 'firebase-admin/app';
-import { getFirestore, Timestamp } from 'firebase-admin/firestore';
+import { getFirestore, Timestamp, FieldValue } from 'firebase-admin/firestore';
 
 initializeApp({ projectId: 'demo-aiafg' });
 const db = getFirestore();
@@ -19,6 +19,12 @@ const results = [];
 const check = (n, c, e = '') => { results.push(!!c); console.log(`${c ? '✅' : '❌'} ${n}${e ? '  — ' + e : ''}`); };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const post = (p, b = {}) => fetch(`${BASE}/${p}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tenantId: T, ...b }) }).then((r) => r.json());
+
+// PLAN-LIMITS-3B: el inbound de Instagram (test 5) requiere la feature `multiChannel`. perfumeria la
+// habilita por featureOverride per-tenant (queda en false en todos los planes). Settle 31s para que el
+// caché de entitlements (30s) refleje el override antes de procesar el inbound IG.
+await db.doc(`tenants/${T}`).set({ featureOverrides: { multiChannel: true } }, { merge: true });
+await sleep(31_000);
 
 // Asegurar conexión + campañas
 await post('devMetaConnect');
@@ -49,6 +55,7 @@ check('5. El webhook capturó de qué campaña vino el cliente', cap?.campaignId
 // Limpieza
 for (const p of ['orders/d5-order', 'orderFinancials/d5-order', 'customers/d5-cust', `customers/${cid}`]) await db.doc(`tenants/${T}/${p}`).delete();
 if (r.eventId) await db.doc(`metaWebhookInbox/${r.eventId}`).delete().catch(() => {});
+await db.doc(`tenants/${T}`).set({ featureOverrides: FieldValue.delete() }, { merge: true }); // restaura: sin override
 
 const ok = results.every((x) => x);
 console.log(`\nRESULTADO D5: ${ok ? 'TODO OK ✅' : 'HAY FALLOS ❌'} (${results.filter((x) => x).length}/${results.length})`);

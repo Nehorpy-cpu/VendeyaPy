@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { UNLIMITED, isUnlimited, effectiveLimit, effectiveLimits, isFeatureEnabled, decideQuota, billingPosture, GRACE_MS } from './decide.js';
+import { UNLIMITED, isUnlimited, effectiveLimit, effectiveLimits, effectiveFeatures, isFeatureEnabled, decideQuota, billingPosture, GRACE_MS } from './decide.js';
 import type { PlanLimits, PlanFeatures } from '@vpw/shared';
 
 const LIMITS: PlanLimits = { maxProducts: 20, maxOrdersPerMonth: 50, maxWhatsappMessagesPerMonth: 500, maxDeliveryPersons: 2, maxUsers: 2, maxWhatsappNumbers: 1, maxAdSyncsPerMonth: 0, maxAiTokensPerMonth: 0 };
@@ -73,5 +73,25 @@ describe('isFeatureEnabled', () => {
   it('refleja el flag del plan', () => {
     expect(isFeatureEnabled(FEATURES, 'aiAssistant')).toBe(false);
     expect(isFeatureEnabled({ ...FEATURES, marketingAutomation: true }, 'marketingAutomation')).toBe(true);
+  });
+});
+
+describe('effectiveFeatures (PLAN-LIMITS-3B)', () => {
+  it('sin overrides devuelve las features del plan tal cual', () => {
+    expect(effectiveFeatures(FEATURES)).toEqual(FEATURES);
+  });
+  it('un override booleano prende una feature sin tocar el resto', () => {
+    const r = effectiveFeatures(FEATURES, { multiChannel: true });
+    expect(r.multiChannel).toBe(true);
+    expect(r.aiAssistant).toBe(false);
+    expect(r.stripe).toBe(false);
+  });
+  it('un override puede apagar una feature que el plan trae prendida', () => {
+    const base: PlanFeatures = { ...FEATURES, aiAssistant: true };
+    expect(effectiveFeatures(base, { aiAssistant: false }).aiAssistant).toBe(false);
+  });
+  it('ignora claves no booleanas en el override', () => {
+    const r = effectiveFeatures(FEATURES, { multiChannel: undefined as unknown as boolean });
+    expect(r.multiChannel).toBe(false);
   });
 });

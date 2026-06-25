@@ -12,6 +12,8 @@ import { db, paths } from '../lib/firebase.js';
 import { handleMessage } from '../conversation/engine.js';
 import { getWhatsAppClient } from '../messaging/whatsappClient.js';
 import { checkTenantInboundGate, incrementMessageUsage } from '../tenants/lifecycle.js';
+import { resolveEntitlements } from '../entitlements/entitlements.js';
+import { isFeatureEnabled } from '../entitlements/decide.js';
 import { logger } from '../lib/logger.js';
 
 const channelOf = (platform: string): MessageChannel =>
@@ -47,6 +49,21 @@ export async function processWebhookEvent(eventId: string): Promise<void> {
     }
 
     const platform = channelOf(ev.platform);
+
+    // PLAN-LIMITS-3B: gate de multiChannel. WhatsApp NUNCA se gatea (incluido en todos los planes).
+    // Los canales NO-WhatsApp (Instagram/Messenger) requieren la feature `multiChannel` del plan
+    // efectivo (o un featureOverride del tenant). Chequeo NO-lanzante: NO usamos assertFeatureEnabled
+    // porque lanza HttpsError y caería en el catch de abajo marcando el evento 'failed' (con
+    // reintento/alerta); acá lo correcto es marcarlo 'ignored' (mismo patrón que el gate de empresa).
+    if (platform !== 'whatsapp') {
+      const ent = await resolveEntitlements(tenantId);
+      if (!isFeatureEnabled(ent.features, 'multiChannel')) {
+        await ref.update({ processingStatus: 'ignored', tenantId, errorMessage: 'canal no incluido en el plan (multiChannel)', processedAt: Timestamp.now() });
+        logger.info('Inbound no-WhatsApp bloqueado por feature del plan', { tenantId, platform: ev.platform });
+        return;
+      }
+    }
+
     const result = await handleMessage({ tenantId, from: payload.from, text: payload.text, channel: platform });
     await incrementMessageUsage(tenantId).catch(() => { /* métrica de uso, no crítica */ });
 

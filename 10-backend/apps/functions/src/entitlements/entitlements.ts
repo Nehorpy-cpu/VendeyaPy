@@ -12,7 +12,7 @@ import type { Tenant, PlanLimits, PlanFeatures, PlanTier, SubscriptionStatus, Te
 import { db, paths } from '../lib/firebase.js';
 import { recordAudit } from '../audit/audit.js';
 import { getPlan } from '../plans/plans.js';
-import { billingPosture, decideQuota, effectiveLimits, isFeatureEnabled, type BillingPosture } from './decide.js';
+import { billingPosture, decideQuota, effectiveLimits, effectiveFeatures, isFeatureEnabled, type BillingPosture } from './decide.js';
 import { maybeResetUsage } from './usageReset.js';
 
 export interface Entitlements {
@@ -67,9 +67,9 @@ export async function resolveEntitlements(tenantId: string): Promise<Entitlement
     tier: effPlan.tier,
     subscriptionStatus: status,
     isDemo,
-    // Overrides (deals Enterprise) solo aplican con premium habilitado.
+    // Overrides (deals Enterprise / demos) solo aplican con premium habilitado.
     limits: effectiveLimits(effPlan.limits, premiumSuspended ? undefined : tenant?.limitOverrides),
-    features: effPlan.features,
+    features: effectiveFeatures(effPlan.features, premiumSuspended ? undefined : tenant?.featureOverrides),
     posture,
   };
   cache.set(tenantId, { ent, expiresAtMs: now + TTL_MS });

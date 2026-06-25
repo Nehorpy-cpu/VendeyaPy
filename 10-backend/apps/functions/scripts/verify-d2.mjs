@@ -8,7 +8,7 @@ process.env.FIRESTORE_EMULATOR_HOST = '127.0.0.1:8080';
 process.env.GCLOUD_PROJECT = 'demo-aiafg';
 
 import { initializeApp } from 'firebase-admin/app';
-import { getFirestore } from 'firebase-admin/firestore';
+import { getFirestore, FieldValue } from 'firebase-admin/firestore';
 
 initializeApp({ projectId: 'demo-aiafg' });
 const db = getFirestore();
@@ -23,6 +23,13 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const post = (p, b = {}) => fetch(`${BASE}/${p}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(b) }).then((r) => r.json());
 async function waitInbox(id, ms = 18000) { const end = Date.now() + ms; while (Date.now() < end) { const s = (await db.doc(`metaWebhookInbox/${id}`).get()).data()?.processingStatus; if (s && s !== 'received' && s !== 'processing') return s; await sleep(1200); } return 'timeout'; }
 const lastMsgChannel = async (cid) => { const ms = await db.collection(`tenants/${T}/customers/${cid}/messages`).orderBy('createdAt', 'asc').limit(1).get(); return ms.docs[0]?.data()?.channel; };
+
+// PLAN-LIMITS-3B: el procesamiento de canales NO-WhatsApp (Instagram/Messenger) ahora requiere la
+// feature `multiChannel`. perfumeria (demo omnicanal) la habilita por featureOverride per-tenant
+// (multiChannel queda en false en todos los PLANES porque el outbound IG aún no existe). Settle 31s
+// para que el caché de entitlements (30s) refleje el override antes de procesar el inbound IG.
+await db.doc(`tenants/${T}`).set({ featureOverrides: { multiChannel: true } }, { merge: true });
+await sleep(31_000);
 
 // 0. Reconectar (puebla metaExternalIndex con el código D2)
 await post('devMetaConnect', { tenantId: T, byUid: 'uid-owner' });
@@ -65,6 +72,7 @@ for (const cid of [igCid, waCid]) {
   await db.doc(`tenants/${T}/customers/${cid}`).delete();
 }
 for (const id of [r1.eventId, r2.eventId]) await db.doc(`metaWebhookInbox/${id}`).delete();
+await db.doc(`tenants/${T}`).set({ featureOverrides: FieldValue.delete() }, { merge: true }); // restaura: sin override
 
 const ok = results.every((r) => r);
 console.log(`\nRESULTADO D2: ${ok ? 'TODO OK ✅' : 'HAY FALLOS ❌'} (${results.filter((r) => r).length}/${results.length})`);

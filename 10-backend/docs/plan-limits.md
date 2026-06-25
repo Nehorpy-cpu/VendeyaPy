@@ -216,5 +216,71 @@ plan) = PLAN-LIMITS-4. E2E por plan completa = PLAN-LIMITS-5.
 5. **`connectMetaDemo`** (`meta/connect.ts`, vía `devMetaConnect`) persiste 1 número demo SIN el gate, pero es
    un endpoint **dev-only** (404 en prod por `guardDevEndpoint`) y escribe 1 número fijo → impacto nulo en prod.
 
-**Estado:** PLAN-LIMITS-1 (auditoría) + 2 (modelo) + 2B (moneda PYG) + 3A (gates orders/números) cerrados.
-Sigue **PLAN-LIMITS-3B** (gates de pagos/facturación/multicanal).
+## 11. PLAN-LIMITS-3B — features comerciales sensibles (auditoría + gate de multiChannel)
+
+Backend/shared/tests/docs only. Sin frontend, sin deploy, sin tocar precios/landing/billing manual.
+**Regla de oro:** no encender como disponible una feature sin implementación real **y** gate real; si está
+`planned`/`not_started`, queda en `false` en los planes y solo se documenta. Auditoría exhaustiva (workflow
+multi-agente con verificación adversarial) de las 6 features: **solo `multiChannel` tiene un punto de uso real
+ungated**; las otras 5 son scaffold de tipos sin ruta de código activable → documentadas apagadas.
+
+**Matriz de decisión 3B:**
+
+| Feature | Veredicto | Categoría | Por qué |
+|---|---|---|---|
+| `multiChannel` | **GATEADA** | capacidad del tenant | Inbound IG/Messenger REAL y testeado (`parseWebhook`→`metaWebhook`→`onWebhookInbox`→`process.ts`). Punto ungated: `process.ts` entregaba canales no-WhatsApp al MISMO motor sin chequear el plan (H4). |
+| `stripe` | apagada (`not_started`) | pago del negocio (sus clientes) | Solo el tipo `StripeConfig`; nunca leído/escrito. `stripeWebhook` es receptor sin productor (nada crea la sesión de cobro). Checkout real = transferencia. |
+| `bancard` | apagada (`not_started`) | pago del negocio | `verifyBancardSignature` es STUB (`TODO`), `paymentBancardWebhook` comentado, `BancardConfig` nunca usado. El `'BANCARD'` de `createPendingOrder` es placeholder (cobro real = transferencia). |
+| `localWallets` | apagada (`not_started`) | pago del negocio | Solo `WalletConfig` (tigo/personal/zimple) como tipo; cero consumidores; checkout no ofrece billeteras. |
+| `electronicInvoicing` | apagada (`planned`) | capacidad del tenant (factura SET/SIFEN) | Scaffold más amplio (tipos `Invoice`, `TenantFiscalConfig`/timbrado, `paths.invoices`, rules) pero **sin emisión**: `createPendingOrder` solo deja `invoice:{invoiceId:null}`. *Red herring:* los "comprobante" son la FOTO de la transferencia, no factura fiscal. |
+| `prioritySupport` | apagada (`not_started`) | etiqueta comercial | Sin software ejecutable (no hay tickets/SLA/enrutado). Es nivel de soporte humano, no gateable. |
+
+**Distinción SaaS-billing vs pago-del-negocio:** `stripe`/`bancard` aparecen mucho en `billing/*` y
+`PLATFORM_PAYMENT_PROVIDER` — eso es **cómo el SaaS le cobra la suscripción al tenant** (otro camino, ya
+funciona, fuera de alcance). Las **features de plan** `stripe`/`bancard`/`localWallets` son **cómo el negocio
+le cobra a SUS clientes** (`PAYMENT_METHOD` + `TenantPaymentsConfig`), que es scaffold puro.
+
+**Implementado (gate de `multiChannel`):**
+- **`meta/process.ts`:** tras resolver el canal, si `platform !== 'whatsapp'` se chequea
+  `isFeatureEnabled(ent.features, 'multiChannel')` (NO-lanzante, vía `resolveEntitlements`). Si no está
+  habilitada → el evento se marca `ignored` (no se entrega al motor) — **no** se usa `assertFeatureEnabled`
+  porque lanza `HttpsError` y caería en el catch marcando `failed` (con reintento). **WhatsApp nunca se gatea**
+  (incluido en todos los planes). Cierra **H4**.
+- **`featureOverrides` per-tenant (nuevo, espejo de `limitOverrides`):** `Tenant.featureOverrides?:
+  Partial<PlanFeatures>` + `effectiveFeatures()` en `decide.ts`, cableado en `resolveEntitlements` (solo aplica
+  con premium habilitado). Permite habilitar una feature a un tenant puntual (demo/Enterprise/tests) **sin
+  encenderla en el plan**. `multiChannel` queda en **`false` en TODOS los planes** (el outbound IG/Messenger
+  aún no existe → no es vendible); perfumeria (demo) lo habilita por override en `verify-d2`/`verify-d5`.
+- **Tests:** `verify-plan-limits-3b.mjs` (8/8): IG/Messenger sin feature → `ignored` (con el motivo exacto);
+  WhatsApp siempre `processed`; IG con override → `processed` (canal instagram); cross-tenant (el override de
+  un tenant no habilita a otro). `decide.test.ts` cubre `effectiveFeatures`. `verify-d2`/`verify-d5` setean el
+  featureOverride + settle (su inbound IG sigue procesando). *No bypass desde payload:* el tenant se resuelve
+  server-side por `metaExternalIndex`; el remitente no puede declararse una feature.
+
+**Apagadas — punto FUTURO de gate (cuando se construya la capacidad real, recién ahí encender en planes):**
+- `stripe`/`bancard`/`localWallets` → en el callable que cree la sesión de cobro y/o un `paymentsConfigUpdate`
+  que escriba `*.enabled` (planes sugeridos a futuro: `growth`/`pro`/`enterprise`).
+- `electronicInvoicing` → en la función de emisión fiscal (SIFEN/timbrado) (plan sugerido: `pro`).
+- `prioritySupport` → no aplica gate de software (capacidad operativa de soporte humano, fuera de código).
+- Todas siguen en la lista `NOT_YET` de `plans.test.ts` (asegura `false` en todos los planes).
+
+**Riesgos restantes 3B:**
+1. **`multiChannel` outbound incompleto:** el inbound IG/Messenger está completo y gateado, pero el envío
+   saliente (`getWhatsAppClient`/`CloudAPIClient`) siempre postea al endpoint de WhatsApp Cloud API — no hay
+   cliente de envío IG/Messenger. Por eso `multiChannel` **no se enciende en ningún plan** todavía (solo por
+   override per-tenant). Encenderla en planes recién cuando exista envío saliente real por canal.
+2. **Alcance del hueco H4 hoy:** el connect REAL de prod (`runMetaConnect`→`buildMetaAssets`) solo crea assets
+   `whatsapp_*`; el índice IG/Messenger solo lo crean endpoints **dev-only** (`devMetaConnect`,
+   `devSimulateInbound`, 404 en prod). El gate igual se agregó (defensivo + forward-safe): cuando se construya
+   el connect IG/FB real, el plan ya queda enforceado.
+3. **Inconsistencia FE/BE (copy):** el espejo del frontend (`apps/web/lib/entitlements.ts`) muestra
+   `prioritySupport`/billeteras como incluidas en planes premium mientras el backend las tiene en `false`. Es
+   marketing/copy (la fuente de verdad es `resolveEntitlements` sobre `plans/{id}`), no un hueco de
+   enforcement. Alinear en PLAN-LIMITS-4.
+4. **Scaffold muerto** (`paths.invoices`, `BancardConfig`/`StripeConfig`/`WalletConfig`, receptor
+   `stripeWebhook`): existe pero no se debe encender ninguna feature por la mera presencia de tipos/infra; el
+   criterio sigue siendo **punto de uso real + gate real**.
+
+**Estado:** PLAN-LIMITS-1 (auditoría) + 2 (modelo) + 2B (moneda PYG) + 3A (gates orders/números) + 3B (gate
+multiChannel + featureOverrides; 5 features documentadas apagadas) cerrados. Sigue **PLAN-LIMITS-4** (frontend:
+espejo + alineado de features + textos/PlanGate por plan) y **PLAN-LIMITS-5** (e2e por plan).

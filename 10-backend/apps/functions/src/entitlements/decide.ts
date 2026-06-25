@@ -30,6 +30,17 @@ export function effectiveLimits(planLimits: PlanLimits, overrides?: Partial<Plan
   return out;
 }
 
+/** Mezcla las features del plan con los overrides del tenant (demos/Enterprise/deals). */
+export function effectiveFeatures(planFeatures: PlanFeatures, overrides?: Partial<PlanFeatures>): PlanFeatures {
+  const out = { ...planFeatures };
+  if (overrides) {
+    for (const k of Object.keys(out) as Array<keyof PlanFeatures>) {
+      if (typeof overrides[k] === 'boolean') out[k] = overrides[k] as boolean;
+    }
+  }
+  return out;
+}
+
 export function isFeatureEnabled(features: PlanFeatures, key: keyof PlanFeatures): boolean {
   return features[key] === true;
 }
