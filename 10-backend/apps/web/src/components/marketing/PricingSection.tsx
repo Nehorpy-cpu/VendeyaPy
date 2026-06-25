@@ -140,7 +140,7 @@ export function PricingSection({
       {/* Prueba gratis + Enterprise: completan la matriz real sin sumar otra tarjeta. */}
       <div className="flex flex-col items-center justify-between gap-3 rounded-2xl border border-ink-100 bg-ink-50/40 p-5 text-center sm:flex-row sm:text-left">
         <p className="text-sm text-ink-600">
-          <span className="font-semibold text-ink-900">Prueba gratis</span> para arrancar ·{' '}
+          <span className="font-semibold text-ink-900">Prueba gratis de 7 días</span> para arrancar ·{' '}
           <span className="font-semibold text-ink-900">Enterprise</span> a medida: multiempresa y límites por acuerdo.
         </p>
         <a href="#demo" className="shrink-0 text-sm font-semibold text-mint-700 hover:text-mint-600">

@@ -140,7 +140,8 @@ const dbg5B = (await db.doc(`tenants/${B}/_debug/lastWhatsappSend`).get()).data(
 check('5. cross-tenant: inbound de A resuelve a A (su phone_number_id) y NO dispara a B',
   dbg5A?.phoneNumberId === PNID_A && dbg5A.phoneNumberId !== PNID_B && dbg5B === null, `A=${dbg5A?.phoneNumberId} B=${dbg5B ? 'disparó' : 'intacto'}`);
 
-// 6. límite de mensajes: usage al tope (free=500) → inbound bloqueado, sin envío ni incremento.
+// 6. límite de mensajes: usage 500 SOBRE el tope del free trial (maxWhatsappMessagesPerMonth=50) →
+//    inbound bloqueado, sin envío ni incremento (el gate frena por estar sobre la cuota).
 await setupTenant(A, PNID_A, { mode: 'live' });
 await db.doc(`tenants/${A}`).set({ usage: { messagesThisMonth: 500, currentPeriodStart: Timestamp.now() } }, { merge: true });
 const dbg6 = await sendAndGetDebug(A, PNID_A, '595900000006', { timeoutMs: 8_000 });

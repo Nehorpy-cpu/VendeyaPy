@@ -44,6 +44,8 @@ export interface PlanView {
   priceUsdPerMonth: number;
   /** Precio comercial mensual en guaraníes (PLAN-LIMITS-2B) — fuente para mostrar al cliente. */
   pricePygPerMonth?: number;
+  /** Días de prueba gratis (PLAN-LIMITS-FREE-TRIAL). Solo el plan `free` (7). Espejo de Plan.trialDays. */
+  trialDays?: number;
   /** Precio "a medida" (Enterprise): se muestra distinto. */
   customPrice?: boolean;
   popular?: boolean;
@@ -75,10 +77,12 @@ export const PLAN_CATALOG: PlanView[] = [
     id: 'free',
     tier: 'FREE',
     name: 'Prueba gratis',
-    description: 'Para probar la plataforma.',
+    description: 'Probá la plataforma 7 días con límites básicos.',
     priceUsdPerMonth: 0,
     pricePygPerMonth: 0,
-    limits: { maxProducts: 20, maxOrdersPerMonth: 50, maxWhatsappMessagesPerMonth: 500, maxDeliveryPersons: 2, maxUsers: 2, maxWhatsappNumbers: 1, maxAdSyncsPerMonth: 0, maxAiTokensPerMonth: 0 },
+    trialDays: 7,
+    // PLAN-LIMITS-FREE-TRIAL: prueba acotada de 7 días (no permanente). Límites bajos espejo de plans.ts.
+    limits: { maxProducts: 20, maxOrdersPerMonth: 10, maxWhatsappMessagesPerMonth: 50, maxDeliveryPersons: 1, maxUsers: 2, maxWhatsappNumbers: 1, maxAdSyncsPerMonth: 0, maxAiTokensPerMonth: 0 },
     features: F({}),
   },
   {

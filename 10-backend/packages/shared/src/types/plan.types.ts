@@ -39,6 +39,13 @@ export interface Plan {
   priceUsdPerMonth: number;
   /** Precio comercial mensual en guaraníes (PLAN-LIMITS-2). Fuente de verdad para mostrar al cliente. */
   pricePygPerMonth?: number;
+  /**
+   * Días de prueba gratis (PLAN-LIMITS-FREE-TRIAL). Solo el plan `free` lo define (7). Es METADATA:
+   * indica que el plan es una prueba acotada, no un plan gratuito permanente. El vencimiento automático
+   * del trial (auto-downgrade/lock al día 7) NO está implementado todavía — ver docs/plan-limits.md §13.
+   * Los planes pagos lo dejan `undefined` (no son trials).
+   */
+  trialDays?: number;
   limits: PlanLimits;
   features: PlanFeatures;
   isActive: boolean;

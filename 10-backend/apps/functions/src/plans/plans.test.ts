@@ -38,10 +38,25 @@ describe('plans/DEFAULT_PLANS — matriz oficial congelada (PLAN-LIMITS-2)', () 
     for (const p of DEFAULT_PLANS) for (const f of NOT_YET) expect(p.features[f]).toBe(false);
   });
 
-  it('los límites NO cambian respecto a la auditoría (solo nombres/precios/features)', () => {
+  it('límites de los planes pagos (PLAN-LIMITS-2, sin cambios)', () => {
     expect(byId.starter.limits.maxAiTokensPerMonth).toBe(50_000);
     expect(byId.growth.limits.maxWhatsappMessagesPerMonth).toBe(20_000);
     expect(byId.pro.limits.maxProducts).toBe(10_000);
+  });
+
+  it('free es una PRUEBA GRATIS de 7 días (PLAN-LIMITS-FREE-TRIAL): trialDays + límites bajos; pagos sin trialDays', () => {
+    expect(byId.free.trialDays).toBe(7);
+    expect(byId.free.limits.maxProducts).toBe(20);
+    expect(byId.free.limits.maxOrdersPerMonth).toBe(10);
+    expect(byId.free.limits.maxWhatsappMessagesPerMonth).toBe(50);
+    expect(byId.free.limits.maxUsers).toBe(2);
+    expect(byId.free.limits.maxDeliveryPersons).toBe(1);
+    expect(byId.free.limits.maxWhatsappNumbers).toBe(1);
     expect(byId.free.limits.maxAiTokensPerMonth).toBe(0);
+    expect(byId.free.limits.maxAdSyncsPerMonth).toBe(0);
+    expect(byId.free.features.aiAssistant).toBe(false);
+    expect(byId.free.features.marketingAutomation).toBe(false);
+    // Los planes pagos NO son trials → sin trialDays.
+    for (const id of ['starter', 'growth', 'pro', 'enterprise']) expect(byId[id]!.trialDays).toBeUndefined();
   });
 });

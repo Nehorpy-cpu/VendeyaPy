@@ -71,25 +71,25 @@ const seedCart = async () => db.doc(`tenants/${T}/customers/${CID}/sessions/acti
   expiresAt: Timestamp.fromMillis(now.toMillis() + 86_400_000), updatedAt: now,
 });
 
-// usage justo debajo del límite free (maxOrdersPerMonth=50): ordersThisMonth=49 → 1 orden entra, la 2da no.
-await db.doc(`tenants/${T}`).set({ usage: { ordersThisMonth: 49, messagesThisMonth: 0, currentPeriodStart: Timestamp.now() } }, { merge: true });
+// usage justo debajo del límite free trial (maxOrdersPerMonth=10): ordersThisMonth=9 → 1 orden entra, la 2da no.
+await db.doc(`tenants/${T}`).set({ usage: { ordersThisMonth: 9, messagesThisMonth: 0, currentPeriodStart: Timestamp.now() } }, { merge: true });
 await seedCart();
 const ordersBefore = await ordersCount(T);
 await postMsg(CID, 'pagar');
 let r1 = null; for (let i = 0; i < 18; i++) { r1 = await lastOut(CID); if (r1 && /transferencia|transferí|datos para|Total/i.test(r1)) break; await sleep(700); }
 const ordersAfter1 = await ordersCount(T);
 const usageAfter1 = await ordersUsage(T);
-check('1. dentro del límite → crea la orden + mide (ordersThisMonth 49→50)',
-  ordersAfter1 === ordersBefore + 1 && usageAfter1 === 50, `orders ${ordersBefore}→${ordersAfter1} usage=${usageAfter1}`);
+check('1. dentro del límite → crea la orden + mide (ordersThisMonth 9→10)',
+  ordersAfter1 === ordersBefore + 1 && usageAfter1 === 10, `orders ${ordersBefore}→${ordersAfter1} usage=${usageAfter1}`);
 
-// 2da orden: ahora ordersThisMonth=50 (al tope) → bloqueada.
+// 2da orden: ahora ordersThisMonth=10 (al tope del free trial) → bloqueada.
 await postMsg(CID, 'pagar');
 let r2 = null; for (let i = 0; i < 18; i++) { r2 = await lastOut(CID); if (r2 && /asesor/i.test(r2)) break; await sleep(700); }
 const ordersAfter2 = await ordersCount(T);
 const usageAfter2 = await ordersUsage(T);
 const safeReply = !!r2 && /asesor/i.test(r2) && !/plan|cupo|límite|super/i.test(r2);
 check('2. sobre el límite → NO crea orden, NO incrementa usage, mensaje SEGURO al cliente',
-  ordersAfter2 === ordersAfter1 && usageAfter2 === 50 && safeReply, `orders=${ordersAfter2} usage=${usageAfter2} reply=${JSON.stringify(r2)}`);
+  ordersAfter2 === ordersAfter1 && usageAfter2 === 10 && safeReply, `orders=${ordersAfter2} usage=${usageAfter2} reply=${JSON.stringify(r2)}`);
 
 // ============================ PART B — WHATSAPP NUMBERS ============================
 const WABA = 'waba-pl-1';

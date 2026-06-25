@@ -19,6 +19,7 @@ interface PlanSpec {
   description: string;
   priceUsdPerMonth: number;
   pricePygPerMonth?: number;
+  trialDays?: number;
   limits: PlanLimits;
   features: PlanFeatures;
 }
@@ -36,8 +37,11 @@ const F = (over: Partial<PlanFeatures>): PlanFeatures => ({
 // disponibles hasta que PLAN-LIMITS-3 implemente sus gates). LÍMITES sin cambios respecto a la auditoría.
 export const DEFAULT_PLANS: PlanSpec[] = [
   {
-    id: 'free', tier: 'FREE', name: 'Prueba gratis', description: 'Probá la plataforma con límites básicos', priceUsdPerMonth: 0, pricePygPerMonth: 0,
-    limits: { maxProducts: 20, maxOrdersPerMonth: 50, maxWhatsappMessagesPerMonth: 500, maxDeliveryPersons: 2, maxUsers: 2, maxWhatsappNumbers: 1, maxAdSyncsPerMonth: 0, maxAiTokensPerMonth: 0 },
+    id: 'free', tier: 'FREE', name: 'Prueba gratis', description: 'Probá la plataforma 7 días con límites básicos', priceUsdPerMonth: 0, pricePygPerMonth: 0, trialDays: 7,
+    // PLAN-LIMITS-FREE-TRIAL: prueba acotada de 7 días (no plan gratuito permanente). Límites BAJOS para
+    // acotar costo: 10 pedidos/mes, 50 mensajes/mes, 0 tokens IA, 0 ad syncs. maxDeliveryPersons=1 y
+    // maxUsers=2 (owner + 1) para que el trial sea usable sin romper registro/onboarding. Sin features premium.
+    limits: { maxProducts: 20, maxOrdersPerMonth: 10, maxWhatsappMessagesPerMonth: 50, maxDeliveryPersons: 1, maxUsers: 2, maxWhatsappNumbers: 1, maxAdSyncsPerMonth: 0, maxAiTokensPerMonth: 0 },
     features: F({}),
   },
   {

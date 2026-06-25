@@ -90,7 +90,7 @@ pagos actuales, para no romper registro/onboarding:
 
 | Comercial | Tier actual | Precio ref. | aiAssistant | marketing | pagos premium | multiCanal | Productos | Mensajes/mes | AI tok/mes | Números WA | Repartidores | Usuarios |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
-| *(Trial)* `free` | FREE | $0 | ❌ | ❌ | ❌ | ❌ | 20 | 500 | 0 | 1 | 2 | 2 |
+| *(Trial 7d)* `free` | FREE | $0 | ❌ | ❌ | ❌ | ❌ | 20 | 50 | 0 | 1 | 1 | 2 |  ⟵ FREE-TRIAL (§13)
 | **Básico** | STARTER | $29 | ✅ | ❌ | ✅ básicos | ❌ | 200 | 5.000 | 50k | 1 | 10 | 5 |
 | **Pro** | GROWTH | $79 | ✅ | ✅ | ✅ | ✅ | 1.000 | 20.000 | 250k | 3 | 50 | 15 |
 | **Max** | PRO | $199 | ✅ | ✅ + priority | ✅ + e-invoicing | ✅ | 10.000 | 100.000 | 1M | 10 | 200 | 50 |
@@ -316,6 +316,44 @@ Solo frontend (zona billing/plans) + docs. Sin backend (solo lectura), sin deplo
 3. La sección "Próximamente" es informativa; cuando el backend prenda una feature en un plan hay que moverla de
    `UPCOMING_FEATURES` a las incluidas (queda centralizado en `entitlements.ts`).
 
-**Estado:** PLAN-LIMITS-1 (auditoría) + 2 (modelo) + 2B (moneda PYG) + 3A (gates orders/números) + 3B (gate
-multiChannel + featureOverrides) + 4 (frontend billing/plans alineado) cerrados. Sigue **PLAN-LIMITS-5** (e2e por
-plan) y **FRONTEND-UX-1** (landing/copy + rediseño general del panel).
+## 13. PLAN-LIMITS-FREE-TRIAL — `free` = prueba gratis acotada de 7 días
+
+Backend/shared/tests/docs + frontend (límites del free trial). El plan `free` **deja de ser un plan gratuito
+permanente**: pasa a ser una prueba acotada de 7 días con límites bajos para acotar costo. ID interno `free`
+sin cambiar; nombre comercial "Prueba gratis"; planes pagos **intactos**.
+
+**Matriz final del free trial** (`plans/plans.ts` `DEFAULT_PLANS.free` + espejo `apps/web/lib/entitlements.ts`):
+
+| campo | valor | nota |
+|---|---|---|
+| `trialDays` | **7** | metadata nueva (campo `Plan.trialDays?`) |
+| `maxProducts` | 20 | sin cambio |
+| `maxOrdersPerMonth` | **10** | bajó de 50 |
+| `maxWhatsappMessagesPerMonth` | **50** | bajó de 500 |
+| `maxUsers` | **2** | owner + 1 empleado (el registro crea solo al owner → no rompe onboarding) |
+| `maxDeliveryPersons` | **1** | bajó de 2 (no 0: con 0 se rompía `verify-fase5c-growth-c2` y el trial no podría probar delivery) |
+| `maxWhatsappNumbers` | 1 | sin cambio |
+| `maxAiTokensPerMonth` | 0 | sin cambio (sin IA en el trial) |
+| `maxAdSyncsPerMonth` | 0 | sin cambio |
+| `aiAssistant` / `marketingAutomation` / `multiChannel` / pagos / facturación | **false** | sin features premium |
+
+**`trialDays` es METADATA — `Plan.trialDays?: number`** (en `@vpw/shared`): solo `free` lo define (7); los
+planes pagos lo dejan `undefined` (no son trials). Compatible/no rompe nada (campo opcional; `resolveEntitlements`
+no lo usa). El frontend lo espeja en `PlanView.trialDays` y lo muestra ("Prueba gratis de 7 días").
+
+**GAP documentado (no implementado en esta fase):** **NO existe vencimiento automático del trial.** `trialDays`
+hoy es solo informativo: pasados los 7 días, la cuenta NO se auto-degrada ni se bloquea — los límites del free
+siguen aplicando indefinidamente. Implementar el vencimiento (auto-lock / forzar upgrade al día 7, con su fecha
+de inicio del trial y un job/gate que lo aplique) es una **fase futura** (requiere lógica de billing nueva; el
+usuario pidió explícitamente NO inventarla acá). Riesgo restante: un tenant puede quedarse en el free trial sin
+límite de tiempo hasta que se construya ese enforcement.
+
+**Tests:** `plans.test.ts` (pin de la matriz free + `trialDays` solo en free), `verify-plan-matrix.mjs` (matriz
+e2e con los nuevos valores + check de `trialDays`), `verify-plan-limits.mjs` (gate de órdenes ajustado a free=10:
+ordersThisMonth 9→10). `verify-fase4-whatsapp` (test de mensajes pasa igual: 500 sigue sobre el nuevo tope 50;
+solo se actualizó el comentario). `verify-fase5c-growth-c2` sin cambios (su test 1 crea 1 repartidor → ok con
+free=1; tests 2/3 usan `limitOverrides`).
+
+**Estado:** PLAN-LIMITS-1 + 2 + 2B + 3A + 3B + 4 + FREE-TRIAL (free = prueba 7d) cerrados. Sigue **PLAN-LIMITS-5**
+(e2e por plan — script `verify-plan-matrix.mjs` listo) y **FRONTEND-UX-1** (landing/rediseño). Pendiente futuro:
+**enforcement del vencimiento del trial** (no implementado, ver gap arriba).
