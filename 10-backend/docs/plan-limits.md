@@ -281,6 +281,41 @@ le cobra a SUS clientes** (`PAYMENT_METHOD` + `TenantPaymentsConfig`), que es sc
    `stripeWebhook`): existe pero no se debe encender ninguna feature por la mera presencia de tipos/infra; el
    criterio sigue siendo **punto de uso real + gate real**.
 
+## 12. PLAN-LIMITS-4 — alineación del frontend (espejo/billing/PlanGate) con la verdad del backend
+
+Solo frontend (zona billing/plans) + docs. Sin backend (solo lectura), sin deploy, sin rediseño. El frontend
+**muestra la verdad del backend**: no vende como disponible ninguna feature que el backend tenga en `false`.
+
+- **`apps/web/src/lib/entitlements.ts` — `PLAN_CATALOG.features` alineado EXACTO con `plans/plans.ts`:**
+  antes el espejo prendía `bancard/stripe/localWallets/multiChannel/electronicInvoicing/prioritySupport` (mock).
+  Ahora cada plan trae solo lo real: `aiAssistant` (Básico+) y `marketingAutomation` (Pro+). Nuevos exports:
+  `ENFORCED_FEATURES` (las 2 reales, únicas que se muestran como "incluidas") y `UPCOMING_FEATURES` (roadmap,
+  se muestran como "Próximamente": pagos online, facturación electrónica, multicanal completo, soporte
+  prioritario). Nombres/precios PYG/límites ya estaban alineados (2/2B) — solo las features estaban mock.
+- **`PlanComparison.tsx`:** `KEY_FEATURES` → solo `aiAssistant`+`marketingAutomation` (check/dash real por plan);
+  bloque "Próximamente" debajo del grid con `UPCOMING_FEATURES` (no por plan, no como incluidas).
+- **`billing/page.tsx`:** sección "Incluido en tu plan" → solo `ENFORCED_FEATURES`; nueva sección
+  "Próximamente" con `UPCOMING_FEATURES`. El `PlanGate` demo dejaba de prometer **facturación electrónica
+  "desde Growth"** (feature inexistente) → ahora gatea `marketingAutomation` (feature REAL, disponible en Pro+).
+- **PlanGate** sigue siendo solo UX (el backend valida seguridad); CTA de upgrade lleva a `/billing` donde la
+  activación de plan se solicita por WhatsApp (billing manual, muestra ₲). Enterprise = "A medida" / "Contactar".
+- **Verificación:** web typecheck 0, lint 0 err (1 warning pre-existente ajeno), sin tests frontend. Sin strings
+  de plan en USD; features futuras solo bajo "Próximamente".
+
+**Riesgos restantes 4 / pendiente para FRONTEND-UX-1:**
+1. **Landing (`apps/web/src/app/page.tsx` → `marketing/PricingSection.tsx`) NO tocada** (fuera de alcance: "no
+   tocar landing todavía"). **Tiene su propio copy desincronizado y con promesas falsas:** planes
+   "Inicial/Crecimiento/Escala" a ₲290.000/₲690.000/A medida (≠ Básico ₲150.000 / Pro ₲350.000 / Max ₲650.000
+   del backend) y features "WhatsApp + Instagram + Messenger" y "Soporte prioritario" como incluidas
+   (multiChannel/prioritySupport NO disponibles). **Alinear o marcar como roadmap en FRONTEND-UX-1 / fase de
+   landing.** Mismo cuidado en `login` splash y wizard `welcome` ("Conectá Instagram y Facebook" — hoy la
+   conexión Meta es para ads/atribución, no multicanal de mensajería).
+2. **`entitlements.ts` sigue parcialmente mock** para acciones no cableadas (`requestPlanChange`/`openBillingPortal`
+   devuelven `NotWired`; uso puntual de productos/usuarios/números en 0 hasta cablear `count()`). Es honesto
+   (no promete) pero queda para cuando el backend exponga esas lecturas como callables.
+3. La sección "Próximamente" es informativa; cuando el backend prenda una feature en un plan hay que moverla de
+   `UPCOMING_FEATURES` a las incluidas (queda centralizado en `entitlements.ts`).
+
 **Estado:** PLAN-LIMITS-1 (auditoría) + 2 (modelo) + 2B (moneda PYG) + 3A (gates orders/números) + 3B (gate
-multiChannel + featureOverrides; 5 features documentadas apagadas) cerrados. Sigue **PLAN-LIMITS-4** (frontend:
-espejo + alineado de features + textos/PlanGate por plan) y **PLAN-LIMITS-5** (e2e por plan).
+multiChannel + featureOverrides) + 4 (frontend billing/plans alineado) cerrados. Sigue **PLAN-LIMITS-5** (e2e por
+plan) y **FRONTEND-UX-1** (landing/copy + rediseño general del panel).

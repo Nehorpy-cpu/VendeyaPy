@@ -9,6 +9,7 @@ import {
   planById,
   requestPlanChange,
   formatPlanPrice,
+  UPCOMING_FEATURES,
   type PlanView,
 } from '@/lib/entitlements';
 import { CheckIcon } from '@/components/marketing/icons';
@@ -17,11 +18,11 @@ function lim(n: number) {
   return isUnlimited(n) ? '∞' : n.toLocaleString('es-PY');
 }
 
+// PLAN-LIMITS-4: solo las features REALMENTE enforceadas por el backend (no prometer las que están
+// en false). El resto (pagos/facturación/multicanal/soporte) se muestra abajo como "Próximamente".
 const KEY_FEATURES: { key: keyof PlanView['features']; label: string }[] = [
-  { key: 'multiChannel', label: 'Multicanal IG/Messenger' },
+  { key: 'aiAssistant', label: 'Asistente IA' },
   { key: 'marketingAutomation', label: 'Marketing y automatización' },
-  { key: 'electronicInvoicing', label: 'Facturación electrónica' },
-  { key: 'prioritySupport', label: 'Soporte prioritario' },
 ];
 
 export function PlanComparison({ currentPlanId }: { currentPlanId: string }) {
@@ -107,6 +108,22 @@ export function PlanComparison({ currentPlanId }: { currentPlanId: string }) {
             </div>
           );
         })}
+      </div>
+
+      {/* Roadmap: capacidades que aún no están disponibles en ningún plan (backend = false). */}
+      <div className="rounded-2xl border border-dashed border-ink-200 bg-ink-50/40 p-4">
+        <div className="flex items-center gap-2">
+          <span className="rounded-full bg-ink-100 px-2 py-0.5 text-[0.6rem] font-bold uppercase tracking-wide text-ink-500">Próximamente</span>
+          <span className="text-xs text-ink-500">en desarrollo — todavía no incluidas en ningún plan</span>
+        </div>
+        <ul className="mt-2 flex flex-wrap gap-x-4 gap-y-1">
+          {UPCOMING_FEATURES.map((f) => (
+            <li key={f.label} className="flex items-center gap-1.5 text-xs text-ink-500">
+              <span className="grid h-3.5 w-3.5 place-items-center text-ink-300">+</span>
+              {f.label}
+            </li>
+          ))}
+        </ul>
       </div>
 
       {note && (

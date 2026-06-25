@@ -64,8 +64,11 @@ const F = (over: Partial<PlanFeatures>): PlanFeatures => ({
 });
 
 /**
- * Catálogo de planes — valores de docs/planes-entitlements.md (matriz 5A).
- * Fuente de verdad real: `plans/{id}` en backend; esto es el espejo de marketing/UI.
+ * Catálogo de planes — espejo de `plans/plans.ts` del backend (fuente de verdad: `plans/{id}`).
+ * PLAN-LIMITS-4: `features` alineadas EXACTO con el backend. Hoy las únicas features enforceadas
+ * son `aiAssistant` (Básico+) y `marketingAutomation` (Pro+). Las demás (pagos/facturación/multicanal/
+ * soporte) están en `false` en TODOS los planes (ver `UPCOMING_FEATURES`): se muestran como
+ * "Próximamente", NUNCA como incluidas. No prometer features que el backend no habilita.
  */
 export const PLAN_CATALOG: PlanView[] = [
   {
@@ -86,7 +89,7 @@ export const PLAN_CATALOG: PlanView[] = [
     priceUsdPerMonth: 29,
     pricePygPerMonth: 150_000,
     limits: { maxProducts: 200, maxOrdersPerMonth: 500, maxWhatsappMessagesPerMonth: 5000, maxDeliveryPersons: 10, maxUsers: 5, maxWhatsappNumbers: 1, maxAdSyncsPerMonth: 0, maxAiTokensPerMonth: 50000 },
-    features: F({ bancard: true, stripe: true, localWallets: true, multiChannel: true, aiAssistant: true }),
+    features: F({ aiAssistant: true }),
   },
   {
     id: 'growth',
@@ -97,7 +100,7 @@ export const PLAN_CATALOG: PlanView[] = [
     pricePygPerMonth: 350_000,
     popular: true,
     limits: { maxProducts: 1000, maxOrdersPerMonth: 2000, maxWhatsappMessagesPerMonth: 20000, maxDeliveryPersons: 50, maxUsers: 15, maxWhatsappNumbers: 3, maxAdSyncsPerMonth: 30, maxAiTokensPerMonth: 250000 },
-    features: F({ bancard: true, stripe: true, localWallets: true, multiChannel: true, electronicInvoicing: true, marketingAutomation: true, aiAssistant: true }),
+    features: F({ aiAssistant: true, marketingAutomation: true }),
   },
   {
     id: 'pro',
@@ -107,7 +110,7 @@ export const PLAN_CATALOG: PlanView[] = [
     priceUsdPerMonth: 199,
     pricePygPerMonth: 650_000,
     limits: { maxProducts: 10000, maxOrdersPerMonth: 20000, maxWhatsappMessagesPerMonth: 100000, maxDeliveryPersons: 200, maxUsers: 50, maxWhatsappNumbers: 10, maxAdSyncsPerMonth: 300, maxAiTokensPerMonth: 1000000 },
-    features: F({ bancard: true, stripe: true, localWallets: true, multiChannel: true, electronicInvoicing: true, marketingAutomation: true, aiAssistant: true, prioritySupport: true }),
+    features: F({ aiAssistant: true, marketingAutomation: true }),
   },
   {
     id: 'enterprise',
@@ -118,7 +121,7 @@ export const PLAN_CATALOG: PlanView[] = [
     pricePygPerMonth: 0,
     customPrice: true,
     limits: { maxProducts: UNLIMITED, maxOrdersPerMonth: UNLIMITED, maxWhatsappMessagesPerMonth: UNLIMITED, maxDeliveryPersons: UNLIMITED, maxUsers: UNLIMITED, maxWhatsappNumbers: UNLIMITED, maxAdSyncsPerMonth: UNLIMITED, maxAiTokensPerMonth: UNLIMITED },
-    features: F({ bancard: true, stripe: true, localWallets: true, multiChannel: true, electronicInvoicing: true, marketingAutomation: true, aiAssistant: true, prioritySupport: true }),
+    features: F({ aiAssistant: true, marketingAutomation: true }),
   },
 ];
 
@@ -212,6 +215,26 @@ export const FEATURE_LABELS: Record<PlanFeatureKey, string> = {
   prioritySupport: 'Soporte prioritario',
   aiAssistant: 'Asistente IA',
 };
+
+/**
+ * Features REALMENTE enforceadas hoy por el backend (PLAN-LIMITS-2/3A/3B). Son las ÚNICAS que se
+ * muestran como "incluidas" por plan (check/dash). El resto del catálogo de `PlanFeatures` está en
+ * `false` en todos los planes → no se muestran como incluidas, sino en `UPCOMING_FEATURES`.
+ */
+export const ENFORCED_FEATURES: PlanFeatureKey[] = ['aiAssistant', 'marketingAutomation'];
+
+/**
+ * Roadmap: capacidades que el backend tiene en `false`/`planned`/`not_started` (PLAN-LIMITS-3B).
+ * Se muestran como "Próximamente" — NUNCA como incluidas en un plan. No prometer disponibilidad ni
+ * "desde el plan X". Cuando el backend implemente su gate y las prenda en un plan, pasan a la lista
+ * de features incluidas. Ver docs/plan-limits.md §11.
+ */
+export const UPCOMING_FEATURES: { label: string }[] = [
+  { label: 'Pagos online (Bancard, Stripe, billeteras locales)' },
+  { label: 'Facturación electrónica' },
+  { label: 'Multicanal completo: Instagram y Messenger' },
+  { label: 'Soporte prioritario' },
+];
 
 /** ¿El entitlement actual habilita esta feature? (rol/cuota se validan aparte/backend). */
 export function hasFeature(ent: ResolvedEntitlements | null | undefined, feature: PlanFeatureKey): boolean {

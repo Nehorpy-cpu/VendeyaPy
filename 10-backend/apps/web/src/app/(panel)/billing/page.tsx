@@ -10,7 +10,8 @@ import {
   planById,
   hasFeature,
   FEATURE_LABELS,
-  type PlanFeatureKey,
+  ENFORCED_FEATURES,
+  UPCOMING_FEATURES,
   type ResolvedEntitlements,
 } from '@/lib/entitlements';
 import { SubscriptionCard } from '@/components/billing/SubscriptionCard';
@@ -22,15 +23,6 @@ import { PlanBadge } from '@/components/billing/PlanBadge';
 import { ManualActivationPanel } from '@/components/billing/ManualActivationPanel';
 import { AdminActivationQueue } from '@/components/billing/AdminActivationQueue';
 import { CheckIcon } from '@/components/marketing/icons';
-
-const FEATURE_ORDER: PlanFeatureKey[] = [
-  'multiChannel',
-  'marketingAutomation',
-  'electronicInvoicing',
-  'aiAssistant',
-  'bancard',
-  'prioritySupport',
-];
 
 export default function BillingPage() {
   const { claims } = useAuth();
@@ -122,23 +114,35 @@ export default function BillingPage() {
             )}
           </section>
 
-          {/* Features del plan */}
+          {/* Features REALMENTE incluidas en el plan (solo las enforceadas por el backend). */}
           <section className="space-y-3">
             <h2 className="text-sm font-semibold uppercase tracking-wide text-ink-500">Incluido en tu plan</h2>
             <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-              {FEATURE_ORDER.map((f) => (
+              {ENFORCED_FEATURES.map((f) => (
                 <FeatureRow key={f} label={FEATURE_LABELS[f]} on={ent.features[f]} />
               ))}
             </div>
           </section>
 
-          {/* Ejemplo de estado bloqueado por plan (área "estados bloqueados") */}
+          {/* Roadmap: capacidades en desarrollo, todavía no incluidas en ningún plan (backend = false). */}
           <section className="space-y-3">
-            <h2 className="text-sm font-semibold uppercase tracking-wide text-ink-500">Funciones premium</h2>
+            <h2 className="text-sm font-semibold uppercase tracking-wide text-ink-500">Próximamente</h2>
+            <p className="text-xs text-ink-500">En desarrollo. Todavía no están disponibles en ningún plan; te avisamos cuando se habiliten.</p>
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+              {UPCOMING_FEATURES.map((f) => (
+                <UpcomingRow key={f.label} label={f.label} />
+              ))}
+            </div>
+          </section>
+
+          {/* Estado bloqueado por plan: ejemplo con una feature REAL gateada (marketing/automatización,
+              disponible desde el plan Pro). El backend sigue siendo la fuente de verdad de seguridad. */}
+          <section className="space-y-3">
+            <h2 className="text-sm font-semibold uppercase tracking-wide text-ink-500">Funciones por plan</h2>
             <PlanGate
-              allowed={hasFeature(ent, 'electronicInvoicing')}
-              title="Facturación electrónica"
-              requiredPlanLabel="Growth"
+              allowed={hasFeature(ent, 'marketingAutomation')}
+              title="Marketing y automatizaciones"
+              requiredPlanLabel="Pro"
               mode="block"
             >
               <PremiumPanelDemo ent={ent} />
@@ -182,12 +186,22 @@ function FeatureRow({ label, on }: { label: string; on: boolean }) {
   );
 }
 
+function UpcomingRow({ label }: { label: string }) {
+  return (
+    <div className="flex items-center gap-2.5 rounded-xl border border-dashed border-ink-200 bg-ink-50/40 px-3.5 py-2.5 text-sm">
+      <span className="grid h-6 w-6 shrink-0 place-items-center rounded-lg bg-ink-100 text-xs font-bold text-ink-400">+</span>
+      <span className="text-ink-500">{label}</span>
+      <span className="ml-auto shrink-0 rounded-full bg-ink-100 px-2 py-0.5 text-[0.6rem] font-bold uppercase tracking-wide text-ink-500">Próximamente</span>
+    </div>
+  );
+}
+
 function PremiumPanelDemo({ ent }: { ent: ResolvedEntitlements }) {
   return (
     <div className="rounded-2xl border border-ink-100 bg-white p-5 shadow-soft">
-      <h3 className="text-sm font-semibold text-ink-900">Facturación electrónica</h3>
+      <h3 className="text-sm font-semibold text-ink-900">Marketing y automatizaciones</h3>
       <p className="mt-1 text-sm text-ink-500">
-        Emití comprobantes fiscales automáticos por cada venta. Disponible en tu plan ({ent.tier}).
+        Seguimientos automáticos, sincronización de anuncios y respuestas ganadoras. Incluido en tu plan ({ent.tier}).
       </p>
     </div>
   );
