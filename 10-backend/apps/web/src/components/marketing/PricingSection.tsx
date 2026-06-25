@@ -1,6 +1,7 @@
 /**
  * Sección de planes. Tres etapas con el plan recomendado destacado.
- * CTA configurable (por defecto, agendar demo). Una sola capa de tarjeta.
+ * CTA de adquisición = "Probar gratis" → /register (Básico); Pro/Max = "Hablar con ventas" → #demo.
+ * Una sola capa de tarjeta.
  */
 import { cn } from '@/lib/cn';
 import { Reveal } from './Reveal';
@@ -28,8 +29,8 @@ const DEFAULT_PLANS: PricingPlan[] = [
     price: '₲ 150.000',
     period: '/mes',
     features: ['1 número de WhatsApp', 'Catálogo, pedidos y bot con asistente IA', 'Hasta 5 usuarios', 'Atribución de tus anuncios de Meta', 'Métricas de ventas y ganancia'],
-    cta: 'Empezar',
-    href: '#demo',
+    cta: 'Probar gratis',
+    href: '/register',
   },
   {
     name: 'Pro',
@@ -43,7 +44,7 @@ const DEFAULT_PLANS: PricingPlan[] = [
       'Tracking propio (cupones / QR)',
       'Hasta 15 usuarios con historial',
     ],
-    cta: 'Agendar demo',
+    cta: 'Hablar con ventas',
     href: '#demo',
     featured: true,
   },
@@ -143,9 +144,14 @@ export function PricingSection({
           <span className="font-semibold text-ink-900">Prueba gratis de 7 días</span> para arrancar ·{' '}
           <span className="font-semibold text-ink-900">Enterprise</span> a medida: multiempresa y límites por acuerdo.
         </p>
-        <a href="#demo" className="shrink-0 text-sm font-semibold text-mint-700 hover:text-mint-600">
-          Hablar con ventas →
-        </a>
+        <div className="flex shrink-0 items-center gap-4">
+          <a href="/register" className="text-sm font-semibold text-mint-700 hover:text-mint-600">
+            Probar gratis →
+          </a>
+          <a href="#demo" className="text-sm font-semibold text-ink-600 hover:text-ink-900">
+            Hablar con ventas →
+          </a>
+        </div>
       </div>
     </div>
   );

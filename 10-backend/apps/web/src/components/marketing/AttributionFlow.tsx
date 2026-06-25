@@ -22,7 +22,7 @@ export interface FlowStep {
 
 const DEFAULT_STEPS: FlowStep[] = [
   { icon: <MegaphoneIcon className="h-5 w-5" />, label: 'Meta Ad', value: '₲ 1.250.000', hint: 'Inversión campaña' },
-  { icon: <ChatIcon className="h-5 w-5" />, label: 'Conversación', value: '312 chats', hint: 'WhatsApp + IG' },
+  { icon: <ChatIcon className="h-5 w-5" />, label: 'Conversación', value: '312 chats', hint: 'Por WhatsApp' },
   { icon: <BagIcon className="h-5 w-5" />, label: 'Pedido', value: '88 pedidos', hint: 'Armados por el bot' },
   { icon: <CardIcon className="h-5 w-5" />, label: 'Pago', value: '₲ 9.4M', hint: 'Ingresos cobrados' },
   { icon: <TrendingIcon className="h-5 w-5" />, label: 'Ganancia', value: '₲ 3.6M', hint: 'Margen real', },

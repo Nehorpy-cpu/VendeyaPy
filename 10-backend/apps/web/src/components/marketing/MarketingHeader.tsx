@@ -9,7 +9,7 @@ const NAV_LINKS = [
   { label: 'Producto', href: '#producto' },
   { label: 'Diferencial', href: '#diferencial' },
   { label: 'Cómo funciona', href: '#como-funciona' },
-  { label: 'Pricing', href: '#pricing' },
+  { label: 'Planes', href: '#pricing' },
   { label: 'Demo', href: '#demo' },
 ];
 
@@ -60,8 +60,8 @@ export function MarketingHeader() {
           <Button href="/dashboard" variant="ghost" size="sm">
             Entrar al panel
           </Button>
-          <Button href="#demo" variant="primary" size="sm" withArrow>
-            Agendar demo
+          <Button href="/register" variant="primary" size="sm" withArrow>
+            Probar gratis
           </Button>
         </div>
 
@@ -94,8 +94,8 @@ export function MarketingHeader() {
               <Button href="/dashboard" variant="secondary" size="md" className="w-full">
                 Entrar al panel
               </Button>
-              <Button href="#demo" variant="primary" size="md" className="w-full" withArrow>
-                Agendar demo
+              <Button href="/register" variant="primary" size="md" className="w-full" withArrow>
+                Probar gratis
               </Button>
             </div>
           </nav>

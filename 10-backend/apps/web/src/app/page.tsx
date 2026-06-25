@@ -185,11 +185,11 @@ function Hero() {
             qué deja ganancia real.
           </p>
           <div className="mt-8 flex flex-col gap-3 sm:flex-row">
-            <Button href="#demo" variant="primary" size="lg" withArrow>
-              Agendar demo
+            <Button href="/register" variant="primary" size="lg" withArrow>
+              Probar gratis
             </Button>
-            <Button href="#como-funciona" variant="secondary" size="lg">
-              Ver cómo funciona
+            <Button href="#demo" variant="secondary" size="lg">
+              Agendar demo
             </Button>
           </div>
           <div className="mt-8 flex flex-wrap items-center gap-x-6 gap-y-2 text-sm text-ink-500">
@@ -306,7 +306,12 @@ function DifferentialShowcase() {
           />
           <div className="relative flex flex-col gap-10">
             <div className="flex flex-col gap-5 lg:max-w-2xl">
-              <Eyebrow tone="dark">De anuncio a ganancia real</Eyebrow>
+              <div className="flex flex-wrap items-center gap-3">
+                <Eyebrow tone="dark">De anuncio a ganancia real</Eyebrow>
+                <span className="inline-flex items-center gap-1.5 rounded-full bg-white/10 px-2.5 py-1 text-xs font-medium text-ink-200 ring-1 ring-inset ring-white/15">
+                  Datos de ejemplo
+                </span>
+              </div>
               <h2 className="text-balance text-3xl font-bold tracking-tight text-white sm:text-4xl">
                 Meta te muestra gasto.{' '}
                 <span className="text-gradient">AI_AFG te muestra ganancia.</span>

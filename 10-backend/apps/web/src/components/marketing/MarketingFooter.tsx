@@ -25,6 +25,7 @@ const COLUMNS = [
   {
     title: 'Empresa',
     links: [
+      { label: 'Probar gratis', href: '/register' },
       { label: 'Agendar demo', href: '#demo' },
       { label: 'Entrar al panel', href: '/dashboard' },
     ],
