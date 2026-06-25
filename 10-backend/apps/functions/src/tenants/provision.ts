@@ -85,6 +85,14 @@ export async function provisionTenantCore(input: ProvisionCoreInput): Promise<Pr
   const welcome = WELCOME_BY_INDUSTRY[input.industry ?? 'default'] ?? WELCOME_BY_INDUSTRY.default;
   const tenantRef = db().doc(paths.tenant(input.tenantId));
 
+  // TRIAL-ENFORCEMENT-1A: los tenants nuevos en `free` nacen con prueba de `Plan.trialDays` días.
+  // `endsAt = startedAt + trialDays`. El backend deriva el vencimiento (no se guarda status). Planes
+  // pagos (o `free` sin trialDays) no llevan `trial`.
+  const trial =
+    planId === 'free' && typeof plan.trialDays === 'number' && plan.trialDays > 0
+      ? { startedAt: now, endsAt: Timestamp.fromMillis(now.toMillis() + plan.trialDays * 86_400_000) }
+      : undefined;
+
   // 1) Reserva ATÓMICA del slug: create() falla si el doc ya existe (sin auto-sufijo).
   try {
     await tenantRef.create({
@@ -100,6 +108,7 @@ export async function provisionTenantCore(input: ProvisionCoreInput): Promise<Pr
       usage: { ordersThisMonth: 0, messagesThisMonth: 0, jobsThisMonth: 0, adSyncsThisMonth: 0, aiTokensThisMonth: 0, aiCostUsdThisMonth: 0, currentPeriodStart: now },
       subscription: { status: 'none', planId, stripeCustomerId: null, stripeSubscriptionId: null, currentPeriodEnd: null, updatedAt: now },
       onboarding: { completed: false, completedAt: null },
+      ...(trial ? { trial } : {}),
       industry: input.industry ?? null,
       createdAt: now,
       updatedAt: now,

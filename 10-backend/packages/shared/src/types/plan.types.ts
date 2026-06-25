@@ -40,10 +40,10 @@ export interface Plan {
   /** Precio comercial mensual en guaraníes (PLAN-LIMITS-2). Fuente de verdad para mostrar al cliente. */
   pricePygPerMonth?: number;
   /**
-   * Días de prueba gratis (PLAN-LIMITS-FREE-TRIAL). Solo el plan `free` lo define (7). Es METADATA:
-   * indica que el plan es una prueba acotada, no un plan gratuito permanente. El vencimiento automático
-   * del trial (auto-downgrade/lock al día 7) NO está implementado todavía — ver docs/plan-limits.md §13.
-   * Los planes pagos lo dejan `undefined` (no son trials).
+   * Días de prueba gratis (PLAN-LIMITS-FREE-TRIAL). Solo el plan `free` lo define (7). Determina
+   * `Tenant.trial.endsAt = startedAt + trialDays·días` en `provisionTenantCore`. El vencimiento SE ENFORCEA
+   * (TRIAL-ENFORCEMENT-1A): `resolveEntitlements` deriva `trialExpired` por fecha y bloquea acciones de uso.
+   * Ver docs/plan-limits.md §13 (matriz) y §14 (enforcement). Los planes pagos lo dejan `undefined`.
    */
   trialDays?: number;
   limits: PlanLimits;

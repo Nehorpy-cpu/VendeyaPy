@@ -134,6 +134,13 @@ export interface Tenant {
   subscription?: TenantSubscription;
   /** Estado del onboarding inicial (Fase registro). Solo Admin SDK lo escribe (completeOnboarding). */
   onboarding?: { completed: boolean; completedAt: Timestamp | null };
+  /**
+   * Prueba gratis (PLAN-LIMITS-FREE-TRIAL / TRIAL-ENFORCEMENT-1A). Server-set en `provisionTenantCore`
+   * para tenants nuevos en plan `free`: `endsAt = startedAt + Plan.trialDays`. El backend DERIVA si está
+   * vencido (`trial.endsAt < now`); NO se guarda un `status` que pueda quedar viejo. Solo Admin SDK lo
+   * escribe (rules lo bloquean para owner/seller/manager/viewer). Tenants pagos no lo tienen.
+   */
+  trial?: { startedAt: Timestamp; endsAt: Timestamp };
   /** Overrides de límites por tenant (Enterprise/deals a medida) — Fase 5A. Solo Admin SDK. */
   limitOverrides?: Partial<PlanLimits>;
   /** Overrides de features por tenant (demos/Enterprise/deals) — PLAN-LIMITS-3B. Solo Admin SDK.

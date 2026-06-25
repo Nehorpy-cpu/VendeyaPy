@@ -135,9 +135,11 @@ service cloud.firestore {
       // onboarding NO son editables desde el cliente — solo Cloud Functions (Admin SDK):
       // onboarding.completed lo marca el callable completeOnboarding (R-1/R-2). El frontend
       // nunca decide seguridad.
+      // `trial` (TRIAL-ENFORCEMENT-1A) y `featureOverrides` (PLAN-LIMITS-3B) son server-set: solo Admin SDK
+      // los escribe (provisionTenantCore / activación). El cliente —owner o admin— NO puede editarlos.
       allow update: if (isTenantOwner(tenantId) || isPlatformAdmin())
         && !request.resource.data.diff(resource.data).affectedKeys()
-            .hasAny(['planId', 'limits', 'limitOverrides', 'usage', 'subscription', 'status', 'isDemo', 'deletedAt', 'onboarding']);
+            .hasAny(['planId', 'limits', 'limitOverrides', 'featureOverrides', 'usage', 'subscription', 'status', 'isDemo', 'trial', 'deletedAt', 'onboarding']);
 
       // Creación y borrado: solo platform admin (vía Cloud Functions con Admin SDK)
       allow create, delete: if false;

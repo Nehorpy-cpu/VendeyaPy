@@ -356,4 +356,57 @@ free=1; tests 2/3 usan `limitOverrides`).
 
 **Estado:** PLAN-LIMITS-1 + 2 + 2B + 3A + 3B + 4 + FREE-TRIAL (free = prueba 7d) cerrados. Sigue **PLAN-LIMITS-5**
 (e2e por plan — script `verify-plan-matrix.mjs` listo) y **FRONTEND-UX-1** (landing/rediseño). Pendiente futuro:
-**enforcement del vencimiento del trial** (no implementado, ver gap arriba).
+**enforcement del vencimiento del trial** (cerrado en §14).
+
+## 14. TRIAL-ENFORCEMENT-1A — el vencimiento del free trial bloquea el uso (derivado por fecha)
+
+Cierra el GAP de §13: el `trialDays: 7` del free pasa de informativo a **enforcement real de backend**. Solo
+backend/shared/rules/e2e (sin frontend, sin deploy, sin secrets). **Estado DERIVADO por fecha**, no se persiste
+un `status` que pueda quedar viejo.
+
+**Campo nuevo `Tenant.trial?: { startedAt; endsAt }`** (server-set):
+- `provisionTenantCore` lo crea para tenants nuevos en `free`: `endsAt = startedAt + Plan.trialDays·días`.
+  Cubre self-service (`registerTenantOwner`) y alta admin (`provisionTenant`) — ambos pasan por el core.
+- Planes pagos / `free` sin `trialDays` → sin `trial`.
+
+**Cálculo CENTRALIZADO en `resolveEntitlements`** (un solo lugar, no duplicado):
+`trialExpired = selectedPlanId === 'free' && !isDemo && trial.endsAt < now`. Se expone en `Entitlements`. Un
+tenant que activa un plan pago cambia `planId` (≠ free) → `trialExpired` false automáticamente.
+
+**Enforcement DRY en los 2 gates base** (todo lo demás pasa por ahí):
+- `checkQuota` → si `trialExpired`: `{allowed:false, reason:'trial_expired'}`. Cubre **órdenes** (engine.ts
+  `checkQuota('orders')` → respuesta SEGURA al cliente, sin revelar el vencimiento), **bot/WhatsApp inbound**
+  (`checkTenantInboundGate` → no responde), y **writes con cuota** vía `assertWithinLimit` (productos, repartidores,
+  usuarios → `failed-precondition` "Tu prueba gratis terminó…").
+- `assertFeatureEnabled` → si `trialExpired`: lanza `failed-precondition`. Cubre **IA interna** (`assertAiBudget`)
+  y **jobs de marketing** (`runTenantJob`). No se tocó engine.ts/ai.ts/runTenantJob: heredan el gate.
+
+**NO se bloquea** (por diseño): `requestManualPlanActivation` y `manualBillingActivate` (no pasan por gates de
+uso) → el owner puede pedir activación y el admin activar aunque el trial esté vencido; los **reads** tampoco.
+Tras activar, `applySubscriptionUpdate` cambia `planId` + invalida el caché → la acción antes bloqueada vuelve a
+pasar (≤30s por el TTL del caché).
+
+**Rules:** `trial` y `featureOverrides` agregados a las claves prohibidas de update directo de `tenants/{id}`
+(antes `featureOverrides` quedaba escribible — hueco de 3B, también cerrado). Solo Admin SDK escribe esos campos;
+owner/seller/manager/viewer (client SDK) → 403.
+
+**Decisión — sin bypass de admin en los gates de uso:** PLATFORM_ADMIN no se thread-ea a `checkQuota`/
+`assertFeatureEnabled` (sería invasivo y el e2e no lo requiere). El admin igual opera **activación** (no gateada);
+si en el futuro se necesita que el admin haga acciones de USO sobre un tenant vencido sin activarlo primero, se
+agrega el rol a los gates → **TRIAL-ENFORCEMENT-1B**.
+
+**Tenants legacy sin `trial`:** `trialExpired` false → NO se bloquean en esta fase (no se migran automáticamente).
+**Producción debe decidir la migración** (backfill de `trial` a tenants free existentes) antes del launch.
+
+**E2E `verify-trial-enforcement.mjs` (10/10):** provisioning crea trial 7d; trial activo permite; vencido bloquea
+acción de uso + bot (sin filtrar al cliente); vencido permite request; admin activa; tras activar vuelve a pasar;
+owner/seller/manager/viewer no escriben `trial` (rules 403); legacy sin trial no se rompe. Tenants/usuarios
+efímeros (no toca perfumeria).
+
+**Riesgos restantes:** (1) **Migración legacy** pendiente para prod (backfill de `trial`). (2) **Caché de
+entitlements 30s** (en memoria por instancia): tras activar, el desbloqueo puede tardar ≤30s en instancias con
+caché stale (eventual-consistency existente, no nuevo). (3) **Sin bypass de admin** para acciones de uso (ver
+decisión). (4) El vencimiento NO envía aviso/recordatorio al owner (notificaciones = fase futura).
+
+**Estado:** TRIAL-ENFORCEMENT-1A cerrado (vencimiento del trial enforceado). Pendiente: migración legacy en prod,
+1B (bypass admin si se requiere), notificaciones de vencimiento, FRONTEND-UX-1.

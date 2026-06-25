@@ -23,7 +23,7 @@ export const reactivateTenant = (tenantId: string): Promise<void> => setTenantSt
 
 export interface TenantGate {
   allowed: boolean;
-  reason?: 'suspended' | 'message_limit';
+  reason?: 'suspended' | 'message_limit' | 'trial_expired';
 }
 
 /**
@@ -36,8 +36,10 @@ export async function checkTenantInboundGate(tenantId: string): Promise<TenantGa
   if (!snap.exists) return { allowed: true };
   const status = snap.data()?.status as TenantStatus | undefined;
   if (status === 'SUSPENDED' || status === 'DELETED') return { allowed: false, reason: 'suspended' };
+  // TRIAL-ENFORCEMENT-1A: checkQuota ya bloquea por prueba vencida (reason 'trial_expired'). El bot no
+  // responde; el motivo solo va al log (NUNCA se le revela al cliente final que el plan/trial venció).
   const q = await checkQuota(tenantId, 'messages');
-  if (!q.allowed) return { allowed: false, reason: q.reason === 'suspended' ? 'suspended' : 'message_limit' };
+  if (!q.allowed) return { allowed: false, reason: q.reason === 'suspended' ? 'suspended' : q.reason === 'trial_expired' ? 'trial_expired' : 'message_limit' };
   return { allowed: true };
 }
 

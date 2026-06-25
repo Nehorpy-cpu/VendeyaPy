@@ -24,6 +24,9 @@ export interface Entitlements {
   effectivePlanId: string;
   /** El billing degradó a free por falta de pago (selected != free y premium no permitido). */
   premiumSuspended: boolean;
+  /** Prueba gratis vencida (TRIAL-ENFORCEMENT-1A): planId 'free' + `trial.endsAt < now` + no demo.
+   *  Derivado por fecha (no se persiste). Bloquea acciones de uso; el owner igual puede pedir activación. */
+  trialExpired: boolean;
   tier: PlanTier;
   subscriptionStatus: SubscriptionStatus;
   isDemo: boolean;
@@ -58,12 +61,19 @@ export async function resolveEntitlements(tenantId: string): Promise<Entitlement
   const effPlan = (await getPlan(effectivePlanId)) ?? (await getPlan('free'));
   if (!effPlan) throw new Error('No se pudo resolver el plan base (free).');
 
+  // TRIAL-ENFORCEMENT-1A: prueba vencida = el tenant está en `free`, tiene `trial.endsAt` y ya pasó, y no
+  // es demo. DERIVADO por fecha (no hay status persistido). Un tenant pago tiene planId != 'free' (al activar,
+  // el plan cambia) → trialExpired false. Tenants legacy sin `trial` → false (no se bloquean en esta fase).
+  const trialEndsMs = tenant?.trial?.endsAt ? tenant.trial.endsAt.toMillis() : null;
+  const trialExpired = selectedPlanId === 'free' && !isDemo && trialEndsMs != null && trialEndsMs < now;
+
   const ent: Entitlements = {
     tenantId,
     selectedPlanId,
     planId: selectedPlanId,
     effectivePlanId,
     premiumSuspended,
+    trialExpired,
     tier: effPlan.tier,
     subscriptionStatus: status,
     isDemo,
@@ -112,7 +122,7 @@ const isCountMetric = (m: QuotaMetric): m is CountMetric => m === 'products' || 
 
 export interface QuotaResult {
   allowed: boolean;
-  reason: 'ok' | 'quota_exceeded' | 'suspended';
+  reason: 'ok' | 'quota_exceeded' | 'suspended' | 'trial_expired';
   used: number;
   limit: number;
   unlimited: boolean;
@@ -124,6 +134,8 @@ export async function checkQuota(tenantId: string, metric: QuotaMetric, delta = 
   await maybeResetUsage(tenantId);
   const ent = await resolveEntitlements(tenantId);
   if (!ent.posture.operational) return { allowed: false, reason: 'suspended', used: 0, limit: 0, unlimited: false, metric };
+  // TRIAL-ENFORCEMENT-1A: prueba gratis vencida → ninguna acción de uso (órdenes/mensajes/cuotas) pasa.
+  if (ent.trialExpired) return { allowed: false, reason: 'trial_expired', used: 0, limit: 0, unlimited: false, metric };
   const limit = ent.limits[QUOTA_LIMIT[metric]];
   let used: number;
   if (isCountMetric(metric)) {
@@ -146,6 +158,7 @@ export async function assertWithinLimit(tenantId: string, metric: QuotaMetric, o
   if (r.allowed) return;
   await auditBlock(tenantId, opts.actorUid, `Bloqueado por ${r.reason} (${metric}): ${r.used}/${r.limit}`, { metric, reason: r.reason, used: r.used, limit: r.limit });
   if (r.reason === 'suspended') throw new HttpsError('failed-precondition', 'La empresa está suspendida por billing.');
+  if (r.reason === 'trial_expired') throw new HttpsError('failed-precondition', 'Tu prueba gratis de 7 días terminó. Activá un plan para seguir usando la plataforma.');
   throw new HttpsError('resource-exhausted', `Alcanzaste el límite de tu plan (${metric}: ${r.limit}). Actualizá tu plan para continuar.`);
 }
 
@@ -156,6 +169,11 @@ export async function assertWithinLimit(tenantId: string, metric: QuotaMetric, o
 export async function assertFeatureEnabled(tenantId: string, feature: keyof PlanFeatures, opts: { actorUid?: string | null } = {}): Promise<void> {
   const ent = await resolveEntitlements(tenantId);
   if (isFeatureEnabled(ent.features, feature)) return;
+  // TRIAL-ENFORCEMENT-1A: prueba vencida → bloquea features de uso (IA/marketing) con motivo de trial.
+  if (ent.trialExpired) {
+    await auditBlock(tenantId, opts.actorUid, `Prueba gratis vencida: ${feature}`, { feature, reason: 'trial_expired' });
+    throw new HttpsError('failed-precondition', 'Tu prueba gratis de 7 días terminó. Activá un plan para usar esta función.');
+  }
   if (ent.premiumSuspended) {
     await auditBlock(tenantId, opts.actorUid, `Feature premium suspendida por billing (${ent.posture.reason}): ${feature}`, { feature, reason: 'billing_premium_suspended', billing: ent.posture.reason });
     throw new HttpsError('failed-precondition', 'Tu suscripción tiene un pago pendiente. Regularizá el pago para usar las funciones premium.');
