@@ -205,6 +205,8 @@ export interface ResolvedEntitlements {
   limits: PlanLimits;
   features: PlanFeatures;
   posture: BillingPosture;
+  /** Prueba gratis (TRIAL-ENFORCEMENT-1A/1B). Espejo de `Tenant.trial`; el estado se deriva con `lib/trial.ts`. */
+  trial?: Tenant['trial'];
 }
 
 export type PlanFeatureKey = keyof PlanFeatures;
@@ -385,6 +387,7 @@ export async function resolveEntitlements(tenantId: string): Promise<ResolvedEnt
     limits: (t?.limits as PlanLimits | undefined) ?? plan.limits,
     features: plan.features,
     posture: billingPosture(status, isDemo),
+    trial: t?.trial, // server-set; el estado (activo/vencido/días) se deriva con lib/trial.ts
   };
 }
 
