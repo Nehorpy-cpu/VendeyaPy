@@ -3,6 +3,7 @@
 import { useAuth } from '@/lib/auth-context';
 import { ROLE_LABELS } from '@/lib/roles';
 import { useActiveCompany } from '@/lib/active-company';
+import { NotificationBell } from '@/components/NotificationBell';
 
 export function Header() {
   const { user, claims, signOut } = useAuth();
@@ -35,6 +36,7 @@ export function Header() {
       </div>
 
       <div className="flex items-center gap-3">
+        <NotificationBell />
         <div className="hidden text-right sm:block">
           <div className="text-sm font-medium text-ink-800">{user?.email}</div>
           <div className="text-xs text-ink-500">
