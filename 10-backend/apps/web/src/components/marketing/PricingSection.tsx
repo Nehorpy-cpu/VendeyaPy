@@ -18,37 +18,41 @@ export interface PricingPlan {
   featured?: boolean;
 }
 
+// Matriz comercial REAL (PLAN-LIMITS-2/2B). Solo features que existen hoy: WhatsApp, catálogo/pedidos,
+// asistente IA, atribución de Meta Ads, y marketing/automatización (Pro+). No prometer pagos online,
+// facturación electrónica, multicanal IG/Messenger ni soporte prioritario (en desarrollo).
 const DEFAULT_PLANS: PricingPlan[] = [
   {
-    name: 'Inicial',
+    name: 'Básico',
     tagline: 'Para empezar a vender por WhatsApp sin perder pedidos.',
-    price: '₲ 290.000',
+    price: '₲ 150.000',
     period: '/mes',
-    features: ['1 número de WhatsApp', 'Catálogo y pedidos', 'Bot de respuestas', 'Hasta 2 vendedores', 'Métricas básicas'],
+    features: ['1 número de WhatsApp', 'Catálogo, pedidos y bot con asistente IA', 'Hasta 5 usuarios', 'Atribución de tus anuncios de Meta', 'Métricas de ventas y ganancia'],
     cta: 'Empezar',
     href: '#demo',
   },
   {
-    name: 'Crecimiento',
-    tagline: 'Atribución real: qué campaña deja ganancia, no solo clics.',
-    price: '₲ 690.000',
+    name: 'Pro',
+    tagline: 'Atribución real y automatización: qué campaña deja ganancia, no solo clics.',
+    price: '₲ 350.000',
     period: '/mes',
     features: [
-      'WhatsApp + Instagram + Messenger',
-      'Atribución anuncio → pedido → ganancia',
+      'Todo lo de Básico',
+      'Hasta 3 números de WhatsApp',
+      'Marketing y automatización (seguimientos)',
       'Tracking propio (cupones / QR)',
-      'Hasta 8 vendedores con historial',
-      'Growth Copilot y seguimientos',
+      'Hasta 15 usuarios con historial',
     ],
     cta: 'Agendar demo',
     href: '#demo',
     featured: true,
   },
   {
-    name: 'Escala',
-    tagline: 'Multiempresa y volumen, con soporte dedicado.',
-    price: 'A medida',
-    features: ['Multiempresa / multimarca', 'Usuarios y roles ilimitados', 'Integraciones y API', 'Reportes avanzados', 'Soporte prioritario'],
+    name: 'Max',
+    tagline: 'Alto volumen para negocios consolidados.',
+    price: '₲ 650.000',
+    period: '/mes',
+    features: ['Todo lo de Pro', 'Hasta 10 números de WhatsApp', 'Hasta 50 usuarios', 'Mayor volumen de mensajes y tokens de IA', 'Reportes de ganancia por campaña'],
     cta: 'Hablar con ventas',
     href: '#demo',
   },
@@ -65,8 +69,8 @@ export function PricingSection({
     <div className={cn('flex flex-col gap-12', className)}>
       <SectionHeading
         eyebrow="Planes para cada etapa"
-        title="Empezá chico, escalá cuando vendas más"
-        description="Sin permanencia. Cambiás de plan cuando tu operación lo pide. Precios en guaraníes, facturación mensual."
+        title="Empezá gratis, escalá cuando vendas más"
+        description="Probá con el plan gratis. Sin permanencia, cambiás de plan cuando tu operación lo pide. Precios en guaraníes, facturación mensual."
       />
       <div className="grid grid-cols-1 items-stretch gap-5 md:grid-cols-3">
         {plans.map((plan, i) => (
@@ -131,6 +135,17 @@ export function PricingSection({
             </div>
           </Reveal>
         ))}
+      </div>
+
+      {/* Prueba gratis + Enterprise: completan la matriz real sin sumar otra tarjeta. */}
+      <div className="flex flex-col items-center justify-between gap-3 rounded-2xl border border-ink-100 bg-ink-50/40 p-5 text-center sm:flex-row sm:text-left">
+        <p className="text-sm text-ink-600">
+          <span className="font-semibold text-ink-900">Prueba gratis</span> para arrancar ·{' '}
+          <span className="font-semibold text-ink-900">Enterprise</span> a medida: multiempresa y límites por acuerdo.
+        </p>
+        <a href="#demo" className="shrink-0 text-sm font-semibold text-mint-700 hover:text-mint-600">
+          Hablar con ventas →
+        </a>
       </div>
     </div>
   );

@@ -105,7 +105,7 @@ export default function LoginPage() {
 
           <ul className="flex flex-col gap-2.5 text-sm text-ink-100">
             {[
-              { icon: <ChatIcon className="h-4 w-4" />, text: 'WhatsApp, Instagram y Messenger en un flujo' },
+              { icon: <ChatIcon className="h-4 w-4" />, text: 'Vendé por WhatsApp en un solo flujo' },
               { icon: <TrendingIcon className="h-4 w-4" />, text: 'Atribución de anuncio a ganancia real' },
               { icon: <ShieldIcon className="h-4 w-4" />, text: 'Multiempresa y permisos por rol' },
             ].map((f) => (

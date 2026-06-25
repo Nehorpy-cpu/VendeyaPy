@@ -15,11 +15,11 @@ const COLUMNS = [
     ],
   },
   {
-    title: 'Canales',
+    title: 'Integraciones',
     links: [
-      { label: 'WhatsApp', href: '#producto' },
-      { label: 'Instagram', href: '#producto' },
-      { label: 'Messenger', href: '#producto' },
+      { label: 'WhatsApp Cloud API', href: '#producto' },
+      { label: 'Meta Ads', href: '#producto' },
+      { label: 'Instagram / Messenger (pronto)', href: '#producto' },
     ],
   },
   {
@@ -38,8 +38,8 @@ export function MarketingFooter() {
         <div className="col-span-2 flex flex-col gap-4">
           <Logo />
           <p className="max-w-xs text-sm leading-relaxed text-ink-500">
-            La plataforma que convierte conversaciones de WhatsApp, Instagram y Messenger en ventas y
-            ganancia medible.
+            La plataforma que convierte tus conversaciones de WhatsApp en ventas y ganancia medible, con
+            atribución de tus anuncios de Meta.
           </p>
           <div className="flex items-center gap-2">
             {[WhatsappIcon, InstagramIcon, MessengerIcon].map((Icon, i) => (

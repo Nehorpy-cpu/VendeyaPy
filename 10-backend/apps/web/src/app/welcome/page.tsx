@@ -133,8 +133,8 @@ export default function WelcomePage() {
             </Link>
             <Link href="/integrations" className="group rounded-xl border border-ink-200 bg-white p-4 transition hover:border-mint-400 hover:shadow-sm">
               <div className="text-2xl">📲</div>
-              <div className="mt-1 font-semibold text-ink-900">Conectá Instagram y Facebook</div>
-              <p className="mt-1 text-xs text-ink-500">Sumá Meta más adelante para recibir mensajes y medir tus anuncios.</p>
+              <div className="mt-1 font-semibold text-ink-900">Conectá tu cuenta de Meta</div>
+              <p className="mt-1 text-xs text-ink-500">Sumá Meta más adelante para medir y atribuir tus anuncios. La mensajería por Instagram y Messenger llega próximamente.</p>
             </Link>
           </div>
         </div>

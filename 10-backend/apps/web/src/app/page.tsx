@@ -32,7 +32,7 @@ import {
 export const metadata: Metadata = {
   title: 'AI_AFG — Vendé por WhatsApp y medí la ganancia real',
   description:
-    'AI_AFG conecta catálogo, bot, vendedores, pedidos y campañas para saber qué canal vende y qué deja ganancia real. Ventas por WhatsApp, Instagram y Messenger.',
+    'AI_AFG conecta catálogo, bot, vendedores, pedidos y campañas para saber qué deja ganancia real. Ventas por WhatsApp con atribución de tus anuncios de Meta.',
 };
 
 /* ------------------------------ data estática ----------------------------- */
@@ -62,7 +62,7 @@ const PILLARS: Feature[] = [
   {
     icon: <BotIcon className="h-5 w-5" />,
     title: 'Bot que vende',
-    description: 'Responde al instante, arma el pedido y coordina el pago en WhatsApp, Instagram y Messenger.',
+    description: 'Responde al instante, arma el pedido y coordina el pago por WhatsApp.',
     accent: 'mint',
   },
   {
@@ -126,7 +126,7 @@ const BENEFITS: Feature[] = [
 
 const STEPS = [
   { icon: <BagIcon className="h-5 w-5" />, title: 'Conectás tu catálogo', description: 'Cargás productos, precios y costos. El bot ya sabe qué ofrecer y a cuánto.' },
-  { icon: <ChatIcon className="h-5 w-5" />, title: 'Entran clientes por chat', description: 'Desde tus anuncios o tu perfil: WhatsApp, Instagram y Messenger en un solo flujo.' },
+  { icon: <ChatIcon className="h-5 w-5" />, title: 'Entran clientes por chat', description: 'Desde tus anuncios de Meta o tu número, te escriben por WhatsApp y todo queda en un solo flujo.' },
   { icon: <BotIcon className="h-5 w-5" />, title: 'El bot responde y arma pedidos', description: 'Contesta, sugiere, cierra la venta y deja todo registrado. Tus vendedores intervienen cuando suma.' },
   { icon: <ChartIcon className="h-5 w-5" />, title: 'El panel mide la ganancia real', description: 'Ventas, ingresos, costos, margen y qué campaña los generó. Decisiones con números.' },
 ];
@@ -175,7 +175,7 @@ function Hero() {
       <div className="bg-grid pointer-events-none absolute inset-0 opacity-[0.4]" aria-hidden />
       <div className="mk-container relative grid items-center gap-12 py-16 lg:grid-cols-[1.05fr_1fr] lg:gap-10 lg:py-24">
         <div className="flex flex-col items-start animate-fade-up">
-          <Eyebrow>Ventas por WhatsApp · Instagram · Messenger</Eyebrow>
+          <Eyebrow>Ventas por WhatsApp · Atribución de Meta Ads</Eyebrow>
           <h1 className="mt-5 text-balance text-4xl font-bold leading-[1.08] tracking-tight text-ink-900 sm:text-5xl lg:text-[3.4rem]">
             Convertí conversaciones de WhatsApp en{' '}
             <span className="text-gradient">ventas medibles</span>
@@ -215,15 +215,15 @@ function Hero() {
 function TrustStrip() {
   const channels = [
     { icon: <WhatsappIcon className="h-5 w-5" />, label: 'WhatsApp Cloud API' },
-    { icon: <InstagramIcon className="h-5 w-5" />, label: 'Instagram Direct' },
-    { icon: <MessengerIcon className="h-5 w-5" />, label: 'Messenger' },
     { icon: <MegaphoneIcon className="h-5 w-5" />, label: 'Meta Ads' },
+    { icon: <InstagramIcon className="h-5 w-5" />, label: 'Instagram · próximamente' },
+    { icon: <MessengerIcon className="h-5 w-5" />, label: 'Messenger · próximamente' },
   ];
   return (
     <section className="border-y border-ink-100 bg-ink-50/40">
       <div className="mk-container flex flex-col items-center gap-6 py-8 sm:flex-row sm:justify-between">
         <p className="text-sm font-medium text-ink-500">
-          Integrado con los canales donde ya te escriben tus clientes
+          Vendé por WhatsApp y medí tus anuncios de Meta. Más canales en camino.
         </p>
         <div className="flex flex-wrap items-center justify-center gap-x-6 gap-y-3">
           {channels.map((c) => (
