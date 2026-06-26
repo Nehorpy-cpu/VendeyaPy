@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import type { Promotion, Insight, Product, PromotionType, PromotionStatus } from '@vpw/shared';
 import { useActiveCompany } from '@/lib/active-company';
@@ -14,6 +14,7 @@ import {
   tsToDateInput,
   type PromotionInput,
 } from '@/lib/promotions';
+import { SectionHeader, EmptyState, SkeletonList, StatusBadge, ConfirmModal, type BadgeTone } from '@/components/ui';
 
 const API = process.env['NEXT_PUBLIC_API_BASE_URL'] ?? 'http://localhost:5001/demo-aiafg/us-central1';
 
@@ -30,15 +31,15 @@ const STATUS_LABEL: Record<PromotionStatus, string> = {
   PAUSED: 'Pausada',
   FINISHED: 'Finalizada',
 };
-const STATUS_STYLE: Record<PromotionStatus, string> = {
-  DRAFT: 'bg-gray-100 text-gray-600',
-  ACTIVE: 'bg-brand-100 text-brand-700',
-  PAUSED: 'bg-amber-100 text-amber-700',
-  FINISHED: 'bg-gray-100 text-gray-400',
+const STATUS_TONE: Record<PromotionStatus, BadgeTone> = {
+  DRAFT: 'ink',
+  ACTIVE: 'mint',
+  PAUSED: 'amber',
+  FINISHED: 'ink',
 };
 
-const field = 'w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-brand-500 focus:outline-none';
-const lbl = 'mb-1 block text-xs font-medium text-gray-600';
+const field = 'w-full rounded-lg border border-ink-200 px-3 py-2 text-sm text-ink-800 transition-colors focus:border-mint-500 focus:outline-none focus:ring-2 focus:ring-mint-500/30';
+const lbl = 'mb-1 block text-xs font-medium text-ink-600';
 
 export default function PromotionsPage() {
   const { tenantId, loading: companyLoading } = useActiveCompany();
@@ -88,10 +89,8 @@ export default function PromotionsPage() {
 
   const suggestions = suggestionsQ.data ?? [];
 
-  if (companyLoading) return <div className="text-gray-400">Cargando…</div>;
-  if (!tenantId) {
-    return <div className="rounded-xl border border-dashed border-gray-300 bg-white p-8 text-center text-sm text-gray-500">Seleccioná una empresa.</div>;
-  }
+  if (companyLoading) return <div className="text-sm text-ink-400">Cargando…</div>;
+  if (!tenantId) return <EmptyState title="Seleccioná una empresa" text="Elegí una empresa en la barra superior para gestionar sus promociones." />;
 
   const openNew = () => setForm({ open: true, promo: null, prefill: null, fromInsight: null });
   const openEdit = (p: Promotion) => setForm({ open: true, promo: p, prefill: null, fromInsight: null });
@@ -112,34 +111,35 @@ export default function PromotionsPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <h1 className="text-2xl font-bold text-gray-900">Promotion Strategy</h1>
-        <button onClick={openNew} className="rounded-lg bg-brand-600 px-4 py-2 text-sm font-semibold text-white hover:bg-brand-700">+ Nueva promo</button>
-      </div>
+      <SectionHeader
+        title="Promociones"
+        subtitle="Creá y seguí promos, o partí de una sugerencia del copiloto."
+        actions={<button onClick={openNew} className="rounded-lg bg-mint-600 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-mint-700">+ Nueva promo</button>}
+      />
 
       {/* Sugerencias por reglas */}
-      <section className="rounded-xl border border-gray-200 bg-white p-4">
+      <section className="rounded-2xl border border-ink-100 bg-white p-5 shadow-soft">
         <div className="mb-3 flex items-center justify-between">
-          <h2 className="text-sm font-semibold uppercase tracking-wide text-gray-500">💡 Sugerencias para vos</h2>
-          <button onClick={() => genMut.mutate()} disabled={genMut.isPending} className="text-xs text-brand-700 hover:underline disabled:opacity-50">
+          <h2 className="text-sm font-semibold uppercase tracking-wide text-ink-500">💡 Sugerencias para vos</h2>
+          <button onClick={() => genMut.mutate()} disabled={genMut.isPending} className="text-xs font-medium text-mint-700 hover:text-mint-600 disabled:opacity-50">
             {genMut.isPending ? 'Buscando…' : 'Actualizar sugerencias'}
           </button>
         </div>
         {suggestions.length === 0 ? (
-          <p className="text-sm text-gray-400">No hay sugerencias por ahora. Tocá “Actualizar sugerencias”.</p>
+          <p className="text-sm text-ink-400">No hay sugerencias por ahora. Tocá “Actualizar sugerencias”.</p>
         ) : (
           <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
             {suggestions.map((i) => (
-              <div key={i.id} className="rounded-lg border border-gray-200 p-3">
+              <div key={i.id} className="rounded-xl border border-ink-100 p-3">
                 <div className="flex items-start justify-between gap-2">
-                  <span className="font-medium text-gray-900">{i.title}</span>
-                  <span className={'shrink-0 rounded-full px-2 py-0.5 text-[10px] font-semibold ' + (i.priority === 'HIGH' ? 'bg-red-100 text-red-700' : 'bg-amber-100 text-amber-700')}>{i.priority === 'HIGH' ? 'urgente' : 'oportunidad'}</span>
+                  <span className="font-medium text-ink-900">{i.title}</span>
+                  <StatusBadge tone={i.priority === 'HIGH' ? 'coral' : 'amber'}>{i.priority === 'HIGH' ? 'urgente' : 'oportunidad'}</StatusBadge>
                 </div>
-                <p className="mt-1 text-xs text-gray-600">{i.description}</p>
-                <p className="mt-1 text-xs text-gray-500">📈 {i.estimatedImpact}</p>
+                <p className="mt-1 text-xs text-ink-600">{i.description}</p>
+                <p className="mt-1 text-xs text-ink-500">📈 {i.estimatedImpact}</p>
                 <div className="mt-2 flex gap-2">
-                  <button onClick={() => openFromInsight(i)} className="rounded-lg bg-brand-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-brand-700">Crear promo</button>
-                  <button onClick={() => dismissMut.mutate(i.id)} className="rounded-lg border border-gray-300 px-3 py-1.5 text-xs text-gray-600 hover:bg-gray-50">Descartar</button>
+                  <button onClick={() => openFromInsight(i)} className="rounded-lg bg-mint-600 px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-mint-700">Crear promo</button>
+                  <button onClick={() => dismissMut.mutate(i.id)} className="rounded-lg border border-ink-200 px-3 py-1.5 text-xs font-medium text-ink-600 transition-colors hover:bg-ink-50">Descartar</button>
                 </div>
               </div>
             ))}
@@ -148,16 +148,14 @@ export default function PromotionsPage() {
       </section>
 
       {/* Lista de promos */}
-      {promosQ.isLoading && <div className="text-gray-400">Cargando promociones…</div>}
+      {promosQ.isLoading && <SkeletonList rows={4} />}
       {promosQ.isSuccess && (promosQ.data?.length ?? 0) === 0 && (
-        <div className="rounded-xl border border-dashed border-gray-300 bg-white p-8 text-center text-sm text-gray-500">
-          Todavía no hay promociones. Creá una con “+ Nueva promo” o desde una sugerencia.
-        </div>
+        <EmptyState title="Todavía no hay promociones" text="Creá una con “+ Nueva promo” o desde una sugerencia del copiloto." />
       )}
       {promosQ.isSuccess && (promosQ.data?.length ?? 0) > 0 && (
-        <div className="overflow-x-auto rounded-xl border border-gray-200 bg-white">
+        <div className="overflow-x-auto rounded-2xl border border-ink-100 bg-white shadow-soft">
           <table className="min-w-full text-sm">
-            <thead className="border-b border-gray-200 bg-gray-50 text-left text-xs uppercase tracking-wide text-gray-500">
+            <thead className="border-b border-ink-100 bg-ink-50/60 text-left text-xs uppercase tracking-wide text-ink-400">
               <tr>
                 <th className="px-4 py-3">Promo</th>
                 <th className="px-4 py-3">Tipo</th>
@@ -168,23 +166,23 @@ export default function PromotionsPage() {
                 <th className="px-4 py-3"></th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-gray-100">
+            <tbody className="divide-y divide-ink-50">
               {promosQ.data!.map((p) => (
-                <tr key={p.id} className="hover:bg-gray-50">
-                  <td className="px-4 py-3"><div className="font-medium text-gray-900">{p.name}</div><div className="text-xs text-gray-500">{p.objective}</div></td>
-                  <td className="px-4 py-3">{TYPE_LABEL[p.type]}</td>
-                  <td className="px-4 py-3">{p.type === 'PERCENTAGE' ? `${p.discountValue}%` : p.type === 'FIXED_AMOUNT' ? `₲ ${p.discountValue.toLocaleString('es-PY')}` : '—'}</td>
-                  <td className="px-4 py-3 text-xs text-gray-600">{tsToDateInput(p.startDate) || '—'} → {tsToDateInput(p.endDate) || '—'}</td>
-                  <td className="px-4 py-3">{p.productIds?.length ?? 0}</td>
-                  <td className="px-4 py-3"><span className={'rounded-full px-2 py-0.5 text-xs font-medium ' + STATUS_STYLE[p.status]}>{STATUS_LABEL[p.status]}</span></td>
+                <tr key={p.id} className="hover:bg-ink-50/50">
+                  <td className="px-4 py-3"><div className="font-medium text-ink-900">{p.name}</div><div className="text-xs text-ink-500">{p.objective}</div></td>
+                  <td className="px-4 py-3 text-ink-700">{TYPE_LABEL[p.type]}</td>
+                  <td className="px-4 py-3 text-ink-700">{p.type === 'PERCENTAGE' ? `${p.discountValue}%` : p.type === 'FIXED_AMOUNT' ? `₲ ${p.discountValue.toLocaleString('es-PY')}` : '—'}</td>
+                  <td className="px-4 py-3 text-xs text-ink-600">{tsToDateInput(p.startDate) || '—'} → {tsToDateInput(p.endDate) || '—'}</td>
+                  <td className="px-4 py-3 text-ink-700">{p.productIds?.length ?? 0}</td>
+                  <td className="px-4 py-3"><StatusBadge tone={STATUS_TONE[p.status]}>{STATUS_LABEL[p.status]}</StatusBadge></td>
                   <td className="px-4 py-3 text-right whitespace-nowrap">
                     {p.status === 'ACTIVE' ? (
-                      <button onClick={() => statusMut.mutate({ p, status: 'PAUSED' })} className="mr-3 text-amber-600 hover:underline">Pausar</button>
+                      <button onClick={() => statusMut.mutate({ p, status: 'PAUSED' })} className="mr-3 font-medium text-amber-600 hover:text-amber-700">Pausar</button>
                     ) : p.status !== 'FINISHED' ? (
-                      <button onClick={() => statusMut.mutate({ p, status: 'ACTIVE' })} className="mr-3 text-brand-700 hover:underline">Activar</button>
+                      <button onClick={() => statusMut.mutate({ p, status: 'ACTIVE' })} className="mr-3 font-medium text-mint-700 hover:text-mint-600">Activar</button>
                     ) : null}
-                    <button onClick={() => openEdit(p)} className="mr-3 text-brand-700 hover:underline">Editar</button>
-                    <button onClick={() => setConfirmDel(p)} className="text-red-600 hover:underline">Finalizar</button>
+                    <button onClick={() => openEdit(p)} className="mr-3 font-medium text-mint-700 hover:text-mint-600">Editar</button>
+                    <button onClick={() => setConfirmDel(p)} className="font-medium text-coral-600 hover:text-coral-700">Finalizar</button>
                   </td>
                 </tr>
               ))}
@@ -205,16 +203,16 @@ export default function PromotionsPage() {
       )}
 
       {confirmDel && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-          <div className="w-full max-w-sm rounded-2xl bg-white p-6 shadow-xl">
-            <h3 className="text-base font-semibold text-gray-900">¿Finalizar promoción?</h3>
-            <p className="mt-2 text-sm text-gray-600">Vas a finalizar <span className="font-medium">{confirmDel.name}</span>. Dejará de estar activa y saldrá del listado (se conserva el historial).</p>
-            <div className="mt-5 flex justify-end gap-3">
-              <button onClick={() => setConfirmDel(null)} className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-100">Cancelar</button>
-              <button onClick={() => delMut.mutate(confirmDel.id)} disabled={delMut.isPending} className="rounded-lg bg-red-600 px-4 py-2 text-sm font-semibold text-white hover:bg-red-700 disabled:opacity-60">{delMut.isPending ? 'Finalizando…' : 'Finalizar'}</button>
-            </div>
-          </div>
-        </div>
+        <ConfirmModal
+          title="¿Finalizar promoción?"
+          confirmLabel="Finalizar"
+          danger
+          pending={delMut.isPending}
+          onCancel={() => setConfirmDel(null)}
+          onConfirm={() => delMut.mutate(confirmDel.id)}
+        >
+          Vas a finalizar <span className="font-medium text-ink-800">{confirmDel.name}</span>. Dejará de estar activa y saldrá del listado (se conserva el historial).
+        </ConfirmModal>
       )}
     </div>
   );
@@ -269,12 +267,12 @@ function PromoForm({
   const showDiscount = f.type === 'PERCENTAGE' || f.type === 'FIXED_AMOUNT';
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/40 p-4">
+    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-ink-950/40 p-4">
       <form
         onSubmit={(e) => { e.preventDefault(); onSubmit({ ...f, name: f.name.trim(), discountValue: showDiscount ? Number(f.discountValue) || 0 : 0 }); }}
-        className="my-8 w-full max-w-xl rounded-2xl bg-white p-6 shadow-xl"
+        className="my-8 w-full max-w-xl rounded-2xl border border-ink-100 bg-white p-6 shadow-float"
       >
-        <h2 className="mb-4 text-lg font-bold text-gray-900">{initial ? 'Editar promoción' : 'Nueva promoción'}</h2>
+        <h2 className="mb-4 text-lg font-bold text-ink-900">{initial ? 'Editar promoción' : 'Nueva promoción'}</h2>
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
           <div className="sm:col-span-2"><label className={lbl}>Nombre *</label><input className={field} required value={f.name} onChange={(e) => set('name', e.target.value)} /></div>
           <div><label className={lbl}>Tipo</label>
@@ -298,11 +296,11 @@ function PromoForm({
           <div className="sm:col-span-2"><label className={lbl}>Descripción</label><textarea className={field} rows={2} value={f.description} onChange={(e) => set('description', e.target.value)} /></div>
           <div className="sm:col-span-2">
             <label className={lbl}>Productos en la promo ({f.productIds.length})</label>
-            <div className="max-h-40 overflow-y-auto rounded-lg border border-gray-200 p-2">
-              {products.length === 0 && <p className="text-xs text-gray-400">No hay productos.</p>}
+            <div className="max-h-40 overflow-y-auto rounded-lg border border-ink-200 p-2">
+              {products.length === 0 && <p className="text-xs text-ink-400">No hay productos.</p>}
               {products.map((p) => (
-                <label key={p.id} className="flex items-center gap-2 py-0.5 text-sm text-gray-700">
-                  <input type="checkbox" checked={f.productIds.includes(p.id)} onChange={() => toggleProduct(p.id)} />
+                <label key={p.id} className="flex items-center gap-2 py-0.5 text-sm text-ink-700">
+                  <input type="checkbox" className="accent-mint-600" checked={f.productIds.includes(p.id)} onChange={() => toggleProduct(p.id)} />
                   {p.emoji} {p.name}
                 </label>
               ))}
@@ -310,8 +308,8 @@ function PromoForm({
           </div>
         </div>
         <div className="mt-6 flex justify-end gap-3">
-          <button type="button" onClick={onCancel} className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-100">Cancelar</button>
-          <button type="submit" disabled={saving} className="rounded-lg bg-brand-600 px-4 py-2 text-sm font-semibold text-white hover:bg-brand-700 disabled:opacity-60">{saving ? 'Guardando…' : 'Guardar'}</button>
+          <button type="button" onClick={onCancel} className="rounded-lg border border-ink-200 px-4 py-2 text-sm font-medium text-ink-700 transition-colors hover:bg-ink-50">Cancelar</button>
+          <button type="submit" disabled={saving} className="rounded-lg bg-mint-600 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-mint-700 disabled:opacity-60">{saving ? 'Guardando…' : 'Guardar'}</button>
         </div>
       </form>
     </div>
