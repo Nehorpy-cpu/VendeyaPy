@@ -89,7 +89,9 @@ export default function PromotionsPage() {
   });
 
   const suggestions = suggestionsQ.data ?? [];
-  // "Actualizar sugerencias" usa un endpoint dev (404 en prod). Solo en local/emulador.
+  // "Actualizar sugerencias" (generatePromotionSuggestions) NO tiene aún una acción de runTenantJob en
+  // el backend (panel/jobs.ts no la mapea). Sigue usando el endpoint dev (404 en prod) y queda visible
+  // solo en local/emulador hasta que el backend la exponga.
   const devTools = isDevToolingAllowed();
 
   if (companyLoading) return <div className="text-sm text-ink-400">Cargando…</div>;

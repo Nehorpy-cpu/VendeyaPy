@@ -36,8 +36,9 @@ export default function DecisionsPage() {
     onSuccess: invalidate,
   });
   const genMut = useMutation({ mutationFn: () => generateInsights(tenantId!), onSuccess: invalidate });
-  // "Actualizar acciones" usa un endpoint dev (404 en prod). Solo en local/emulador; el refresco
-  // real (job programado/autenticado) llega en GROWTH-JOBS-WIRING.
+  // "Actualizar acciones" (generateAllInsights) NO tiene aún una acción de runTenantJob en el backend
+  // (panel/jobs.ts no la mapea; solo existe el subconjunto 'generateFollowups'). Por eso sigue usando el
+  // endpoint dev (404 en prod) y queda visible solo en local/emulador hasta que el backend la exponga.
   const devTools = isDevToolingAllowed();
 
   const grouped = useMemo(() => {

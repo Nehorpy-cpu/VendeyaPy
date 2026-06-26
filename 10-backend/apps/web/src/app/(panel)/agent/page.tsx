@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import type { AgentConfig, BankAccount, Seller, AuditStatus } from '@vpw/shared';
 import { useActiveCompany } from '@/lib/active-company';
+import { useAuth } from '@/lib/auth-context';
 import {
   getAgentConfig,
   saveAgentConfig,
@@ -12,6 +13,7 @@ import {
   DEFAULT_AGENT,
 } from '@/lib/agent-config';
 import { listOpenAudits, setAuditStatus, generateAudits } from '@/lib/audits';
+import { canRunPanelJobs, friendlyJobError } from '@/lib/entitlements';
 import { isDevToolingAllowed } from '@/lib/integrations';
 import { AgentTestChat } from '@/components/AgentTestChat';
 import { SectionHeader, EmptyState, SkeletonList } from '@/components/ui';
@@ -21,6 +23,7 @@ const lbl = 'mb-1 block text-xs font-medium text-ink-600';
 
 export default function AgentPage() {
   const { tenantId, loading: companyLoading } = useActiveCompany();
+  const { claims } = useAuth();
   const qc = useQueryClient();
 
   const agentQ = useQuery({ queryKey: ['agentConfig', tenantId], queryFn: () => getAgentConfig(tenantId!), enabled: !!tenantId });
@@ -54,8 +57,10 @@ export default function AgentPage() {
   });
 
   const set = <K extends keyof AgentConfig>(k: K, v: AgentConfig[K]) => setAgent((s) => ({ ...s, [k]: v }));
-  // "Revisar ahora" (auditoría) y el chat de prueba en vivo usan endpoints dev (404 en prod).
-  // Solo en local/emulador; en prod se usa el Simulador del agente (callable real).
+  // "Revisar ahora" (auditoría) llama al callable real runTenantJob('generateAudits') → visible para
+  // roles con permiso de jobs (owner/manager/admin). El chat de prueba en vivo sigue usando devMessage
+  // (404 en prod): solo en local/emulador; en prod se apunta al Simulador (callable real).
+  const canJobs = canRunPanelJobs(claims.role);
   const devTools = isDevToolingAllowed();
 
   if (companyLoading) return <div className="text-sm text-ink-400">Cargando…</div>;
@@ -85,12 +90,15 @@ export default function AgentPage() {
             <span className="text-xs text-ink-500">
               {(auditsQ.data?.length ?? 0) === 0 ? '✓ Sin hallazgos.' : `${auditsQ.data!.length} hallazgo(s) para revisar.`}
             </span>
-            {devTools && (
+            {canJobs && (
               <button onClick={() => auditGenMut.mutate()} disabled={auditGenMut.isPending} className="text-xs font-medium text-mint-700 hover:text-mint-600 disabled:opacity-50">
                 {auditGenMut.isPending ? 'Revisando…' : 'Revisar ahora'}
               </button>
             )}
           </div>
+          {auditGenMut.isError && (
+            <p className="mb-2 rounded-lg bg-coral-50 px-3 py-2 text-xs text-coral-700 ring-1 ring-inset ring-coral-100">{friendlyJobError(auditGenMut.error)}</p>
+          )}
           <div className="space-y-2">
             {(auditsQ.data ?? []).map((a) => (
               <div key={a.id} className="flex items-start gap-2 rounded-xl border border-ink-100 p-2.5">

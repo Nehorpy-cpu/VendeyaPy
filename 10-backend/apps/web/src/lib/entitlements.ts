@@ -23,8 +23,9 @@ import type {
   Tenant,
 } from '@vpw/shared';
 import { doc, getDoc, collection, collectionGroup, query, where, orderBy, limit, getDocs } from 'firebase/firestore';
-import { httpsCallable } from 'firebase/functions';
+import { httpsCallable, type FunctionsError } from 'firebase/functions';
 import { firebaseDb, firebaseFunctions } from './firebase';
+import type { Role } from './auth-context';
 
 /** Sentinela de "ilimitado" (evita Infinity en Firestore). Ver doc 5A. */
 export const UNLIMITED = 1e9;
@@ -442,12 +443,41 @@ export async function getSubscription(tenantId: string): Promise<SubscriptionVie
 }
 
 /**
- * Dispara una acción de mantenimiento del tenant.
- * TODO(panel-backend): `httpsCallable(functions,'runTenantJob')({ action })`.
- * Por ahora MOCK (no toca backend ni Firestore).
+ * Roles que pueden ejecutar acciones del panel (mismo criterio que el backend `resolvePanelAuth`:
+ * PLATFORM_ADMIN / TENANT_OWNER / TENANT_MANAGER). Vendedor/lector: denegado. Se usa para mostrar u
+ * ocultar los botones de jobs; el backend igual revalida.
  */
-export async function runTenantJob(action: TenantJobAction): Promise<TenantJobResult> {
-  return { ok: true, action, result: { mock: true }, wired: false };
+const PANEL_JOB_ROLES: Role[] = ['PLATFORM_ADMIN', 'TENANT_OWNER', 'TENANT_MANAGER'];
+export function canRunPanelJobs(role: Role | null): boolean {
+  return !!role && PANEL_JOB_ROLES.includes(role);
+}
+
+/**
+ * Dispara una acción de mantenimiento del tenant vía el callable autenticado `runTenantJob`
+ * (GROWTH-JOBS-WIRING). Reemplaza los endpoints `dev*`. El backend autoriza por rol+tenant
+ * (panel/auth.ts) y aplica entitlements; acá NO se inventa lógica. `tenantId` es opcional para
+ * owner/manager (el backend usa el del token) y obligatorio para PLATFORM_ADMIN.
+ */
+export async function runTenantJob(action: TenantJobAction, tenantId?: string): Promise<TenantJobResult> {
+  const call = httpsCallable<{ action: TenantJobAction; tenantId?: string }, { ok: boolean; action: TenantJobAction; tenantId: string; result: unknown }>(
+    firebaseFunctions(),
+    'runTenantJob',
+  );
+  const res = await call(tenantId ? { action, tenantId } : { action });
+  return { ok: res.data.ok, action: res.data.action, result: res.data.result, wired: true };
+}
+
+/** Mapea errores del callable `runTenantJob` a mensajes claros en español para la UI. */
+export function friendlyJobError(e: unknown): string {
+  const err = e as Partial<FunctionsError> & { code?: string; message?: string };
+  const code = err?.code ?? '';
+  if (code === 'functions/permission-denied') return 'Tu rol no puede ejecutar esta acción.';
+  if (code === 'functions/failed-precondition') return err.message || 'Esta acción no está disponible para tu plan actual.';
+  if (code === 'functions/resource-exhausted') return 'Alcanzaste el límite de tu plan para esta acción este mes.';
+  if (code === 'functions/unavailable') return 'El servicio no está disponible por un momento. Probá de nuevo.';
+  if (code === 'functions/unauthenticated') return 'Iniciá sesión para continuar.';
+  if (code === 'functions/invalid-argument') return err.message || 'No se pudo ejecutar la acción.';
+  return err.message || 'No se pudo ejecutar la acción. Probá de nuevo.';
 }
 
 /** Resultado de una acción de billing que todavía NO está cableada (5B). */

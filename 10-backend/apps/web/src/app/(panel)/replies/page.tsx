@@ -6,7 +6,7 @@ import type { WinningReply } from '@vpw/shared';
 import { useActiveCompany } from '@/lib/active-company';
 import { useAuth } from '@/lib/auth-context';
 import { listReplies, upsertReply, archiveReply, generateReplies, type ReplyInput } from '@/lib/replies';
-import { isDevToolingAllowed } from '@/lib/integrations';
+import { canRunPanelJobs, friendlyJobError } from '@/lib/entitlements';
 import { SectionHeader, EmptyState, SkeletonList, StatusBadge } from '@/components/ui';
 
 const field = 'w-full rounded-lg border border-ink-200 px-3 py-2 text-sm text-ink-800 transition-colors focus:border-mint-500 focus:outline-none focus:ring-2 focus:ring-mint-500/30';
@@ -24,9 +24,9 @@ export default function RepliesPage() {
   const { tenantId, loading: companyLoading } = useActiveCompany();
   const { claims } = useAuth();
   const canEdit = claims.role !== 'SELLER';
-  // "Buscar ganadoras" usa un endpoint dev (404 en prod). Solo en local/emulador; el cableado real
-  // (job autenticado) llega en GROWTH-JOBS-WIRING. En prod, el CRUD manual sigue disponible.
-  const devTools = isDevToolingAllowed();
+  // "Buscar ganadoras" llama al callable real runTenantJob('generateWinningReplies'). Visible para
+  // roles que pueden ejecutar jobs (owner/manager/admin); el CRUD manual queda bajo canEdit.
+  const canJobs = canRunPanelJobs(claims.role);
   const qc = useQueryClient();
   const [form, setForm] = useState<{ open: boolean; r: WinningReply | null }>({ open: false, r: null });
 
@@ -48,7 +48,7 @@ export default function RepliesPage() {
         subtitle="Tu biblioteca de mensajes que funcionaron: guardalos a mano y reutilizalos."
         actions={canEdit && (
           <>
-            {devTools && (
+            {canJobs && (
               <button onClick={() => genMut.mutate()} disabled={genMut.isPending} className="rounded-lg border border-ink-200 px-3 py-2 text-sm font-medium text-ink-700 transition-colors hover:bg-ink-50 disabled:opacity-50">{genMut.isPending ? 'Buscando…' : '🏆 Buscar ganadoras'}</button>
             )}
             <button onClick={() => setForm({ open: true, r: null })} className="rounded-lg bg-mint-600 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-mint-700">+ Nueva</button>
@@ -56,9 +56,13 @@ export default function RepliesPage() {
         )}
       />
 
+      {genMut.isError && (
+        <p className="rounded-xl bg-coral-50 px-3.5 py-2.5 text-sm text-coral-700 ring-1 ring-inset ring-coral-100">{friendlyJobError(genMut.error)}</p>
+      )}
+
       {repliesQ.isLoading && <SkeletonList rows={4} />}
       {repliesQ.isSuccess && replies.length === 0 && (
-        <EmptyState title="Sin respuestas todavía" text={canEdit ? (devTools ? 'Tocá “Buscar ganadoras” o agregá una a mano.' : 'Agregá tu primera respuesta con “+ Nueva”.') : 'Aparecerán acá cuando el equipo registre mensajes que funcionaron.'} />
+        <EmptyState title="Sin respuestas todavía" text={canEdit ? (canJobs ? 'Tocá “Buscar ganadoras” o agregá una a mano.' : 'Agregá tu primera respuesta con “+ Nueva”.') : 'Aparecerán acá cuando el equipo registre mensajes que funcionaron.'} />
       )}
 
       <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">

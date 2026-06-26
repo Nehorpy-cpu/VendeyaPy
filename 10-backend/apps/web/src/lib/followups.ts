@@ -1,13 +1,13 @@
 /**
  * Capa de acceso a tareas de seguimiento (panel · P14).
- * Solo lectura + cambiar status (hecho/descartar). Generar = job dev (en prod, programado).
+ * Solo lectura + cambiar status (hecho/descartar). Generar = callable real `runTenantJob`.
  */
 
 import { collection, doc, getDocs, updateDoc, query, where, serverTimestamp } from 'firebase/firestore';
 import type { FollowUpTask, FollowUpStatus } from '@vpw/shared';
 import { firebaseDb } from './firebase';
+import { runTenantJob } from './entitlements';
 
-const API = process.env['NEXT_PUBLIC_API_BASE_URL'] ?? 'http://localhost:5001/demo-aiafg/us-central1';
 const tasksCol = (t: string) => collection(firebaseDb(), 'tenants', t, 'followUpTasks');
 
 /** Tareas pendientes (las hechas/descartadas no aparecen). */
@@ -23,10 +23,7 @@ export async function setTaskStatus(tenantId: string, id: string, status: Follow
   });
 }
 
+/** Genera tareas de seguimiento vía el callable real (acción `generateFollowups`). */
 export async function generateFollowups(tenantId: string): Promise<void> {
-  await fetch(`${API}/devGenerateFollowups`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ tenantId }),
-  });
+  await runTenantJob('generateFollowups', tenantId);
 }

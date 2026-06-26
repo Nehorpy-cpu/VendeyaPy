@@ -1,13 +1,13 @@
 /**
  * Capa de acceso a la auditoría del agente (panel · P16).
- * Solo lectura + cambiar status (resolver/descartar). Generar = job dev.
+ * Solo lectura + cambiar status (resolver/descartar). Generar = callable real `runTenantJob`.
  */
 
 import { collection, doc, getDocs, updateDoc, query, where, serverTimestamp } from 'firebase/firestore';
 import type { AgentAudit, AuditStatus } from '@vpw/shared';
 import { firebaseDb } from './firebase';
+import { runTenantJob } from './entitlements';
 
-const API = process.env['NEXT_PUBLIC_API_BASE_URL'] ?? 'http://localhost:5001/demo-aiafg/us-central1';
 const auditsCol = (t: string) => collection(firebaseDb(), 'tenants', t, 'agentAudits');
 
 export async function listOpenAudits(tenantId: string): Promise<AgentAudit[]> {
@@ -22,10 +22,7 @@ export async function setAuditStatus(tenantId: string, id: string, status: Audit
   });
 }
 
+/** Revisa la config del agente y genera hallazgos vía el callable real (acción `generateAudits`). */
 export async function generateAudits(tenantId: string): Promise<void> {
-  await fetch(`${API}/devGenerateAudits`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ tenantId }),
-  });
+  await runTenantJob('generateAudits', tenantId);
 }

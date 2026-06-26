@@ -11,8 +11,8 @@ import { collection, getDocs, query, orderBy } from 'firebase/firestore';
 import { httpsCallable } from 'firebase/functions';
 import type { TrackingSource, TrackingType } from '@vpw/shared';
 import { firebaseDb, firebaseFunctions } from './firebase';
+import { runTenantJob } from './entitlements';
 
-const API = process.env['NEXT_PUBLIC_API_BASE_URL'] ?? 'http://localhost:5001/demo-aiafg/us-central1';
 const col = (t: string) => collection(firebaseDb(), 'tenants', t, 'trackingSources');
 
 export async function listTrackingSources(tenantId: string): Promise<TrackingSource[]> {
@@ -54,6 +54,7 @@ export async function deleteTrackingSource(tenantId: string, id: string): Promis
   await call({ tenantId, id });
 }
 
+/** Recalcula el rollup de atribución por código vía el callable real (acción `computeTracking`). */
 export async function computeTracking(tenantId: string): Promise<void> {
-  await fetch(`${API}/devComputeTracking`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tenantId }) });
+  await runTenantJob('computeTracking', tenantId);
 }

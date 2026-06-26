@@ -11,8 +11,8 @@ import { collection, getDocs } from 'firebase/firestore';
 import { httpsCallable } from 'firebase/functions';
 import type { WinningReply } from '@vpw/shared';
 import { firebaseDb, firebaseFunctions } from './firebase';
+import { runTenantJob } from './entitlements';
 
-const API = process.env['NEXT_PUBLIC_API_BASE_URL'] ?? 'http://localhost:5001/demo-aiafg/us-central1';
 const repliesCol = (t: string) => collection(firebaseDb(), 'tenants', t, 'winningReplies');
 
 export async function listReplies(tenantId: string): Promise<WinningReply[]> {
@@ -54,10 +54,7 @@ export async function archiveReply(tenantId: string, id: string): Promise<void> 
   await call({ tenantId, id });
 }
 
+/** Mina respuestas ganadoras de conversaciones convertidas vía el callable real (`generateWinningReplies`). */
 export async function generateReplies(tenantId: string): Promise<void> {
-  await fetch(`${API}/devGenerateWinningReplies`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ tenantId }),
-  });
+  await runTenantJob('generateWinningReplies', tenantId);
 }
