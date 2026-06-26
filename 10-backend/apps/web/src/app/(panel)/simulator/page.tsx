@@ -110,8 +110,8 @@ function TestForm({ initial, saving, onCancel, onSubmit }: { initial: AgentTestC
   });
   const set = <K extends keyof TestCaseInput>(k: K, v: TestCaseInput[K]) => setF((s) => ({ ...s, [k]: v }));
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-ink-950/40 p-4">
-      <form onSubmit={(e) => { e.preventDefault(); onSubmit({ ...f, name: f.name.trim(), userMessage: f.userMessage.trim() }); }} className="my-8 w-full max-w-lg rounded-2xl border border-ink-100 bg-white p-6 shadow-float">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink-950/40 p-4">
+      <form onSubmit={(e) => { e.preventDefault(); onSubmit({ ...f, name: f.name.trim(), userMessage: f.userMessage.trim() }); }} className="max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-2xl border border-ink-100 bg-white p-6 shadow-float">
         <h2 className="mb-4 text-lg font-bold text-ink-900">{initial ? 'Editar caso' : 'Nuevo caso'}</h2>
         <div className="space-y-3">
           <div><label className={lbl}>Nombre *</label><input className={field} required value={f.name} onChange={(e) => set('name', e.target.value)} /></div>

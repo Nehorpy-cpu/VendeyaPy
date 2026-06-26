@@ -95,8 +95,8 @@ function TrackingForm({ initial, saving, onCancel, onSubmit }: { initial: Tracki
   const [f, setF] = useState<TrackingInput>({ ...(initial ? { id: initial.id } : {}), name: initial?.name ?? '', code: initial?.code ?? '', type: initial?.type ?? 'coupon', active: initial?.active ?? true });
   const lbl = 'mb-1 block text-xs font-medium text-ink-600';
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-ink-950/40 p-4">
-      <form onSubmit={(e) => { e.preventDefault(); onSubmit({ ...f, name: f.name.trim() }); }} className="my-8 w-full max-w-md rounded-2xl border border-ink-100 bg-white p-6 shadow-float">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink-950/40 p-4">
+      <form onSubmit={(e) => { e.preventDefault(); onSubmit({ ...f, name: f.name.trim() }); }} className="max-h-[90vh] w-full max-w-md overflow-y-auto rounded-2xl border border-ink-100 bg-white p-6 shadow-float">
         <h2 className="mb-4 text-lg font-bold text-ink-900">{initial ? 'Editar código' : 'Nuevo código'}</h2>
         <div className="space-y-3">
           <div><label className={lbl}>Nombre de la promo *</label><input className={field} required value={f.name} onChange={(e) => setF((s) => ({ ...s, name: e.target.value }))} placeholder="Promo Verano" /></div>

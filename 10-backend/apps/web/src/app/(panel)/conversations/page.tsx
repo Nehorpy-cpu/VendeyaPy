@@ -6,6 +6,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import type { Customer, Message } from '@vpw/shared';
 import { useActiveCompany } from '@/lib/active-company';
 import { useAuth } from '@/lib/auth-context';
+import { cn } from '@/lib/cn';
 import {
   listConversations,
   getCustomer,
@@ -114,9 +115,9 @@ function ConversationsInner() {
         <p className="mt-1 text-sm text-ink-500">La bandeja de tu bot en WhatsApp. Tomá una charla para atenderla vos.</p>
       </div>
 
-      <div className="grid h-[34rem] grid-cols-1 gap-4 md:grid-cols-3">
-        {/* Lista */}
-        <div className="flex flex-col overflow-hidden rounded-2xl border border-ink-100 bg-white shadow-soft md:col-span-1">
+      <div className="grid h-[70vh] grid-cols-1 gap-4 md:h-[34rem] md:grid-cols-3">
+        {/* Lista — en mobile se oculta cuando hay un chat abierto (patrón list-or-chat) */}
+        <div className={cn('flex-col overflow-hidden rounded-2xl border border-ink-100 bg-white shadow-soft md:col-span-1 md:flex', selected ? 'hidden md:flex' : 'flex')}>
           <label className="flex items-center gap-2 border-b border-ink-100 px-4 py-2.5 text-xs text-ink-600">
             <input type="checkbox" checked={onlyMine} onChange={(e) => setOnlyMine(e.target.checked)} className="accent-mint-600" />
             Solo mis chats (asignados a mí)
@@ -162,8 +163,8 @@ function ConversationsInner() {
           </div>
         </div>
 
-        {/* Chat */}
-        <div className="flex flex-col overflow-hidden rounded-2xl border border-ink-100 bg-white shadow-soft md:col-span-2">
+        {/* Chat — en mobile solo se muestra cuando hay un chat seleccionado */}
+        <div className={cn('flex-col overflow-hidden rounded-2xl border border-ink-100 bg-white shadow-soft md:col-span-2 md:flex', selected ? 'flex' : 'hidden md:flex')}>
           {!selected && (
             <div className="flex flex-1 items-center justify-center px-6 text-center text-sm text-ink-400">
               Elegí una conversación de la izquierda.
@@ -171,14 +172,23 @@ function ConversationsInner() {
           )}
           {selected && (
             <>
-              <div className="flex items-center justify-between border-b border-ink-100 px-4 py-3">
-                <div>
-                  <div className="font-semibold text-ink-900">{current ? name(current) : selected}</div>
-                  <div className="text-xs text-ink-400">
-                    {isHuman ? '🧑‍💼 Lo atiende un vendedor (bot en pausa)' : '🤖 Lo atiende el bot'}
+              <div className="flex items-center justify-between gap-2 border-b border-ink-100 px-4 py-3">
+                <div className="flex min-w-0 items-center gap-2">
+                  <button
+                    onClick={() => setSelected(null)}
+                    aria-label="Volver a la lista"
+                    className="grid h-8 w-8 shrink-0 place-items-center rounded-lg text-ink-500 transition-colors hover:bg-ink-50 md:hidden"
+                  >
+                    ←
+                  </button>
+                  <div className="min-w-0">
+                    <div className="truncate font-semibold text-ink-900">{current ? name(current) : selected}</div>
+                    <div className="text-xs text-ink-400">
+                      {isHuman ? '🧑‍💼 Lo atiende un vendedor (bot en pausa)' : '🤖 Lo atiende el bot'}
+                    </div>
                   </div>
                 </div>
-                <div className="flex gap-2">
+                <div className="flex shrink-0 gap-2">
                   {isHuman ? (
                     <button
                       onClick={() => releaseMut.mutate()}

@@ -83,8 +83,8 @@ export default function RepliesPage() {
 function ReplyForm({ initial, saving, onCancel, onSubmit }: { initial: WinningReply | null; saving: boolean; onCancel: () => void; onSubmit: (input: ReplyInput) => void }) {
   const [f, setF] = useState<ReplyInput>({ ...(initial ? { id: initial.id } : {}), text: initial?.text ?? '', category: initial?.category ?? 'General' });
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-ink-950/40 p-4">
-      <form onSubmit={(e) => { e.preventDefault(); onSubmit({ ...f, text: f.text.trim() }); }} className="my-8 w-full max-w-lg rounded-2xl border border-ink-100 bg-white p-6 shadow-float">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink-950/40 p-4">
+      <form onSubmit={(e) => { e.preventDefault(); onSubmit({ ...f, text: f.text.trim() }); }} className="max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-2xl border border-ink-100 bg-white p-6 shadow-float">
         <h2 className="mb-4 text-lg font-bold text-ink-900">{initial ? 'Editar respuesta' : 'Nueva respuesta'}</h2>
         <div className="space-y-3">
           <div><label className="mb-1 block text-xs font-medium text-ink-600">Categoría</label><input className={field} value={f.category} onChange={(e) => setF((s) => ({ ...s, category: e.target.value }))} placeholder="Saludo, Cierre, Objeción…" /></div>

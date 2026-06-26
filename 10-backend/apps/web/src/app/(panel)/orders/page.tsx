@@ -154,8 +154,8 @@ export default function OrdersPage() {
       )}
 
       {detail && (
-        <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-ink-950/40 p-4" onClick={() => setDetail(null)}>
-          <div className="my-8 w-full max-w-lg rounded-2xl border border-ink-100 bg-white p-6 shadow-float" onClick={(e) => e.stopPropagation()}>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink-950/40 p-4" onClick={() => setDetail(null)}>
+          <div className="max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-2xl border border-ink-100 bg-white p-6 shadow-float" onClick={(e) => e.stopPropagation()}>
             <div className="mb-4 flex items-center justify-between">
               <h2 className="text-lg font-bold text-ink-900">Pedido <span className="font-mono text-sm text-ink-500">{detail.id.slice(0, 12)}…</span></h2>
               <button onClick={() => setDetail(null)} className="grid h-8 w-8 place-items-center rounded-lg text-ink-400 transition-colors hover:bg-ink-50 hover:text-ink-700" aria-label="Cerrar">✕</button>
