@@ -184,6 +184,9 @@ export function ProductForm({ initial, initialCost, initialPriority, categories,
           </div>
           <div className="sm:col-span-2">
             <label className={lbl}>Notas para la IA (el agente las usa para recomendar)</label>
+            <p className="mb-1.5 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+              ⚠️ Este contenido puede ser usado por el bot al responder a clientes. No incluyas costos, márgenes, datos internos, campañas privadas ni información sensible.
+            </p>
             <textarea className={field} rows={2} value={f.aiNotes} onChange={(e) => set('aiNotes', e.target.value)} placeholder="Beneficios, público ideal, cuándo recomendarlo…" />
           </div>
           <label className="flex items-center gap-2 text-sm text-ink-700">

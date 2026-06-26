@@ -6,6 +6,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import type { Insight, InsightType, InsightStatus } from '@vpw/shared';
 import { useActiveCompany } from '@/lib/active-company';
 import { listPendingInsights, setInsightStatus, generateInsights } from '@/lib/insights';
+import { isDevToolingAllowed } from '@/lib/integrations';
 import { SectionHeader, EmptyState, SkeletonList } from '@/components/ui';
 
 const TYPE_LABEL: Record<string, string> = {
@@ -35,6 +36,9 @@ export default function DecisionsPage() {
     onSuccess: invalidate,
   });
   const genMut = useMutation({ mutationFn: () => generateInsights(tenantId!), onSuccess: invalidate });
+  // "Actualizar acciones" usa un endpoint dev (404 en prod). Solo en local/emulador; el refresco
+  // real (job programado/autenticado) llega en GROWTH-JOBS-WIRING.
+  const devTools = isDevToolingAllowed();
 
   const grouped = useMemo(() => {
     const list = insightsQ.data ?? [];
@@ -54,15 +58,17 @@ export default function DecisionsPage() {
         title="Acciones de hoy"
         subtitle={total === 0 ? 'Sin acciones pendientes.' : `Tenés ${total} acción(es) recomendada(s).`}
         actions={
-          <button onClick={() => genMut.mutate()} disabled={genMut.isPending} className="rounded-lg bg-mint-600 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-mint-700 disabled:opacity-60">
-            {genMut.isPending ? 'Buscando…' : 'Actualizar acciones'}
-          </button>
+          devTools ? (
+            <button onClick={() => genMut.mutate()} disabled={genMut.isPending} className="rounded-lg bg-mint-600 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-mint-700 disabled:opacity-60">
+              {genMut.isPending ? 'Buscando…' : 'Actualizar acciones'}
+            </button>
+          ) : undefined
         }
       />
 
       {insightsQ.isLoading && <SkeletonList rows={4} />}
       {insightsQ.isSuccess && total === 0 && (
-        <EmptyState title="¡Todo al día! 🎉" text="No hay acciones pendientes. Tocá “Actualizar acciones” para volver a revisar." />
+        <EmptyState title="¡Todo al día! 🎉" text={devTools ? 'No hay acciones pendientes. Tocá “Actualizar acciones” para volver a revisar.' : 'No hay acciones pendientes por ahora.'} />
       )}
 
       {TYPE_ORDER.filter((t) => grouped[t]?.length).map((t) => (

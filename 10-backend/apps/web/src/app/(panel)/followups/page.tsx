@@ -7,6 +7,7 @@ import type { FollowUpTask, FollowUpType, FollowUpStatus } from '@vpw/shared';
 import { useActiveCompany } from '@/lib/active-company';
 import { useAuth } from '@/lib/auth-context';
 import { listFollowUpTasks, setTaskStatus, generateFollowups } from '@/lib/followups';
+import { isDevToolingAllowed } from '@/lib/integrations';
 import { SectionHeader, EmptyState, SkeletonList } from '@/components/ui';
 
 const TYPE_LABEL: Record<FollowUpType, string> = {
@@ -40,6 +41,8 @@ export default function FollowupsPage() {
   const invalidate = () => qc.invalidateQueries({ queryKey: ['followups', tenantId] });
   const statusMut = useMutation({ mutationFn: ({ id, status }: { id: string; status: FollowUpStatus }) => setTaskStatus(tenantId!, id, status), onSuccess: invalidate });
   const genMut = useMutation({ mutationFn: () => generateFollowups(tenantId!), onSuccess: invalidate });
+  // "Actualizar tareas" usa un endpoint dev (404 en prod). Solo en local/emulador.
+  const devTools = isDevToolingAllowed();
 
   const visible = useMemo(() => {
     const list = tasksQ.data ?? [];
@@ -61,16 +64,18 @@ export default function FollowupsPage() {
             <label className="flex items-center gap-2 text-xs text-ink-600">
               <input type="checkbox" className="accent-mint-600" checked={onlyMine} onChange={(e) => setOnlyMine(e.target.checked)} /> Mis tareas
             </label>
-            <button onClick={() => genMut.mutate()} disabled={genMut.isPending} className="rounded-lg bg-mint-600 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-mint-700 disabled:opacity-60">
-              {genMut.isPending ? 'Buscando…' : 'Actualizar tareas'}
-            </button>
+            {devTools && (
+              <button onClick={() => genMut.mutate()} disabled={genMut.isPending} className="rounded-lg bg-mint-600 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-mint-700 disabled:opacity-60">
+                {genMut.isPending ? 'Buscando…' : 'Actualizar tareas'}
+              </button>
+            )}
           </>
         }
       />
 
       {tasksQ.isLoading && <SkeletonList rows={4} />}
       {tasksQ.isSuccess && visible.length === 0 && (
-        <EmptyState title="¡Sin pendientes! ✅" text={onlyMine ? 'No tenés tareas asignadas.' : 'Tocá “Actualizar tareas” para revisar si hay seguimientos nuevos.'} />
+        <EmptyState title="¡Sin pendientes! ✅" text={onlyMine ? 'No tenés tareas asignadas.' : (devTools ? 'Tocá “Actualizar tareas” para revisar si hay seguimientos nuevos.' : 'No hay seguimientos pendientes por ahora.')} />
       )}
 
       <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">

@@ -12,6 +12,7 @@ import {
   DEFAULT_AGENT,
 } from '@/lib/agent-config';
 import { listOpenAudits, setAuditStatus, generateAudits } from '@/lib/audits';
+import { isDevToolingAllowed } from '@/lib/integrations';
 import { AgentTestChat } from '@/components/AgentTestChat';
 import { SectionHeader, EmptyState, SkeletonList } from '@/components/ui';
 
@@ -53,6 +54,9 @@ export default function AgentPage() {
   });
 
   const set = <K extends keyof AgentConfig>(k: K, v: AgentConfig[K]) => setAgent((s) => ({ ...s, [k]: v }));
+  // "Revisar ahora" (auditoría) y el chat de prueba en vivo usan endpoints dev (404 en prod).
+  // Solo en local/emulador; en prod se usa el Simulador del agente (callable real).
+  const devTools = isDevToolingAllowed();
 
   if (companyLoading) return <div className="text-sm text-ink-400">Cargando…</div>;
   if (!tenantId) return <EmptyState title="Seleccioná una empresa" text="Elegí una empresa en la barra superior para configurar su agente." />;
@@ -81,9 +85,11 @@ export default function AgentPage() {
             <span className="text-xs text-ink-500">
               {(auditsQ.data?.length ?? 0) === 0 ? '✓ Sin hallazgos.' : `${auditsQ.data!.length} hallazgo(s) para revisar.`}
             </span>
-            <button onClick={() => auditGenMut.mutate()} disabled={auditGenMut.isPending} className="text-xs font-medium text-mint-700 hover:text-mint-600 disabled:opacity-50">
-              {auditGenMut.isPending ? 'Revisando…' : 'Revisar ahora'}
-            </button>
+            {devTools && (
+              <button onClick={() => auditGenMut.mutate()} disabled={auditGenMut.isPending} className="text-xs font-medium text-mint-700 hover:text-mint-600 disabled:opacity-50">
+                {auditGenMut.isPending ? 'Revisando…' : 'Revisar ahora'}
+              </button>
+            )}
           </div>
           <div className="space-y-2">
             {(auditsQ.data ?? []).map((a) => (
@@ -139,11 +145,13 @@ export default function AgentPage() {
 
         {/* Reglas de venta */}
         <Section title="Reglas de venta (las usará el cerebro de IA)">
-          <textarea className={field} rows={4} value={agent.salesRules} onChange={(e) => set('salesRules', e.target.value)} placeholder="Ej: priorizar productos con buen margen; no descontar bajo el costo; ofrecer alternativa si no hay stock…" />
+          <ClientVisibleWarning />
+          <textarea className={field} rows={4} value={agent.salesRules} onChange={(e) => set('salesRules', e.target.value)} placeholder="Ej: ofrecé una alternativa si no hay stock; sé breve y amable; pedí el dato de envío antes de cerrar…" />
         </Section>
 
         {/* FAQ */}
         <Section title="Preguntas frecuentes">
+          <ClientVisibleWarning />
           {agent.faq.map((item, i) => (
             <div key={i} className="mb-2 flex gap-2">
               <input className={field} placeholder="Pregunta" value={item.q} onChange={(e) => set('faq', agent.faq.map((x, j) => j === i ? { ...x, q: e.target.value } : x))} />
@@ -187,10 +195,22 @@ export default function AgentPage() {
       {/* Chat de prueba */}
       <div className="xl:col-span-1">
         <div className="sticky top-4">
-          <AgentTestChat tenantId={tenantId} />
-          <p className="mt-2 text-xs text-ink-400">
-            Guardá los cambios para que el chat de prueba use la nueva configuración.
-          </p>
+          {devTools ? (
+            <>
+              <AgentTestChat tenantId={tenantId} />
+              <p className="mt-2 text-xs text-ink-400">
+                Guardá los cambios para que el chat de prueba use la nueva configuración.
+              </p>
+            </>
+          ) : (
+            <div className="rounded-xl border border-ink-200 bg-white p-5 text-sm text-ink-600 shadow-soft">
+              <div className="mb-1 font-semibold text-ink-800">🧪 Probá tu agente</div>
+              <p className="text-xs text-ink-500">
+                Guardá los cambios y probá cómo responde el bot desde el{' '}
+                <a href="/simulator" className="font-medium text-mint-700 hover:text-mint-600">Simulador del agente</a>. Corre el mismo bot que WhatsApp, sin enviar mensajes reales.
+              </p>
+            </div>
+          )}
         </div>
       </div>
     </div>
@@ -203,5 +223,14 @@ function Section({ title, children }: { title: string; children: React.ReactNode
       <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-ink-500">{title}</h2>
       {children}
     </div>
+  );
+}
+
+/** Aviso para campos de texto libre que el bot puede mostrarle al cliente (salesRules, FAQ, notas IA). */
+function ClientVisibleWarning() {
+  return (
+    <p className="mb-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+      ⚠️ Este contenido puede ser usado por el bot al responder a clientes. No incluyas costos, márgenes, datos internos, campañas privadas ni información sensible.
+    </p>
   );
 }

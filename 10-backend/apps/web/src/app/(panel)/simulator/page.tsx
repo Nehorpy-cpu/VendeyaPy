@@ -42,7 +42,7 @@ export default function SimulatorPage() {
     <div className="space-y-6">
       <SectionHeader
         title="Simulador del agente"
-        subtitle="Guardá escenarios y corrélos contra el bot para ver cómo responde."
+        subtitle="Guardá escenarios y corrélos contra el bot real para ver cómo responde."
         actions={
           <>
             <button onClick={() => seedMut.mutate()} disabled={seedMut.isPending} className="rounded-lg border border-ink-200 px-3 py-2 text-sm font-medium text-ink-700 transition-colors hover:bg-ink-50 disabled:opacity-50">Cargar ejemplos</button>
@@ -50,6 +50,10 @@ export default function SimulatorPage() {
           </>
         }
       />
+
+      <div className="rounded-2xl border border-mint-100 bg-mint-50/60 px-4 py-3 text-xs text-ink-600">
+        🔎 Es una <strong className="text-ink-800">simulación</strong>: corre el mismo bot que WhatsApp, con la config y los productos reales de tu empresa, pero <strong className="text-ink-800">no se envía ningún mensaje al cliente</strong>.
+      </div>
 
       {casesQ.isLoading && <SkeletonList rows={4} />}
       {casesQ.isSuccess && cases.length === 0 && (
@@ -70,7 +74,7 @@ export default function SimulatorPage() {
             </div>
             {tc.lastResult && (
               <div className="mt-2 rounded-lg bg-ink-50/60 p-2 text-xs text-ink-700">
-                <span className="font-semibold text-ink-500">Respuesta del bot:</span>
+                <span className="font-semibold text-ink-500">Respuesta del bot (simulación):</span>
                 <div className="mt-0.5 whitespace-pre-wrap">{tc.lastResult}</div>
               </div>
             )}

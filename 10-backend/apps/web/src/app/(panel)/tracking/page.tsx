@@ -5,6 +5,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import type { TrackingSource, TrackingType } from '@vpw/shared';
 import { useActiveCompany } from '@/lib/active-company';
 import { listTrackingSources, upsertTrackingSource, deleteTrackingSource, computeTracking, type TrackingInput } from '@/lib/tracking';
+import { isDevToolingAllowed } from '@/lib/integrations';
 import { SectionHeader, EmptyState, SkeletonList, StatusBadge } from '@/components/ui';
 
 const TYPE_LABEL: Record<TrackingType, string> = { coupon: '🎟️ Cupón', qr: '📱 QR', link: '🔗 Link' };
@@ -21,6 +22,9 @@ export default function TrackingPage() {
   const saveMut = useMutation({ mutationFn: (input: TrackingInput) => upsertTrackingSource(tenantId!, input), onSuccess: () => { invalidate(); setForm({ open: false, src: null }); } });
   const delMut = useMutation({ mutationFn: (id: string) => deleteTrackingSource(tenantId!, id), onSuccess: invalidate });
   const computeMut = useMutation({ mutationFn: () => computeTracking(tenantId!), onSuccess: invalidate });
+  // "Calcular atribución" usa un endpoint dev (404 en prod). Solo en local/emulador; el recálculo
+  // real (job autenticado) llega en GROWTH-JOBS-WIRING. La CAPTURA del código sí está activa.
+  const devTools = isDevToolingAllowed();
 
   if (companyLoading) return <div className="text-sm text-ink-400">Cargando…</div>;
   if (!tenantId) return <EmptyState title="Seleccioná una empresa" text="Elegí una empresa en la barra superior para ver su tracking propio." />;
@@ -34,14 +38,17 @@ export default function TrackingPage() {
         subtitle="Sin Meta: medí qué promo (cupón, QR, flyer) trajo cada venta."
         actions={
           <>
-            <button onClick={() => computeMut.mutate()} disabled={computeMut.isPending} className="rounded-lg border border-ink-200 px-3 py-2 text-sm font-medium text-ink-700 transition-colors hover:bg-ink-50 disabled:opacity-50">{computeMut.isPending ? 'Calculando…' : '🎯 Calcular atribución'}</button>
+            {devTools && (
+              <button onClick={() => computeMut.mutate()} disabled={computeMut.isPending} className="rounded-lg border border-ink-200 px-3 py-2 text-sm font-medium text-ink-700 transition-colors hover:bg-ink-50 disabled:opacity-50">{computeMut.isPending ? 'Calculando…' : '🎯 Calcular atribución'}</button>
+            )}
             <button onClick={() => setForm({ open: true, src: null })} className="rounded-lg bg-mint-600 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-mint-700">+ Nuevo código</button>
           </>
         }
       />
 
       <div className="rounded-2xl border border-mint-100 bg-mint-50/60 px-4 py-3 text-xs text-ink-600">
-        💡 Creá un código (ej: <strong className="text-ink-800">VERANO20</strong>), ponelo en tu flyer/QR/historia. Cuando un cliente lo menciona al bot, la venta queda atribuida a esa promo — y ves cuánto vendió y cuánta ganancia dejó.
+        💡 Creá un código (ej: <strong className="text-ink-800">VERANO20</strong>), ponelo en tu flyer/QR/historia. Cuando un cliente lo menciona al bot, la venta queda <strong className="text-ink-800">atribuida</strong> a esa promo.
+        {!devTools && ' El recálculo de los totales por código (ventas/ingresos/ganancia) se conectará en una próxima actualización.'}
       </div>
 
       {srcQ.isLoading && <SkeletonList rows={4} />}

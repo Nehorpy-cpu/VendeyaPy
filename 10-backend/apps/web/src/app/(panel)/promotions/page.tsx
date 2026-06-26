@@ -14,6 +14,7 @@ import {
   tsToDateInput,
   type PromotionInput,
 } from '@/lib/promotions';
+import { isDevToolingAllowed } from '@/lib/integrations';
 import { SectionHeader, EmptyState, SkeletonList, StatusBadge, ConfirmModal, type BadgeTone } from '@/components/ui';
 
 const API = process.env['NEXT_PUBLIC_API_BASE_URL'] ?? 'http://localhost:5001/demo-aiafg/us-central1';
@@ -88,6 +89,8 @@ export default function PromotionsPage() {
   });
 
   const suggestions = suggestionsQ.data ?? [];
+  // "Actualizar sugerencias" usa un endpoint dev (404 en prod). Solo en local/emulador.
+  const devTools = isDevToolingAllowed();
 
   if (companyLoading) return <div className="text-sm text-ink-400">Cargando…</div>;
   if (!tenantId) return <EmptyState title="Seleccioná una empresa" text="Elegí una empresa en la barra superior para gestionar sus promociones." />;
@@ -117,16 +120,22 @@ export default function PromotionsPage() {
         actions={<button onClick={openNew} className="rounded-lg bg-mint-600 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-mint-700">+ Nueva promo</button>}
       />
 
+      <div className="rounded-2xl border border-mint-100 bg-mint-50/60 px-4 py-3 text-xs text-ink-600">
+        💡 El bot puede <strong className="text-ink-800">mencionar</strong> tus promociones activas como información cuando el cliente pregunta. La <strong className="text-ink-800">aplicación automática del descuento</strong> en el carrito/pedido se habilitará más adelante; por ahora el equipo la aplica al cerrar la venta.
+      </div>
+
       {/* Sugerencias por reglas */}
       <section className="rounded-2xl border border-ink-100 bg-white p-5 shadow-soft">
         <div className="mb-3 flex items-center justify-between">
           <h2 className="text-sm font-semibold uppercase tracking-wide text-ink-500">💡 Sugerencias para vos</h2>
-          <button onClick={() => genMut.mutate()} disabled={genMut.isPending} className="text-xs font-medium text-mint-700 hover:text-mint-600 disabled:opacity-50">
-            {genMut.isPending ? 'Buscando…' : 'Actualizar sugerencias'}
-          </button>
+          {devTools && (
+            <button onClick={() => genMut.mutate()} disabled={genMut.isPending} className="text-xs font-medium text-mint-700 hover:text-mint-600 disabled:opacity-50">
+              {genMut.isPending ? 'Buscando…' : 'Actualizar sugerencias'}
+            </button>
+          )}
         </div>
         {suggestions.length === 0 ? (
-          <p className="text-sm text-ink-400">No hay sugerencias por ahora. Tocá “Actualizar sugerencias”.</p>
+          <p className="text-sm text-ink-400">{devTools ? 'No hay sugerencias por ahora. Tocá “Actualizar sugerencias”.' : 'No hay sugerencias por ahora.'}</p>
         ) : (
           <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
             {suggestions.map((i) => (

@@ -50,6 +50,17 @@ export function isDemoIntegrationsAllowed(): boolean {
   return process.env['NEXT_PUBLIC_USE_EMULATORS'] === 'true' || process.env.NODE_ENV !== 'production';
 }
 
+/**
+ * Las herramientas DEV del panel (endpoints `dev*`: generar sugerencias/insights/respuestas/
+ * seguimientos/auditorías, recalcular atribución de tracking, chat de prueba) solo funcionan en
+ * local/emulador — en prod `guardDevEndpoint` las 404ea. En staging/prod ocultamos los botones que
+ * las llaman para no prometer algo que no responde. Mismo criterio que el demo de Integraciones.
+ * Su cableado real (callable autenticado `runTenantJob`) llega en GROWTH-JOBS-WIRING.
+ */
+export function isDevToolingAllowed(): boolean {
+  return isDemoIntegrationsAllowed();
+}
+
 export interface MetaConnectInput {
   nonce: string;
   code: string;
