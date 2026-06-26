@@ -9,7 +9,7 @@
 - **Hosting = Firebase Web Frameworks (Next.js SSR).** `firebase.json` → `hosting.source: "apps/web"` + `frameworksBackend.region: "us-central1"`. NO es export estático: `next.config.mjs` no tiene `output:'export'` (hay server components/SSR). `firebase deploy` detecta Next.js, corre `next build` y **provisiona un backend SSR (Cloud Function 2ª gen) + sube los estáticos al CDN**. ⇒ requiere **plan Blaze** y, según versión de CLI, habilitar Web Frameworks.
 - **Functions:** `firebase.json` → source `apps/functions`, `predeploy: pnpm --filter functions build` (buildea antes de deployar). Región `us-central1`.
 - **Firestore:** `rules` = `firestore.rules` (402 líneas, **default-deny** al final), `indexes` = `firestore.indexes.json` (111 líneas). **Storage:** `storage.rules` (tenant-isolated).
-- **Scripts de deploy** (`package.json` raíz): `deploy:staging` (`firebase deploy --project vpw-staging`), `deploy:prod` (`--project vpw-prod`), `deploy:rules` (`firestore:rules,storage:rules`), `deploy:indexes`. Functions: `apps/functions` → `deploy` (`--only functions`). Web build: `apps/web` → `next build`.
+- **Scripts de deploy** (`package.json` raíz): `deploy:staging` (`firebase deploy --project vpw-staging`), `deploy:prod` (`--project vpw-prod`), `deploy:rules` (`firestore:rules,storage`), `deploy:indexes`. Functions: `apps/functions` → `deploy` (`--only functions`). Web build: `apps/web` → `next build`.
 
 ## 1. Checklist
 

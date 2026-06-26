@@ -24,7 +24,7 @@
     "emulators:import": "firebase emulators:start --import=./tests/fixtures/emulator-data",
     "deploy:staging": "firebase deploy --project vpw-staging",
     "deploy:prod": "firebase deploy --project vpw-prod",
-    "deploy:rules": "firebase deploy --only firestore:rules,storage:rules",
+    "deploy:rules": "firebase deploy --only firestore:rules,storage",
     "deploy:indexes": "firebase deploy --only firestore:indexes",
     "prepare": "husky install"
   },
