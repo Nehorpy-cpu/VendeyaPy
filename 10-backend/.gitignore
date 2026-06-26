@@ -33,6 +33,8 @@ pnpm-debug.log*
 
 # Firebase
 .firebase/
+# Artefacto autónomo de deploy de Functions (generado por build-deploy.mjs)
+apps/functions/.deploy/
 firebase-debug.log
 firestore-debug.log
 ui-debug.log

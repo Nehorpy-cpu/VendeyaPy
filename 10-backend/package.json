@@ -25,6 +25,7 @@
     "deploy:staging": "firebase deploy --project vpw-staging",
     "deploy:prod": "firebase deploy --project vpw-prod",
     "deploy:rules": "firebase deploy --only firestore:rules,storage",
+    "deploy:functions": "firebase deploy --only functions --config firebase.functions.json",
     "deploy:indexes": "firebase deploy --only firestore:indexes",
     "prepare": "husky install"
   },

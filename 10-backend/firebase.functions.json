@@ -1,0 +1,15 @@
+{
+  "//": "Config ALTERNO solo para deploy de Functions (workspace:* fix). Uso: firebase deploy --only functions --config firebase.functions.json --project <alias>. El firebase.json por defecto (emulador + hosting/firestore/storage) NO cambia. functions.source apunta al artefacto autónomo generado por apps/functions/scripts/build-deploy.mjs.",
+  "functions": [
+    {
+      "source": "apps/functions/.deploy",
+      "codebase": "default",
+      "ignore": ["node_modules", ".git", "firebase-debug.log", "firebase-debug.*.log", "*.local"],
+      "predeploy": [
+        "pnpm --filter @vpw/shared build",
+        "pnpm --filter functions build",
+        "node apps/functions/scripts/build-deploy.mjs"
+      ]
+    }
+  ]
+}
