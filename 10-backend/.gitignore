@@ -26,6 +26,10 @@ pnpm-debug.log*
 .env.development
 .env.staging
 .env.production
+# Firebase Functions env por proyecto (valores staging/prod — NUNCA commitear)
+.env.vpw-dev
+.env.vpw-staging
+.env.vpw-prod
 
 # Firebase
 .firebase/
