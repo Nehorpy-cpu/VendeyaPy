@@ -64,7 +64,7 @@
 2. **Verificación de propiedad:** cargar el **TXT** que da Firebase en el DNS de **Hostinger** (zona DNS del dominio). Esperar verificación.
 3. **Apuntar el dominio:** Firebase da **registros A** (apex/root → IPs de Firebase Hosting) y, para `www`, normalmente **A** o **CNAME** según lo que indique. Cargarlos en Hostinger (borrar A/CNAME previos que apunten al hosting de Hostinger para evitar conflicto).
 4. **SSL:** Firebase **provisiona el certificado automáticamente** (Let's Encrypt) una vez verificado el DNS; puede tardar (minutos a 24 h por propagación).
-5. **Redirect www↔root:** decidir el canónico (recomendado `www → root` o `root → www`) y configurarlo (en Firebase Hosting al agregar ambos dominios, o con `redirects` en `firebase.json`). Hoy `firebase.json` **no tiene `redirects`** → si se quiere redirect, se agrega ahí (cambio menor, fuera de esta auditoría).
+5. **Redirect www↔root:** decidir el canónico (recomendado `www → root` o `root → www`). ⚠️ **Requiere el dominio final** y por eso se difiere a **DOMAIN-HOSTINGER-1** (ver §6). NO se agregó `redirects` a `firebase.json` en DEPLOY-PREP-1: un redirect host-canónico no se puede expresar de forma genérica/sin dominio, y meter un `redirects` array bajo Web Frameworks puede chocar con el adaptador de Next.
 6. **No conectar el dominio todavía** (alcance de esta fase). Cuando se haga, validar `https://midominio.com` + `https://www…` + que el SSL esté activo.
 
 ## 4. Riesgos
@@ -78,4 +78,68 @@
 - **Depende del dominio:** hasta SSL emitido, solo sirve `*.web.app`.
 - **No listo para clientes reales todavía:** falta Meta App Review + secrets reales + dominio + smoke en prod. El panel/billing-manual/trial sí están listos para operar en prod una vez configurado el env.
 
-_No se implementó nada: auditoría + plan. Próximos cambios (ej. `redirects` en firebase.json, `.env.production`) se hacen en fases dedicadas._
+## 5. Plantillas de entorno de producción (DEPLOY-PREP-1)
+
+> Solo **plantillas/checklist** — sin valores reales. Frontend = plantilla versionada;
+> backend = lista para setear en el runtime de Functions. Marcado: 🌐 público (va al cliente) ·
+> 🔒 secreto (Secret Manager) · 🧩 sensible (env deployado, no commitear).
+
+### 5.1 Frontend (`apps/web`) — build-time, PÚBLICO
+
+Plantilla versionada: **`apps/web/.env.production.example`** → copiar a `apps/web/.env.production`
+(gitignored) o setear en el entorno del **build de deploy**. Las `NEXT_PUBLIC_*` se hornean en el
+bundle; si faltan en el build, quedan vacías. **Ninguna es secreta** (la API key de Firebase Web es
+identificador de proyecto, no credencial; la seguridad la dan rules + Auth).
+
+| Var | Marca | Notas |
+|---|---|---|
+| `NEXT_PUBLIC_FIREBASE_API_KEY` | 🌐 | SDK config de vpw-prod (Console → Project Settings) |
+| `NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN` | 🌐 | `vpw-prod.firebaseapp.com` |
+| `NEXT_PUBLIC_FIREBASE_PROJECT_ID` | 🌐 | `vpw-prod` |
+| `NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET` | 🌐 | usar el EXACTO de la consola (`.appspot.com` o `.firebasestorage.app`) |
+| `NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID` | 🌐 | SDK config |
+| `NEXT_PUBLIC_FIREBASE_APP_ID` | 🌐 | SDK config |
+| `NEXT_PUBLIC_USE_EMULATORS` | 🌐 | **DEBE ser `false`/ausente.** ★ Riesgo #1 ★ |
+| `NEXT_PUBLIC_META_APP_ID` | 🌐 | Embedded Signup; si falta → "Meta no configurada" |
+| `NEXT_PUBLIC_META_CONFIG_ID` | 🌐 | Embedded Signup; idem |
+| `NEXT_PUBLIC_META_GRAPH_VERSION` | 🌐 | ej. `v19.0` |
+| `NEXT_PUBLIC_SUPPORT_WHATSAPP` | 🌐 | número soporte (solo dígitos); link wa.me de billing manual / RegistrationGate |
+| `NEXT_PUBLIC_API_BASE_URL` | 🌐 | **opcional en prod**: solo endpoints dev-tooling (404 en prod). Setear a la base real para evitar fallback a localhost |
+
+### 5.2 Backend (`apps/functions`) — runtime de Functions
+
+Setear en el runtime de `vpw-prod`. Plantilla completa con notas en **`.env.example`** (raíz). Lo
+SECRETO va a **Secret Manager** (`defineSecret` + binding); lo SENSIBLE-pero-no-secret va por env
+deployado (no commitear). Sin estos, `getConfig()` (Zod) tira al primer request y las functions fallan.
+
+| Var | Marca | Cómo se provee |
+|---|---|---|
+| `ANTHROPIC_API_KEY` | 🔒 | `firebase functions:secrets:set ANTHROPIC_API_KEY` (bound a IA). Sin ella → AI `disabled` (fallback rule-based) |
+| `META_APP_SECRET` | 🔒 | `firebase functions:secrets:set META_APP_SECRET` (bound a `connectMeta`/`verifyMetaChannel`). **Mismo valor que `WHATSAPP_APP_SECRET`** |
+| `TENANT_SECRETS_ENCRYPTION_KEY` | 🧩 | env deployado, min 32, **DEFINITIVA** antes de cifrar tokens reales (rotarla obliga a re-cifrar todo) |
+| `WHATSAPP_APP_SECRET` | 🧩 | env deployado, firma del webhook (HMAC). Mismo App Secret que `META_APP_SECRET` |
+| `WHATSAPP_WEBHOOK_VERIFY_TOKEN` | 🧩 | env deployado, token de verificación del webhook (configurado igual en Meta) |
+| `META_APP_ID` | 🌐 | env deployado, ID público de la app de Meta (no secreto) |
+| `API_BASE_URL` | 🌐 | env deployado, base de functions de prod |
+| `WEB_BASE_URL` | 🌐 | env deployado, URL pública del panel (dominio/`*.web.app`) |
+| `N8N_BASE_URL` | 🌐 | env deployado, si se usa n8n |
+| `N8N_INTERNAL_SECRET` | 🧩 | env deployado, min 32, si se usa n8n |
+
+> **Propuesto (META-SECRETS-2):** migrar `WHATSAPP_APP_SECRET` / `WHATSAPP_WEBHOOK_VERIFY_TOKEN` /
+> `TENANT_SECRETS_ENCRYPTION_KEY` (hoy 🧩 env deployado) a Secret Manager. Hoy están acoplados a
+> `config.ts` (los valida `getConfig`, usados backend-wide) → migración backend-wide, no por-función.
+
+## 6. Redirect host-canónico (www↔root) — diferido a DOMAIN-HOSTINGER-1
+
+**No se tocó `firebase.json`.** Un redirect www↔root **no se puede expresar sin el dominio final**:
+el `redirects` array de Firebase Hosting es por-path (source/destination), no por-host; un
+host-canónico necesita destino absoluto con el dominio. Además, bajo **Web Frameworks (Next SSR)**
+meter un `redirects` array puede chocar con el adaptador de Next. Por eso se difiere. Opciones seguras
+para esa fase (elegir una, ya con el dominio):
+
+1. **Hostinger / registrar:** redirect 301 `www → root` (o viceversa) en la zona DNS / panel del dominio (lo más simple, no toca el repo).
+2. **Next.js `redirects()`** en `next.config.mjs` con matcher de host (`has: [{ type: 'host', value: 'www.midominio.com' }]`) → `permanent: true`. Compatible con Web Frameworks; requiere el dominio.
+
+_DEPLOY-PREP-1: solo config/docs. Se creó `apps/web/.env.production.example` y se documentó el
+checklist backend + el diferimiento de redirects. **No se hizo deploy, no se conectó dominio ni Meta,
+no se tocaron secrets reales ni lógica de producto.** Próximo: DOMAIN-HOSTINGER-1 (dominio + redirect)._
