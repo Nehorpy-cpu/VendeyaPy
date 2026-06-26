@@ -41,6 +41,15 @@ export function isMetaConfigured(): boolean {
   return !!process.env['NEXT_PUBLIC_META_APP_ID'] && !!process.env['NEXT_PUBLIC_META_CONFIG_ID'];
 }
 
+/**
+ * El fallback demo de Integraciones (endpoints dev: connectMetaDemo/disconnectMeta/processConversions)
+ * SOLO se permite en local/emulador, nunca en producción. En prod, la UI muestra estados honestos en
+ * vez de acciones demo. (No afecta el flujo REAL por callables, que siempre está disponible.)
+ */
+export function isDemoIntegrationsAllowed(): boolean {
+  return process.env['NEXT_PUBLIC_USE_EMULATORS'] === 'true' || process.env.NODE_ENV !== 'production';
+}
+
 export interface MetaConnectInput {
   nonce: string;
   code: string;

@@ -14,6 +14,7 @@ import {
   connectMetaDemo,
   disconnectMeta,
   isMetaConfigured,
+  isDemoIntegrationsAllowed,
   startMetaConnect,
   connectMeta,
   verifyMetaChannel,
@@ -81,6 +82,8 @@ export default function IntegrationsPage() {
   const qc = useQueryClient();
 
   const configured = isMetaConfigured();
+  // El fallback demo (endpoints dev) solo se permite en local/emulador; en prod, estados honestos.
+  const demoAllowed = isDemoIntegrationsAllowed();
   // Solo owner/admin operan (conectar/verificar/seleccionar/desconectar). El backend lo reexige.
   const canOperate = claims.role === 'TENANT_OWNER' || claims.role === 'PLATFORM_ADMIN';
   const [feedback, setFeedback] = useState<Feedback | null>(null);
@@ -174,7 +177,10 @@ export default function IntegrationsPage() {
   if (companyLoading) return <div className="text-sm text-ink-400">Cargando…</div>;
   if (!tenantId) return <EmptyState title="Seleccioná una empresa" text="Elegí una empresa en la barra superior para gestionar su conexión con Meta." />;
 
-  const onConnect = () => (configured ? connectRealMut.mutate() : connectDemoMut.mutate());
+  const onConnect = () => {
+    if (configured) { connectRealMut.mutate(); return; }
+    if (demoAllowed) connectDemoMut.mutate(); // demo solo en local/emulador
+  };
 
   return (
     <div className="space-y-5">
@@ -184,9 +190,13 @@ export default function IntegrationsPage() {
         <div className="rounded-2xl border border-ink-100 bg-ink-50/60 px-4 py-3 text-sm text-ink-600">
           Conectá tu cuenta de Meta Business para recibir mensajes de WhatsApp en el panel. El token de acceso nunca se guarda en la base — solo una referencia segura.
         </div>
-      ) : (
+      ) : demoAllowed ? (
         <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
-          <strong>Modo demo:</strong> configurá Meta (NEXT_PUBLIC_META_APP_ID y NEXT_PUBLIC_META_CONFIG_ID) para usar la conexión real. Por ahora podés <strong>simular la conexión</strong> para ver cómo funciona el panel. El token nunca se guarda en la base.
+          <strong>Modo demo (local):</strong> configurá Meta (NEXT_PUBLIC_META_APP_ID y NEXT_PUBLIC_META_CONFIG_ID) para usar la conexión real. Por ahora podés <strong>simular la conexión</strong> para ver cómo funciona el panel. El token nunca se guarda en la base.
+        </div>
+      ) : (
+        <div className="rounded-2xl border border-ink-100 bg-ink-50/60 px-4 py-3 text-sm text-ink-600">
+          La conexión real de Meta aún no está configurada para esta plataforma. Te avisamos cuando esté disponible para tu empresa.
         </div>
       )}
 
@@ -211,7 +221,7 @@ export default function IntegrationsPage() {
               <span className="text-xs text-ink-400">Solo el dueño o un administrador pueden gestionar la conexión.</span>
             ) : (
               <>
-                {!connected && (
+                {!connected && (configured || demoAllowed) && (
                   <button onClick={onConnect} disabled={busy} className={btnPrimary}>
                     {connecting ? 'Conectando…' : configured ? 'Conectar Meta Business' : 'Conectar (demo)'}
                   </button>
@@ -226,7 +236,7 @@ export default function IntegrationsPage() {
                     {verifyMut.isPending ? 'Revisando…' : 'Revisar conexión'}
                   </button>
                 )}
-                {connected && (
+                {connected && (configured || demoAllowed) && (
                   <button onClick={() => disconnectMut.mutate()} disabled={busy} className={btnSecondary}>
                     {disconnectMut.isPending ? 'Desconectando…' : 'Desconectar'}
                   </button>
@@ -330,10 +340,12 @@ export default function IntegrationsPage() {
         </div>
       )}
 
-      {/* Activos conectados */}
-      {connected && (
+      {/* Activos conectados — en prod no se muestran activos demo (solo conexión real). */}
+      {connected && (configured || demoAllowed) && (
         <div>
-          <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-ink-500">Activos conectados ({assets.length})</h2>
+          <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-ink-500">
+            Activos conectados ({assets.length}){!configured && ' · demo'}
+          </h2>
           <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
             {assets.map((a) => (
               <div key={a.id} className="flex items-center justify-between rounded-xl border border-ink-100 bg-white p-3 shadow-soft">
@@ -356,7 +368,11 @@ export default function IntegrationsPage() {
               <div className="text-lg font-semibold text-ink-900">Conversions API</div>
               <div className="mt-1 text-sm text-ink-500">{convQ.data?.filter((e) => e.sendStatus === 'sent').length ?? 0} eventos enviados a Meta (server-side)</div>
             </div>
-            <button onClick={() => procMut.mutate()} disabled={procMut.isPending} className={btnSecondary}>{procMut.isPending ? 'Procesando…' : 'Procesar eventos (demo)'}</button>
+            {demoAllowed ? (
+              <button onClick={() => procMut.mutate()} disabled={procMut.isPending} className={btnSecondary}>{procMut.isPending ? 'Procesando…' : 'Procesar eventos (demo)'}</button>
+            ) : (
+              <span className="inline-flex items-center rounded-lg border border-ink-200 px-3 py-2 text-sm font-medium text-ink-400">Próximamente</span>
+            )}
           </div>
           <p className="mt-2 text-xs text-ink-400">Manda las ventas y conversiones directo a Meta (sin depender de cookies del navegador), para que los anuncios optimicen mejor y midan las ventas reales.</p>
         </div>
