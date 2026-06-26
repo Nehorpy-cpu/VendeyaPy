@@ -4,7 +4,6 @@
  */
 import Link from 'next/link';
 import { cn } from '@/lib/cn';
-import { BrandMark } from '@/components/BrandMark';
 import { ArrowRightIcon } from './icons';
 
 /* ---------------------------------- Logo --------------------------------- */
@@ -20,9 +19,8 @@ export function Logo({
 }) {
   const content = (
     <span className={cn('inline-flex items-center gap-2.5', className)}>
-      <span className="relative grid h-9 w-9 place-items-center rounded-xl bg-[#0d172c] shadow-glow">
-        <BrandMark className="h-7 w-7" />
-      </span>
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img src="/brand/isotype.png" alt="" width={36} height={36} className="h-9 w-9 shrink-0 rounded-xl shadow-glow" />
       <span
         className={cn(
           'text-lg font-bold tracking-tight',

@@ -4,7 +4,6 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useAuth } from '@/lib/auth-context';
 import { navSectionsForRole } from '@/lib/roles';
-import { BrandMark } from '@/components/BrandMark';
 import { cn } from '@/lib/cn';
 
 /** Contenido de navegación (logo + secciones). Se usa en el aside desktop y en el drawer mobile. */
@@ -20,9 +19,8 @@ function NavList({ onNavigate }: { onNavigate?: () => void }) {
         onClick={onNavigate}
         className="flex h-16 shrink-0 items-center gap-2.5 border-b border-ink-100 px-5"
       >
-        <span className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-[#0d172c] shadow-glow">
-          <BrandMark className="h-[22px] w-[22px]" />
-        </span>
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img src="/brand/isotype.png" alt="" width={32} height={32} className="h-8 w-8 shrink-0 rounded-lg shadow-glow" />
         <span className="text-lg font-bold tracking-tight text-ink-900">
           Vende<span className="text-mint-600">Ya</span>Py
         </span>
