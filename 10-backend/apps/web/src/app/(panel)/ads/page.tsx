@@ -5,6 +5,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import type { MetaCampaign } from '@vpw/shared';
 import { useActiveCompany } from '@/lib/active-company';
 import { listCampaigns, syncAds, computeAttribution } from '@/lib/ads';
+import { isDemoIntegrationsAllowed as isDemoAllowed } from '@/lib/integrations';
 import { SectionHeader, EmptyState, SkeletonList } from '@/components/ui';
 
 const gs = (n: number) => '₲ ' + Math.round(n).toLocaleString('es-PY');
@@ -18,6 +19,9 @@ export default function AdsPage() {
   const invalidate = () => qc.invalidateQueries({ queryKey: ['metaCampaigns', tenantId] });
   const syncMut = useMutation({ mutationFn: () => syncAds(tenantId!), onSuccess: invalidate });
   const attrMut = useMutation({ mutationFn: () => computeAttribution(tenantId!), onSuccess: invalidate });
+  // Acciones demo (sync/atribución por endpoints dev) SOLO en emulador/demo; en staging/prod se ocultan
+  // y la pantalla muestra estado honesto. Mismo criterio que Integraciones (isDemoIntegrationsAllowed).
+  const demoAllowed = isDemoAllowed();
 
   const campaigns = useMemo(() => campaignsQ.data ?? [], [campaignsQ.data]);
   const totals = useMemo(() => {
@@ -43,20 +47,31 @@ export default function AdsPage() {
         title="Anuncios y ganancia"
         subtitle="Qué campaña deja plata de verdad: gasto vs. ventas, ingresos y ganancia reales."
         actions={
-          <>
-            <button onClick={() => attrMut.mutate()} disabled={attrMut.isPending} className="rounded-lg bg-mint-600 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-mint-700 disabled:opacity-60">{attrMut.isPending ? 'Calculando…' : '🎯 Calcular atribución'}</button>
-            <button onClick={() => syncMut.mutate()} disabled={syncMut.isPending} className="rounded-lg border border-ink-200 px-3 py-2 text-sm font-medium text-ink-700 transition-colors hover:bg-ink-50 disabled:opacity-60">{syncMut.isPending ? 'Sincronizando…' : '🔄 Sincronizar (demo)'}</button>
-          </>
+          demoAllowed ? (
+            <>
+              <button onClick={() => attrMut.mutate()} disabled={attrMut.isPending} className="rounded-lg bg-mint-600 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-mint-700 disabled:opacity-60">{attrMut.isPending ? 'Calculando…' : '🎯 Calcular atribución'}</button>
+              <button onClick={() => syncMut.mutate()} disabled={syncMut.isPending} className="rounded-lg border border-ink-200 px-3 py-2 text-sm font-medium text-ink-700 transition-colors hover:bg-ink-50 disabled:opacity-60">{syncMut.isPending ? 'Sincronizando…' : '🔄 Sincronizar (demo)'}</button>
+            </>
+          ) : undefined
         }
       />
 
-      <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-800">
-        ℹ️ Datos de demostración (Meta aún no conectado). La <strong>atribución</strong> conecta cada venta con la campaña que la trajo; con Meta conectado, estos números son reales.
-      </div>
+      {demoAllowed && (
+        <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-800">
+          ℹ️ Datos de demostración (Meta aún no conectado). La <strong>atribución</strong> conecta cada venta con la campaña que la trajo; con Meta conectado, estos números son reales.
+        </div>
+      )}
 
       {campaignsQ.isLoading && <SkeletonList rows={3} />}
       {campaignsQ.isSuccess && campaigns.length === 0 && (
-        <EmptyState title="Sin campañas todavía" text="Tocá “Sincronizar (demo)” para ver cómo se conecta cada campaña con sus ventas y ganancia." />
+        <EmptyState
+          title="Sin campañas todavía"
+          text={
+            demoAllowed
+              ? 'Tocá “Sincronizar (demo)” para ver cómo se conecta cada campaña con sus ventas y ganancia.'
+              : 'Conectá Meta para ver tus campañas y métricas reales (gasto, ventas, ingresos y ganancia por campaña).'
+          }
+        />
       )}
 
       {campaigns.length > 0 && (
