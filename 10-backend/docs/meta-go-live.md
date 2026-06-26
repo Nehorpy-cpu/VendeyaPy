@@ -24,13 +24,23 @@
 ### B. Backend secrets/env (`apps/functions`)
 | Secret/env | Estado | Detalle |
 |---|---|---|
-| `META_APP_ID` (backend) | ⚠️ falta | Para el intercambio `code`→token (`graphClient`/`connectFlow`). |
-| `META_APP_SECRET` | ⚠️ falta | App Secret de la app de Meta; se usa en el intercambio OAuth. **Hoy se lee de `process.env`** (no Secret Manager). |
-| `WHATSAPP_APP_SECRET` | ⚠️ falta | Firma del webhook (`X-Hub-Signature-256`). **Es el mismo App Secret de Meta** bajo otro nombre → setear ambos al mismo valor (o unificar). Obligatorio en prod. |
-| `WHATSAPP_WEBHOOK_VERIFY_TOKEN` | ⚠️ falta | Token del handshake GET. En emulador default `aiafg-verify-demo`; en prod hay que definir uno propio y ponerlo igual en Meta. |
-| `TENANT_SECRETS_ENCRYPTION_KEY` | ⚠️ falta (prod) | Clave maestra 32+ chars (deriva AES-256-GCM). **Rotarla = migrar todos los secrets cifrados.** Existe en local; falta proveerla en prod. |
-| `ANTHROPIC_API_KEY` | ✅ listo (patrón) | Único secret vía Firebase `defineSecret` (bindeado a las functions de IA). |
-| Provisioning de secrets en prod | ⚠️ falta | META/WhatsApp/encryption-key se leen de `process.env`, no de Secret Manager. **Recomendado:** migrar `META_APP_SECRET`, `WHATSAPP_APP_SECRET` y `TENANT_SECRETS_ENCRYPTION_KEY` a `defineSecret`/`functions:secrets:set` para que existan en el runtime de Cloud Functions v2 (hoy dependerían de `.env` deployado). |
+| `META_APP_ID` (backend) | ⚠️ falta (valor) | Para el intercambio `code`→token (`graphClient`/`connectFlow`). **NO es secreto** → env deployado (o `.env.local`). |
+| `META_APP_SECRET` | ✅ migrado / ⚠️ falta valor | **Migrado a Secret Manager** (META-SECRETS-1): `defineSecret` en `meta/metaSecrets.ts`, bindeado a `connectMeta` y `verifyMetaChannel`. En runtime Firebase lo inyecta en `process.env.META_APP_SECRET` (lo que ya lee `graphClient`). Setear el valor con `firebase functions:secrets:set META_APP_SECRET`. En emulador NO se usa (Fixture). Es el **mismo** App Secret que `WHATSAPP_APP_SECRET`. |
+| `WHATSAPP_APP_SECRET` | ⚠️ falta | Firma del webhook (`X-Hub-Signature-256`). **Es el mismo App Secret de Meta** bajo otro nombre. **Acoplado a `config.ts`** (se valida en todo `getConfig()`) → se provee por **env deployado**, no por `defineSecret` por-función. Setear al mismo valor que `META_APP_SECRET`. |
+| `WHATSAPP_WEBHOOK_VERIFY_TOKEN` | ⚠️ falta | Token del handshake GET. Acoplado a `config.ts` → env deployado. En emulador default `aiafg-verify-demo`; en prod definir uno propio y ponerlo igual en Meta. |
+| `TENANT_SECRETS_ENCRYPTION_KEY` | ⚠️ falta (prod) | Clave maestra 32+ chars (AES-256-GCM). Acoplada a `config.ts`/`crypto` (uso backend-wide) → env deployado. **Rotarla = migrar todos los secrets cifrados** → definitiva antes de clientes reales. |
+| `ANTHROPIC_API_KEY` | ✅ listo (patrón) | Secret vía Firebase `defineSecret` (bindeado a las functions de IA). |
+| Provisioning de secrets en prod | ⚠️ parcial | **Hecho:** `META_APP_SECRET` vía Secret Manager (defineSecret + bound), como `ANTHROPIC_API_KEY`. **Pendiente/propuesto:** `WHATSAPP_APP_SECRET`, `WHATSAPP_WEBHOOK_VERIFY_TOKEN` y `TENANT_SECRETS_ENCRYPTION_KEY` están acoplados a `config.ts` (los valida `getConfig()`, usados por funciones de todo el backend); migrarlos a `defineSecret` requeriría bindearlos a muchas functions → **propuesto como tarea backend-wide aparte** (META-SECRETS-2). Hoy se proveen por env deployado (Cloud Functions v2 lee `.env.<project>`). |
+
+#### Cómo gestionar los secrets (comandos)
+- **Local / emulador:** poné los valores en `apps/functions/.env.local` (gitignored). Para `META_APP_SECRET` bindeado, el emulador lo toma de `.env.local`/`.secret.local`; igual **no se usa en local** (Graph fake), así que puede quedar vacío. `WHATSAPP_WEBHOOK_VERIFY_TOKEN` tiene default `aiafg-verify-demo` en emulador.
+- **Producción (Secret Manager) — `META_APP_SECRET`:**
+  ```
+  firebase functions:secrets:set META_APP_SECRET      # pega el App Secret; queda en Secret Manager
+  # se inyecta solo en connectMeta/verifyMetaChannel (bindeadas con defineSecret)
+  ```
+- **Producción (env deployado) — el resto:** setear `META_APP_ID`, `WHATSAPP_APP_SECRET` (= mismo App Secret), `WHATSAPP_WEBHOOK_VERIFY_TOKEN`, `TENANT_SECRETS_ENCRYPTION_KEY` en el `.env.<project>` de `apps/functions` (o como secrets a nivel proyecto). Verificar con `firebase functions:secrets:access META_APP_SECRET` (solo metadatos).
+- **NUNCA commitear** valores reales: ni en `.env.example`, ni en código, ni en logs. `.env.local`/`.secret.local` van gitignored. Los tokens por tenant viven cifrados en Firestore (solo la ref opaca).
 | `META_OAUTH_REDIRECT_URI` | ℹ️ legacy | De la Fase 4A (`oauth.ts`, deprecada). El Embedded Signup (4B) **no** necesita redirect URI. |
 | `ALLOW_GLOBAL_WHATSAPP_FALLBACK` | ✅ listo | Default `false`; **nunca activar en prod multi-tenant** (es un fallback global deprecado). |
 
@@ -63,7 +73,7 @@
 1. **Meta Developer:** crear/usar la app de Meta; agregar el producto WhatsApp; crear la **configuración de Embedded Signup** (define los scopes `whatsapp_business_messaging` + `whatsapp_business_management`). Anotar `APP_ID` y `CONFIG_ID`.
 2. **Verificar el dominio** del panel en Meta App Settings (Business Verification si aplica).
 3. **App Review / Advanced Access** para los scopes de WhatsApp (y solo esos por ahora). Mientras tanto, iterar con **test users/test business**.
-4. **Secrets backend (prod):** setear `META_APP_ID`, `META_APP_SECRET`, `WHATSAPP_APP_SECRET` (= App Secret), `WHATSAPP_WEBHOOK_VERIFY_TOKEN` (string propio), `TENANT_SECRETS_ENCRYPTION_KEY` (32+ chars, **definitiva**, no rotar luego). Preferible vía `firebase functions:secrets:set` + `defineSecret`.
+4. **Secrets backend (prod):** `META_APP_SECRET` ya está cableado a Secret Manager → `firebase functions:secrets:set META_APP_SECRET`. El resto por **env deployado** (`.env.<project>`): `META_APP_ID`, `WHATSAPP_APP_SECRET` (= mismo App Secret), `WHATSAPP_WEBHOOK_VERIFY_TOKEN` (string propio), `TENANT_SECRETS_ENCRYPTION_KEY` (32+ chars, **definitiva**). Detalle y comandos en §2.B.
 5. **Env frontend (prod):** `NEXT_PUBLIC_META_APP_ID` y `NEXT_PUBLIC_META_CONFIG_ID` (y `NEXT_PUBLIC_META_GRAPH_VERSION` si se cambia de v19.0).
 6. **Deploy** functions + web. Obtener la URL real de `metaWebhook`.
 7. **Configurar el webhook en Meta:** Callback URL = `https://us-central1-<PROJECT_ID>.cloudfunctions.net/metaWebhook`, Verify Token = el de paso 4, suscribir el objeto `whatsapp_business_account`.

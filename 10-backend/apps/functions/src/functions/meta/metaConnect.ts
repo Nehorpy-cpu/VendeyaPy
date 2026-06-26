@@ -19,6 +19,7 @@ import { verifyWhatsappChannel } from '../../meta/preflight.js';
 import { selectTenantPhoneNumber } from '../../meta/discovery.js';
 import { disconnectMeta } from '../../meta/connect.js';
 import { getMetaGraphClient } from '../../meta/graphClient.js';
+import { META_APP_SECRET } from '../../meta/metaSecrets.js';
 import { assertWhatsappNumbersEntitled } from '../../entitlements/entitlements.js';
 import { logger } from '../../lib/logger.js';
 
@@ -59,7 +60,8 @@ export const connectMeta = onCall<{
   phoneNumberId?: string;
   businessId?: string;
   businessName?: string;
-}>({ region: 'us-central1' }, async (req) => {
+  // META_APP_SECRET (Secret Manager): el intercambio del code → token usa el App Secret en graphClient.
+}>({ region: 'us-central1', secrets: [META_APP_SECRET] }, async (req) => {
   const { tenantId, uid } = authorize(req, req.data?.tenantId);
   const d = req.data ?? {};
   if (!d.code) throw new HttpsError('invalid-argument', 'Falta el code de Meta.');
@@ -84,7 +86,7 @@ export const connectMeta = onCall<{
   return { ok: true, status: result.status, phoneNumberId: result.selectedPhoneNumberId, phoneNumber: result.phoneNumber, assets: result.assetsCount };
 });
 
-export const verifyMetaChannel = onCall<{ tenantId?: string }>({ region: 'us-central1' }, async (req) => {
+export const verifyMetaChannel = onCall<{ tenantId?: string }>({ region: 'us-central1', secrets: [META_APP_SECRET] }, async (req) => {
   const { tenantId } = authorize(req, req.data?.tenantId);
   const graph = await getMetaGraphClient();
   const result = await verifyWhatsappChannel(tenantId, graph);
