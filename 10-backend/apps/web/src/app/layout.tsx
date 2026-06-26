@@ -6,8 +6,8 @@ import { Providers } from './providers';
 const inter = Inter({ subsets: ['latin'], variable: '--font-inter' });
 
 export const metadata: Metadata = {
-  title: 'AI_AFG — Panel',
-  description: 'Panel de administración multiempresa',
+  title: 'VendeYaPy — Panel',
+  description: 'VendeYaPy — vendé más por WhatsApp, gestioná tu negocio y medí la ganancia real.',
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

@@ -63,7 +63,7 @@ export function HeroDashboardMockup({ className }: { className?: string }) {
           <span className="h-2.5 w-2.5 rounded-full bg-coral-300" />
           <span className="h-2.5 w-2.5 rounded-full bg-amber-300" />
           <span className="h-2.5 w-2.5 rounded-full bg-mint-300" />
-          <span className="ml-2 text-xs font-medium text-ink-400">AI_AFG · Panel comercial</span>
+          <span className="ml-2 text-xs font-medium text-ink-400">VendeYaPy · Panel comercial</span>
           <span className="ml-auto inline-flex items-center gap-1 rounded-full bg-mint-50 px-2 py-0.5 text-[0.65rem] font-semibold text-mint-700">
             <span className="h-1.5 w-1.5 rounded-full bg-mint-500" />
             Vista de ejemplo

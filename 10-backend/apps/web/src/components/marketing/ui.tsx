@@ -19,14 +19,15 @@ export function Logo({
 }) {
   const content = (
     <span className={cn('inline-flex items-center gap-2.5', className)}>
-      <span className="relative grid h-9 w-9 place-items-center rounded-xl bg-mint-brand shadow-glow">
-        <svg viewBox="0 0 24 24" className="h-5 w-5 text-white" fill="none" aria-hidden="true">
+      <span className="relative grid h-9 w-9 place-items-center rounded-xl bg-[#0d172c] shadow-glow">
+        <svg viewBox="0 0 24 24" className="h-5 w-5 text-mint-300" fill="none" aria-hidden="true">
           <path
-            d="M5 6.5A2.5 2.5 0 0 1 7.5 4h9A2.5 2.5 0 0 1 19 6.5v6A2.5 2.5 0 0 1 16.5 15H10l-3.4 3v-3H7.5A2.5 2.5 0 0 1 5 12.5v-6Z"
-            fill="currentColor"
-            opacity="0.95"
+            d="M6.5 7 12 13 17.5 7 M12 13 12 17.5"
+            stroke="currentColor"
+            strokeWidth={2.6}
+            strokeLinecap="round"
+            strokeLinejoin="round"
           />
-          <path d="M12 7.2l.9 2.1 2.1.9-2.1.9-.9 2.1-.9-2.1L9 10.2l2.1-.9.9-2.1Z" fill="#0d172c" />
         </svg>
       </span>
       <span
@@ -35,13 +36,13 @@ export function Logo({
           tone === 'dark' ? 'text-ink-900' : 'text-white',
         )}
       >
-        AI<span className={tone === 'dark' ? 'text-mint-600' : 'text-mint-300'}>_AFG</span>
+        VendeYa<span className={tone === 'dark' ? 'text-mint-600' : 'text-mint-300'}>Py</span>
       </span>
     </span>
   );
   if (href === null) return content;
   return (
-    <Link href={href} className="inline-flex" aria-label="AI_AFG — inicio">
+    <Link href={href} className="inline-flex" aria-label="VendeYaPy — inicio">
       {content}
     </Link>
   );

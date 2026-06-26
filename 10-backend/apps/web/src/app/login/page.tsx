@@ -120,7 +120,7 @@ export default function LoginPage() {
         </div>
 
         <div className="relative text-xs text-ink-300">
-          © {new Date().getFullYear()} AI_AFG · Vendé por chat, medí la ganancia.
+          © {new Date().getFullYear()} VendeYaPy · Vendé más. Gestioná mejor. Crecé hoy.
         </div>
       </aside>
 

@@ -71,7 +71,7 @@ export function MarketingFooter() {
       </div>
       <div className="border-t border-ink-100">
         <div className="mk-container flex flex-col items-center justify-between gap-2 py-5 text-xs text-ink-400 sm:flex-row">
-          <span>© {new Date().getFullYear()} AI_AFG · Vendé por chat, medí la ganancia.</span>
+          <span>© {new Date().getFullYear()} VendeYaPy · Vendé más. Gestioná mejor. Crecé hoy.</span>
           <span>Hecho en Paraguay 🇵🇾</span>
         </div>
       </div>

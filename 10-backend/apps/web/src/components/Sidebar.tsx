@@ -19,17 +19,19 @@ function NavList({ onNavigate }: { onNavigate?: () => void }) {
         onClick={onNavigate}
         className="flex h-16 shrink-0 items-center gap-2.5 border-b border-ink-100 px-5"
       >
-        <span className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-mint-brand shadow-glow">
-          <svg viewBox="0 0 24 24" className="h-[18px] w-[18px] text-white" fill="none" aria-hidden="true">
+        <span className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-[#0d172c] shadow-glow">
+          <svg viewBox="0 0 24 24" className="h-[18px] w-[18px] text-mint-300" fill="none" aria-hidden="true">
             <path
-              d="M5 6.5A2.5 2.5 0 0 1 7.5 4h9A2.5 2.5 0 0 1 19 6.5v6A2.5 2.5 0 0 1 16.5 15H10l-3.4 3v-3H7.5A2.5 2.5 0 0 1 5 12.5v-6Z"
-              fill="currentColor"
+              d="M6.5 7 12 13 17.5 7 M12 13 12 17.5"
+              stroke="currentColor"
+              strokeWidth={2.6}
+              strokeLinecap="round"
+              strokeLinejoin="round"
             />
-            <path d="M12 7.2l.9 2.1 2.1.9-2.1.9-.9 2.1-.9-2.1L9 10.2l2.1-.9.9-2.1Z" fill="#0d172c" />
           </svg>
         </span>
         <span className="text-lg font-bold tracking-tight text-ink-900">
-          AI<span className="text-mint-600">_AFG</span>
+          VendeYa<span className="text-mint-600">Py</span>
         </span>
       </Link>
       <nav className="flex-1 space-y-4 overflow-y-auto p-2">

@@ -9,7 +9,7 @@ import { WhatsappIcon, CheckIcon } from './icons';
 export function CTASection({
   id = 'demo',
   registerHref = '/register',
-  whatsappHref = 'https://wa.me/595993083000?text=Hola%20AI_AFG%2C%20quiero%20agendar%20una%20demo',
+  whatsappHref = 'https://wa.me/595993083000?text=Hola%20VendeYaPy%2C%20quiero%20agendar%20una%20demo',
   className,
 }: {
   id?: string;

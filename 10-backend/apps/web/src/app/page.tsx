@@ -30,9 +30,9 @@ import {
 } from '@/components/marketing/icons';
 
 export const metadata: Metadata = {
-  title: 'AI_AFG — Vendé por WhatsApp y medí la ganancia real',
+  title: 'VendeYaPy — Vendé más por WhatsApp',
   description:
-    'AI_AFG conecta catálogo, bot, vendedores, pedidos y campañas para saber qué deja ganancia real. Ventas por WhatsApp con atribución de tus anuncios de Meta.',
+    'VendeYaPy conecta catálogo, bot, vendedores, pedidos y campañas para saber qué deja ganancia real. Ventas por WhatsApp con atribución de tus anuncios de Meta.',
 };
 
 /* ------------------------------ data estática ----------------------------- */
@@ -188,7 +188,7 @@ function Hero() {
             <span className="text-gradient">copiloto comercial</span>
           </h1>
           <p className="mt-5 max-w-xl text-pretty text-lg leading-relaxed text-ink-500">
-            AI_AFG conecta catálogo, bot, vendedores, pedidos y campañas para saber qué canal vende y
+            VendeYaPy conecta catálogo, bot, vendedores, pedidos y campañas para saber qué canal vende y
             qué deja ganancia real.
           </p>
           <div className="mt-8 flex flex-col gap-3 sm:flex-row">
@@ -321,7 +321,7 @@ function DifferentialShowcase() {
               </div>
               <h2 className="text-balance text-3xl font-bold tracking-tight text-white sm:text-4xl">
                 Meta te muestra gasto.{' '}
-                <span className="text-gradient">AI_AFG te muestra ganancia.</span>
+                <span className="text-gradient">VendeYaPy te muestra ganancia.</span>
               </h2>
               <p className="text-base leading-relaxed text-ink-200 sm:text-lg">
                 Seguimos el recorrido completo: del anuncio a la conversación, al pedido, al pago y a la
