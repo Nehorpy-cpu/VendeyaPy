@@ -89,13 +89,13 @@ export function ProductForm({ initial, initialCost, initialPriority, categories,
     onSubmit(input);
   };
 
-  const field = 'w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-brand-500 focus:outline-none';
-  const lbl = 'mb-1 block text-xs font-medium text-gray-600';
+  const field = 'w-full rounded-lg border border-ink-200 px-3 py-2 text-sm text-ink-800 transition-colors focus:border-mint-500 focus:outline-none focus:ring-2 focus:ring-mint-500/30';
+  const lbl = 'mb-1 block text-xs font-medium text-ink-600';
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/40 p-4">
-      <form onSubmit={submit} className="my-8 w-full max-w-2xl rounded-2xl bg-white p-6 shadow-xl">
-        <h2 className="mb-4 text-lg font-bold text-gray-900">
+    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-ink-950/40 p-4">
+      <form onSubmit={submit} className="my-8 w-full max-w-2xl rounded-2xl border border-ink-100 bg-white p-6 shadow-float">
+        <h2 className="mb-4 text-lg font-bold text-ink-900">
           {initial ? 'Editar producto' : 'Nuevo producto'}
         </h2>
 
@@ -185,23 +185,23 @@ export function ProductForm({ initial, initialCost, initialPriority, categories,
             <label className={lbl}>Notas para la IA (el agente las usa para recomendar)</label>
             <textarea className={field} rows={2} value={f.aiNotes} onChange={(e) => set('aiNotes', e.target.value)} placeholder="Beneficios, público ideal, cuándo recomendarlo…" />
           </div>
-          <label className="flex items-center gap-2 text-sm text-gray-700">
-            <input type="checkbox" checked={f.featured} onChange={(e) => set('featured', e.target.checked)} /> Destacado
+          <label className="flex items-center gap-2 text-sm text-ink-700">
+            <input type="checkbox" className="accent-mint-600" checked={f.featured} onChange={(e) => set('featured', e.target.checked)} /> Destacado
           </label>
-          <label className="flex items-center gap-2 text-sm text-gray-700">
-            <input type="checkbox" checked={f.isNew} onChange={(e) => set('isNew', e.target.checked)} /> Nuevo
+          <label className="flex items-center gap-2 text-sm text-ink-700">
+            <input type="checkbox" className="accent-mint-600" checked={f.isNew} onChange={(e) => set('isNew', e.target.checked)} /> Nuevo
           </label>
         </div>
 
         {error && (
-          <p className="mt-4 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">{error}</p>
+          <p className="mt-4 rounded-lg bg-coral-50 px-3 py-2 text-sm text-coral-700">{error}</p>
         )}
 
         <div className="mt-6 flex justify-end gap-3">
-          <button type="button" onClick={onCancel} className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-100">
+          <button type="button" onClick={onCancel} className="rounded-lg border border-ink-200 px-4 py-2 text-sm font-medium text-ink-700 transition-colors hover:bg-ink-50">
             Cancelar
           </button>
-          <button type="submit" disabled={saving} className="rounded-lg bg-brand-600 px-4 py-2 text-sm font-semibold text-white hover:bg-brand-700 disabled:opacity-60">
+          <button type="submit" disabled={saving} className="rounded-lg bg-mint-600 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-mint-700 disabled:opacity-60">
             {saving ? 'Guardando…' : 'Guardar'}
           </button>
         </div>

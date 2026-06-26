@@ -13,9 +13,10 @@ import {
 } from '@/lib/agent-config';
 import { listOpenAudits, setAuditStatus, generateAudits } from '@/lib/audits';
 import { AgentTestChat } from '@/components/AgentTestChat';
+import { SectionHeader, EmptyState, SkeletonList } from '@/components/ui';
 
-const field = 'w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-brand-500 focus:outline-none';
-const lbl = 'mb-1 block text-xs font-medium text-gray-600';
+const field = 'w-full rounded-lg border border-ink-200 px-3 py-2 text-sm text-ink-800 transition-colors focus:border-mint-500 focus:outline-none focus:ring-2 focus:ring-mint-500/30';
+const lbl = 'mb-1 block text-xs font-medium text-ink-600';
 
 export default function AgentPage() {
   const { tenantId, loading: companyLoading } = useActiveCompany();
@@ -53,44 +54,47 @@ export default function AgentPage() {
 
   const set = <K extends keyof AgentConfig>(k: K, v: AgentConfig[K]) => setAgent((s) => ({ ...s, [k]: v }));
 
-  if (companyLoading) return <div className="text-gray-400">Cargando…</div>;
-  if (!tenantId) return <div className="rounded-xl border border-dashed border-gray-300 bg-white p-8 text-center text-sm text-gray-500">Seleccioná una empresa.</div>;
-  if (agentQ.isLoading) return <div className="text-gray-400">Cargando configuración…</div>;
+  if (companyLoading) return <div className="text-sm text-ink-400">Cargando…</div>;
+  if (!tenantId) return <EmptyState title="Seleccioná una empresa" text="Elegí una empresa en la barra superior para configurar su agente." />;
+  if (agentQ.isLoading) return <SkeletonList rows={5} />;
 
   return (
     <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">
       {/* Configuración */}
       <div className="space-y-6 xl:col-span-2">
-        <div className="flex items-center justify-between">
-          <h1 className="text-2xl font-bold text-gray-900">Configuración del agente</h1>
-          <div className="flex items-center gap-3">
-            {saved && <span className="text-sm text-brand-700">✓ Guardado</span>}
-            <button onClick={() => saveMut.mutate()} disabled={saveMut.isPending} className="rounded-lg bg-brand-600 px-4 py-2 text-sm font-semibold text-white hover:bg-brand-700 disabled:opacity-60">
-              {saveMut.isPending ? 'Guardando…' : 'Guardar cambios'}
-            </button>
-          </div>
-        </div>
+        <SectionHeader
+          title="Configuración del agente"
+          subtitle="Definí cómo responde tu bot de WhatsApp: identidad, mensajes y reglas de venta."
+          actions={
+            <>
+              {saved && <span className="text-sm font-medium text-mint-700">✓ Guardado</span>}
+              <button onClick={() => saveMut.mutate()} disabled={saveMut.isPending} className="rounded-lg bg-mint-600 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-mint-700 disabled:opacity-60">
+                {saveMut.isPending ? 'Guardando…' : 'Guardar cambios'}
+              </button>
+            </>
+          }
+        />
 
         {/* Auditoría del agente (P16) */}
         <Section title="🔍 Auditoría del agente">
           <div className="mb-2 flex items-center justify-between">
-            <span className="text-xs text-gray-500">
+            <span className="text-xs text-ink-500">
               {(auditsQ.data?.length ?? 0) === 0 ? '✓ Sin hallazgos.' : `${auditsQ.data!.length} hallazgo(s) para revisar.`}
             </span>
-            <button onClick={() => auditGenMut.mutate()} disabled={auditGenMut.isPending} className="text-xs text-brand-700 hover:underline disabled:opacity-50">
+            <button onClick={() => auditGenMut.mutate()} disabled={auditGenMut.isPending} className="text-xs font-medium text-mint-700 hover:text-mint-600 disabled:opacity-50">
               {auditGenMut.isPending ? 'Revisando…' : 'Revisar ahora'}
             </button>
           </div>
           <div className="space-y-2">
             {(auditsQ.data ?? []).map((a) => (
-              <div key={a.id} className="flex items-start gap-2 rounded-lg border border-gray-200 p-2">
-                <span className={'mt-1.5 h-2 w-2 shrink-0 rounded-full ' + (a.severity === 'HIGH' ? 'bg-red-500' : a.severity === 'MEDIUM' ? 'bg-amber-500' : 'bg-gray-400')} />
+              <div key={a.id} className="flex items-start gap-2 rounded-xl border border-ink-100 p-2.5">
+                <span className={'mt-1.5 h-2 w-2 shrink-0 rounded-full ' + (a.severity === 'HIGH' ? 'bg-coral-500' : a.severity === 'MEDIUM' ? 'bg-amber-500' : 'bg-ink-300')} />
                 <div className="min-w-0 flex-1">
-                  <div className="text-sm text-gray-800">{a.summary}</div>
-                  <div className="text-xs text-gray-500">👉 {a.recommendedFix}</div>
+                  <div className="text-sm text-ink-800">{a.summary}</div>
+                  <div className="text-xs text-ink-500">👉 {a.recommendedFix}</div>
                   <div className="mt-1 flex gap-3">
-                    <button onClick={() => auditStatusMut.mutate({ id: a.id, status: 'RESOLVED' })} className="text-xs text-brand-700 hover:underline">Resuelto</button>
-                    <button onClick={() => auditStatusMut.mutate({ id: a.id, status: 'DISMISSED' })} className="text-xs text-gray-500 hover:underline">Descartar</button>
+                    <button onClick={() => auditStatusMut.mutate({ id: a.id, status: 'RESOLVED' })} className="text-xs font-medium text-mint-700 hover:text-mint-600">Resuelto</button>
+                    <button onClick={() => auditStatusMut.mutate({ id: a.id, status: 'DISMISSED' })} className="text-xs text-ink-500 hover:text-ink-700">Descartar</button>
                   </div>
                 </div>
               </div>
@@ -100,15 +104,15 @@ export default function AgentPage() {
 
         {/* Control del bot */}
         <Section title="Estado del bot">
-          <label className="flex items-center gap-2 text-sm text-gray-700">
-            <input type="checkbox" checked={agent.botEnabled} onChange={(e) => set('botEnabled', e.target.checked)} />
+          <label className="flex items-center gap-2 text-sm text-ink-700">
+            <input type="checkbox" className="accent-mint-600" checked={agent.botEnabled} onChange={(e) => set('botEnabled', e.target.checked)} />
             Bot encendido {agent.botEnabled ? '🟢' : '🔴 (no responde)'}
           </label>
-          <label className="mt-2 flex items-center gap-2 text-sm text-gray-700">
-            <input type="checkbox" checked={agent.testMode} onChange={(e) => set('testMode', e.target.checked)} /> Modo prueba
+          <label className="mt-2 flex items-center gap-2 text-sm text-ink-700">
+            <input type="checkbox" className="accent-mint-600" checked={agent.testMode} onChange={(e) => set('testMode', e.target.checked)} /> Modo prueba
           </label>
-          <label className="mt-2 flex items-center gap-2 text-sm text-gray-700">
-            <input type="checkbox" checked={agent.profitMode} onChange={(e) => set('profitMode', e.target.checked)} />
+          <label className="mt-2 flex items-center gap-2 text-sm text-ink-700">
+            <input type="checkbox" className="accent-mint-600" checked={agent.profitMode} onChange={(e) => set('profitMode', e.target.checked)} />
             💰 Modo Ganancia {agent.profitMode ? '(prioriza productos rentables)' : ''}
           </label>
         </Section>
@@ -144,10 +148,10 @@ export default function AgentPage() {
             <div key={i} className="mb-2 flex gap-2">
               <input className={field} placeholder="Pregunta" value={item.q} onChange={(e) => set('faq', agent.faq.map((x, j) => j === i ? { ...x, q: e.target.value } : x))} />
               <input className={field} placeholder="Respuesta" value={item.a} onChange={(e) => set('faq', agent.faq.map((x, j) => j === i ? { ...x, a: e.target.value } : x))} />
-              <button onClick={() => set('faq', agent.faq.filter((_, j) => j !== i))} className="px-2 text-red-600">✕</button>
+              <button onClick={() => set('faq', agent.faq.filter((_, j) => j !== i))} className="px-2 text-coral-600 hover:text-coral-700">✕</button>
             </div>
           ))}
-          <button onClick={() => set('faq', [...agent.faq, { q: '', a: '' }])} className="text-sm text-brand-700 hover:underline">+ Agregar FAQ</button>
+          <button onClick={() => set('faq', [...agent.faq, { q: '', a: '' }])} className="text-sm font-medium text-mint-700 hover:text-mint-600">+ Agregar FAQ</button>
         </Section>
 
         {/* Cuentas bancarias */}
@@ -159,11 +163,11 @@ export default function AgentPage() {
               <input className={field} placeholder="Titular" value={b.holder} onChange={(e) => setBanks(banks.map((x, j) => j === i ? { ...x, holder: e.target.value } : x))} />
               <div className="flex gap-1">
                 <input className={field} placeholder="CI/RUC" value={b.document} onChange={(e) => setBanks(banks.map((x, j) => j === i ? { ...x, document: e.target.value } : x))} />
-                <button onClick={() => setBanks(banks.filter((_, j) => j !== i))} className="px-2 text-red-600">✕</button>
+                <button onClick={() => setBanks(banks.filter((_, j) => j !== i))} className="px-2 text-coral-600 hover:text-coral-700">✕</button>
               </div>
             </div>
           ))}
-          <button onClick={() => setBanks([...banks, { bank: '', accountNumber: '', holder: '', document: '' }])} className="text-sm text-brand-700 hover:underline">+ Agregar cuenta</button>
+          <button onClick={() => setBanks([...banks, { bank: '', accountNumber: '', holder: '', document: '' }])} className="text-sm font-medium text-mint-700 hover:text-mint-600">+ Agregar cuenta</button>
         </Section>
 
         {/* Vendedores */}
@@ -172,11 +176,11 @@ export default function AgentPage() {
             <div key={i} className="mb-2 flex items-center gap-2">
               <input className={field} placeholder="Nombre" value={s.name} onChange={(e) => setSellers(sellers.map((x, j) => j === i ? { ...x, name: e.target.value } : x))} />
               <input className={field} placeholder="WhatsApp (+595…)" value={s.whatsapp} onChange={(e) => setSellers(sellers.map((x, j) => j === i ? { ...x, whatsapp: e.target.value } : x))} />
-              <label className="flex items-center gap-1 text-xs text-gray-600"><input type="checkbox" checked={s.active} onChange={(e) => setSellers(sellers.map((x, j) => j === i ? { ...x, active: e.target.checked } : x))} /> activo</label>
-              <button onClick={() => setSellers(sellers.filter((_, j) => j !== i))} className="px-2 text-red-600">✕</button>
+              <label className="flex items-center gap-1 text-xs text-ink-600"><input type="checkbox" className="accent-mint-600" checked={s.active} onChange={(e) => setSellers(sellers.map((x, j) => j === i ? { ...x, active: e.target.checked } : x))} /> activo</label>
+              <button onClick={() => setSellers(sellers.filter((_, j) => j !== i))} className="px-2 text-coral-600 hover:text-coral-700">✕</button>
             </div>
           ))}
-          <button onClick={() => setSellers([...sellers, { name: '', whatsapp: '+595', active: true }])} className="text-sm text-brand-700 hover:underline">+ Agregar vendedor</button>
+          <button onClick={() => setSellers([...sellers, { name: '', whatsapp: '+595', active: true }])} className="text-sm font-medium text-mint-700 hover:text-mint-600">+ Agregar vendedor</button>
         </Section>
       </div>
 
@@ -184,7 +188,7 @@ export default function AgentPage() {
       <div className="xl:col-span-1">
         <div className="sticky top-4">
           <AgentTestChat tenantId={tenantId} />
-          <p className="mt-2 text-xs text-gray-400">
+          <p className="mt-2 text-xs text-ink-400">
             Guardá los cambios para que el chat de prueba use la nueva configuración.
           </p>
         </div>
@@ -195,8 +199,8 @@ export default function AgentPage() {
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
-    <div className="rounded-xl border border-gray-200 bg-white p-4">
-      <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-gray-500">{title}</h2>
+    <div className="rounded-2xl border border-ink-100 bg-white p-5 shadow-soft">
+      <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-ink-500">{title}</h2>
       {children}
     </div>
   );
