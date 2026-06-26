@@ -74,6 +74,11 @@ export { trialNotificationsDaily } from './functions/scheduled/trialNotification
 export { productUpsert } from './functions/products/productUpsert.js';
 export { resetUsageMonthly } from './functions/scheduled/resetUsage.js';
 
+// Scheduler diario (GROWTH-JOBS-SCHEDULER-1, 04:00 America/Asuncion) que refresca los jobs de growth
+// SEGUROS (rule-based, sin IA) para tenants ACTIVE: computeTracking/generateWinningReplies/
+// generateFollowups/generateAudits. Mismo core que el callable runTenantJob.
+export { refreshGrowthJobsDaily } from './functions/scheduled/refreshGrowthJobs.js';
+
 // Catálogo por callables (Fase 5C-B): baja por soft-archive + categorías. No cierra rules aún.
 export { productDelete } from './functions/products/productDelete.js';
 export { categoryUpsert, categoryDelete } from './functions/products/categoryCallables.js';

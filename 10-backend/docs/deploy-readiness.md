@@ -169,7 +169,7 @@ no se tocaron secrets reales ni lógica de producto.** Próximo: DOMAIN-HOSTINGE
 Disparados por Eventarc/Scheduler — exponerlos dejaría que cualquiera POSTee eventos/jobs falsos. El
 `runServiceId` es el nombre de la función **en minúsculas**:
 - `onOrderWriteStats` → `onorderwritestats` · `onProductWriteAudit` → `onproductwriteaudit` · `onWebhookInbox` → `onwebhookinbox` (event / Firestore)
-- `resetUsageMonthly` → `resetusagemonthly` · `trialNotificationsDaily` → `trialnotificationsdaily` (scheduled)
+- `resetUsageMonthly` → `resetusagemonthly` · `trialNotificationsDaily` → `trialnotificationsdaily` · `refreshGrowthJobsDaily` → `refreshgrowthjobsdaily` (scheduled)
 
 ### 7.4 Comandos (Cloud Shell)
 ```bash
@@ -183,7 +183,7 @@ HC=$(gcloud run services describe healthcheck --region=us-central1 --format='val
 curl -s -o /dev/null -w "healthCheck -> %{http_code}\n" "$HC"     # esperar 200
 
 # 2) Si healthCheck pasa a 200, aplicar al resto EXCLUYENDO event/scheduled:
-EXCLUDE="onorderwritestats onproductwriteaudit onwebhookinbox resetusagemonthly trialnotificationsdaily"
+EXCLUDE="onorderwritestats onproductwriteaudit onwebhookinbox resetusagemonthly trialnotificationsdaily refreshgrowthjobsdaily"
 for SVC in $(gcloud run services list --region=us-central1 --format='value(metadata.name)'); do
   case " $EXCLUDE " in *" $SVC "*) echo "skip (event/scheduled): $SVC"; continue;; esac
   gcloud run services add-iam-policy-binding "$SVC" \
