@@ -234,6 +234,9 @@ export default function RegisterPage() {
               <div className="rounded-xl border border-ink-100 bg-ink-50/60 p-4 text-sm text-ink-600">
                 Te enviamos un correo a <span className="font-semibold text-ink-800">{email || user?.email}</span>. Abrí el
                 enlace para verificar y volvé acá.
+                <p className="mt-2 text-xs text-ink-500">
+                  Si no ves el correo, revisá Spam, Promociones o Correo no deseado. A veces puede tardar unos minutos.
+                </p>
                 {isEmulator && (
                   <p className="mt-2 text-xs text-ink-500">
                     Emulador: abrí el enlace desde la consola de Auth en{' '}
