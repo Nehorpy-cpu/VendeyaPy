@@ -52,12 +52,13 @@
 3. **Secrets prod:** `firebase functions:secrets:set ANTHROPIC_API_KEY` y `META_APP_SECRET` (proyecto `vpw-prod`). Setear el resto del backend env (`config.ts`) por `.env.vpw-prod` en `apps/functions`.
 4. **Env frontend prod:** `apps/web/.env.production` con los `NEXT_PUBLIC_*` de vpw-prod (USE_EMULATORS **false**).
 5. **Rules + indexes:** `pnpm deploy:rules` + `pnpm deploy:indexes` (`--project vpw-prod`); esperar a que los índices terminen.
-6. **Functions:** `firebase deploy --only functions --project vpw-prod` (corre el predeploy build). Verificar en logs que arrancan sin "missing env/secret".
-7. **Hosting (web frameworks):** `firebase deploy --only hosting --project vpw-prod` (buildea Next.js + provisiona SSR). Probar la URL `*.web.app` antes del dominio.
-8. **Smoke en prod** (sin clientes reales): login, panel, dashboard, integraciones en estado "Meta no configurada", billing manual, trial. Confirmar que NO aparecen acciones demo y que la consola no tira errores.
-9. **Dominio Hostinger** (§3): agregar el custom domain, cargar DNS, esperar SSL, configurar redirect.
-10. **Meta go-live** (`docs/meta-go-live.md`): recién cuando App Review + dominio verificado en Meta + secrets → conectar una empresa de prueba → activar `live` → habilitar clientes.
-11. **Backfill free-trials** en prod (dry-run → `--apply`) para tenants legacy.
+6. **Functions:** `firebase deploy --only functions --config firebase.functions.json --project vpw-prod` (config **alterno** del fix de empaquetado pnpm — STAGING-FUNCTIONS-BUNDLE-FIX; el predeploy genera el artefacto autónomo `apps/functions/.deploy`, porque un deploy directo de `apps/functions` falla con `EUNSUPPORTEDPROTOCOL` por `"@vpw/shared":"workspace:*"`). Verificar en logs que arrancan sin "missing env/secret".
+7. **IAM público de Functions (§7):** los servicios Cloud Run v2 **nacen privados** → conceder `roles/run.invoker` a `allUsers` en las HTTP/callable, **excluyendo** las event/scheduled. Sin esto, todo da **403** (incluso `healthCheck`). **Repetir tras cada deploy de functions** (las funciones nuevas también nacen privadas). Comandos + exclusión + smoke en §7.
+8. **Hosting (web frameworks):** `firebase deploy --only hosting --project vpw-prod` (buildea Next.js + provisiona SSR). Probar la URL `*.web.app` antes del dominio.
+9. **Smoke en prod** (sin clientes reales): login, panel, dashboard, integraciones en estado "Meta no configurada", billing manual, trial. Confirmar que NO aparecen acciones demo y que la consola no tira errores.
+10. **Dominio Hostinger** (§3): agregar el custom domain, cargar DNS, esperar SSL, configurar redirect.
+11. **Meta go-live** (`docs/meta-go-live.md`): recién cuando App Review + dominio verificado en Meta + secrets → conectar una empresa de prueba → activar `live` → habilitar clientes.
+12. **Backfill free-trials** en prod (dry-run → `--apply`) para tenants legacy.
 
 ## 3. Dominio Hostinger → Firebase Hosting (pasos, sin ejecutar)
 1. En **Firebase Console → Hosting → Add custom domain**: ingresar el dominio (root `midominio.com` y/o `www`). Firebase muestra los **registros exactos** a cargar (no hardcodear acá: usar los que da la consola).
@@ -143,3 +144,69 @@ para esa fase (elegir una, ya con el dominio):
 _DEPLOY-PREP-1: solo config/docs. Se creó `apps/web/.env.production.example` y se documentó el
 checklist backend + el diferimiento de redirects. **No se hizo deploy, no se conectó dominio ni Meta,
 no se tocaron secrets reales ni lógica de producto.** Próximo: DOMAIN-HOSTINGER-1 (dominio + redirect)._
+
+## 7. Invocación pública de Functions (IAM Cloud Run) — STAGING-FUNCTIONS-IAM
+
+> Paso **obligatorio después de cada deploy de functions**. Validado en `vpw-staging`.
+
+### 7.1 Por qué hace falta
+- Cloud Functions v2 = servicios **Cloud Run**, que **nacen privados** (sin invoker público). Antes del
+  paso IAM, `healthCheck` (una HTTP function **sin auth en el código**) devolvía **HTTP 403**: la request
+  ni siquiera llega al código.
+- Tras conceder `roles/run.invoker` a `allUsers` en los servicios HTTP/callable, `healthCheck` → **200**.
+- **La seguridad real la hace el CÓDIGO, no el IAM de Cloud Run:** auth + rol + tenant en los callables,
+  firma HMAC en webhooks (`metaWebhook`/`stripeWebhook`), y el `guardDevEndpoint` (dev* → 404 fuera del
+  emulador). `allUsers` solo permite que la request **llegue** al handler; el handler decide.
+
+### 7.2 Qué servicios SÍ abrir (`allUsers` / `run.invoker`)
+- **HTTP functions** (`httpsTrigger`): webhooks reales (`metaWebhook`, `stripeWebhook`,
+  `paypalBillingWebhook`, `platformBillingWebhook`), `healthCheck`, y los `dev*` (quedan en **404** por el guard).
+- **Callable functions** (`callableTrigger`): todas (el panel las invoca con token de Auth; auth in-app).
+- En staging fueron **65** servicios (40 callable + 25 https).
+
+### 7.3 Qué servicios NO abrir (dejar privados)
+Disparados por Eventarc/Scheduler — exponerlos dejaría que cualquiera POSTee eventos/jobs falsos. El
+`runServiceId` es el nombre de la función **en minúsculas**:
+- `onOrderWriteStats` → `onorderwritestats` · `onProductWriteAudit` → `onproductwriteaudit` · `onWebhookInbox` → `onwebhookinbox` (event / Firestore)
+- `resetUsageMonthly` → `resetusagemonthly` · `trialNotificationsDaily` → `trialnotificationsdaily` (scheduled)
+
+### 7.4 Comandos (Cloud Shell)
+```bash
+gcloud config set project <PROJECT>            # vpw-staging | vpw-prod
+gcloud run services list --region=us-central1
+
+# 1) Probar PRIMERO con healthCheck (sin auth en código → test limpio):
+gcloud run services add-iam-policy-binding healthcheck \
+  --region=us-central1 --member=allUsers --role=roles/run.invoker
+HC=$(gcloud run services describe healthcheck --region=us-central1 --format='value(status.url)')
+curl -s -o /dev/null -w "healthCheck -> %{http_code}\n" "$HC"     # esperar 200
+
+# 2) Si healthCheck pasa a 200, aplicar al resto EXCLUYENDO event/scheduled:
+EXCLUDE="onorderwritestats onproductwriteaudit onwebhookinbox resetusagemonthly trialnotificationsdaily"
+for SVC in $(gcloud run services list --region=us-central1 --format='value(metadata.name)'); do
+  case " $EXCLUDE " in *" $SVC "*) echo "skip (event/scheduled): $SVC"; continue;; esac
+  gcloud run services add-iam-policy-binding "$SVC" \
+    --region=us-central1 --member=allUsers --role=roles/run.invoker --quiet >/dev/null \
+    && echo "ok: $SVC"
+done
+```
+
+### 7.5 Smoke esperado (tras IAM)
+- `healthCheck` → **200** (era 403)
+- dev endpoints (`devMetaConnect`, …) → **404** por el guard (NO 403 IAM)
+- callable sin auth (`provisionTenant`, …) → **401** unauthenticated (NO 403/500; algún callable con
+  validación previa de args puede dar **400** — también es "controlado", no IAM ni crash)
+- `metaWebhook` GET con `verify_token` inválido → **403** (rechazo de la app, no 500)
+- `stripeWebhook` POST sin firma → **401** (rechazo de firma, no 500)
+- Logs (`firebase functions:log`): los containers cold-startean OK (`STARTUP TCP probe succeeded`);
+  **sin** `MODULE_NOT_FOUND` / `@vpw/shared` / `ZodError` / missing-env.
+
+### 7.6 Producción
+- **Repetir este paso después de cada deploy de functions** (servicios v2 — y funciones nuevas — nacen
+  privados). Apuntar `--project vpw-prod`.
+- ⛔ Si `add-iam-policy-binding` con `allUsers` es **rechazado** por `constraints/iam.allowedPolicyMemberDomains`
+  (**Domain Restricted Sharing**) → **bloqueo externo**: lo resuelve quien administre la org/Workspace
+  (eximir el proyecto o ajustar la policy). En `vpw-staging` **no** había DRS (se aplicó sin problema).
+
+_DEPLOY-DOCS-IAM: solo docs. Documenta el paso IAM (por qué, qué abrir/excluir, comandos, smoke, nota
+prod). **No se ejecutó deploy ni IAM, no se tocó código ni secrets.**_
