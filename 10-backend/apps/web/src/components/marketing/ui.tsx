@@ -4,6 +4,7 @@
  */
 import Link from 'next/link';
 import { cn } from '@/lib/cn';
+import { BrandMark } from '@/components/BrandMark';
 import { ArrowRightIcon } from './icons';
 
 /* ---------------------------------- Logo --------------------------------- */
@@ -20,15 +21,7 @@ export function Logo({
   const content = (
     <span className={cn('inline-flex items-center gap-2.5', className)}>
       <span className="relative grid h-9 w-9 place-items-center rounded-xl bg-[#0d172c] shadow-glow">
-        <svg viewBox="0 0 24 24" className="h-5 w-5 text-mint-300" fill="none" aria-hidden="true">
-          <path
-            d="M6.5 7 12 13 17.5 7 M12 13 12 17.5"
-            stroke="currentColor"
-            strokeWidth={2.6}
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          />
-        </svg>
+        <BrandMark className="h-7 w-7" />
       </span>
       <span
         className={cn(
@@ -36,7 +29,7 @@ export function Logo({
           tone === 'dark' ? 'text-ink-900' : 'text-white',
         )}
       >
-        VendeYa<span className={tone === 'dark' ? 'text-mint-600' : 'text-mint-300'}>Py</span>
+        Vende<span className={tone === 'dark' ? 'text-mint-600' : 'text-mint-300'}>Ya</span>Py
       </span>
     </span>
   );
