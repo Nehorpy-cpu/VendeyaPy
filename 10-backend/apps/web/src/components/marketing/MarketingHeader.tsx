@@ -6,11 +6,11 @@ import { Logo, Button } from './ui';
 import { MenuIcon, CloseIcon } from './icons';
 
 const NAV_LINKS = [
-  { label: 'Producto', href: '#producto' },
-  { label: 'Diferencial', href: '#diferencial' },
-  { label: 'Cómo funciona', href: '#como-funciona' },
-  { label: 'Planes', href: '#pricing' },
-  { label: 'Demo', href: '#demo' },
+  { label: 'Producto', href: '/#producto' },
+  { label: 'Diferencial', href: '/#diferencial' },
+  { label: 'Cómo funciona', href: '/#como-funciona' },
+  { label: 'Planes', href: '/#pricing' },
+  { label: 'Demo', href: '/#demo' },
 ];
 
 export function MarketingHeader() {
