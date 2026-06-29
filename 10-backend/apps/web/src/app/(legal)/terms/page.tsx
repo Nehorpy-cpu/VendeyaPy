@@ -1,6 +1,6 @@
 import type { Metadata } from 'next';
 import Link from 'next/link';
-import { LegalPage, Section, P, UL } from '@/components/legal/ui';
+import { LegalPage, Section, P, UL, LEGAL_LAST_UPDATED } from '@/components/legal/ui';
 
 export const metadata: Metadata = {
   title: 'Términos del servicio — VendeYaPy',
@@ -11,6 +11,14 @@ export default function TermsPage() {
   return (
     <LegalPage
       title="Términos del servicio"
+      note={
+        <>
+          <strong className="font-semibold text-ink-800">Última actualización:</strong> {LEGAL_LAST_UPDATED}.
+          Estos términos describen las condiciones de uso de la plataforma VendeYaPy. Podremos actualizarlos
+          periódicamente para reflejar cambios en el servicio, requisitos legales o políticas de plataformas
+          integradas como Meta/WhatsApp.
+        </>
+      }
       intro="Estos términos regulan el uso de VendeYaPy. Al crear una cuenta o usar la plataforma, aceptás estas condiciones. Si usás la plataforma en nombre de una empresa, declarás tener facultades para aceptarlas por ella."
     >
       <Section title="1. El servicio">

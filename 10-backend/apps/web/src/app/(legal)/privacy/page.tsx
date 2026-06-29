@@ -1,6 +1,6 @@
 import type { Metadata } from 'next';
 import Link from 'next/link';
-import { LegalPage, Section, P, UL } from '@/components/legal/ui';
+import { LegalPage, Section, P, UL, LEGAL_LAST_UPDATED } from '@/components/legal/ui';
 
 export const metadata: Metadata = {
   title: 'Política de privacidad — VendeYaPy',
@@ -12,6 +12,14 @@ export default function PrivacyPage() {
   return (
     <LegalPage
       title="Política de privacidad"
+      note={
+        <>
+          <strong className="font-semibold text-ink-800">Última actualización:</strong> {LEGAL_LAST_UPDATED}.
+          Esta política describe cómo VendeYaPy recopila, utiliza y protege la información relacionada con el
+          uso de la plataforma. Podremos actualizarla periódicamente para reflejar cambios en el servicio,
+          requisitos legales o políticas de plataformas integradas como Meta/WhatsApp.
+        </>
+      }
       intro="VendeYaPy es una plataforma para vender por WhatsApp y gestionar el negocio. Esta política describe qué datos tratamos, con qué fin, con quién los compartimos y cómo podés solicitar su eliminación. Aplica a las empresas que usan el panel y a las personas que las representan."
     >
       <Section title="1. Datos de cuenta y empresa">

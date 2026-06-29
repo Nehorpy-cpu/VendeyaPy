@@ -6,16 +6,18 @@ import Link from 'next/link';
 import { ArrowRightIcon } from '@/components/marketing/icons';
 
 /** Fecha de vigencia de los documentos legales (manual; actualizar al revisar). */
-export const LEGAL_LAST_UPDATED = 'junio de 2026';
+export const LEGAL_LAST_UPDATED = '29 de junio de 2026';
 /** Contacto de soporte para consultas y solicitudes de datos. */
 export const LEGAL_CONTACT_EMAIL = 'soporte@vendeyapy.com';
 
 export function LegalPage({
   title,
+  note,
   intro,
   children,
 }: {
   title: string;
+  note: React.ReactNode;
   intro?: React.ReactNode;
   children: React.ReactNode;
 }) {
@@ -30,12 +32,9 @@ export function LegalPage({
       </Link>
 
       <h1 className="mt-6 text-3xl font-bold tracking-tight text-ink-900 sm:text-4xl">{title}</h1>
-      <p className="mt-2 text-sm text-ink-400">Última actualización: {LEGAL_LAST_UPDATED}</p>
 
-      <div className="mt-5 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
-        ⚠️ <strong>Versión inicial.</strong> Este documento es una base para cumplir requisitos de las
-        plataformas (Meta/WhatsApp) y <strong>debe ser revisado por un profesional legal</strong> antes de un
-        lanzamiento masivo. No constituye asesoramiento legal.
+      <div className="mt-5 rounded-xl border border-ink-100 bg-ink-50/60 px-4 py-3 text-sm leading-relaxed text-ink-600">
+        {note}
       </div>
 
       {intro && <p className="mt-6 text-[0.95rem] leading-relaxed text-ink-600">{intro}</p>}

@@ -1,6 +1,6 @@
 import type { Metadata } from 'next';
 import Link from 'next/link';
-import { LegalPage, Section, P, UL, LEGAL_CONTACT_EMAIL } from '@/components/legal/ui';
+import { LegalPage, Section, P, UL, LEGAL_CONTACT_EMAIL, LEGAL_LAST_UPDATED } from '@/components/legal/ui';
 
 export const metadata: Metadata = {
   title: 'Eliminación de datos — VendeYaPy',
@@ -11,6 +11,14 @@ export default function DataDeletionPage() {
   return (
     <LegalPage
       title="Eliminación de datos"
+      note={
+        <>
+          <strong className="font-semibold text-ink-800">Última actualización:</strong> {LEGAL_LAST_UPDATED}.
+          Esta página describe cómo solicitar la eliminación de la información asociada a tu cuenta y empresa
+          en VendeYaPy. Podremos actualizar este procedimiento periódicamente para reflejar cambios en el
+          servicio, requisitos legales o políticas de plataformas integradas como Meta/WhatsApp.
+        </>
+      }
       intro="Podés solicitar la eliminación de los datos asociados a tu cuenta y a tu empresa en VendeYaPy. Acá te explicamos qué se elimina y cómo pedirlo."
     >
       <Section title="1. Qué datos podés eliminar">
