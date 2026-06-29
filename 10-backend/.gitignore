@@ -30,6 +30,7 @@ pnpm-debug.log*
 .env.vpw-dev
 .env.vpw-staging
 .env.vpw-prod
+.env.vpw-prod-dd6ff
 
 # Firebase
 .firebase/

@@ -3,7 +3,7 @@
     "default": "vpw-dev",
     "dev": "vpw-dev",
     "staging": "vpw-staging",
-    "production": "vpw-prod"
+    "production": "vpw-prod-dd6ff"
   },
   "targets": {},
   "etags": {}
