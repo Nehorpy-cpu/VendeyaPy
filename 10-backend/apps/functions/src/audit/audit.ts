@@ -49,6 +49,7 @@ export const AUDIT_ACTIONS = [
   'chat.takeover',
   'chat.released',
   'meta.connected',
+  'meta.connected_manual',
   'meta.disconnected',
   'entitlement.blocked',
   'trial.notification_created',

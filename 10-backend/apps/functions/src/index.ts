@@ -141,6 +141,8 @@ export { devMetaConnect, devMetaDisconnect } from './functions/meta/devMeta.js';
 // Conexión REAL de Meta por tenant (Fase 4B): callables autenticados (owner/admin) del
 // Embedded Signup — nonce + intercambio de code + discovery + preflight. No cablea frontend.
 export { startMetaConnect, connectMeta, verifyMetaChannel, selectMetaPhoneNumber, metaDisconnect } from './functions/meta/metaConnect.js';
+// WM-1: alta MANUAL de WhatsApp por PLATFORM_ADMIN (reusa el mismo modelo; no toca Embedded Signup).
+export { adminSetManualWhatsappConnection } from './functions/meta/manualWhatsappCallables.js';
 
 // Webhooks + omnicanal (D2): endpoint de Meta (GET verify + POST) + trigger + simulador.
 export { metaWebhook, devSimulateInbound } from './functions/meta/webhookHttp.js';

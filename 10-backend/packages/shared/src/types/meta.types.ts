@@ -5,7 +5,7 @@
  * Subcolecciones: tenants/{t}/metaConnections/{id} · tenants/{t}/metaAssets/{id}.
  */
 
-import type { MetaConnectionStatus, MetaAssetType, WebhookStatus } from '../enums.js';
+import type { MetaConnectionStatus, MetaConnectionSource, MetaAssetType, WebhookStatus } from '../enums.js';
 import type { Timestamp } from './common.types.js';
 import type { CampaignAttribution } from './attribution.types.js';
 
@@ -21,6 +21,8 @@ export interface MetaConnection {
   tokenExpiresAt: Timestamp | null;
   scopes: string[];
   status: MetaConnectionStatus;
+  /** Origen de la conexión. Opcional/aditivo: ausente = legacy/Embedded Signup. */
+  source?: MetaConnectionSource;
   lastVerifiedAt: Timestamp | null;
   errorMessage: string;
   createdAt: Timestamp;

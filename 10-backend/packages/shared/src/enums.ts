@@ -210,6 +210,11 @@ export const META_CONNECTION_STATUS = [
 ] as const;
 export type MetaConnectionStatus = (typeof META_CONNECTION_STATUS)[number];
 
+// Origen de la conexión Meta/WhatsApp. 'embedded_signup' = flujo OAuth de Meta;
+// 'manual_admin' = carga manual por un PLATFORM_ADMIN (WM-1); 'demo' = simulada (local).
+export const META_CONNECTION_SOURCE = ['embedded_signup', 'manual_admin', 'demo'] as const;
+export type MetaConnectionSource = (typeof META_CONNECTION_SOURCE)[number];
+
 // Canal de un mensaje/conversación (omnicanal, D2).
 export const MESSAGE_CHANNEL = ['whatsapp', 'instagram', 'messenger'] as const;
 export type MessageChannel = (typeof MESSAGE_CHANNEL)[number];

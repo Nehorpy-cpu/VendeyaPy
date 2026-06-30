@@ -8,7 +8,7 @@
  * y el code NUNCA se loguean. Las llamadas a Graph pasan por MetaGraphClient (inyectable).
  */
 import { Timestamp } from 'firebase-admin/firestore';
-import type { MetaConnection, MetaConnectionStatus } from '@vpw/shared';
+import type { MetaConnection, MetaConnectionStatus, MetaConnectionSource } from '@vpw/shared';
 import { db, paths } from '../lib/firebase.js';
 import { getSecretStore } from '../lib/secretStore.js';
 import { logger } from '../lib/logger.js';
@@ -56,9 +56,24 @@ async function writeFailureStatus(tenantId: string, status: MetaConnectionStatus
   );
 }
 
-async function writeActiveConnection(
+/**
+ * Escribe el doc determinista metaConnections/main (merge). Helper COMPARTIDO entre el flujo
+ * Embedded Signup (defaults: status 'active', tokenType 'live') y el alta manual (WM-1), que pasa
+ * `status`/`source` propios. Nunca escribe el token: solo `tokenSecretRef`.
+ */
+export async function writeActiveConnection(
   tenantId: string,
-  fields: { byUid?: string | null; tokenSecretRef: string; tokenExpiresAtMs: number | null; scopes: string[]; businessId?: string; businessName?: string },
+  fields: {
+    byUid?: string | null;
+    tokenSecretRef: string;
+    tokenExpiresAtMs: number | null;
+    scopes: string[];
+    businessId?: string;
+    businessName?: string;
+    status?: MetaConnectionStatus;
+    tokenType?: string;
+    source?: MetaConnectionSource;
+  },
 ): Promise<void> {
   const ref = db().doc(paths.metaConnection(tenantId, 'main'));
   const existing = (await ref.get()).data() as MetaConnection | undefined;
@@ -70,14 +85,15 @@ async function writeActiveConnection(
     metaBusinessName: fields.businessName ?? existing?.metaBusinessName ?? '',
     connectedUserId: fields.byUid ?? existing?.connectedUserId ?? '',
     tokenSecretRef: fields.tokenSecretRef,
-    tokenType: 'live',
+    tokenType: fields.tokenType ?? 'live',
     tokenExpiresAt: fields.tokenExpiresAtMs ? Timestamp.fromMillis(fields.tokenExpiresAtMs) : null,
     scopes: fields.scopes,
-    status: 'active',
+    status: fields.status ?? 'active',
     lastVerifiedAt: now,
     errorMessage: '',
     createdAt: existing?.createdAt ?? now,
     updatedAt: now,
+    ...(fields.source ? { source: fields.source } : {}),
   };
   await ref.set(conn, { merge: true });
 }
