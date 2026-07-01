@@ -143,6 +143,8 @@ export { devMetaConnect, devMetaDisconnect } from './functions/meta/devMeta.js';
 export { startMetaConnect, connectMeta, verifyMetaChannel, selectMetaPhoneNumber, metaDisconnect } from './functions/meta/metaConnect.js';
 // WM-1: alta MANUAL de WhatsApp por PLATFORM_ADMIN (reusa el mismo modelo; no toca Embedded Signup).
 export { adminSetManualWhatsappConnection } from './functions/meta/manualWhatsappCallables.js';
+// WM-2: solicitud de activación asistida (owner/admin) + cancelación. Solo metadatos, sin token.
+export { requestWhatsappActivation, cancelWhatsappActivationRequest } from './functions/meta/whatsappActivationCallables.js';
 
 // Webhooks + omnicanal (D2): endpoint de Meta (GET verify + POST) + trigger + simulador.
 export { metaWebhook, devSimulateInbound } from './functions/meta/webhookHttp.js';

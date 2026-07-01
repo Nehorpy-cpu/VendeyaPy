@@ -215,6 +215,12 @@ export type MetaConnectionStatus = (typeof META_CONNECTION_STATUS)[number];
 export const META_CONNECTION_SOURCE = ['embedded_signup', 'manual_admin', 'demo'] as const;
 export type MetaConnectionSource = (typeof META_CONNECTION_SOURCE)[number];
 
+// Onboarding manual de WhatsApp (WM-2): estado de la solicitud de activación asistida.
+// El owner la crea ('pending'); el admin la 'completed' al cargar la conexión manual (WM-1) o la
+// 'cancelled'. Vive en tenants/{tenantId}/whatsappActivationRequests/{requestId}.
+export const WHATSAPP_ACTIVATION_STATUS = ['pending', 'completed', 'cancelled'] as const;
+export type WhatsappActivationStatus = (typeof WHATSAPP_ACTIVATION_STATUS)[number];
+
 // Canal de un mensaje/conversación (omnicanal, D2).
 export const MESSAGE_CHANNEL = ['whatsapp', 'instagram', 'messenger'] as const;
 export type MessageChannel = (typeof MESSAGE_CHANNEL)[number];

@@ -59,6 +59,8 @@ export const MODULES: NavModule[] = [
   { key: 'integrations', label: 'Integración Meta', href: '/integrations', icon: '🔌', section: 'crecer', roles: ['PLATFORM_ADMIN', 'TENANT_OWNER'] },
   // ── AJUSTES ──
   { key: 'billing', label: 'Plan y facturación', href: '/billing', icon: '💳', section: 'ajustes', roles: ['PLATFORM_ADMIN', 'TENANT_OWNER'] },
+  // Panel solo-admin (WM-2): bandeja de solicitudes de WhatsApp + carga manual de la conexión.
+  { key: 'whatsapp-admin', label: 'WhatsApp (admin)', href: '/whatsapp-admin', icon: '📲', section: 'ajustes', roles: ['PLATFORM_ADMIN'] },
   // ── Ocultos del sidebar hasta que exista su página (FRONTEND-UX-1C). Roles conservados. ──
   { key: 'companies', label: 'Empresas', href: '/companies', icon: '🏢', hidden: true, roles: ['PLATFORM_ADMIN'] },
   { key: 'campaigns', label: 'Campañas', href: '/campaigns', icon: '📣', hidden: true, roles: ['PLATFORM_ADMIN', 'TENANT_OWNER'] },

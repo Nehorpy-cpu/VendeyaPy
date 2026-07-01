@@ -27,6 +27,7 @@ import { getChannelConfig, setWhatsappSendMode, friendlyChannelError } from '@/l
 import { getAgentConfig } from '@/lib/agent-config';
 import { resolveEntitlements, getUsage, isUnlimited } from '@/lib/entitlements';
 import { SectionHeader, EmptyState, ConfirmModal } from '@/components/ui';
+import { WhatsappAssistedActivation } from '@/components/integrations/WhatsappAssistedActivation';
 
 const STATUS: Record<MetaConnectionStatus, { label: string; cls: string }> = {
   not_connected: { label: 'Sin conectar', cls: 'bg-ink-50 text-ink-600' },
@@ -251,6 +252,10 @@ export default function IntegrationsPage() {
           </div>
         )}
       </div>
+
+      {/* Activación asistida de WhatsApp (WM-2): cuando el Embedded Signup no está configurado, el owner
+          pide ayuda al equipo. No activa 'live' (eso sigue siendo exclusivo de channelConfigUpdate). */}
+      {!configured && <WhatsappAssistedActivation tenantId={tenantId} canOperate={canOperate} connStatus={conn?.status ?? null} />}
 
       {/* Respuestas reales por WhatsApp (W-2) */}
       <div className={card}>

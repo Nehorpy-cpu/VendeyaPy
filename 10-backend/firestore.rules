@@ -380,6 +380,13 @@ service cloud.firestore {
         allow write: if false;
       }
 
+      // Solicitudes de activación asistida de WhatsApp (WM-2). El owner ve las SUYAS; el admin las
+      // gestiona/completa. Escritura SOLO por callable (Admin SDK) — el owner no se autoconecta.
+      match /whatsappActivationRequests/{requestId} {
+        allow read: if isTenantOwner(tenantId) || isPlatformAdmin();
+        allow write: if false;
+      }
+
       // Webhook events (solo Cloud Functions, lectura para debug)
       match /webhookEvents/{eventId} {
         allow read: if isPlatformAdmin();
@@ -390,6 +397,12 @@ service cloud.firestore {
     // Bandeja del Super Admin: solicitudes de activación manual de TODOS los tenants (collectionGroup).
     // La lectura por-tenant del owner ya la cubre el match anidado tenants/{t}/manualActivationRequests.
     match /{path=**}/manualActivationRequests/{requestId} {
+      allow read: if isPlatformAdmin();
+    }
+
+    // Bandeja del Super Admin: solicitudes de activación de WhatsApp de TODOS los tenants (collectionGroup).
+    // La lectura por-tenant del owner ya la cubre el match anidado tenants/{t}/whatsappActivationRequests.
+    match /{path=**}/whatsappActivationRequests/{requestId} {
       allow read: if isPlatformAdmin();
     }
 

@@ -8,8 +8,9 @@
  * Seguridad: el accessToken va cifrado al SecretStore (nunca a Firestore legible, logs ni audit).
  * No toca connectMeta / verifyMetaChannel / selectMetaPhoneNumber / metaDisconnect / channelConfigUpdate.
  *
- * NOTA WM-1: el callable owner `requestWhatsappActivation` (solicitud) queda para WM-2 — requiere una
- * subcolección nueva + su regla, que se agrega junto con la UI del owner. Ver docs/whatsapp-manual-onboarding.md.
+ * WM-2: acepta un `requestId` OPCIONAL. Si viene de una solicitud del owner (whatsappActivationRequests),
+ * al cargar la conexión se marca esa solicitud como 'completed' (best-effort, no rompe la conexión).
+ * La solicitud/cancelación del owner viven en functions/meta/whatsappActivationCallables.ts.
  */
 import { onCall, HttpsError } from 'firebase-functions/v2/https';
 import { db, paths } from '../../lib/firebase.js';
@@ -17,6 +18,7 @@ import { META_APP_SECRET } from '../../meta/metaSecrets.js';
 import { getMetaGraphClient } from '../../meta/graphClient.js';
 import { assertWhatsappNumbersEntitled } from '../../entitlements/entitlements.js';
 import { parseManualWhatsappInput, runManualWhatsappConnect } from '../../meta/manualConnect.js';
+import { markActivationRequestCompleted } from '../../meta/activationRequests.js';
 import { recordAudit } from '../../audit/audit.js';
 import { logger } from '../../lib/logger.js';
 
@@ -29,6 +31,8 @@ interface ManualConnInput {
   businessName?: string;
   accessToken?: string;
   tokenExpiresAt?: number;
+  /** WM-2 (opcional): si viene de una solicitud del owner, se marca 'completed' al cargar. */
+  requestId?: string;
 }
 
 // debug_token (preflight) usa el app access token → necesita META_APP_SECRET, igual que connectMeta.
@@ -75,6 +79,15 @@ export const adminSetManualWhatsappConnection = onCall<ManualConnInput>(
       metadata: { source: 'manual_admin', phoneNumberId: parsed.value.phoneNumberId, wabaId: parsed.value.wabaId, status: result.status, ready: result.ready },
     });
     logger.info('adminSetManualWhatsappConnection ok', { tenantId, status: result.status, ready: result.ready });
+
+    // 7) WM-2: si el alta responde a una solicitud del owner, marcarla 'completed' (best-effort:
+    //    un requestId inválido/ausente NO rompe la conexión ya escrita). Solo datos NO sensibles.
+    const requestId = typeof req.data?.requestId === 'string' ? req.data.requestId.trim() : '';
+    if (requestId) {
+      await markActivationRequestCompleted(tenantId, requestId, {
+        connectionStatus: result.status, phoneNumberId: result.phoneNumberId, adminUid,
+      });
+    }
 
     return { ok: true, status: result.status, ready: result.ready, phoneNumberId: result.phoneNumberId, phoneNumber: result.phoneNumber };
   },

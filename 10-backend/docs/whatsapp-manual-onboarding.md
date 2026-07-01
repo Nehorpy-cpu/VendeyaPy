@@ -1,14 +1,33 @@
-# Onboarding manual de WhatsApp (WM-1)
+# Onboarding manual de WhatsApp (WM-1 · WM-2)
 
 Camino alternativo cuando Embedded Signup / App Review / Business Verification de Meta están
 demorados o bloqueados: un **PLATFORM_ADMIN** carga manualmente la conexión de WhatsApp de un cliente.
 Reusa el **mismo modelo** que el Embedded Signup, así que el envío, los webhooks, el modo mock/live y
 `metaDisconnect` funcionan idéntico.
 
-> **Estado WM-1 (backend):** implementado el callable `adminSetManualWhatsappConnection`. El callable
-> de solicitud del owner (`requestWhatsappActivation`) queda para **WM-2** (necesita una subcolección
-> nueva + su regla, que se agregan junto con la UI del owner). Por ahora la solicitud es por el canal
-> de soporte habitual.
+> **Estado:** **WM-1** = el admin carga la conexión (`adminSetManualWhatsappConnection`). **WM-2** = el
+> owner pide **activación asistida** desde el panel (`requestWhatsappActivation`) y el admin la ve/gestiona
+> en su panel. El flujo end-to-end es: el owner solicita → el admin carga la conexión (WM-1) referenciando
+> esa solicitud → la solicitud queda `completed`. Embedded Signup sigue igual y puede reemplazar la
+> conexión manual del mismo tenant en cualquier momento.
+
+## WM-2 — Solicitud del owner + panel del admin
+
+**Flujo:**
+1. **Owner** (panel → *Integración Meta*, cuando Embedded no está configurado): botón **"Solicitar activación
+   asistida de WhatsApp"** → `requestWhatsappActivation` crea una solicitud `pending` en
+   `tenants/{t}/whatsappActivationRequests/{id}`. **1 pending por empresa**. No toca `metaConnections` ni
+   tokens. Solo el **TENANT_OWNER** (su empresa) o **PLATFORM_ADMIN** pueden solicitar; seller/manager/viewer no.
+2. **Admin** (panel → *Ajustes → WhatsApp (admin)*, solo `PLATFORM_ADMIN`): ve las solicitudes pendientes
+   (collectionGroup) y usa el form de carga manual (WM-1). Al enviar con `requestId`, la solicitud pasa a
+   `completed` (best-effort: un requestId inválido nunca rompe la conexión ya escrita).
+3. **Cancelar:** `cancelWhatsappActivationRequest` — el owner cancela solo la suya pendiente; el admin, cualquiera.
+
+**Seguridad:** la solicitud **nunca** contiene el token (solo metadatos: nota/contacto/estado/phone id). El
+token sigue el camino de WM-1 (cifrado en SecretStore, ver §3). La escritura de las solicitudes es **solo por
+callable** (Admin SDK; rules `write:false`). El owner ve las suyas; el admin las lee vía `collectionGroup`
+(regla + índice `whatsappActivationRequests` en `firestore.indexes.json`). El owner **no** puede cargar tokens:
+el form de carga es exclusivo del panel admin.
 
 ## 1. Qué datos pedir al cliente
 | Dato | Qué es | Requerido |

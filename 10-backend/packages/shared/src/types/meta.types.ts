@@ -5,7 +5,7 @@
  * Subcolecciones: tenants/{t}/metaConnections/{id} · tenants/{t}/metaAssets/{id}.
  */
 
-import type { MetaConnectionStatus, MetaConnectionSource, MetaAssetType, WebhookStatus } from '../enums.js';
+import type { MetaConnectionStatus, MetaConnectionSource, MetaAssetType, WebhookStatus, WhatsappActivationStatus } from '../enums.js';
 import type { Timestamp } from './common.types.js';
 import type { CampaignAttribution } from './attribution.types.js';
 
@@ -60,6 +60,36 @@ export interface WebhookInboxEvent {
   receivedAt: Timestamp;
   processedAt: Timestamp | null;
   expiresAt: Timestamp | null;
+}
+
+/**
+ * Onboarding manual de WhatsApp (WM-2). El TENANT_OWNER solicita activación asistida
+ * (status='pending'); el PLATFORM_ADMIN carga la conexión manual (WM-1) y la marca 'completed',
+ * o la 'cancelled'. Vive en tenants/{tenantId}/whatsappActivationRequests/{requestId}.
+ * ESCRITURA SOLO por callable (Admin SDK; rules write:false). NUNCA contiene el token de acceso.
+ */
+export interface WhatsappActivationRequest {
+  id: string;
+  tenantId: string;
+  status: WhatsappActivationStatus;
+  /** Quién creó la solicitud (uid del owner/admin) y su rol al momento de crearla. */
+  requestedByUid: string;
+  requestedByRole: string;
+  requestedAt: Timestamp;
+  /** Nombre de la empresa al momento de solicitar (snapshot informativo). */
+  businessName: string | null;
+  /** Teléfono/WhatsApp de contacto para coordinar la activación (informativo, no sensible). */
+  contactPhone: string | null;
+  /** Nota opcional del owner. */
+  note: string | null;
+  /** Quién revisó (completó/canceló) y cuándo. */
+  reviewedByUid: string | null;
+  reviewedAt: Timestamp | null;
+  /** Al completar (WM-1): estado resultante de la conexión + phone id. NO incluye token. */
+  connectionStatus: string | null;
+  phoneNumberId: string | null;
+  /** Motivo de cancelación (si status='cancelled'). */
+  cancelReason: string | null;
 }
 
 /**
