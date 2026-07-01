@@ -13,6 +13,8 @@
  *     --create        crea el usuario si no existe (sin contraseña; el admin la setea por "restablecer
  *                     contraseña"). Sin este flag, si el usuario no existe, se DETIENE y pide crearlo en Console.
  *     --verify-only   solo lee y verifica claims; no escribe nada.
+ *     --allow-prod    confirma INTENCIONALMENTE un proyecto de producción (nombre con 'prod'); sin esto
+ *                     el script rechaza prod para evitar accidentes.
  *
  * CREDENCIALES (Admin SDK): ADC o service account vía GOOGLE_APPLICATION_CREDENTIALS apuntando al JSON
  *   del proyecto (Firebase Console → Project settings → Service accounts → Generate new private key).
@@ -20,7 +22,7 @@
  *
  * GUARDAS DE SEGURIDAD:
  *   - Exige --project explícito (sin default → no se corre contra el proyecto equivocado por accidente).
- *   - RECHAZA cualquier proyecto que parezca producción (nombre con 'prod').
+ *   - RECHAZA cualquier proyecto que parezca producción (nombre con 'prod') salvo --allow-prod explícito.
  *   - RECHAZA correr si hay env de EMULADOR seteado (FIRESTORE/AUTH_EMULATOR_HOST…): este script es
  *     REAL-only; para el emulador usá seed-users.mjs. Así es imposible tocar el emulador por accidente
  *     cuando se pide un proyecto real, y viceversa (no arranca sin credenciales reales).
@@ -43,7 +45,10 @@ const die = (msg) => { console.error(`✗ ${msg}`); process.exit(1); };
 
 // -------- validación de args + guardas --------
 if (!project) die('Falta --project (ej. --project=vpw-staging). Sin default a propósito, para no correr contra el proyecto equivocado.');
-if (/prod/i.test(project)) die(`El proyecto "${project}" parece PRODUCCIÓN. Este script NO opera sobre prod.`);
+// PROD bloqueado por defecto (evita accidentes). Para un bootstrap INTENCIONAL de prod, pasá --allow-prod.
+if (/prod/i.test(project) && args['allow-prod'] !== true) {
+  die(`El proyecto "${project}" parece PRODUCCIÓN. Pasá --allow-prod para confirmar intencionalmente el bootstrap del admin de prod.`);
+}
 if (!email) die('Falta --email (o ADMIN_EMAIL).');
 if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) die(`Email inválido: "${email}".`);
 
