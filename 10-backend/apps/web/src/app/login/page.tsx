@@ -3,9 +3,10 @@
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { signInWithEmailAndPassword } from 'firebase/auth';
+import { signInWithEmailAndPassword, sendPasswordResetEmail } from 'firebase/auth';
 import { firebaseAuth } from '@/lib/firebase';
 import { useAuth } from '@/lib/auth-context';
+import { isValidEmail, resetOutcome } from '@/lib/password-reset';
 import { Logo } from '@/components/marketing/ui';
 import { MetricCard } from '@/components/marketing/MetricCard';
 import { AnimatedChart } from '@/components/marketing/AnimatedChart';
@@ -25,6 +26,11 @@ export default function LoginPage() {
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  // Recuperación de contraseña (PASSWORD-RESET-UX).
+  const [mode, setMode] = useState<'login' | 'reset'>('login');
+  const [resetError, setResetError] = useState<string | null>(null);
+  const [resetSent, setResetSent] = useState<string | null>(null);
+  const [resetSubmitting, setResetSubmitting] = useState(false);
 
   // Si ya está logueado, ir al panel.
   useEffect(() => {
@@ -42,6 +48,41 @@ export default function LoginPage() {
       setError('Email o contraseña incorrectos.');
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  const openReset = () => {
+    setError(null);
+    setResetError(null);
+    setResetSent(null);
+    setMode('reset');
+  };
+  const backToLogin = () => {
+    setMode('login');
+    setResetError(null);
+    setResetSent(null);
+  };
+
+  const onReset = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setResetError(null);
+    setResetSent(null);
+    if (!isValidEmail(email)) {
+      setResetError('Ingresá un email válido.');
+      return;
+    }
+    setResetSubmitting(true);
+    try {
+      await sendPasswordResetEmail(firebaseAuth(), email.trim());
+      setResetSent(resetOutcome('').msg); // mensaje genérico (no revela existencia)
+    } catch (err) {
+      const code = (err as { code?: string })?.code ?? '';
+      const outcome = resetOutcome(code);
+      // user-not-found → se trata como éxito (no revelar); el resto muestra error amigable.
+      if (outcome.kind === 'success') setResetSent(outcome.msg);
+      else setResetError(outcome.msg);
+    } finally {
+      setResetSubmitting(false);
     }
   };
 
@@ -141,81 +182,159 @@ export default function LoginPage() {
 
         <div className="flex flex-1 items-center justify-center">
           <div className="w-full max-w-sm">
-            <div className="mb-8">
-              <h2 className="text-2xl font-bold tracking-tight text-ink-900">Entrá a tu panel</h2>
-              <p className="mt-1 text-sm text-ink-500">
-                Usá las credenciales de tu empresa para continuar.
-              </p>
-            </div>
+            {mode === 'login' ? (
+              <>
+                <div className="mb-8">
+                  <h2 className="text-2xl font-bold tracking-tight text-ink-900">Entrá a tu panel</h2>
+                  <p className="mt-1 text-sm text-ink-500">
+                    Usá las credenciales de tu empresa para continuar.
+                  </p>
+                </div>
 
-            <form onSubmit={onSubmit} className="space-y-4">
-              <div>
-                <label htmlFor="email" className="mb-1.5 block text-sm font-medium text-ink-700">
-                  Email
-                </label>
-                <input
-                  id="email"
-                  type="email"
-                  autoComplete="email"
-                  required
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  className="w-full rounded-xl border border-ink-200 bg-white px-3.5 py-2.5 text-sm text-ink-900 outline-none transition-colors placeholder:text-ink-300 focus:border-mint-500 focus:ring-2 focus:ring-mint-500/30"
-                  placeholder="tu@email.com"
-                />
-              </div>
-              <div>
-                <label htmlFor="password" className="mb-1.5 block text-sm font-medium text-ink-700">
-                  Contraseña
-                </label>
-                <input
-                  id="password"
-                  type="password"
-                  autoComplete="current-password"
-                  required
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  className="w-full rounded-xl border border-ink-200 bg-white px-3.5 py-2.5 text-sm text-ink-900 outline-none transition-colors placeholder:text-ink-300 focus:border-mint-500 focus:ring-2 focus:ring-mint-500/30"
-                  placeholder="••••••••"
-                />
-              </div>
+                <form onSubmit={onSubmit} className="space-y-4">
+                  <div>
+                    <label htmlFor="email" className="mb-1.5 block text-sm font-medium text-ink-700">
+                      Email
+                    </label>
+                    <input
+                      id="email"
+                      type="email"
+                      autoComplete="email"
+                      required
+                      value={email}
+                      onChange={(e) => setEmail(e.target.value)}
+                      className="w-full rounded-xl border border-ink-200 bg-white px-3.5 py-2.5 text-sm text-ink-900 outline-none transition-colors placeholder:text-ink-300 focus:border-mint-500 focus:ring-2 focus:ring-mint-500/30"
+                      placeholder="tu@email.com"
+                    />
+                  </div>
+                  <div>
+                    <div className="mb-1.5 flex items-center justify-between">
+                      <label htmlFor="password" className="block text-sm font-medium text-ink-700">
+                        Contraseña
+                      </label>
+                      <button
+                        type="button"
+                        onClick={openReset}
+                        className="text-xs font-medium text-mint-700 transition-colors hover:text-mint-800"
+                      >
+                        ¿Olvidaste tu contraseña?
+                      </button>
+                    </div>
+                    <input
+                      id="password"
+                      type="password"
+                      autoComplete="current-password"
+                      required
+                      value={password}
+                      onChange={(e) => setPassword(e.target.value)}
+                      className="w-full rounded-xl border border-ink-200 bg-white px-3.5 py-2.5 text-sm text-ink-900 outline-none transition-colors placeholder:text-ink-300 focus:border-mint-500 focus:ring-2 focus:ring-mint-500/30"
+                      placeholder="••••••••"
+                    />
+                  </div>
 
-              {error && (
-                <p className="flex items-center gap-2 rounded-xl bg-coral-50 px-3.5 py-2.5 text-sm text-coral-700 ring-1 ring-inset ring-coral-100">
-                  {error}
+                  {error && (
+                    <p className="flex items-center gap-2 rounded-xl bg-coral-50 px-3.5 py-2.5 text-sm text-coral-700 ring-1 ring-inset ring-coral-100">
+                      {error}
+                    </p>
+                  )}
+
+                  <button
+                    type="submit"
+                    disabled={submitting}
+                    className="group inline-flex h-11 w-full items-center justify-center gap-2 rounded-full bg-mint-brand text-sm font-semibold text-white shadow-glow outline-none transition-all duration-200 hover:brightness-[1.05] focus-visible:ring-2 focus-visible:ring-mint-500 focus-visible:ring-offset-2 disabled:opacity-60"
+                  >
+                    {submitting ? 'Ingresando…' : 'Ingresar'}
+                    {!submitting && (
+                      <ArrowRightIcon className="h-4 w-4 transition-transform duration-200 group-hover:translate-x-0.5" />
+                    )}
+                  </button>
+                </form>
+
+                <p className="mt-5 text-center text-sm text-ink-500">
+                  ¿No tenés cuenta?{' '}
+                  <Link href="/register" className="font-semibold text-mint-700 transition-colors hover:text-mint-800">
+                    Creá tu empresa
+                  </Link>
                 </p>
-              )}
 
-              <button
-                type="submit"
-                disabled={submitting}
-                className="group inline-flex h-11 w-full items-center justify-center gap-2 rounded-full bg-mint-brand text-sm font-semibold text-white shadow-glow outline-none transition-all duration-200 hover:brightness-[1.05] focus-visible:ring-2 focus-visible:ring-mint-500 focus-visible:ring-offset-2 disabled:opacity-60"
-              >
-                {submitting ? 'Ingresando…' : 'Ingresar'}
-                {!submitting && (
-                  <ArrowRightIcon className="h-4 w-4 transition-transform duration-200 group-hover:translate-x-0.5" />
+                {process.env['NEXT_PUBLIC_USE_EMULATORS'] === 'true' && (
+                  <div className="mt-6 rounded-xl border border-ink-100 bg-ink-50/60 p-3.5 text-xs text-ink-500">
+                    <p className="mb-1 flex items-center gap-1.5 font-semibold text-ink-600">
+                      <CheckIcon className="h-3.5 w-3.5 text-mint-600" />
+                      Usuarios de prueba (emulador):
+                    </p>
+                    <p>superadmin@aiafg.com · owner@perfumeria.com · seller@perfumeria.com</p>
+                    <p className="mt-0.5">
+                      Contraseña: <span className="font-mono text-ink-700">test1234</span>
+                    </p>
+                  </div>
                 )}
-              </button>
-            </form>
+              </>
+            ) : (
+              <>
+                <div className="mb-8">
+                  <h2 className="text-2xl font-bold tracking-tight text-ink-900">Recuperar contraseña</h2>
+                  <p className="mt-1 text-sm text-ink-500">
+                    Ingresá tu email y te enviamos un enlace para crear una nueva contraseña.
+                  </p>
+                </div>
 
-            <p className="mt-5 text-center text-sm text-ink-500">
-              ¿No tenés cuenta?{' '}
-              <Link href="/register" className="font-semibold text-mint-700 transition-colors hover:text-mint-800">
-                Creá tu empresa
-              </Link>
-            </p>
+                {resetSent ? (
+                  <div className="space-y-5">
+                    <p role="status" className="rounded-xl bg-mint-50 px-3.5 py-2.5 text-sm text-mint-800 ring-1 ring-inset ring-mint-100">
+                      {resetSent}
+                    </p>
+                    <button
+                      type="button"
+                      onClick={backToLogin}
+                      className="inline-flex items-center gap-1.5 text-sm font-semibold text-mint-700 transition-colors hover:text-mint-800"
+                    >
+                      <ArrowRightIcon className="h-4 w-4 rotate-180" />
+                      Volver a iniciar sesión
+                    </button>
+                  </div>
+                ) : (
+                  <form onSubmit={onReset} className="space-y-4" noValidate>
+                    <div>
+                      <label htmlFor="reset-email" className="mb-1.5 block text-sm font-medium text-ink-700">
+                        Email
+                      </label>
+                      <input
+                        id="reset-email"
+                        type="email"
+                        autoComplete="email"
+                        value={email}
+                        onChange={(e) => setEmail(e.target.value)}
+                        className="w-full rounded-xl border border-ink-200 bg-white px-3.5 py-2.5 text-sm text-ink-900 outline-none transition-colors placeholder:text-ink-300 focus:border-mint-500 focus:ring-2 focus:ring-mint-500/30"
+                        placeholder="tu@email.com"
+                      />
+                    </div>
 
-            {process.env['NEXT_PUBLIC_USE_EMULATORS'] === 'true' && (
-              <div className="mt-6 rounded-xl border border-ink-100 bg-ink-50/60 p-3.5 text-xs text-ink-500">
-                <p className="mb-1 flex items-center gap-1.5 font-semibold text-ink-600">
-                  <CheckIcon className="h-3.5 w-3.5 text-mint-600" />
-                  Usuarios de prueba (emulador):
-                </p>
-                <p>superadmin@aiafg.com · owner@perfumeria.com · seller@perfumeria.com</p>
-                <p className="mt-0.5">
-                  Contraseña: <span className="font-mono text-ink-700">test1234</span>
-                </p>
-              </div>
+                    {resetError && (
+                      <p role="alert" className="flex items-center gap-2 rounded-xl bg-coral-50 px-3.5 py-2.5 text-sm text-coral-700 ring-1 ring-inset ring-coral-100">
+                        {resetError}
+                      </p>
+                    )}
+
+                    <button
+                      type="submit"
+                      disabled={resetSubmitting}
+                      className="group inline-flex h-11 w-full items-center justify-center gap-2 rounded-full bg-mint-brand text-sm font-semibold text-white shadow-glow outline-none transition-all duration-200 hover:brightness-[1.05] focus-visible:ring-2 focus-visible:ring-mint-500 focus-visible:ring-offset-2 disabled:opacity-60"
+                    >
+                      {resetSubmitting ? 'Enviando…' : 'Enviarme el enlace'}
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={backToLogin}
+                      className="inline-flex items-center gap-1.5 text-sm font-medium text-ink-500 transition-colors hover:text-ink-800"
+                    >
+                      <ArrowRightIcon className="h-4 w-4 rotate-180" />
+                      Volver a iniciar sesión
+                    </button>
+                  </form>
+                )}
+              </>
             )}
           </div>
         </div>
