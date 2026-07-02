@@ -89,6 +89,20 @@ export async function listMessages(
   return snap.docs.map((d) => d.data() as Message);
 }
 
+/** Últimos `max` mensajes en orden cronológico ascendente (historial para el sales agent IA, F1). */
+export async function listRecentMessages(
+  tenantId: string,
+  customerId: string,
+  max = 6,
+): Promise<Message[]> {
+  const snap = await db()
+    .collection(paths.messages(tenantId, customerId))
+    .orderBy('createdAt', 'desc')
+    .limit(max)
+    .get();
+  return snap.docs.map((d) => d.data() as Message).reverse();
+}
+
 /** Marca como leídos los mensajes entrantes (resetea el contador del vendedor). */
 export async function markConversationRead(tenantId: string, customerId: string): Promise<void> {
   await db()

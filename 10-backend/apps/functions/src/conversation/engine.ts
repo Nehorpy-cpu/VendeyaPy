@@ -22,7 +22,8 @@ import {
 import { addToCart, formatCart } from './cart.js';
 import { getAgentConfig } from './agentConfig.js';
 import { runSalesAgent } from '../ai/salesAgent.js';
-import { appendMessage } from './messages.js';
+import type { AiMessage } from '../ai/types.js';
+import { appendMessage, listRecentMessages } from './messages.js';
 import { createPendingOrder } from '../orders/createPendingOrder.js';
 import { getCheckoutConfig, formatTransferInstructions } from '../orders/checkoutConfig.js';
 import { captureTrackingCode } from '../tracking/tracking.js';
@@ -75,9 +76,15 @@ function detectarEstilo(t: string): string | undefined {
   return undefined;
 }
 
-function detectarGenero(t: string): string {
+/**
+ * Género SOLO si el texto lo dice explícito; sin señal → undefined = sin filtro (F1).
+ * (El default 'Femenino' dejaba catálogos 100% masculinos siempre vacíos.)
+ * Exportada para tests.
+ */
+export function detectarGenero(t: string): string | undefined {
   if (/\b(para (e|é)l|hombre|masculino|caballero|novio|esposo)\b/.test(t)) return 'Masculino';
-  return 'Femenino'; // default: foco perfumería femenina
+  if (/\b(para ella|mujer|femenin[oa]|dama|novia|esposa)\b/.test(t)) return 'Femenino';
+  return undefined;
 }
 
 function detectarPrecio(t: string): { maxPrice?: number; priceRange?: string } {
@@ -90,11 +97,15 @@ function detectarPrecio(t: string): { maxPrice?: number; priceRange?: string } {
   return {};
 }
 
+/**
+ * Catálogo rule-based SOLO ante pedido explícito o señal clara (estilo/precio) (F1).
+ * Palabras genéricas de compra (quiero/perfume/tenés/busco/recomend/ver/regalo) ya NO capturan:
+ * esos turnos van al sales agent IA (ruleEngineWouldFallback), que busca con mejores parámetros.
+ * Nota: detectarPrecio ya cubre barat/econom/accesible/premium/lujo como señal de precio.
+ */
 function quiereCatalogo(t: string): boolean {
   return (
-    /\b(cat[aá]logo|ver|mostrar|muestra|perfume|fragancia|recomend|busco|quiero|tienen|ten[eé]s|regalo|opciones|barat|econom|accesible|premium|lujo)\b/.test(
-      t,
-    ) ||
+    /\b(cat[aá]logo|mostr[aá]|muestr[ao]|mu[eé]strame|opciones)/.test(t) ||
     detectarEstilo(t) !== undefined ||
     Object.keys(detectarPrecio(t)).length > 0
   );
@@ -158,6 +169,34 @@ export function ruleEngineWouldFallback(text: string, t: string): boolean {
   );
 }
 
+/** Cuántos mensajes del historial recibe la IA como contexto (F1). */
+const AI_HISTORY_MAX = 6;
+
+/**
+ * Historial persistido → mensajes para la IA (F1). Pura y exportada para tests.
+ * Garantías para la Messages API de Anthropic: sin textos vacíos, roles alternados
+ * (consecutivos del mismo lado se fusionan), empieza en 'user' y termina con el
+ * turno actual del cliente (el inbound ya está persistido cuando se llama).
+ */
+export function buildAiHistory(
+  history: Array<{ direction: string; text: string }>,
+  currentText: string,
+): AiMessage[] {
+  const msgs: Array<{ role: 'user' | 'assistant'; content: string }> = [];
+  for (const m of history) {
+    const text = (m.text ?? '').trim();
+    if (!text) continue;
+    const role = m.direction === 'in' ? 'user' : 'assistant';
+    const last = msgs[msgs.length - 1];
+    if (last && last.role === role) last.content = `${last.content}\n${text}`;
+    else msgs.push({ role, content: text });
+  }
+  while (msgs.length > 0 && msgs[0]!.role !== 'user') msgs.shift(); // la API exige empezar en 'user'
+  const last = msgs[msgs.length - 1];
+  if (!last || last.role !== 'user') msgs.push({ role: 'user', content: currentText.trim() });
+  return msgs;
+}
+
 /**
  * Resuelve qué producto quiere el cliente:
  *  - por orden ("el primero") sobre lo último mostrado, o
@@ -180,10 +219,11 @@ async function resolverSeleccion(
 }
 
 /**
- * Decide la respuesta. PUNTO DE EXTENSIÓN: acá se enchufa el cerebro de IA
- * (Claude/GPT) en una fase futura, reemplazando estas reglas.
+ * Decide la respuesta con las REGLAS (transaccional/navegacional). La IA atiende la cola
+ * conversacional vía ruleEngineWouldFallback y el rescate de catálogo vacío (catalogEmpty, F1)
+ * — ambos cableados en handleMessage. Exportada para tests (flag catalogEmpty).
  */
-async function decidirRespuesta(
+export async function decidirRespuesta(
   tenantId: string,
   customerId: string,
   text: string,
@@ -195,6 +235,8 @@ async function decidirRespuesta(
   cart?: Cart;
   lastShownSkus?: string[];
   pendingOrderId?: string;
+  /** F1: la rama catálogo no encontró productos → el caller puede delegar a la IA antes del canned. */
+  catalogEmpty?: boolean;
 }> {
   const t = text.toLowerCase();
 
@@ -295,6 +337,7 @@ async function decidirRespuesta(
           'Mmm, no encontré algo que encaje justo con eso 🤔. ¿Querés que te muestre ' +
           'nuestros más vendidos, o ajustamos el presupuesto?',
         nextState: 'BROWSING',
+        catalogEmpty: true, // F1: el caller intenta el sales agent IA antes de mandar este canned
       };
     }
     return {
@@ -364,12 +407,19 @@ export async function handleMessage(input: ConversationInput): Promise<Conversat
   const prevCart: Cart = existing?.cart ?? { items: [], subtotal: 0 };
   const prevShown: string[] = existing?.context?.lastShownSkus ?? [];
 
+  // F1: la IA recibe HISTORIAL (últimos AI_HISTORY_MAX mensajes, el inbound actual ya está
+  // persistido por el appendMessage de arriba). Lazy: solo se lee si algún camino delega.
+  const delegarAlSalesAgent = async () => {
+    const historial = await listRecentMessages(tenantId, customerId, AI_HISTORY_MAX);
+    return runSalesAgent({ tenantId, agentConfig, messages: buildAiHistory(historial, text) });
+  };
+
   // Ruteo (AG-3): la cola conversacional (lo que el motor mandaría a su fallback) va al sales agent
   // de Claude — ADVISORY, solo info pública, sin tocar carrito/pedido. El resto (saludo, catálogo,
   // carrito, pagar, selección) se queda en las reglas. Si la IA está off/sin cupo/falla → fallback.
   let result: Awaited<ReturnType<typeof decidirRespuesta>> | undefined;
   if (!esNuevo && ruleEngineWouldFallback(text, text.toLowerCase())) {
-    const ai = await runSalesAgent({ tenantId, agentConfig, messages: [{ role: 'user', content: text }] });
+    const ai = await delegarAlSalesAgent();
     if (ai.used) {
       // Si la IA mostró productos REALES (ids del backend de buscar_productos), sincronizamos el estado
       // conversacional igual que el catálogo rule-based → "el primero/segundo" funciona después.
@@ -388,6 +438,19 @@ export async function handleMessage(input: ConversationInput): Promise<Conversat
       greeting: agentConfig.greetingMessage,
       profitMode: agentConfig.profitMode,
     });
+    // F1: catálogo sin resultados → antes del canned "no encontré", intentar la IA (sus tools
+    // buscan con mejores parámetros y puede ofrecer alternativas reales). Si la IA no corre
+    // (gate/disabled/error), queda el canned de siempre. Nunca alcanzable con esNuevo (saludo).
+    if (result.catalogEmpty) {
+      const ai = await delegarAlSalesAgent();
+      if (ai.used) {
+        const showed = ai.shownSkus.length > 0;
+        result = showed
+          ? { reply: ai.reply, nextState: 'VIEWING_PRODUCT', lastShownSkus: ai.shownSkus }
+          : { reply: ai.reply, nextState: result.nextState };
+        logger.info('Catálogo vacío → respuesta por sales agent IA', { tenantId, customerId, shown: ai.shownSkus.length, tools: ai.usedTools.length });
+      }
+    }
   }
   const { reply, nextState } = result;
 
