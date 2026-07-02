@@ -7,6 +7,13 @@
  */
 import type { Product, Promotion, PromotionType, Currency, TenantStatsPublic, TenantStatsPrivate, ProductUnitsAgg, ProductProfitAgg } from '@vpw/shared';
 
+/** Topes hacia el modelo (F1B): material de venta sin inflar el payload/tokens. */
+const DESCRIPTION_MAX_CHARS = 200;
+const AI_NOTES_MAX_CHARS = 300;
+
+/** Truncado por code points (no parte surrogate pairs/emojis a la mitad). */
+const truncate = (s: string, max: number): string => Array.from(s.trim()).slice(0, max).join('');
+
 /** Producto PÚBLICO para el sales agent. SIN costo/margen/financials/tenantId/meta/inventario exacto. */
 export interface PublicProduct {
   id: string;
@@ -15,6 +22,7 @@ export interface PublicProduct {
   price: number;
   compareAtPrice: number | null;
   currency: Currency;
+  description: string;
   styleTags: string[];
   available: boolean;
   lowStock: boolean;
@@ -31,11 +39,12 @@ export function sanitizeProduct(p: Product): PublicProduct {
     price: p.price,
     compareAtPrice: p.compareAtPrice,
     currency: p.currency,
+    description: truncate(p.description ?? '', DESCRIPTION_MAX_CHARS), // pública, truncada (F1B)
     styleTags: p.perfume?.styleTags ?? [],
     available: stock > 0,
     lowStock: stock > 0 && stock <= 3, // disponibilidad, no el stock exacto
     featured: !!p.featured,
-    aiNotes: p.aiNotes ?? '',
+    aiNotes: truncate(p.aiNotes ?? '', AI_NOTES_MAX_CHARS), // tope de payload (F1B)
   };
 }
 

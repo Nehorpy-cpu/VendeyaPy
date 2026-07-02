@@ -10,8 +10,11 @@
 
 import type { Product } from '@vpw/shared';
 import { db, paths } from '../lib/firebase.js';
+import { splitByQueryMatch, bestNameMatch } from './match.js';
 
 export interface CatalogFilters {
+  /** F1B: texto libre del cliente (nombre/marca). Los matches van PRIMERO y no se filtran por género/precio. */
+  query?: string;
   gender?: string; // 'Femenino' | 'Masculino' | 'Unisex'
   styleTag?: string; // dulce, fresco, intenso, árabe, floral, cítrico, gourmand...
   priceRange?: string; // 'ACCESIBLE' | 'MID' | 'PREMIUM' | 'LUJO'
@@ -31,9 +34,12 @@ export async function searchCatalog(
     .where('status', '==', 'ACTIVE')
     .get();
 
-  let productos = snap.docs.map((d) => d.data() as Product).filter((p) => p.inventory?.stock > 0);
+  const activos = snap.docs.map((d) => d.data() as Product).filter((p) => p.inventory?.stock > 0);
 
-  // Filtros en memoria
+  // Filtros explícitos PRIMERO (F1B): el contrato de la tool (precioMax/género/estilo declarados
+  // por el cliente) se respeta siempre. Con F1 el género ya no tiene default, así que acá solo
+  // llega lo que el cliente dijo.
+  let productos = activos;
   if (filters.gender) {
     productos = productos.filter(
       (p) => p.perfume?.gender === filters.gender || p.perfume?.gender === 'Unisex',
@@ -45,6 +51,11 @@ export async function searchCatalog(
   if (filters.maxPrice) {
     productos = productos.filter((p) => p.price <= filters.maxPrice!);
   }
+
+  // F1B: la consulta por nombre/marca decide el ORDEN — los matches van PRIMERO (pinned),
+  // el resto se rankea por relevancia como siempre.
+  const { pinned, rest } = splitByQueryMatch(filters.query, productos);
+  productos = rest;
 
   // Modo Ganancia: leer costo/prioridad (privado, server-side) para rankear por rentabilidad.
   const finMap = new Map<string, { cost: number | null; priority: number }>();
@@ -71,7 +82,7 @@ export async function searchCatalog(
   });
   scored.sort((a, b) => b.score - a.score || Number(b.p.featured) - Number(a.p.featured));
 
-  return scored.slice(0, filters.limit ?? 3).map((s) => s.p);
+  return [...pinned, ...scored.map((s) => s.p)].slice(0, filters.limit ?? 3);
 }
 
 /** Trae un producto por su id (SKU). null si no existe. */
@@ -80,15 +91,18 @@ export async function getProductById(tenantId: string, productId: string): Promi
   return doc.exists ? (doc.data() as Product) : null;
 }
 
-/** Busca un producto activo cuyo nombre aparezca en el texto (ej: "quiero good girl"). */
+/**
+ * Busca un producto activo por nombre PARCIAL/tokenizado en el texto (F1B):
+ * "agregá la belle" → "La Vie Est Belle". Antes exigía el nombre completo dentro del texto.
+ * Umbral del matcher (≥1 token exacto) evita agregados por palabras genéricas ("agregá el perfume").
+ */
 export async function findProductByName(tenantId: string, text: string): Promise<Product | null> {
-  const t = text.toLowerCase();
   const snap = await db()
     .collection(paths.products(tenantId))
     .where('status', '==', 'ACTIVE')
     .get();
   const productos = snap.docs.map((d) => d.data() as Product);
-  // Match por nombre más largo primero (evita falsos positivos con nombres cortos)
-  productos.sort((a, b) => b.name.length - a.name.length);
-  return productos.find((p) => p.name && t.includes(p.name.toLowerCase())) ?? null;
+  // requireNameToken: marca sola ("sumale algo de armaf") NO agrega un producto arbitrario
+  // al carrito; hace falta al menos un token exacto del NOMBRE ("agregá la belle").
+  return bestNameMatch(text, productos, { requireNameToken: true });
 }

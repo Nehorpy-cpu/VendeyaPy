@@ -27,6 +27,18 @@ describe('ai/salesTools buscar_productos', () => {
     expect(seen.filters?.maxPrice).toBe(200);
   });
 
+  it('F1B: pasa `consulta` como query a searchCatalog (búsqueda por nombre/marca)', async () => {
+    let seen: { filters?: CatalogFilters } = {};
+    const deps = {
+      searchCatalog: async (_t: string, filters: CatalogFilters) => { seen = { filters }; return []; },
+    };
+    await buscarProductos.execute('perfumeria', { consulta: 'Supremacy', estilo: 'dulce' }, deps);
+    expect(seen.filters?.query).toBe('Supremacy');
+    expect(seen.filters?.styleTag).toBe('dulce'); // los filtros siguen funcionando
+    await buscarProductos.execute('perfumeria', { consulta: '   ' }, deps);
+    expect(seen.filters?.query).toBeUndefined(); // consulta vacía no viaja
+  });
+
   it('sanitiza: la salida no incluye costo/margen', async () => {
     const deps = { searchCatalog: async () => [product({ costPrice: 40, margin: 0.6 })] };
     const out = (await buscarProductos.execute('perfumeria', {}, deps)) as Record<string, unknown>[];

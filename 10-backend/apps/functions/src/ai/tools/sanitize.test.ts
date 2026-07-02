@@ -14,12 +14,29 @@ const rogueProduct = {
 } as unknown as Product;
 
 describe('ai/sanitize sanitizeProduct', () => {
-  it('expone solo la whitelist pública (precio/marca/estilo/disponibilidad)', () => {
+  it('expone solo la whitelist pública (precio/marca/estilo/disponibilidad/descripción)', () => {
     const out = sanitizeProduct(rogueProduct);
     expect(out).toEqual({
       id: 'p1', name: 'Good Girl', brand: 'Carolina Herrera', price: 250000, compareAtPrice: 300000,
-      currency: 'PYG', styleTags: ['dulce', 'floral'], available: true, lowStock: true, featured: true, aiNotes: 'best seller',
+      currency: 'PYG', description: 'd', styleTags: ['dulce', 'floral'], available: true, lowStock: true, featured: true, aiNotes: 'best seller',
     });
+  });
+
+  it('F1B: la descripción se trunca a 200 chars (control de payload/tokens)', () => {
+    const p = { ...rogueProduct, description: 'x'.repeat(500) } as unknown as Product;
+    expect(sanitizeProduct(p).description).toHaveLength(200);
+    const sinDesc = { ...rogueProduct, description: undefined } as unknown as Product;
+    expect(sanitizeProduct(sinDesc).description).toBe('');
+  });
+
+  it('F1B: aiNotes también tiene tope (300) y el truncado no parte emojis (code points)', () => {
+    const p = { ...rogueProduct, aiNotes: 'n'.repeat(999) } as unknown as Product;
+    expect(Array.from(sanitizeProduct(p).aiNotes)).toHaveLength(300);
+    // emoji justo en el borde del truncado → no queda un surrogate suelto
+    const conEmoji = { ...rogueProduct, description: 'x'.repeat(199) + '😀y' } as unknown as Product;
+    const desc = sanitizeProduct(conEmoji).description;
+    expect(Array.from(desc)).toHaveLength(200);
+    expect(/[\uD800-\uDBFF]$/.test(desc)).toBe(false); // sin lone surrogate al final
   });
 
   it('NUNCA filtra costo/margen/ganancia/financials/tenantId', () => {

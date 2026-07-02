@@ -24,12 +24,12 @@ const defaultSearchDeps: SalesSearchDeps = { searchCatalog };
 
 const buscarProductosDef: AiTool = {
   name: 'buscar_productos',
-  description: 'Busca productos públicos activos y con stock del negocio. Devuelve nombre, marca, precio, estilo y disponibilidad. NO devuelve costos ni márgenes.',
+  description: 'Busca productos públicos activos y con stock del negocio. Si `consulta` menciona un nombre o marca, esos productos vienen PRIMERO. Devuelve nombre, marca, precio, descripción, estilo y disponibilidad. NO devuelve costos ni márgenes.',
   inputSchema: {
     type: 'object',
     properties: {
-      consulta: { type: 'string', description: 'Lo que busca el cliente (texto libre).' },
-      genero: { type: 'string', enum: ['Femenino', 'Masculino', 'Unisex'], description: 'Género del producto.' },
+      consulta: { type: 'string', description: 'Lo que busca el cliente, tal como lo dijo (nombre, marca o tipo: "Supremacy", "algo de Armaf", "un dulce").' },
+      genero: { type: 'string', enum: ['Femenino', 'Masculino', 'Unisex'], description: 'Género del producto, SOLO si el cliente lo indicó.' },
       estilo: { type: 'string', description: 'Estilo (dulce, fresco, intenso, floral, cítrico, árabe...).' },
       precioMax: { type: 'number', description: 'Precio máximo en la moneda del negocio.' },
     },
@@ -42,6 +42,7 @@ export const buscarProductos: AiToolHandler = {
   async execute(tenantId: string, input: Record<string, unknown>, deps: SalesSearchDeps = defaultSearchDeps): Promise<PublicProduct[]> {
     // tenantId viene del contexto; cualquier tenantId en `input` se ignora.
     const filters: CatalogFilters = {
+      query: str(input.consulta), // F1B: matches por nombre/marca van primero (searchCatalog)
       gender: str(input.genero),
       styleTag: str(input.estilo),
       maxPrice: num(input.precioMax),

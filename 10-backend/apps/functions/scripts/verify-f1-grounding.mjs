@@ -119,6 +119,37 @@ await setFixture({ fail: true, failMessage: 'fixture: fallo simulado F1' });
   check('4. catálogo vacío + IA caída → canned "no encontré" (fallback intacto)', !!txt && txt.includes(CANNED_EMPTY), JSON.stringify(txt));
 }
 
+// === 5. F1B: consulta con nombre → el producto consultado viene PRIMERO (pinning real) ===
+const sessionDoc = async (from) => {
+  const cid = from.replace(/[^0-9]/g, '');
+  return (await db.doc(`tenants/${T}/customers/${cid}/sessions/active`).get()).data();
+};
+{
+  await setFixture({ responses: [
+    { toolUses: [{ id: 'tu-f1b', name: 'buscar_productos', input: { consulta: 'Good Girl' } }] },
+    { text: `¡Sí, la tenemos! ✨ ${AI_MARK}` },
+  ] });
+  const from = fresh(5);
+  const txt = await probeUntil(from, 'tienen la good girl?', (t) => t.includes(AI_MARK));
+  const shown = (await sessionDoc(from))?.context?.lastShownSkus ?? [];
+  check('5. F1B: consulta="Good Girl" → pinned primero en resultados (lastShownSkus[0])',
+    !!txt && txt.includes(AI_MARK) && shown[0] === 'carolina-herrera-good-girl',
+    `shown=${JSON.stringify(shown)}`);
+}
+
+// === 6. F1B: agregar por nombre PARCIAL (rule-based, sin nombre completo) ===
+{
+  const from = fresh(6);
+  await postMsg(from, GREETING);
+  for (let i = 0; i < 16; i++) { if (await lastOut(from)) break; await sleep(500); }
+  await postMsg(from, 'agregá la belle');
+  let txt = null;
+  for (let i = 0; i < 20; i++) { txt = await lastOut(from); if (txt && txt.includes('Agregué')) break; await sleep(600); }
+  check('6. F1B: "agregá la belle" → agrega "La Vie Est Belle" por nombre parcial',
+    !!txt && txt.includes('Agregué') && txt.includes('La Vie Est Belle'),
+    JSON.stringify(txt));
+}
+
 // ---- Restaurar estado previo de perfumeria (modo convivencia) ----
 await db.doc(`tenants/${T}/metaAssets/${PNID}`).delete();
 await db.doc(`metaExternalIndex/whatsapp_${PNID}`).delete();
@@ -131,7 +162,7 @@ for (const f of customers) {
   const cid = f.replace(/[^0-9]/g, '');
   const msgs = await db.collection(`tenants/${T}/customers/${cid}/messages`).get();
   for (const d of msgs.docs) await d.ref.delete();
-  await db.doc(`tenants/${T}/sessions/${cid}`).delete().catch(() => {});
+  await db.doc(`tenants/${T}/customers/${cid}/sessions/active`).delete().catch(() => {});
   await db.doc(`tenants/${T}/customers/${cid}`).delete();
 }
 
