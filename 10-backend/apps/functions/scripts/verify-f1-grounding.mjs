@@ -150,6 +150,35 @@ const sessionDoc = async (from) => {
     JSON.stringify(txt));
 }
 
+// === 7. F2: "sí, agregalo" agrega el primero mostrado → "quiero pagar" crea preorden ===
+let orderId7 = null;
+{
+  const from = customers[4]; // el cliente del caso 5: state VIEWING_PRODUCT, good girl primera
+  const before = await lastOut(from);
+  await postMsg(from, 'sí, agregalo');
+  let txt = null;
+  for (let i = 0; i < 20; i++) { txt = await lastOut(from); if (txt && txt !== before && txt.includes('Agregué')) break; await sleep(600); }
+  const cart7 = (await sessionDoc(from))?.cart;
+  const okAdd = !!txt && txt.includes('Agregué') && txt.includes('Good Girl') &&
+    cart7?.items?.length === 1 && cart7.items[0]?.productId === 'carolina-herrera-good-girl';
+  check('7a. F2: "sí, agregalo" en VIEWING_PRODUCT → agrega el PRIMER producto mostrado (Good Girl)',
+    okAdd, `reply=${JSON.stringify((txt ?? '').slice(0, 60))} cart=${JSON.stringify(cart7?.items)}`);
+
+  await postMsg(from, 'quiero pagar');
+  let txt2 = null;
+  for (let i = 0; i < 20; i++) { txt2 = await lastOut(from); if (txt2 && txt2.includes('transferir')) break; await sleep(600); }
+  const sess7 = await sessionDoc(from);
+  orderId7 = sess7?.context?.pendingOrderId ?? null;
+  let orderOk = false;
+  if (orderId7) {
+    const o = (await db.doc(`tenants/${T}/orders/${orderId7}`).get()).data();
+    orderOk = !!o && o.status === 'PENDING_PAYMENT' && o.totals?.total > 0;
+  }
+  check('7b. F2: "quiero pagar" → preorden PENDING_PAYMENT + estado AWAITING_PAYMENT',
+    !!txt2 && txt2.includes('transferir') && sess7?.state === 'AWAITING_PAYMENT' && orderOk,
+    `orderId=${orderId7} state=${sess7?.state}`);
+}
+
 // ---- Restaurar estado previo de perfumeria (modo convivencia) ----
 await db.doc(`tenants/${T}/metaAssets/${PNID}`).delete();
 await db.doc(`metaExternalIndex/whatsapp_${PNID}`).delete();
@@ -158,6 +187,11 @@ if (beforeChannels) await db.doc(`tenants/${T}/config/channels`).set(beforeChann
 if (beforeAgent) await db.doc(`tenants/${T}/config/agent`).set(beforeAgent);
 await db.doc(`tenants/${T}`).set(before);
 await db.doc(FIX).delete();
+if (orderId7) {
+  const items = await db.collection(`tenants/${T}/orders/${orderId7}/items`).get();
+  for (const d of items.docs) await d.ref.delete();
+  await db.doc(`tenants/${T}/orders/${orderId7}`).delete();
+}
 for (const f of customers) {
   const cid = f.replace(/[^0-9]/g, '');
   const msgs = await db.collection(`tenants/${T}/customers/${cid}/messages`).get();

@@ -22,6 +22,12 @@ describe('catalog/match normalizeText / queryTokens', () => {
     expect(queryTokens('quiero un perfume para regalo')).toEqual([]);
     expect(queryTokens('agregá el perfume Supremacy')).toEqual(['supremacy']);
   });
+
+  it('F2: las confirmaciones de agregado tampoco identifican productos', () => {
+    expect(queryTokens('sí, agregalo')).toEqual([]);
+    expect(queryTokens('dale, sumalo')).toEqual([]);
+    expect(queryTokens('añadilo')).toEqual([]);
+  });
 });
 
 describe('catalog/match productMatchScore / bestNameMatch', () => {

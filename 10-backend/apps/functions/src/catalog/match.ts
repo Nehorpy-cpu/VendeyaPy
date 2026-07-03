@@ -26,7 +26,8 @@ export function normalizeText(s: string): string {
 const STOPWORDS = new Set([
   'perfume', 'perfumes', 'fragancia', 'fragancias', 'colonia', 'colonias', 'producto', 'productos',
   'quiero', 'quisiera', 'busco', 'buscando', 'tenes', 'tienes', 'tienen', 'tiene', 'hay', 'venden',
-  'agrega', 'agregar', 'agregame', 'anadi', 'anade', 'anadir', 'sumale', 'suma', 'sumame', 'dame',
+  'agrega', 'agregar', 'agregame', 'agregalo', 'agregala', 'anadi', 'anade', 'anadir', 'anadilo',
+  'anadila', 'sumale', 'suma', 'sumame', 'sumalo', 'sumala', 'llevalo', 'llevala', 'dale', 'okey', 'dame',
   'llevo', 'llevar', 'muestrame', 'mostrame', 'muestra', 'mostrar', 'catalogo', 'opciones',
   'precio', 'precios', 'cuanto', 'cuesta', 'sale', 'vale', 'para', 'regalo', 'regalar',
   'hombre', 'mujer', 'algo', 'alguno', 'alguna', 'este', 'esta', 'estos', 'estas', 'ese', 'esa',

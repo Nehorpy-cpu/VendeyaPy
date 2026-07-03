@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { ruleEngineWouldFallback, detectarGenero, buildAiHistory } from './engine.js';
+import { ruleEngineWouldFallback, detectarGenero, buildAiHistory, esConfirmacionCorta } from './engine.js';
 
 /**
  * Invariante AG-3 / AG-3B: el sales agent IA SOLO recibe la "cola conversacional" — los turnos que el
@@ -46,12 +46,44 @@ describe('conversation/engine ruleEngineWouldFallback (ruteo al sales agent IA)'
     expect(wouldFallback('agregá la Good Girl')).toBe(false);
   });
 
+  it('F2: sufijos pegados y confirmaciones de agregado van a reglas (antes se iban a la IA)', () => {
+    expect(wouldFallback('sí, agregalo')).toBe(false);
+    expect(wouldFallback('sumalo')).toBe(false);
+    expect(wouldFallback('añadilo al carrito')).toBe(false);
+    expect(wouldFallback('quiero ese')).toBe(false);
+    expect(wouldFallback('me llevo ese')).toBe(false);
+  });
+
+  it('F2: preguntas con conjugaciones de "llevar" NO son agregar (siguen yendo a la IA)', () => {
+    expect(wouldFallback('¿cuánto lleva el envío?')).toBe(true);
+    expect(wouldFallback('¿el perfume lleva alcohol?')).toBe(true);
+  });
+
   it('NO delega el catálogo explícito ni señales claras de estilo/precio (rule-based)', () => {
     expect(wouldFallback('quiero ver el catálogo')).toBe(false); // 'catálogo' explícito
     expect(wouldFallback('mostrame opciones')).toBe(false);
     expect(wouldFallback('busco algo dulce')).toBe(false); // estilo
     expect(wouldFallback('algo barato para el día')).toBe(false); // precio
     expect(wouldFallback('hasta 200 mil')).toBe(false); // precio numérico
+  });
+});
+
+describe('esConfirmacionCorta (F2: "sí"/"dale"/"ok" = agregar el primero SI está mirando productos)', () => {
+  it('confirma: afirmaciones cortas y combinaciones con agregar', () => {
+    expect(esConfirmacionCorta('sí')).toBe(true);
+    expect(esConfirmacionCorta('Sí, agregalo')).toBe(true);
+    expect(esConfirmacionCorta('dale')).toBe(true);
+    expect(esConfirmacionCorta('ok')).toBe(true);
+    expect(esConfirmacionCorta('sí quiero')).toBe(true);
+    expect(esConfirmacionCorta('dale, sumalo')).toBe(true);
+  });
+
+  it('NO confirma: pedidos con contenido, negaciones o texto largo', () => {
+    expect(esConfirmacionCorta('sí, pero tenés algo más barato?')).toBe(false);
+    expect(esConfirmacionCorta('no')).toBe(false);
+    expect(esConfirmacionCorta('quiero pagar')).toBe(false);
+    expect(esConfirmacionCorta('sí, mostrame el catálogo completo por favor')).toBe(false);
+    expect(esConfirmacionCorta('')).toBe(false);
   });
 });
 

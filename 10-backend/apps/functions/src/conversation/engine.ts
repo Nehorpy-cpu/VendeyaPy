@@ -24,6 +24,7 @@ import { getAgentConfig } from './agentConfig.js';
 import { runSalesAgent } from '../ai/salesAgent.js';
 import type { AiMessage } from '../ai/types.js';
 import { appendMessage, listRecentMessages } from './messages.js';
+import { queryTokens } from '../catalog/match.js';
 import { createPendingOrder } from '../orders/createPendingOrder.js';
 import { getCheckoutConfig, formatTransferInstructions } from '../orders/checkoutConfig.js';
 import { captureTrackingCode } from '../tracking/tracking.js';
@@ -134,8 +135,34 @@ function quiereVerCarrito(t: string): boolean {
   return /\b(carrito|mi pedido|qu[eé] llevo|qu[eé] tengo|mi compra)\b/.test(t);
 }
 
+/**
+ * F2: los stems aceptan sufijos pegados ("agregalo", "sumala", "añadilo") — el regex anterior
+ * exigía límite de palabra tras el stem y "agregá" matcheaba pero "agregalo" no (se iba a la IA,
+ * que no puede escribir el carrito). También cubre "quiero ese/esta" y "me llevo ese".
+ */
 function quiereAgregar(t: string): boolean {
-  return /\b(agreg|añad|anad|sum[aá]|llev|me lo llevo|me la llevo|lo quiero|la quiero|lo llevo|la llevo)\b/.test(
+  // Ojo: nada de conjugaciones sueltas de "llevar" ("¿cuánto lleva el envío?" NO es agregar).
+  return /\b(agreg\w*|añad\w*|anad\w*|sum[aá]|sumal[oa]|sumam[eé]|llevalo|llevala|me llevo|me (lo|la) llevo|(lo|la) quiero|(lo|la) llevo|quiero (ese|esa|este|esta))\b/.test(
+    t,
+  );
+}
+
+/**
+ * F2: confirmación corta y pura ("sí", "dale", "ok") — SIN tokens que nombren un producto.
+ * En VIEWING_PRODUCT con productos mostrados equivale a "agregá el primero" (lo decide el caller,
+ * que es quien conoce el estado). Conservadora a propósito: "sí, pero tenés algo más barato" NO
+ * es confirmación. Exportada para tests.
+ */
+export function esConfirmacionCorta(text: string): boolean {
+  const t = text
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!t || t.length > 30) return false;
+  return /^(si+|dale|ok|okey|oka|listo|claro|obvio|perfecto|genial|bueno|de una)( (si+|dale|ok|okey|gracias|porfa|por favor|agregalo|agregala|sumalo|sumala|anadilo|anadila|quiero|ese|esa|lo|la))*$/.test(
     t,
   );
 }
@@ -228,7 +255,7 @@ export async function decidirRespuesta(
   customerId: string,
   text: string,
   esNuevo: boolean,
-  prev: { cart: Cart; lastShownSkus: string[]; greeting: string; profitMode: boolean },
+  prev: { cart: Cart; lastShownSkus: string[]; greeting: string; profitMode: boolean; state: SessionState | null },
 ): Promise<{
   reply: string;
   nextState: SessionState;
@@ -301,7 +328,23 @@ export async function decidirRespuesta(
   }
 
   // 4. Agregar al carrito (seleccionar producto por orden o nombre)
-  const seleccion = await resolverSeleccion(tenantId, t, prev.lastShownSkus);
+  let seleccion = await resolverSeleccion(tenantId, t, prev.lastShownSkus);
+
+  // F2: intención de agregar SIN nombrar producto ("sí, agregalo", "sumalo", "quiero ese", o una
+  // confirmación corta "sí"/"dale"/"ok") mientras el cliente está MIRANDO productos → equivale a
+  // "agregá el primero mostrado". Solo si el texto no tiene tokens identificatorios (queryTokens
+  // vacío): "agregá la good girl" sigue resolviéndose por nombre arriba, y si el nombre no matchea
+  // se repregunta (no se agrega otro producto a ciegas).
+  if (
+    !seleccion &&
+    (quiereAgregar(t) || esConfirmacionCorta(text)) &&
+    prev.state === 'VIEWING_PRODUCT' &&
+    prev.lastShownSkus.length > 0 &&
+    queryTokens(text).length === 0
+  ) {
+    seleccion = await getProductById(tenantId, prev.lastShownSkus[0]!);
+  }
+
   if (seleccion) {
     const cart = addToCart(prev.cart, seleccion);
     const unidades = cart.items.reduce((n, i) => n + i.quantity, 0);
@@ -414,11 +457,17 @@ export async function handleMessage(input: ConversationInput): Promise<Conversat
     return runSalesAgent({ tenantId, agentConfig, messages: buildAiHistory(historial, text) });
   };
 
+  // F2: una confirmación corta ("sí"/"dale"/"ok") mientras el cliente MIRA productos es parte del
+  // flujo de conversión → SIEMPRE reglas (agrega el primero mostrado), nunca la IA (que no puede
+  // escribir el carrito y no debe prometer acciones).
+  const confirmandoSeleccion =
+    esConfirmacionCorta(text) && existing?.state === 'VIEWING_PRODUCT' && prevShown.length > 0;
+
   // Ruteo (AG-3): la cola conversacional (lo que el motor mandaría a su fallback) va al sales agent
   // de Claude — ADVISORY, solo info pública, sin tocar carrito/pedido. El resto (saludo, catálogo,
   // carrito, pagar, selección) se queda en las reglas. Si la IA está off/sin cupo/falla → fallback.
   let result: Awaited<ReturnType<typeof decidirRespuesta>> | undefined;
-  if (!esNuevo && ruleEngineWouldFallback(text, text.toLowerCase())) {
+  if (!esNuevo && !confirmandoSeleccion && ruleEngineWouldFallback(text, text.toLowerCase())) {
     const ai = await delegarAlSalesAgent();
     if (ai.used) {
       // Si la IA mostró productos REALES (ids del backend de buscar_productos), sincronizamos el estado
@@ -437,6 +486,7 @@ export async function handleMessage(input: ConversationInput): Promise<Conversat
       lastShownSkus: prevShown,
       greeting: agentConfig.greetingMessage,
       profitMode: agentConfig.profitMode,
+      state: existing?.state ?? null,
     });
     // F1: catálogo sin resultados → antes del canned "no encontré", intentar la IA (sus tools
     // buscan con mejores parámetros y puede ofrecer alternativas reales). Si la IA no corre

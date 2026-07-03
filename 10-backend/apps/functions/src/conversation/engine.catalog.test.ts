@@ -15,17 +15,19 @@ vi.mock('../catalog/search.js', () => ({
   findProductByName: vi.fn(),
 }));
 
-import { searchCatalog } from '../catalog/search.js';
+import { searchCatalog, getProductById } from '../catalog/search.js';
 import { decidirRespuesta } from './engine.js';
-import type { Product, Cart } from '@vpw/shared';
+import type { Product, Cart, SessionState } from '@vpw/shared';
 
 const searchCatalogMock = vi.mocked(searchCatalog);
+const getProductByIdMock = vi.mocked(getProductById);
 
 const prev = {
   cart: { items: [], subtotal: 0 } as Cart,
   lastShownSkus: [] as string[],
   greeting: '',
   profitMode: false,
+  state: null as SessionState | null,
 };
 
 const producto = {
@@ -39,6 +41,51 @@ const producto = {
 
 beforeEach(() => {
   searchCatalogMock.mockReset();
+  getProductByIdMock.mockReset();
+});
+
+describe('conversation/engine decidirRespuesta — F2: agregar por confirmación/intención pura', () => {
+  const viendo = { ...prev, state: 'VIEWING_PRODUCT' as SessionState, lastShownSkus: ['p1'] };
+
+  it.each(['sí, agregalo', 'sumalo', 'quiero ese'])(
+    '"%s" en VIEWING_PRODUCT con lastShownSkus → agrega el PRIMER producto mostrado',
+    async (msg) => {
+      getProductByIdMock.mockResolvedValueOnce(producto);
+      const r = await decidirRespuesta('t1', 'c1', msg, false, viendo);
+      expect(getProductByIdMock).toHaveBeenCalledWith('t1', 'p1');
+      expect(r.reply).toContain('Agregué');
+      expect(r.reply).toContain('Supremacy Not Only Intense');
+      expect(r.nextState).toBe('CART');
+      expect(r.cart?.items[0]?.productId).toBe('p1');
+      expect(r.cart?.items[0]?.quantity).toBe(1);
+    },
+  );
+
+  it('"sí" fuera de VIEWING_PRODUCT NO agrega (cae al fallback genérico)', async () => {
+    const r = await decidirRespuesta('t1', 'c1', 'sí', false, { ...prev, state: 'BROWSING' as SessionState });
+    expect(getProductByIdMock).not.toHaveBeenCalled();
+    expect(r.cart).toBeUndefined();
+    expect(r.reply).toContain('Puedo ayudarte');
+  });
+
+  it('"sí, agregalo" sin lastShownSkus NO agrega a ciegas (repregunta cuál)', async () => {
+    const r = await decidirRespuesta('t1', 'c1', 'sí, agregalo', false, { ...prev, state: 'VIEWING_PRODUCT' as SessionState });
+    expect(getProductByIdMock).not.toHaveBeenCalled();
+    expect(r.reply).toContain('Decime cuál');
+  });
+
+  it('"agregá la good girl" (nombra producto) NO usa el atajo del primero: resuelve por nombre', async () => {
+    // findProductByName está mockeado y devuelve null → debe repreguntar, no agregar lastShownSkus[0]
+    const r = await decidirRespuesta('t1', 'c1', 'agregá la good girl', false, viendo);
+    expect(getProductByIdMock).not.toHaveBeenCalledWith('t1', 'p1');
+    expect(r.reply).toContain('Decime cuál');
+  });
+
+  it('"quiero pagar" con carrito vacío → respuesta segura (sin crear orden)', async () => {
+    const r = await decidirRespuesta('t1', 'c1', 'quiero pagar', false, viendo);
+    expect(r.reply).toContain('carrito está vacío');
+    expect(r.nextState).toBe('BROWSING');
+  });
 });
 
 describe('conversation/engine decidirRespuesta — rama catálogo (F1)', () => {
