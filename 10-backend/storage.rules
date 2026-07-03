@@ -41,6 +41,12 @@ service firebase.storage {
         && userRole() in ['TENANT_OWNER', 'TENANT_MANAGER', 'TENANT_VIEWER'];
     }
 
+    function isTenantStaff(tenantId) {
+      return isSignedIn()
+        && userTenantId() == tenantId
+        && userRole() in ['TENANT_OWNER', 'TENANT_MANAGER', 'SELLER'];
+    }
+
     function isImageFile() {
       return request.resource.contentType.matches('image/.*');
     }
@@ -65,6 +71,14 @@ service firebase.storage {
     // Exports: solo el tenant los lee, solo Cloud Functions los crean
     match /tenants/{tenantId}/exports/{filename} {
       allow read: if isTenantViewer(tenantId) || isPlatformAdmin();
+      allow write: if false; // Solo Admin SDK
+    }
+
+    // Comprobantes de pago (ORDER-1B): fotos de transferencias que manda el CLIENTE por
+    // WhatsApp y guarda Cloud Functions. Los lee el staff (el SELLER verifica el pago)
+    // y el admin. Escritura de cliente prohibida: SOLO Admin SDK (webhook → Storage).
+    match /tenants/{tenantId}/orders/{orderId}/comprobantes/{filename} {
+      allow read: if isTenantStaff(tenantId) || isPlatformAdmin();
       allow write: if false; // Solo Admin SDK
     }
 

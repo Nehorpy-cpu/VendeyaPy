@@ -10,6 +10,7 @@ import { Timestamp } from 'firebase-admin/firestore';
 import type { WebhookInboxEvent, MetaExternalIndexEntry, MessageChannel } from '@vpw/shared';
 import { db, paths } from '../lib/firebase.js';
 import { handleMessage } from '../conversation/engine.js';
+import { processComprobanteImage } from '../orders/comprobanteImage.js';
 import { getWhatsAppClient } from '../messaging/whatsappClient.js';
 import { checkTenantInboundGate, incrementMessageUsage } from '../tenants/lifecycle.js';
 import { resolveEntitlements } from '../entitlements/entitlements.js';
@@ -34,8 +35,11 @@ export async function processWebhookEvent(eventId: string): Promise<void> {
       const idx = await db().doc(paths.metaExternalIndexEntry(`${ev.platform}_${ev.externalId}`)).get();
       tenantId = (idx.data() as MetaExternalIndexEntry | undefined)?.tenantId ?? null;
     }
-    const payload = ev.payload as { from?: string; text?: string; adReferral?: { campaignId?: string; adId?: string } } | undefined;
-    if (!tenantId || !payload?.from || !payload?.text) {
+    const payload = ev.payload as
+      | { from?: string; text?: string; adReferral?: { campaignId?: string; adId?: string }; messageId?: string; image?: { mediaId?: string; mimeType?: string | null; caption?: string | null } }
+      | undefined;
+    const esImagen = !!payload?.image?.mediaId && ev.platform === 'whatsapp';
+    if (!tenantId || !payload?.from || (!payload?.text && !esImagen)) {
       await ref.update({ processingStatus: 'ignored', errorMessage: !tenantId ? 'empresa no resuelta' : 'payload sin from/text', processedAt: Timestamp.now() });
       return;
     }
@@ -49,6 +53,31 @@ export async function processWebhookEvent(eventId: string): Promise<void> {
     }
 
     const platform = channelOf(ev.platform);
+
+    // ORDER-1B: imagen entrante = posible COMPROBANTE de pago. Camino propio (no pasa por el
+    // bot): asocia a la orden pendiente, Storage, PENDING_VERIFICATION + handoff. Nunca PAID.
+    // La respuesta sale por el mismo cliente (mock la retiene; la recepción no depende del modo).
+    if (esImagen) {
+      const resultado = await processComprobanteImage({
+        tenantId,
+        customerId: payload.from.replace(/[^0-9]/g, ''),
+        from: payload.from,
+        messageId: payload.messageId ?? ev.id,
+        image: { mediaId: payload.image!.mediaId!, mimeType: payload.image!.mimeType, caption: payload.image!.caption },
+      });
+      await incrementMessageUsage(tenantId).catch(() => { /* métrica de uso, no crítica */ });
+      if (resultado.reply.trim()) {
+        try {
+          const client = await getWhatsAppClient(tenantId);
+          await client.sendText(payload.from, resultado.reply, { tenantId, channel: platform });
+        } catch (e) {
+          logger.error('No se pudo entregar la respuesta del comprobante', e, { tenantId });
+        }
+      }
+      await ref.update({ processingStatus: 'processed', tenantId, processedAt: Timestamp.now() });
+      logger.info('Webhook procesado (comprobante imagen)', { eventId, tenantId, attached: resultado.attachedOrderId != null });
+      return;
+    }
 
     // PLAN-LIMITS-3B: gate de multiChannel. WhatsApp NUNCA se gatea (incluido en todos los planes).
     // Los canales NO-WhatsApp (Instagram/Messenger) requieren la feature `multiChannel` del plan
@@ -64,7 +93,8 @@ export async function processWebhookEvent(eventId: string): Promise<void> {
       }
     }
 
-    const result = await handleMessage({ tenantId, from: payload.from, text: payload.text, channel: platform });
+    // A esta altura no es imagen → el guard de arriba garantiza text presente.
+    const result = await handleMessage({ tenantId, from: payload.from, text: payload.text!, channel: platform });
     await incrementMessageUsage(tenantId).catch(() => { /* métrica de uso, no crítica */ });
 
     // Entregar la respuesta del bot por el canal (Cloud API en prod; mock en emulador/demo).

@@ -19,6 +19,13 @@ export interface MetaAdReferral {
   sourceUrl: string | null; // WA: referral.source_url
 }
 
+/** Imagen entrante (ORDER-1B: comprobantes de pago). Solo WhatsApp por ahora. */
+export interface InboundImage {
+  mediaId: string; // id del media en Graph (para descargarlo con el token del tenant)
+  mimeType: string | null;
+  caption: string | null;
+}
+
 export interface NormalizedInbound {
   platform: InboundPlatform;
   externalId: string; // WA: metadata.phone_number_id · IG/Messenger: entry.id → resuelve tenant
@@ -27,6 +34,8 @@ export interface NormalizedInbound {
   messageId: string; // WA: messages[].id (wamid) · IG/Messenger: message.mid → idempotencia
   timestamp: number | null; // WA: segundos (string) · IG/Messenger: ms (number)
   adReferral: MetaAdReferral | null;
+  /** Presente SOLO en mensajes de imagen (text queda con el caption o ''). */
+  image?: InboundImage;
   rawMessage: unknown; // el objeto de ESE mensaje (debug/auditoría; sin tokens)
 }
 
@@ -57,8 +66,16 @@ function waText(msg: Any): string | null {
     case 'button':
       return str(msg?.button?.text); // botón de plantilla (quick reply)
     default:
-      return null; // image/audio/video/sticker/document/location/etc → ignorado
+      return null; // audio/video/sticker/document/location/etc → ignorado (image se maneja aparte, ORDER-1B)
   }
+}
+
+/** ORDER-1B: mensajes `image` (comprobantes). Sin mediaId no sirve → null (ignorado). */
+function waImage(msg: Any): InboundImage | null {
+  if (msg?.type !== 'image') return null;
+  const mediaId = str(msg?.image?.id);
+  if (!mediaId) return null;
+  return { mediaId, mimeType: str(msg?.image?.mime_type), caption: str(msg?.image?.caption) };
 }
 
 function waReferral(ref: Any): MetaAdReferral | null {
@@ -82,8 +99,9 @@ function parseWhatsApp(entries: Any[], out: NormalizedInbound[]): number {
       const messages = Array.isArray(value?.messages) ? value.messages : [];
       for (const msg of messages) {
         const text = waText(msg);
+        const image = waImage(msg);
         const from = str(msg?.from);
-        if (text === null || from === null) {
+        if (from === null || (text === null && image === null)) {
           ignored++;
           continue;
         }
@@ -91,10 +109,11 @@ function parseWhatsApp(entries: Any[], out: NormalizedInbound[]): number {
           platform: 'whatsapp',
           externalId,
           from,
-          text,
+          text: text ?? image?.caption ?? '',
           messageId: str(msg?.id) ?? '',
           timestamp: toNum(msg?.timestamp),
           adReferral: waReferral(msg?.referral),
+          ...(image ? { image } : {}),
           rawMessage: msg,
         });
       }

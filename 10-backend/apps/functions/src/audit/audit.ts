@@ -48,6 +48,7 @@ export const AUDIT_ACTIONS = [
   'order.status_changed',
   'order.payment_confirmed_manual',
   'order.admin_corrected',
+  'order.comprobante_received',
   'billing.activation_requested',
   'billing.activation_approved',
   'billing.activation_cancelled',

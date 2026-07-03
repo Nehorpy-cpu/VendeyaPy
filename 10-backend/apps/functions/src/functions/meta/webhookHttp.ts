@@ -86,6 +86,7 @@ export const metaWebhook = onRequest({ region: 'us-central1', cors: false }, asy
         messageId: m.messageId,
         timestamp: m.timestamp,
         ...(m.adReferral ? { adReferral: m.adReferral } : {}),
+        ...(m.image ? { image: m.image } : {}), // ORDER-1B: comprobante por imagen
         rawMessage: m.rawMessage, // mínimo para auditoría/debug; sin tokens ni secretos
       };
       const id = inboxDocId(m.platform, m.messageId);

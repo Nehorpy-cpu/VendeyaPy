@@ -35,8 +35,33 @@ describe('parseMetaWebhookPayload', () => {
     expect(r.messages[0]!.adReferral).toMatchObject({ adId: '120211234567890123', campaignId: null, sourceUrl: 'https://fb.me/2abcXyz' });
   });
 
-  it('WhatsApp imagen (no-texto) → ignorado', () => {
+  it('ORDER-1B: WhatsApp imagen → normalizada con image.mediaId (posible comprobante)', () => {
     const r = parseMetaWebhookPayload(load('wa-image.json'));
+    expect(r.messages).toHaveLength(1);
+    expect(r.ignored).toBe(0);
+    const m = r.messages[0]!;
+    expect(m.image).toEqual({ mediaId: 'MEDIA_ID', mimeType: 'image/jpeg', caption: null });
+    expect(m.text).toBe(''); // sin caption → text vacío (el flujo de comprobante no depende del texto)
+    expect(m.from).toBe('595991234567');
+    expect(m.messageId).toBe('wamid.IMG1');
+  });
+
+  it('ORDER-1B: imagen SIN media id → ignorada; caption → text', () => {
+    const base = load('wa-image.json');
+    base.entry[0].changes[0].value.messages[0].image = { mime_type: 'image/jpeg' }; // sin id
+    expect(parseMetaWebhookPayload(base).ignored).toBe(1);
+
+    const conCaption = load('wa-image.json');
+    conCaption.entry[0].changes[0].value.messages[0].image.caption = 'pago del pedido';
+    const r = parseMetaWebhookPayload(conCaption);
+    expect(r.messages[0]!.text).toBe('pago del pedido');
+    expect(r.messages[0]!.image?.caption).toBe('pago del pedido');
+  });
+
+  it('ORDER-1B: otros media (audio/documento) siguen ignorados', () => {
+    const base = load('wa-image.json');
+    base.entry[0].changes[0].value.messages[0] = { from: '595991234567', id: 'wamid.AUDIO1', timestamp: '1716750300', type: 'audio', audio: { id: 'M2' } };
+    const r = parseMetaWebhookPayload(base);
     expect(r.messages).toHaveLength(0);
     expect(r.ignored).toBe(1);
   });
