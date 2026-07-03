@@ -9,7 +9,7 @@ import { ConfirmModal } from '@/components/ui';
 import {
   listOrders, listOrderFinancials,
   canTenantEditOrder, canTenantCancelOrder, NEXT_STATUS,
-  cancelOrder, updateOrderData, advanceOrderStatus, friendlyOrderError,
+  cancelOrder, updateOrderData, advanceOrderStatus, adminCorrectOrder, friendlyOrderError,
 } from '@/lib/orders';
 
 const gs = (n: number | null | undefined) => (n == null ? '—' : '₲ ' + Math.round(n).toLocaleString('es-PY'));
@@ -65,15 +65,19 @@ export default function OrdersPage() {
   const isSeller = claims.role === 'SELLER';
   // Cancelar/editar: solo manager+ (el backend igual lo hace cumplir; acá solo se decide qué mostrar).
   const isManager = claims.role === 'TENANT_OWNER' || claims.role === 'TENANT_MANAGER' || claims.role === 'PLATFORM_ADMIN';
+  // ORDER-2B: corrección administrativa — SOLO Super Admin (el backend lo exige con check literal).
+  const isPlatformAdmin = claims.role === 'PLATFORM_ADMIN';
   const [status, setStatus] = useState<OrderStatus | 'ALL'>('ALL');
   const [detail, setDetail] = useState<Order | null>(null);
 
   // ORDER-2: mutaciones por CALLABLES (nunca writes directos; rules los cierran).
   const qc = useQueryClient();
-  const [confirming, setConfirming] = useState<null | 'cancel' | 'pay' | 'deliver'>(null);
+  const [confirming, setConfirming] = useState<null | 'cancel' | 'pay' | 'deliver' | 'admin'>(null);
   const [cancelReason, setCancelReason] = useState('');
   const [editingNotes, setEditingNotes] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [adminStatus, setAdminStatus] = useState<OrderStatus | ''>('');
+  const [adminReason, setAdminReason] = useState('');
 
   const afterMutation = (newStatus?: OrderStatus) => {
     qc.invalidateQueries({ queryKey: ['orders', tenantId] });
@@ -101,8 +105,18 @@ export default function OrdersPage() {
     },
     onError: (e) => setActionError(friendlyOrderError(e)),
   });
-  const mutating = cancelMut.isPending || advanceMut.isPending || notesMut.isPending;
-  const closeDetail = () => { setDetail(null); setConfirming(null); setEditingNotes(null); setActionError(null); };
+  // ORDER-2B: corrección administrativa (adminOrderCorrect — solo PLATFORM_ADMIN, motivo obligatorio).
+  const adminMut = useMutation({
+    mutationFn: () => adminCorrectOrder(tenantId!, detail!.id, adminReason.trim(), { status: adminStatus as OrderStatus }),
+    onSuccess: () => {
+      afterMutation(adminStatus as OrderStatus);
+      setAdminStatus('');
+      setAdminReason('');
+    },
+    onError: (e) => setActionError(friendlyOrderError(e)),
+  });
+  const mutating = cancelMut.isPending || advanceMut.isPending || notesMut.isPending || adminMut.isPending;
+  const closeDetail = () => { setDetail(null); setConfirming(null); setEditingNotes(null); setActionError(null); setAdminStatus(''); setAdminReason(''); };
 
   const ordersQ = useQuery({ queryKey: ['orders', tenantId], queryFn: () => listOrders(tenantId!), enabled: !!tenantId });
   // Finanzas privadas: el vendedor no puede leerlas (reglas) → no se consultan para su rol.
@@ -306,8 +320,65 @@ export default function OrdersPage() {
                 <p className="mt-3 rounded-lg bg-coral-50 px-3 py-2 text-sm text-coral-700">{actionError}</p>
               )}
             </div>
+
+            {/* ORDER-2B: corrección administrativa — SOLO PLATFORM_ADMIN (backend: check literal +
+                motivo obligatorio + audit before/after). Nunca elimina: corrige estados/registro. */}
+            {isPlatformAdmin && (
+              <div className="mt-5 rounded-xl border border-amber-200 bg-amber-50/50 p-4">
+                <h3 className="text-xs font-semibold uppercase tracking-wide text-amber-700">🛡️ Corrección administrativa (Super Admin)</h3>
+                <p className="mt-1 text-xs text-ink-500">Para corregir pedidos permanentes (pagados/entregados) o marcar reembolsos. No elimina el pedido; queda auditado con tu usuario y motivo.</p>
+                <div className="mt-3 flex flex-wrap items-center gap-2">
+                  <select
+                    value={adminStatus}
+                    onChange={(e) => setAdminStatus(e.target.value as OrderStatus | '')}
+                    className="rounded-lg border border-ink-200 px-3 py-1.5 text-sm text-ink-800 focus:border-amber-500 focus:outline-none focus:ring-2 focus:ring-amber-500/30"
+                  >
+                    <option value="">Nuevo estado…</option>
+                    {Object.entries(STATUS_LABEL)
+                      .filter(([k]) => k !== detail.status)
+                      .map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+                  </select>
+                  <button
+                    onClick={() => { setActionError(null); setConfirming('admin'); }}
+                    disabled={mutating || !adminStatus}
+                    className="rounded-lg bg-amber-600 px-3 py-1.5 text-sm font-semibold text-white transition-colors hover:bg-amber-700 disabled:opacity-50"
+                  >
+                    Corregir estado
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         </div>
+      )}
+
+      {detail && confirming === 'admin' && (
+        <ConfirmModal
+          title="Corrección administrativa"
+          confirmLabel={adminMut.isPending ? 'Corrigiendo…' : `Corregir a ${STATUS_LABEL[adminStatus] ?? adminStatus}`}
+          cancelLabel="Volver"
+          danger
+          pending={adminMut.isPending}
+          error={actionError}
+          onCancel={() => { setConfirming(null); setActionError(null); }}
+          onConfirm={() => {
+            if (adminReason.trim().length < 5) { setActionError('Motivo obligatorio (mínimo 5 caracteres) — queda en la auditoría.'); return; }
+            adminMut.mutate();
+          }}
+        >
+          <p>
+            El pedido pasa de <StatusBadge status={detail.status} /> a <StatusBadge status={adminStatus || detail.status} />.{' '}
+            <strong>No se elimina el pedido. La corrección queda auditada</strong> (antes/después + tu usuario + motivo).
+          </p>
+          <textarea
+            value={adminReason}
+            onChange={(e) => setAdminReason(e.target.value)}
+            rows={2}
+            maxLength={300}
+            placeholder="Motivo (obligatorio) — ej: orden de prueba del smoke, se marca reembolsada"
+            className="mt-3 w-full rounded-lg border border-ink-200 px-3 py-2 text-sm text-ink-800 focus:border-amber-500 focus:outline-none focus:ring-2 focus:ring-amber-500/30"
+          />
+        </ConfirmModal>
       )}
 
       {/* Modales de confirmación (encima del detalle) */}
