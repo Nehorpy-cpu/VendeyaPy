@@ -125,9 +125,11 @@ const sessionDoc = async (from) => {
   return (await db.doc(`tenants/${T}/customers/${cid}/sessions/active`).get()).data();
 };
 {
+  // F3: el texto NOMBRA a Good Girl → la oferta alineada es SOLO Good Girl (single, sin ambigüedad),
+  // así el caso 7a ("sí, agregalo") sigue agregándola directo — igual que el flujo real consultivo.
   await setFixture({ responses: [
     { toolUses: [{ id: 'tu-f1b', name: 'buscar_productos', input: { consulta: 'Good Girl' } }] },
-    { text: `¡Sí, la tenemos! ✨ ${AI_MARK}` },
+    { text: `¡Sí, tenemos la Good Girl! ✨ ¿Querés que te la agregue? ${AI_MARK}` },
   ] });
   const from = fresh(5);
   const txt = await probeUntil(from, 'tienen la good girl?', (t) => t.includes(AI_MARK));

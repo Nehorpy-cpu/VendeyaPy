@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { runSalesAgent, extractShownSkus, MAX_SHOWN_SKUS } from './salesAgent.js';
+import { runSalesAgent, extractShownSkus, extractShownProducts, MAX_SHOWN_SKUS } from './salesAgent.js';
 import type { SalesAgentDeps } from './salesAgent.js';
 import type { AgentConfig } from '@vpw/shared';
 import type { RunAgentInput, RunAgentResult, ToolExecResult } from './types.js';
@@ -36,7 +36,7 @@ describe('ai/salesAgent runSalesAgent', () => {
   it('IA habilitada + respuesta válida → used:true y registra uso (tokens sumados + costo)', async () => {
     const { deps, calls } = makeDeps();
     const out = await runSalesAgent({ tenantId: 'perfumeria', agentConfig: AGENT, messages: [{ role: 'user', content: '¿qué me recomendás para una primera cita?' }] }, deps);
-    expect(out).toEqual({ used: true, reply: 'Te recomiendo el Lattafa Asad ✨', shownSkus: [], usedTools: [] });
+    expect(out).toEqual({ used: true, reply: 'Te recomiendo el Lattafa Asad ✨', shownSkus: [], shownProducts: [], usedTools: [] });
     expect(calls.budget).toHaveLength(1); // gate ANTES de llamar
     expect(calls.usage).toEqual([['perfumeria', 200, 0.001]]); // metering DESPUÉS (120+80)
   });
@@ -72,7 +72,7 @@ describe('ai/salesAgent runSalesAgent', () => {
   it('si el metering falla, NO rompe la respuesta al cliente (used:true igual)', async () => {
     const { deps } = makeDeps({ recordUsage: async () => { throw new Error('firestore caído'); } });
     const out = await runSalesAgent({ tenantId: 'perfumeria', agentConfig: AGENT, messages: [{ role: 'user', content: 'hola' }] }, deps);
-    expect(out).toEqual({ used: true, reply: 'Te recomiendo el Lattafa Asad ✨', shownSkus: [], usedTools: [] });
+    expect(out).toEqual({ used: true, reply: 'Te recomiendo el Lattafa Asad ✨', shownSkus: [], shownProducts: [], usedTools: [] });
   });
 
   it('arma el contexto sales: tools públicas + executeTool tenant-scoped que mapea ok/no-ok', async () => {
@@ -111,7 +111,7 @@ describe('ai/salesAgent runSalesAgent', () => {
       return okResult({ reply: 'Mirá estas 2 opciones ✨' });
     };
     const out = await runSalesAgent({ tenantId: 'perfumeria', agentConfig: AGENT, messages: [{ role: 'user', content: 'algo árabe' }] }, { ...deps, runAgent });
-    expect(out).toEqual({ used: true, reply: 'Mirá estas 2 opciones ✨', shownSkus: ['p1', 'p2'], usedTools: ['buscar_productos'] });
+    expect(out).toEqual({ used: true, reply: 'Mirá estas 2 opciones ✨', shownSkus: ['p1', 'p2'], shownProducts: [{ id: 'p1', name: 'Yara' }, { id: 'p2', name: 'Good Girl' }], usedTools: ['buscar_productos'] });
   });
 
   it('prompt injection: el modelo inventa SKUs en el texto → NO entran; shownSkus solo del backend', async () => {
@@ -161,5 +161,9 @@ describe('ai/salesAgent extractShownSkus (fuente de verdad = resultado backend)'
     const out = extractShownSkus('buscar_productos', many);
     expect(out).toHaveLength(MAX_SHOWN_SKUS);
     expect(out[0]).toBe('p0');
+  });
+  it('F3: extractShownProducts captura name (y tolera name ausente/no-string → "")', () => {
+    expect(extractShownProducts('buscar_productos', [{ id: 'a', name: ' Yara ' }, { id: 'b' }, { id: 'c', name: 9 }]))
+      .toEqual([{ id: 'a', name: 'Yara' }, { id: 'b', name: '' }, { id: 'c', name: '' }]);
   });
 });

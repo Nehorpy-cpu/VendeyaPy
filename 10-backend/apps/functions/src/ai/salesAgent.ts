@@ -25,23 +25,44 @@ export const MAX_SHOWN_SKUS = 3;
 const SHOWN_SKUS_TOOL = 'buscar_productos';
 
 /**
- * Extrae los SKUs (ids) mostrados SOLO del RESULTADO backend de `buscar_productos` (PublicProduct[]).
- * Claude NUNCA aporta SKUs: la fuente de verdad es el array que devolvió la tool server-side
- * (tenant-scoped, sanitizado). Endurecido contra formas raras: ignora no-arrays, items no-objeto,
- * ids no-string/vacíos; deduplica y corta a `max`. Así un id inventado por el modelo no entra.
+ * Extrae {id, name} de los productos mostrados SOLO del RESULTADO backend de `buscar_productos`
+ * (PublicProduct[]). Claude NUNCA aporta SKUs: la fuente de verdad es el array que devolvió la
+ * tool server-side (tenant-scoped, sanitizado). Endurecido contra formas raras: ignora no-arrays,
+ * items no-objeto, ids no-string/vacíos; deduplica y corta a `max`. El name viaja junto al id
+ * para que el motor pueda ALINEAR la respuesta con lo presentado (F3) sin re-leer el catálogo.
  */
-export function extractShownSkus(toolName: string, toolResult: unknown, max = MAX_SHOWN_SKUS): string[] {
+export function extractShownProducts(
+  toolName: string,
+  toolResult: unknown,
+  max = MAX_SHOWN_SKUS,
+): Array<{ id: string; name: string }> {
   if (toolName !== SHOWN_SKUS_TOOL || !Array.isArray(toolResult)) return [];
-  const ids: string[] = [];
+  const out: Array<{ id: string; name: string }> = [];
+  const seen = new Set<string>();
   for (const item of toolResult) {
-    const id = item && typeof item === 'object' ? (item as { id?: unknown }).id : undefined;
-    if (typeof id === 'string' && id.trim()) ids.push(id.trim());
+    if (!item || typeof item !== 'object') continue;
+    const { id, name } = item as { id?: unknown; name?: unknown };
+    if (typeof id !== 'string' || !id.trim() || seen.has(id.trim())) continue;
+    seen.add(id.trim());
+    out.push({ id: id.trim(), name: typeof name === 'string' ? name.trim() : '' });
   }
-  return [...new Set(ids)].slice(0, max);
+  return out.slice(0, max);
+}
+
+/** Compat: solo los ids (tests/consumidores existentes). */
+export function extractShownSkus(toolName: string, toolResult: unknown, max = MAX_SHOWN_SKUS): string[] {
+  return extractShownProducts(toolName, toolResult, max).map((p) => p.id);
 }
 
 export type SalesAgentOutcome =
-  | { used: true; reply: string; shownSkus: string[]; usedTools: string[] }
+  | {
+      used: true;
+      reply: string;
+      shownSkus: string[];
+      /** F3: id+name en el orden de la tool (para alinear con el texto presentado). */
+      shownProducts: Array<{ id: string; name: string }>;
+      usedTools: string[];
+    }
   | { used: false; reason: string };
 
 export interface SalesAgentDeps {
@@ -69,7 +90,7 @@ export async function runSalesAgent(
   }
 
   // Metadata SEGURA capturada server-side durante el loop de tools (no del texto del modelo).
-  let shownSkus: string[] = [];
+  let shownProducts: Array<{ id: string; name: string }> = [];
   const usedTools: string[] = [];
 
   const result = await deps.runAgent({
@@ -82,10 +103,10 @@ export async function runSalesAgent(
     executeTool: async (name, toolInput) => {
       usedTools.push(name);
       const r = await deps.execTool(input.tenantId, name, toolInput); // tenantId del contexto, no del modelo
-      // SKUs mostrados = SOLO ids del resultado backend de buscar_productos (la última búsqueda no vacía gana).
+      // Productos mostrados = SOLO del resultado backend de buscar_productos (la última búsqueda no vacía gana).
       if (r.ok) {
-        const ids = extractShownSkus(name, r.result);
-        if (ids.length) shownSkus = ids;
+        const shown = extractShownProducts(name, r.result);
+        if (shown.length) shownProducts = shown;
       }
       return r.ok ? r.result : { error: r.error };
     },
@@ -106,5 +127,11 @@ export async function runSalesAgent(
     }
   }
 
-  return { used: true, reply: result.reply.trim(), shownSkus: [...shownSkus], usedTools: [...usedTools] };
+  return {
+    used: true,
+    reply: result.reply.trim(),
+    shownSkus: shownProducts.map((p) => p.id),
+    shownProducts: [...shownProducts],
+    usedTools: [...usedTools],
+  };
 }

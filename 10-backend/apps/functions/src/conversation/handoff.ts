@@ -34,6 +34,9 @@ export async function takeoverChat(
   }
   await ref.update({
     'context.humanTakeover': true,
+    // F3: la oferta del bot muere al entrar un humano — un "sí" dirigido al vendedor jamás
+    // debe agregar el producto que el bot había ofrecido antes de la pausa.
+    'context.pendingCartConfirmation': null,
     updatedAt: Timestamp.now(),
   });
   // Asignar la conversación al vendedor que la tomó (P9).
@@ -62,6 +65,7 @@ export async function releaseToBot(tenantId: string, customerId: string): Promis
   }
   await ref.update({
     'context.humanTakeover': false,
+    'context.pendingCartConfirmation': null, // F3: el bot retoma con contexto de oferta limpio
     state: 'IDLE', // próximo mensaje del cliente: el bot retoma con un saludo de "vuelta"
     updatedAt: Timestamp.now(),
   });

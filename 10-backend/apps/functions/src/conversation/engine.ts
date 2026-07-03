@@ -10,7 +10,7 @@
  */
 
 import { Timestamp } from 'firebase-admin/firestore';
-import type { Session, SessionState, Product, Cart, MessageChannel } from '@vpw/shared';
+import type { Session, SessionState, Product, Cart, MessageChannel, PendingCartConfirmation } from '@vpw/shared';
 import { db, paths } from '../lib/firebase.js';
 import { logger } from '../lib/logger.js';
 import {
@@ -19,6 +19,17 @@ import {
   findProductByName,
   type CatalogFilters,
 } from '../catalog/search.js';
+import {
+  pendingVigente,
+  buildPendingConfirmation,
+  tipoNegativa,
+  esPreguntaConsulta,
+  contieneNegacion,
+  eleccionPorNombre,
+  alignPresentedWithReply,
+  preguntaDesambiguacion,
+  PENDING_CART_TTL_MS,
+} from './cartIntent.js';
 import { addToCart, formatCart } from './cart.js';
 import { getAgentConfig } from './agentConfig.js';
 import { runSalesAgent } from '../ai/salesAgent.js';
@@ -150,10 +161,10 @@ function quiereAgregar(t: string): boolean {
 }
 
 /**
- * F2: confirmación corta y pura ("sí", "dale", "ok") — SIN tokens que nombren un producto.
- * En VIEWING_PRODUCT con productos mostrados equivale a "agregá el primero" (lo decide el caller,
- * que es quien conoce el estado). Conservadora a propósito: "sí, pero tenés algo más barato" NO
- * es confirmación. Exportada para tests.
+ * F2/F3: confirmación corta y pura ("sí", "dale", "ok", "ese") — SIN tokens que nombren un
+ * producto. Con una oferta pendiente VIGENTE equivale a "agregá el ofrecido" (lo decide el
+ * caller, que conoce el estado y la oferta). Conservadora a propósito: "sí, pero tenés algo
+ * más barato" NO es confirmación. Exportada para tests.
  */
 export function esConfirmacionCorta(text: string): boolean {
   const t = text
@@ -164,7 +175,7 @@ export function esConfirmacionCorta(text: string): boolean {
     .replace(/\s+/g, ' ')
     .trim();
   if (!t || t.length > 30) return false;
-  return /^(si+|dale|ok|okey|oka|listo|claro|obvio|perfecto|genial|bueno|de una)( (si+|dale|ok|okey|gracias|porfa|por favor|agregalo|agregala|sumalo|sumala|anadilo|anadila|quiero|ese|esa|lo|la))*$/.test(
+  return /^(si+|dale|ok|okey|oka|listo|claro|obvio|perfecto|genial|bueno|de una|ese|esa|quiero ese|quiero esa)( (si+|dale|ok|okey|gracias|porfa|por favor|agregalo|agregala|sumalo|sumala|anadilo|anadila|quiero|ese|esa|lo|la))*$/.test(
     t,
   );
 }
@@ -193,7 +204,9 @@ export function ruleEngineWouldFallback(text: string, t: string): boolean {
     !quiereVerCarrito(t) &&
     !quierePagar(t) &&
     !quiereAgregar(t) &&
-    ordinalIndex(t) === null &&
+    // F3: un ordinal solo retiene el turno en reglas si NO es pregunta — "¿cuánto sale el 2?"
+    // es una consulta para la IA, no una selección (antes caía al fallback genérico mudo).
+    (ordinalIndex(t) === null || esPreguntaConsulta(text)) &&
     !quiereCatalogo(t)
   );
 }
@@ -227,27 +240,6 @@ export function buildAiHistory(
 }
 
 /**
- * Resuelve qué producto quiere el cliente:
- *  - por orden ("el primero") sobre lo último mostrado, o
- *  - por nombre ("agregá Good Girl") — solo si hay intención de agregar (evita reads de más).
- */
-async function resolverSeleccion(
-  tenantId: string,
-  t: string,
-  lastShownSkus: string[],
-): Promise<Product | null> {
-  const idx = ordinalIndex(t);
-  if (idx !== null && lastShownSkus[idx]) {
-    const p = await getProductById(tenantId, lastShownSkus[idx]!);
-    if (p) return p;
-  }
-  if (quiereAgregar(t)) {
-    return findProductByName(tenantId, t);
-  }
-  return null;
-}
-
-/**
  * Decide la respuesta con las REGLAS (transaccional/navegacional). La IA atiende la cola
  * conversacional vía ruleEngineWouldFallback y el rescate de catálogo vacío (catalogEmpty, F1)
  * — ambos cableados en handleMessage. Exportada para tests (flag catalogEmpty).
@@ -257,7 +249,19 @@ export async function decidirRespuesta(
   customerId: string,
   text: string,
   esNuevo: boolean,
-  prev: { cart: Cart; lastShownSkus: string[]; greeting: string; profitMode: boolean; state: SessionState | null },
+  prev: {
+    cart: Cart;
+    lastShownSkus: string[];
+    greeting: string;
+    profitMode: boolean;
+    state: SessionState | null;
+    /** F3: oferta pendiente VIGENTE (el caller ya filtró la vencida). */
+    pendingCart?: PendingCartConfirmation | null;
+    /** F3: había una oferta pero venció — una confirmación repregunta en vez de caer al genérico. */
+    pendingExpirada?: boolean;
+    /** F3: reloj inyectable (tests); default Date.now(). */
+    nowMs?: number;
+  },
 ): Promise<{
   reply: string;
   nextState: SessionState;
@@ -266,6 +270,8 @@ export async function decidirRespuesta(
   pendingOrderId?: string;
   /** F1: la rama catálogo no encontró productos → el caller puede delegar a la IA antes del canned. */
   catalogEmpty?: boolean;
+  /** F3: objeto = nueva oferta · null = limpiar · undefined = conservar la actual. */
+  pendingCart?: PendingCartConfirmation | null;
 }> {
   const t = text.toLowerCase();
 
@@ -326,25 +332,110 @@ export async function decidirRespuesta(
       reply: formatTransferInstructions(config, order.totals.total),
       nextState: 'AWAITING_PAYMENT',
       pendingOrderId: order.id,
+      pendingCart: null, // F3: el checkout congela el contexto de oferta (no arrastra a la próxima)
     };
   }
 
-  // 4. Agregar al carrito (seleccionar producto por orden o nombre)
-  let seleccion = await resolverSeleccion(tenantId, t, prev.lastShownSkus);
+  // 4. Agregar al carrito — F3: resolución CONTEXTUAL y determinística contra la oferta vigente.
+  //    Prioridades: nombre en el mensaje ACTUAL > índice ("el primero") > único candidato claro.
+  //    El caller ya filtró la oferta vencida (pendingCart llega null si expiró) — contexto viejo
+  //    NUNCA agrega. La IA jamás toca este camino: solo conversa.
+  const nowMs = prev.nowMs ?? Date.now();
+  const pending = prev.pendingCart ?? null;
 
-  // F2: intención de agregar SIN nombrar producto ("sí, agregalo", "sumalo", "quiero ese", o una
-  // confirmación corta "sí"/"dale"/"ok") mientras el cliente está MIRANDO productos → equivale a
-  // "agregá el primero mostrado". Solo si el texto no tiene tokens identificatorios (queryTokens
-  // vacío): "agregá la good girl" sigue resolviéndose por nombre arriba, y si el nombre no matchea
-  // se repregunta (no se agrega otro producto a ciegas).
-  if (
-    !seleccion &&
-    (quiereAgregar(t) || esConfirmacionCorta(text)) &&
-    prev.state === 'VIEWING_PRODUCT' &&
-    prev.lastShownSkus.length > 0 &&
-    queryTokens(text).length === 0
-  ) {
-    seleccion = await getProductById(tenantId, prev.lastShownSkus[0]!);
+  // Guarda DURA de negación (review F3): "no lo quiero" contiene "(lo) quiero" y engañaba a
+  // quiereAgregar → agregaba lo RECHAZADO. Con negación no se agrega NADA; si además hay oferta
+  // (y no es una pregunta tipo "¿no tenés el invictus?"), se descarta la oferta con cierre amable.
+  const negacion = contieneNegacion(text);
+  if (negacion && pending && !esPreguntaConsulta(text)) {
+    return {
+      reply: 'Dale 👍 no lo agrego. Si querés, contame qué estilo buscás o escribí *catálogo* y vemos otras opciones.',
+      nextState: 'BROWSING',
+      pendingCart: null,
+    };
+  }
+
+  // 4a. Nombre con verbo de agregar ("agregame el Supremacy") → catálogo completo. Prioridad
+  //     ABSOLUTA: gana aunque la oferta vigente tenga otro producto primero.
+  let seleccion: Product | null = null;
+  if (!negacion && quiereAgregar(t)) {
+    seleccion = (await findProductByName(tenantId, t)) ?? null; // exige ≥1 token del NOMBRE
+  }
+
+  // 4b. ELECCIÓN por nombre sin verbo respondiendo a la oferta ("El Supremacy quiero").
+  //     eleccionPorNombre es estricta: preguntas, negaciones y opiniones que solo MENCIONAN al
+  //     candidato ("me encanta el supremacy pero está caro") devuelven [] → van a la IA.
+  if (!seleccion && !negacion && pending) {
+    const elegidos = eleccionPorNombre(text, pending.products);
+    if (elegidos.length === 1) {
+      seleccion = await getProductById(tenantId, elegidos[0]!.id);
+    } else if (elegidos.length > 1) {
+      return {
+        reply: preguntaDesambiguacion(elegidos),
+        nextState: 'VIEWING_PRODUCT',
+        pendingCart: buildPendingConfirmation(elegidos, pending.source, nowMs),
+      };
+    }
+  }
+
+  // 4c. Índice ("el primero", "el 2", "opción 3"): contra la oferta vigente (el orden que el
+  //     cliente LEYÓ); sin oferta, legacy sobre lastShownSkus. Una PREGUNTA con número
+  //     ("¿cuánto sale el 2?") es consulta, no elección — jamás agrega.
+  if (!seleccion && !negacion && !esPreguntaConsulta(text)) {
+    const idx = ordinalIndex(t);
+    if (idx !== null) {
+      // Con oferta VENCIDA el legacy no aplica: "el primero" sobre contexto viejo jamás agrega.
+      const targetId = pending
+        ? pending.products[idx]?.id
+        : prev.pendingExpirada
+          ? undefined
+          : prev.lastShownSkus[idx];
+      if (targetId) seleccion = await getProductById(tenantId, targetId);
+    }
+  }
+
+  // 4d. Confirmación/intención SIN nombre ("sí", "dale", "agregalo", "quiero ese"). La guarda
+  //     queryTokens (heredada de F2) es clave: si el cliente NOMBRÓ algo que no se resolvió
+  //     arriba ("agregame el invictus" que no existe), acá NO se agrega otra cosa a ciegas.
+  if (!seleccion && !negacion && (quiereAgregar(t) || esConfirmacionCorta(text)) && queryTokens(text).length === 0) {
+    if (pending) {
+      if (!pending.needsDisambiguation && pending.primaryProductId) {
+        // Único candidato claro y vigente → ese, exactamente ese.
+        seleccion = await getProductById(tenantId, pending.primaryProductId);
+      } else {
+        // Varios candidatos y un "sí" pelado → NO adivinar: que elija (lista del MOTOR,
+        // numeración garantizada). La oferta se renueva para que "el 2" funcione después.
+        return {
+          reply: preguntaDesambiguacion(pending.products),
+          nextState: 'VIEWING_PRODUCT',
+          pendingCart: { ...pending, expiresAtMs: nowMs + PENDING_CART_TTL_MS },
+        };
+      }
+    } else if (
+      !prev.pendingExpirada && // oferta vencida ⇒ nada de legacy: contexto viejo no agrega
+      prev.state === 'VIEWING_PRODUCT' &&
+      prev.lastShownSkus.length > 0
+    ) {
+      // Legacy (sesiones anteriores a F3, sin oferta guardada): con UN solo mostrado se agrega
+      // ese; con varios NUNCA "el primero" a ciegas — se leen los nombres y se desambigua.
+      if (prev.lastShownSkus.length === 1) {
+        seleccion = await getProductById(tenantId, prev.lastShownSkus[0]!);
+      } else {
+        const prods = (
+          await Promise.all(prev.lastShownSkus.slice(0, 3).map((id) => getProductById(tenantId, id)))
+        ).filter((p): p is Product => !!p);
+        if (prods.length === 1) {
+          seleccion = prods[0]!;
+        } else if (prods.length > 1) {
+          const cands = prods.map((p) => ({ id: p.id, name: p.name }));
+          return {
+            reply: preguntaDesambiguacion(cands),
+            nextState: 'VIEWING_PRODUCT',
+            pendingCart: buildPendingConfirmation(cands, 'catalog_listing', nowMs),
+          };
+        }
+      }
+    }
   }
 
   if (seleccion) {
@@ -357,12 +448,23 @@ export async function decidirRespuesta(
         'Seguí mirando (*catálogo*) o escribí *carrito* / *pagar*.',
       nextState: 'CART',
       cart,
+      pendingCart: null, // F3: oferta consumida — nunca re-agrega con otro "sí" posterior
     };
   }
-  if (quiereAgregar(t)) {
+  if (
+    !negacion &&
+    (quiereAgregar(t) ||
+      (esConfirmacionCorta(text) && (prev.pendingExpirada || prev.state === 'VIEWING_PRODUCT')))
+  ) {
+    // Intención de agregar sin candidato resoluble (incluye oferta VENCIDA): repreguntar, no
+    // adivinar. Un "sí" sin NINGÚN contexto de compra sigue cayendo al fallback genérico.
+    // Se limpia TODO el contexto de oferta (también lastShownSkus): la invitación "número o
+    // nombre" no puede resolverse después contra una lista vieja que el cliente ya no ve.
     return {
       reply: 'Decime cuál querés agregar 🙂 — el *número* (1, 2, 3) o el *nombre* del perfume.',
       nextState: 'VIEWING_PRODUCT',
+      pendingCart: null,
+      lastShownSkus: [],
     };
   }
 
@@ -389,6 +491,12 @@ export async function decidirRespuesta(
       reply: formatearProductos(productos),
       nextState: 'VIEWING_PRODUCT',
       lastShownSkus: productos.map((p) => p.id),
+      // F3: el listado ES la oferta — mismo array que arma el texto ⇒ numeración SIEMPRE alineada.
+      pendingCart: buildPendingConfirmation(
+        productos.map((p) => ({ id: p.id, name: p.name })),
+        'catalog_listing',
+        nowMs,
+      ),
     };
   }
 
@@ -453,6 +561,13 @@ export async function handleMessage(input: ConversationInput): Promise<Conversat
   const prevCart: Cart = existing?.cart ?? { items: [], subtotal: 0 };
   const prevShown: string[] = existing?.context?.lastShownSkus ?? [];
 
+  // F3: oferta de carrito pendiente. La vencida se filtra ACÁ (contexto viejo nunca agrega) y se
+  // limpia al escribir la sesión. `pendingExpirada` deja que una confirmación repregunte.
+  const nowMs = now.toMillis();
+  const pendingPrev = existing?.context?.pendingCartConfirmation ?? null;
+  const pendingActivo = pendingVigente(pendingPrev, nowMs) ? pendingPrev : null;
+  const pendingExpirada = !!pendingPrev && !pendingActivo;
+
   // F1: la IA recibe HISTORIAL (últimos AI_HISTORY_MAX mensajes, el inbound actual ya está
   // persistido por el appendMessage de arriba). Lazy: solo se lee si algún camino delega.
   const delegarAlSalesAgent = async () => {
@@ -460,27 +575,62 @@ export async function handleMessage(input: ConversationInput): Promise<Conversat
     return runSalesAgent({ tenantId, agentConfig, messages: buildAiHistory(historial, text) });
   };
 
-  // F2: una confirmación corta ("sí"/"dale"/"ok") mientras el cliente MIRA productos es parte del
-  // flujo de conversión → SIEMPRE reglas (agrega el primero mostrado), nunca la IA (que no puede
-  // escribir el carrito y no debe prometer acciones).
+  // F3: la IA mostró productos → la oferta es LO QUE EL TEXTO PRESENTA (alineado), no el orden
+  // crudo del buscador (bug Odyssey/Supremacy). Si el texto no nombra ninguno, orden de la tool.
+  const resultadoDesdeIA = (
+    ai: { reply: string; shownProducts: Array<{ id: string; name: string }> },
+    fallbackState: SessionState,
+  ): Awaited<ReturnType<typeof decidirRespuesta>> => {
+    if (ai.shownProducts.length === 0) return { reply: ai.reply, nextState: fallbackState }; // no pisa oferta previa
+    const presentados = alignPresentedWithReply(ai.reply, ai.shownProducts);
+    const oferta = presentados.length > 0 ? presentados : ai.shownProducts;
+    return {
+      reply: ai.reply,
+      nextState: 'VIEWING_PRODUCT',
+      lastShownSkus: oferta.map((p) => p.id),
+      pendingCart: buildPendingConfirmation(oferta, 'ai_recommendation', nowMs),
+    };
+  };
+
+  // F3: negativa ante la oferta vigente — determinística, sin IA:
+  //  - rechazo puro ("no", "ese no") → no agregar, limpiar la oferta, cierre amable.
+  //  - pide alternativa ("mejor otro", "tenés otro") → limpiar la oferta y seguir el ruteo
+  //    normal (la IA/catálogo ofrecen otras opciones sobre contexto limpio).
+  const negativa = !esNuevo && pendingActivo ? tipoNegativa(text) : null;
+  const limpiarOfertaEnEscritura = negativa === 'alternativa';
+
+  // F2/F3: una respuesta a la oferta vigente (confirmación corta, índice, intención de agregar o
+  // la ELECCIÓN por nombre de un candidato) es parte del flujo de conversión → SIEMPRE reglas,
+  // nunca la IA (que no puede escribir el carrito y no debe prometer acciones). Las PREGUNTAS
+  // con número ("¿cuánto sale el 2?") y las opiniones que solo mencionan al candidato ("me
+  // encanta el supremacy pero está caro") NO son respuesta a la oferta: van a la IA.
+  const t = text.toLowerCase();
+  const respondeOferta =
+    !!pendingActivo &&
+    (esConfirmacionCorta(text) ||
+      (ordinalIndex(t) !== null && !esPreguntaConsulta(text)) ||
+      quiereAgregar(t) ||
+      eleccionPorNombre(text, pendingActivo.products).length > 0);
   const confirmandoSeleccion =
-    esConfirmacionCorta(text) && existing?.state === 'VIEWING_PRODUCT' && prevShown.length > 0;
+    respondeOferta ||
+    (esConfirmacionCorta(text) && existing?.state === 'VIEWING_PRODUCT' && prevShown.length > 0);
 
   // Ruteo (AG-3): la cola conversacional (lo que el motor mandaría a su fallback) va al sales agent
   // de Claude — ADVISORY, solo info pública, sin tocar carrito/pedido. El resto (saludo, catálogo,
   // carrito, pagar, selección) se queda en las reglas. Si la IA está off/sin cupo/falla → fallback.
   let result: Awaited<ReturnType<typeof decidirRespuesta>> | undefined;
-  if (!esNuevo && !confirmandoSeleccion && ruleEngineWouldFallback(text, text.toLowerCase())) {
+  if (negativa === 'rechazo') {
+    result = {
+      reply: 'Dale 👍 no lo agrego. Si querés, contame qué estilo buscás o escribí *catálogo* y vemos otras opciones.',
+      nextState: existing?.state ?? 'BROWSING',
+      pendingCart: null,
+    };
+  } else if (!esNuevo && !confirmandoSeleccion && ruleEngineWouldFallback(text, t)) {
     const ai = await delegarAlSalesAgent();
     if (ai.used) {
-      // Si la IA mostró productos REALES (ids del backend de buscar_productos), sincronizamos el estado
-      // conversacional igual que el catálogo rule-based → "el primero/segundo" funciona después.
-      // NUNCA tocamos carrito/pedido (advisory); los ids no vienen del texto del modelo.
-      const showed = ai.shownSkus.length > 0;
-      result = showed
-        ? { reply: ai.reply, nextState: 'VIEWING_PRODUCT', lastShownSkus: ai.shownSkus }
-        : { reply: ai.reply, nextState: existing?.state ?? 'BROWSING' }; // sin productos → no se pisa lastShownSkus
-      logger.info('Respuesta por sales agent IA', { tenantId, customerId, shown: ai.shownSkus.length, tools: ai.usedTools.length });
+      // Ids/nombres SOLO del backend de buscar_productos (nunca del texto del modelo).
+      result = resultadoDesdeIA(ai, existing?.state ?? 'BROWSING');
+      logger.info('Respuesta por sales agent IA', { tenantId, customerId, shown: ai.shownProducts.length, tools: ai.usedTools.length });
     }
   }
   if (!result) {
@@ -490,6 +640,9 @@ export async function handleMessage(input: ConversationInput): Promise<Conversat
       greeting: agentConfig.greetingMessage,
       profitMode: agentConfig.profitMode,
       state: existing?.state ?? null,
+      pendingCart: pendingActivo,
+      pendingExpirada,
+      nowMs,
     });
     // F1: catálogo sin resultados → antes del canned "no encontré", intentar la IA (sus tools
     // buscan con mejores parámetros y puede ofrecer alternativas reales). Si la IA no corre
@@ -497,11 +650,8 @@ export async function handleMessage(input: ConversationInput): Promise<Conversat
     if (result.catalogEmpty) {
       const ai = await delegarAlSalesAgent();
       if (ai.used) {
-        const showed = ai.shownSkus.length > 0;
-        result = showed
-          ? { reply: ai.reply, nextState: 'VIEWING_PRODUCT', lastShownSkus: ai.shownSkus }
-          : { reply: ai.reply, nextState: result.nextState };
-        logger.info('Catálogo vacío → respuesta por sales agent IA', { tenantId, customerId, shown: ai.shownSkus.length, tools: ai.usedTools.length });
+        result = resultadoDesdeIA(ai, result.nextState);
+        logger.info('Catálogo vacío → respuesta por sales agent IA', { tenantId, customerId, shown: ai.shownProducts.length, tools: ai.usedTools.length });
       }
     }
   }
@@ -519,8 +669,18 @@ export async function handleMessage(input: ConversationInput): Promise<Conversat
       currentCategoryId: existing?.context?.currentCategoryId ?? null,
       pendingOrderId: result.pendingOrderId ?? existing?.context?.pendingOrderId ?? null,
       pendingPaymentId: existing?.context?.pendingPaymentId ?? null,
-      lastShownSkus: result.lastShownSkus ?? prevShown,
+      // F3: al vencer la oferta se limpia TAMBIÉN lastShownSkus — si sobreviviera, un "el 1"
+      // posterior resolvería contra una lista vieja/desalineada (el bug original de nuevo).
+      lastShownSkus: result.lastShownSkus ?? (pendingExpirada ? [] : prevShown),
       humanTakeover: existing?.context?.humanTakeover ?? false,
+      // F3: tri-estado del motor (objeto=nueva oferta / null=limpiar / undefined=conservar);
+      // la vencida o descartada por negativa se limpia acá — nunca sobrevive contexto viejo.
+      pendingCartConfirmation:
+        result.pendingCart !== undefined
+          ? result.pendingCart
+          : limpiarOfertaEnEscritura || pendingExpirada
+            ? null
+            : (pendingPrev ?? null),
     },
     expiresAt: Timestamp.fromMillis(now.toMillis() + SESSION_TTL_MS),
     updatedAt: now,

@@ -70,10 +70,16 @@ export async function submitComprobante(
       createdAt: now,
     });
 
-  // 4. Sesión → atención humana (el bot deja de responder)
+  // 4. Sesión → atención humana (el bot deja de responder). La oferta de carrito pendiente
+  //    muere acá (F3): el flujo pasó a verificación de pago, un "sí" al vendedor no agrega nada.
   await db()
     .doc(paths.session(tenantId, order.customerId))
-    .update({ 'context.humanTakeover': true, 'context.pendingOrderId': orderId, updatedAt: now });
+    .update({
+      'context.humanTakeover': true,
+      'context.pendingOrderId': orderId,
+      'context.pendingCartConfirmation': null,
+      updatedAt: now,
+    });
 
   // 5. Notificar al vendedor (producción: WhatsApp; dev: log)
   logger.info('Handoff a vendedor', {

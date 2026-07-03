@@ -40,6 +40,11 @@ describe('conversation/engine ruleEngineWouldFallback (ruteo al sales agent IA)'
     expect(wouldFallback('dame el 3')).toBe(false);
   });
 
+  it('F3: una PREGUNTA con número es consulta para la IA, no selección (review adversarial)', () => {
+    expect(wouldFallback('¿cuánto sale el 2?')).toBe(true);
+    expect(wouldFallback('¿el 1 tiene buena duración?')).toBe(true);
+  });
+
   it('NO delega carrito / pagar / agregar (transaccional rule-based)', () => {
     expect(wouldFallback('mostrame mi carrito')).toBe(false);
     expect(wouldFallback('quiero pagar')).toBe(false);
