@@ -80,6 +80,12 @@ export async function submitComprobante(
       'context.pendingCartConfirmation': null,
       updatedAt: now,
     });
+  // HUMAN-HANDOFF-1: sincronizar TAMBIÉN el resumen del customer — el panel calcula "quién
+  // atiende" y el composer desde conversation.humanTakeover; si queda desfasado, el vendedor
+  // no ve el composer justo en el caso central (comprobante recién recibido).
+  await db()
+    .doc(paths.customer(tenantId, order.customerId))
+    .set({ conversation: { humanTakeover: true }, updatedAt: now }, { merge: true });
 
   // 5. Notificar al vendedor (producción: WhatsApp; dev: log)
   logger.info('Handoff a vendedor', {

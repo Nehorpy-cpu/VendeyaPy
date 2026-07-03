@@ -8,28 +8,12 @@
 
 import { onCall, HttpsError, type CallableRequest } from 'firebase-functions/v2/https';
 import { takeoverChat, releaseToBot } from '../../conversation/handoff.js';
+import { assertStaffAccess } from './staffAuth.js';
 import { recordAudit } from '../../audit/audit.js';
 
 interface HandoffData {
   tenantId?: string;
   customerId?: string;
-}
-
-const STAFF_ROLES = ['PLATFORM_ADMIN', 'TENANT_OWNER', 'TENANT_MANAGER', 'SELLER'];
-
-/** Valida tenant + rol; devuelve un nombre legible del actor para el log/historial. */
-function assertStaff(req: CallableRequest<HandoffData>, tenantId: string): string | undefined {
-  const auth = req.auth;
-  if (!auth) throw new HttpsError('unauthenticated', 'Iniciá sesión para continuar.');
-  const token = auth.token as { tenantId?: string; role?: string; name?: string; email?: string };
-  const isPlatformAdmin = token.role === 'PLATFORM_ADMIN';
-  if (!isPlatformAdmin && token.tenantId !== tenantId) {
-    throw new HttpsError('permission-denied', 'No tenés acceso a esta empresa.');
-  }
-  if (!STAFF_ROLES.includes(token.role ?? '')) {
-    throw new HttpsError('permission-denied', 'Tu rol no puede atender conversaciones.');
-  }
-  return token.name || token.email || undefined;
 }
 
 function readArgs(req: CallableRequest<HandoffData>): { tenantId: string; customerId: string } {
@@ -42,16 +26,17 @@ function readArgs(req: CallableRequest<HandoffData>): { tenantId: string; custom
 
 export const chatTakeover = onCall<HandoffData>({ region: 'us-central1' }, async (req) => {
   const { tenantId, customerId } = readArgs(req);
-  const by = assertStaff(req, tenantId);
-  const result = await takeoverChat(tenantId, customerId, by, req.auth?.uid ?? null);
-  await recordAudit({ tenantId, action: 'chat.takeover', actorUid: req.auth?.uid ?? null, targetType: 'customer', targetId: customerId, summary: `${by ?? 'Staff'} tomó la conversación` });
+  const actor = assertStaffAccess(req.auth, tenantId);
+  const result = await takeoverChat(tenantId, customerId, actor.name, actor.uid);
+  await recordAudit({ tenantId, action: 'chat.takeover', actorUid: actor.uid, targetType: 'customer', targetId: customerId, summary: `${actor.name ?? 'Staff'} tomó la conversación` });
   return result;
 });
 
 export const chatRelease = onCall<HandoffData>({ region: 'us-central1' }, async (req) => {
   const { tenantId, customerId } = readArgs(req);
-  assertStaff(req, tenantId);
+  const actor = assertStaffAccess(req.auth, tenantId);
   const result = await releaseToBot(tenantId, customerId);
-  await recordAudit({ tenantId, action: 'chat.released', actorUid: req.auth?.uid ?? null, targetType: 'customer', targetId: customerId, summary: 'Conversación devuelta al bot' });
+  // HUMAN-HANDOFF-1: acción de audit con el nombre pedido por el programa (antes 'chat.released').
+  await recordAudit({ tenantId, action: 'conversation.returned_to_bot', actorUid: actor.uid, targetType: 'customer', targetId: customerId, summary: `${actor.name ?? 'Staff'} devolvió la conversación al bot` });
   return result;
 });

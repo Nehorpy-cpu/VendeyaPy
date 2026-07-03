@@ -4,7 +4,7 @@
  * A futuro (Track C) se precalculan con jobs para escalar barato.
  */
 
-import { collection, getDocs, query, orderBy, limit as fbLimit } from 'firebase/firestore';
+import { collection, getDocs, query, orderBy, where, limit as fbLimit } from 'firebase/firestore';
 import { httpsCallable } from 'firebase/functions';
 import type { Order, OrderStatus, Product, OrderFinancials } from '@vpw/shared';
 import { firebaseDb, firebaseFunctions } from './firebase';
@@ -91,6 +91,28 @@ export function friendlyOrderError(e: unknown): string {
 export async function listOrders(tenantId: string, max = 200): Promise<Order[]> {
   const snap = await getDocs(query(ordersCol(tenantId), orderBy('createdAt', 'desc'), fbLimit(max)));
   return snap.docs.map((d) => d.data() as Order);
+}
+
+/** Estados "abiertos" que le importan al vendedor en la conversación (HUMAN-HANDOFF-1).
+ * Tipado contra OrderStatus para que un estado inexistente no compile (review adversarial). */
+const OPEN_ORDER_STATUSES: ReadonlySet<OrderStatus> = new Set<OrderStatus>([
+  'PENDING_PAYMENT', 'PENDING_VERIFICATION', 'PAID', 'PREPARING', 'ASSIGNED', 'IN_TRANSIT',
+]);
+
+/**
+ * Pedido abierto más reciente de UN cliente (para el banner del chat). Solo `where` por
+ * customerId (sin orderBy → no necesita índice compuesto); filtro/orden en el cliente.
+ * Límite alto a propósito: sin orderBy, Firestore recorta por ID de documento (aleatorio
+ * respecto a la fecha) — con un límite chico un cliente recurrente podía dejar el pedido
+ * nuevo fuera de la ventana (review adversarial).
+ */
+export async function getCustomerOpenOrder(tenantId: string, customerId: string): Promise<Order | null> {
+  const snap = await getDocs(query(ordersCol(tenantId), where('customerId', '==', customerId), fbLimit(300)));
+  const open = snap.docs
+    .map((d) => d.data() as Order)
+    .filter((o) => OPEN_ORDER_STATUSES.has(o.status))
+    .sort((a, b) => (b.createdAt?.toMillis?.() ?? 0) - (a.createdAt?.toMillis?.() ?? 0));
+  return open[0] ?? null;
 }
 
 /**

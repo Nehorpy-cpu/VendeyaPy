@@ -28,6 +28,14 @@ export interface AppendMessageInput {
   channel?: MessageChannel;
   /** MULTI-NUMBER-1: phone_number_id del número del NEGOCIO por el que entró/salió el mensaje. */
   receivedVia?: string | null;
+  /** HUMAN-HANDOFF-1: uid del staff que escribió (author 'seller'). */
+  senderUid?: string | null;
+  /** HUMAN-HANDOFF-1: nombre legible del staff (para la burbuja del panel). */
+  senderName?: string | null;
+  /** HUMAN-HANDOFF-1: wamid de Meta si el envío fue live. */
+  waMessageId?: string | null;
+  /** HUMAN-HANDOFF-1: true = el outbound quedó retenido por modo mock (no salió a Meta). */
+  viaMock?: boolean;
 }
 
 function preview(text: string): string {
@@ -54,8 +62,14 @@ export async function appendMessage(
     channel,
     createdAt: now,
   };
-  // receivedVia es metadata adicional (MULTI-NUMBER-1); el type Message no lo exige.
-  await ref.set(input.receivedVia ? { ...msg, receivedVia: input.receivedVia } : msg);
+  // Metadata adicional opcional (MULTI-NUMBER-1 / HUMAN-HANDOFF-1): solo los campos presentes.
+  const extra: Record<string, unknown> = {};
+  if (input.receivedVia) extra['receivedVia'] = input.receivedVia;
+  if (input.senderUid) extra['senderUid'] = input.senderUid;
+  if (input.senderName) extra['senderName'] = input.senderName;
+  if (input.waMessageId) extra['waMessageId'] = input.waMessageId;
+  if (input.viaMock) extra['viaMock'] = true;
+  await ref.set(Object.keys(extra).length ? { ...msg, ...extra } : msg);
 
   // Resumen denormalizado (deep-merge sobre el doc del cliente).
   const conv: Record<string, unknown> = {

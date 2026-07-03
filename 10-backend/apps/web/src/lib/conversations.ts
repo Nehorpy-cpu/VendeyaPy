@@ -82,3 +82,24 @@ export async function releaseChat(tenantId: string, customerId: string): Promise
   const res = await fn({ tenantId, customerId });
   return res.data;
 }
+
+export interface ManualMessageResult {
+  ok: boolean;
+  /** true = modo mock: quedó en el historial pero NO salió a WhatsApp. */
+  viaMock: boolean;
+  waMessageId: string | null;
+}
+
+/** HUMAN-HANDOFF-1: mensaje humano del staff por WhatsApp (mismo número que recibió el chat). */
+export async function sendManualMessage(
+  tenantId: string,
+  customerId: string,
+  text: string,
+): Promise<ManualMessageResult> {
+  const fn = httpsCallable<{ tenantId: string; customerId: string; text: string }, ManualMessageResult>(
+    firebaseFunctions(),
+    'conversationSendManualMessage',
+  );
+  const res = await fn({ tenantId, customerId, text });
+  return res.data;
+}

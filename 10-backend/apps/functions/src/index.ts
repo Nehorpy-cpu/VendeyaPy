@@ -117,6 +117,9 @@ export { devTakeoverChat } from './functions/conversation/devTakeoverChat.js';
 // Handoff desde el panel (callables con auth): tomar / devolver conversación (P5).
 export { chatTakeover, chatRelease } from './functions/conversation/chatHandoff.js';
 
+// Respuesta HUMANA del vendedor por WhatsApp desde el panel (HUMAN-HANDOFF-1).
+export { conversationSendManualMessage } from './functions/conversation/manualMessage.js';
+
 // Agregados para dashboards baratos (P7): trigger por pedido + recálculo manual.
 export { onOrderWriteStats } from './functions/stats/onOrderWriteStats.js';
 export { devRecomputeStats } from './functions/stats/devRecomputeStats.js';

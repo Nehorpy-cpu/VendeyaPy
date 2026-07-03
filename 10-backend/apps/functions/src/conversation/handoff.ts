@@ -69,6 +69,12 @@ export async function releaseToBot(tenantId: string, customerId: string): Promis
     state: 'IDLE', // próximo mensaje del cliente: el bot retoma con un saludo de "vuelta"
     updatedAt: Timestamp.now(),
   });
+  // HUMAN-HANDOFF-1: al devolver el chat también se libera la asignación — "quién atiende"
+  // vuelve a ser el bot, no queda un vendedor colgado en la bandeja.
+  await db().doc(paths.customer(tenantId, customerId)).set(
+    { assignedSellerId: null, assignedSellerName: null, updatedAt: Timestamp.now() },
+    { merge: true },
+  );
   await appendMessage(tenantId, customerId, {
     direction: 'out',
     author: 'system',

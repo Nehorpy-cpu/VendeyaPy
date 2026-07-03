@@ -56,6 +56,8 @@ export const AUDIT_ACTIONS = [
   'billing.activation_cancelled',
   'chat.takeover',
   'chat.released',
+  'conversation.manual_message_sent',
+  'conversation.returned_to_bot',
   'meta.connected',
   'meta.connected_manual',
   'meta.disconnected',

@@ -13,8 +13,19 @@ import {
   getMessages,
   takeoverChat,
   releaseChat,
+  sendManualMessage,
 } from '@/lib/conversations';
 import { listTenantWhatsappNumbers } from '@/lib/whatsapp-activation';
+import { getChannelConfig } from '@/lib/channels';
+import { getCustomerOpenOrder } from '@/lib/orders';
+
+const ORDER_STATUS_LABEL: Record<string, string> = {
+  PENDING_PAYMENT: 'Esperando pago',
+  PENDING_VERIFICATION: 'Comprobante por verificar',
+  PAID: 'Pagado',
+  PREPARING: 'Preparando',
+  SHIPPED: 'Enviado',
+};
 
 function hhmm(ts: unknown): string {
   try {
@@ -99,6 +110,50 @@ function ConversationsInner() {
   const releaseMut = useMutation({
     mutationFn: () => releaseChat(tenantId!, selected!),
     onSuccess: refreshAll,
+  });
+
+  // HUMAN-HANDOFF-1: composer del vendedor (responder por WhatsApp desde el panel).
+  // Los callbacks de un envío EN VUELO solo tocan el estado si el vendedor sigue en ESA
+  // conversación (cambiar de chat con red lenta no puede borrar el draft ni pintar el
+  // error/badge de otra charla — review adversarial).
+  const [draft, setDraft] = useState('');
+  const [sendError, setSendError] = useState<string | null>(null);
+  const [lastViaMock, setLastViaMock] = useState(false);
+  const selectedRef = useRef<string | null>(null);
+  useEffect(() => { selectedRef.current = selected; }, [selected]);
+  const sendMut = useMutation({
+    mutationFn: (vars: { customerId: string; text: string }) =>
+      sendManualMessage(tenantId!, vars.customerId, vars.text),
+    onSuccess: (r, vars) => {
+      if (vars.customerId !== selectedRef.current) return; // resolvió para otro chat: no tocar la UI
+      setDraft('');
+      setSendError(null);
+      setLastViaMock(r.viaMock);
+      refreshAll();
+    },
+    onError: (e, vars) => {
+      if (vars.customerId !== selectedRef.current) return;
+      setSendError(e instanceof Error ? e.message : 'No se pudo enviar el mensaje.');
+    },
+  });
+  useEffect(() => { setDraft(''); setSendError(null); setLastViaMock(false); }, [selected]);
+
+  // Modo de envío (para avisar mock ANTES de escribir). Si el rol no puede leer config → sin aviso previo.
+  const channelQ = useQuery({
+    queryKey: ['channelConfig', tenantId],
+    queryFn: () => getChannelConfig(tenantId!).catch(() => null),
+    enabled: !!tenantId,
+    staleTime: 5 * 60 * 1000,
+  });
+  const isMock = channelQ.data?.whatsappSendMode === 'mock' || lastViaMock;
+
+  // Pedido abierto del cliente (banner con link a Pedidos). El comprobante activa el handoff
+  // sobre un pedido PENDING_VERIFICATION: esto le da contexto al vendedor sin salir del chat.
+  const orderQ = useQuery({
+    queryKey: ['customerOpenOrder', tenantId, selected],
+    queryFn: () => getCustomerOpenOrder(tenantId!, selected!).catch(() => null),
+    enabled: !!tenantId && !!selected,
+    refetchInterval: 15000,
   });
 
   // Autoscroll al final cuando llegan mensajes
@@ -206,7 +261,9 @@ function ConversationsInner() {
                   <div className="min-w-0">
                     <div className="truncate font-semibold text-ink-900">{current ? name(current) : selected}</div>
                     <div className="text-xs text-ink-400">
-                      {isHuman ? '🧑‍💼 Lo atiende un vendedor (bot en pausa)' : '🤖 Lo atiende el bot'}
+                      {isHuman
+                        ? `🧑‍💼 ${current?.assignedSellerName ? 'Atiende ' + current.assignedSellerName : 'Lo atiende un vendedor'} · bot en pausa`
+                        : '🤖 Lo atiende el bot'}
                     </div>
                   </div>
                 </div>
@@ -231,6 +288,20 @@ function ConversationsInner() {
                 </div>
               </div>
 
+              {/* HUMAN-HANDOFF-1: pedido abierto del cliente — contexto del comprobante sin salir del chat */}
+              {orderQ.data && (
+                <div className="flex items-center justify-between gap-2 border-b border-amber-100 bg-amber-50/70 px-4 py-2 text-xs">
+                  <span className="min-w-0 truncate text-ink-700">
+                    🧾 Pedido <span className="font-mono">{orderQ.data.id.slice(0, 12)}…</span> ·{' '}
+                    <span className="font-semibold">{ORDER_STATUS_LABEL[orderQ.data.status] ?? orderQ.data.status}</span> · ₲{' '}
+                    {orderQ.data.totals?.total?.toLocaleString('es-PY') ?? '—'}
+                  </span>
+                  <a href="/orders" className="shrink-0 font-semibold text-amber-700 hover:underline">
+                    Ver en Pedidos →
+                  </a>
+                </div>
+              )}
+
               <div className="flex-1 space-y-2 overflow-y-auto bg-ink-50/40 p-4">
                 {messagesQ.isLoading && <div className="text-sm text-ink-400">Cargando mensajes…</div>}
                 {messagesQ.isSuccess && (messagesQ.data?.length ?? 0) === 0 && (
@@ -240,11 +311,53 @@ function ConversationsInner() {
                 <div ref={endRef} />
               </div>
 
-              <div className="border-t border-ink-100 px-4 py-2 text-center text-xs text-ink-400">
-                {isHuman
-                  ? 'Respondé al cliente desde tu WhatsApp. Cuando termines, tocá “Devolver al bot”.'
-                  : 'El bot responde automáticamente. Tomá la conversación para atender vos.'}
-              </div>
+              {/* HUMAN-HANDOFF-1: composer del vendedor — responde por el MISMO número de WhatsApp */}
+              {isHuman ? (
+                <form
+                  className="space-y-1.5 border-t border-ink-100 px-4 py-3"
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    if (draft.trim() && !sendMut.isPending) sendMut.mutate({ customerId: selected!, text: draft });
+                  }}
+                >
+                  <div className="flex items-center gap-2 text-[11px] text-ink-500">
+                    <span className="rounded-full bg-amber-100 px-2 py-0.5 font-semibold text-amber-700">🧑‍💼 Bot pausado — respondés vos</span>
+                    {isMock && (
+                      <span className="rounded-full bg-ink-100 px-2 py-0.5 text-ink-600" title="whatsappSendMode=mock">
+                        Modo prueba: se guarda en el historial pero NO sale a WhatsApp
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex items-end gap-2">
+                    <textarea
+                      value={draft}
+                      onChange={(e) => setDraft(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' && !e.shiftKey) {
+                          e.preventDefault();
+                          if (draft.trim() && !sendMut.isPending) sendMut.mutate({ customerId: selected!, text: draft });
+                        }
+                      }}
+                      rows={2}
+                      maxLength={4096}
+                      placeholder="Escribile al cliente… (Enter envía, Shift+Enter hace salto de línea)"
+                      className="min-h-[2.5rem] flex-1 resize-y rounded-xl border border-ink-200 px-3 py-2 text-sm text-ink-900 outline-none focus:border-mint-500"
+                    />
+                    <button
+                      type="submit"
+                      disabled={!draft.trim() || sendMut.isPending}
+                      className="shrink-0 rounded-xl bg-mint-600 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-mint-700 disabled:opacity-50"
+                    >
+                      {sendMut.isPending ? 'Enviando…' : 'Enviar por WhatsApp'}
+                    </button>
+                  </div>
+                  {sendError && <div className="text-xs font-medium text-coral-600">{sendError}</div>}
+                </form>
+              ) : (
+                <div className="border-t border-ink-100 px-4 py-2 text-center text-xs text-ink-400">
+                  El bot responde automáticamente. Tomá la conversación para atender vos.
+                </div>
+              )}
             </>
           )}
         </div>
@@ -264,13 +377,17 @@ function Bubble({ m }: { m: Message }) {
   const mine = m.direction === 'out'; // bot o vendedor (sale de nosotros)
   const tone =
     m.author === 'seller' ? 'bg-amber-500 text-white' : mine ? 'bg-mint-600 text-white' : 'border border-ink-100 bg-white text-ink-800';
+  const authorLabel = m.author === 'seller' ? (m.senderName ?? 'Vendedor') : m.author === 'bot' ? null : null;
   return (
     <div className={mine ? 'text-right' : 'text-left'}>
       <div className={'inline-block max-w-[80%] whitespace-pre-wrap rounded-2xl px-3 py-2 text-sm ' + tone}>
-        {m.author === 'seller' && <div className="mb-0.5 text-[10px] font-semibold opacity-80">Vendedor</div>}
+        {authorLabel && <div className="mb-0.5 text-[10px] font-semibold opacity-80">🧑‍💼 {authorLabel}</div>}
         {m.text}
       </div>
-      <div className="mt-0.5 text-[10px] text-ink-400">{hhmm(m.createdAt)}</div>
+      <div className="mt-0.5 text-[10px] text-ink-400">
+        {hhmm(m.createdAt)}
+        {m.author === 'seller' && m.viaMock && <span title="Modo prueba: no salió a WhatsApp"> · retenido (prueba)</span>}
+      </div>
     </div>
   );
 }

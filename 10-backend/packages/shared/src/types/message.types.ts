@@ -26,6 +26,16 @@ export interface Message {
   /** Canal por el que entró/salió (omnicanal, D2). Default 'whatsapp'. */
   channel?: MessageChannel;
   createdAt: Timestamp;
+  /** MULTI-NUMBER: phone_number_id del número del negocio por el que entró/salió. */
+  receivedVia?: string | null;
+  /** HUMAN-HANDOFF: uid del staff que escribió (author 'seller'). */
+  senderUid?: string | null;
+  /** HUMAN-HANDOFF: nombre legible del staff que escribió. */
+  senderName?: string | null;
+  /** HUMAN-HANDOFF: wamid devuelto por Meta si el envío fue live. */
+  waMessageId?: string | null;
+  /** HUMAN-HANDOFF: true = outbound retenido por modo mock. */
+  viaMock?: boolean;
 }
 
 /**
