@@ -14,6 +14,7 @@ import {
   takeoverChat,
   releaseChat,
 } from '@/lib/conversations';
+import { listTenantWhatsappNumbers } from '@/lib/whatsapp-activation';
 
 function hhmm(ts: unknown): string {
   try {
@@ -57,6 +58,19 @@ function ConversationsInner() {
     enabled: !!tenantId,
     refetchInterval: 8000,
   });
+
+  // MULTI-NUMBER-1: números del negocio → badge "Recibido en +…" cuando hay más de uno
+  // (activo o histórico). El SELLER no puede leer metaAssets (rules) → sin badge, sin error.
+  const numbersQ = useQuery({
+    queryKey: ['tenantWhatsappNumbers', tenantId],
+    queryFn: () => listTenantWhatsappNumbers(tenantId!).catch(() => []),
+    enabled: !!tenantId,
+    staleTime: 5 * 60 * 1000,
+  });
+  const numbers = numbersQ.data ?? [];
+  const multiNumber = numbers.length > 1;
+  const numberLabel = (pnid: string) =>
+    numbers.find((n) => n.phoneNumberId === pnid)?.displayPhoneNumber ?? `…${pnid.slice(-4)}`;
 
   const customerQ = useQuery({
     queryKey: ['customer', tenantId, selected],
@@ -147,6 +161,14 @@ function ConversationsInner() {
                       <div className="flex items-center justify-between gap-2">
                         <span className="truncate text-xs text-ink-500">{c.conversation?.lastMessagePreview ?? ''}</span>
                         <span className="flex shrink-0 items-center gap-1">
+                          {multiNumber && (c.conversation as { receivedVia?: string } | undefined)?.receivedVia && (
+                            <span
+                              title={'Recibido en ' + numberLabel((c.conversation as unknown as { receivedVia: string }).receivedVia)}
+                              className="rounded-full bg-ink-50 px-1.5 text-[10px] font-medium text-ink-500"
+                            >
+                              📞 {numberLabel((c.conversation as unknown as { receivedVia: string }).receivedVia)}
+                            </span>
+                          )}
                           {c.conversation?.channel && <span title={CHANNEL_LABEL[c.conversation.channel] ?? c.conversation.channel}>{CHANNEL_ICON[c.conversation.channel] ?? ''}</span>}
                           {c.assignedSellerId && (
                             <span title={'Asignado a ' + (c.assignedSellerName ?? 'un vendedor')} className={'rounded-full px-1.5 text-[10px] font-medium ' + (mine ? 'bg-mint-100 text-mint-700' : 'bg-ink-100 text-ink-500')}>{mine ? 'mío' : '👤'}</span>

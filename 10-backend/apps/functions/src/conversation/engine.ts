@@ -38,6 +38,8 @@ export interface ConversationInput {
   text: string;
   /** Canal de entrada (omnicanal, D2). Default 'whatsapp'. */
   channel?: MessageChannel;
+  /** MULTI-NUMBER-1: phone_number_id del número del negocio que RECIBIÓ el mensaje. */
+  receivedByPhoneNumberId?: string | null;
 }
 
 export interface ConversationResult {
@@ -427,6 +429,7 @@ export async function handleMessage(input: ConversationInput): Promise<Conversat
     humanTakeover,
     countUnread: botSilent, // si el bot no atiende, el vendedor tiene algo pendiente
     channel,
+    receivedVia: input.receivedByPhoneNumberId ?? null,
   });
 
   // Tracking propio (P11): si el mensaje trae un código/cupón, atribuir la venta a esa fuente.
@@ -529,7 +532,7 @@ export async function handleMessage(input: ConversationInput): Promise<Conversat
     .set({ id: customerId, tenantId, whatsappPhone: from, updatedAt: now }, { merge: true });
   await sessionRef.set(session);
 
-  // Guardar la respuesta del bot en el historial.
+  // Guardar la respuesta del bot en el historial (sale por el mismo número que recibió).
   if (reply.trim()) {
     await appendMessage(tenantId, customerId, {
       direction: 'out',
@@ -538,6 +541,7 @@ export async function handleMessage(input: ConversationInput): Promise<Conversat
       state: nextState,
       humanTakeover: false,
       channel,
+      receivedVia: input.receivedByPhoneNumberId ?? null,
     });
   }
 

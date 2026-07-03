@@ -54,6 +54,10 @@ export async function processWebhookEvent(eventId: string): Promise<void> {
 
     const platform = channelOf(ev.platform);
 
+    // MULTI-NUMBER-1: en WhatsApp, ev.externalId ES el phone_number_id del número del negocio
+    // que recibió el mensaje → se persiste en la conversación y la respuesta sale por ese número.
+    const receivedBy = ev.platform === 'whatsapp' ? ev.externalId : null;
+
     // ORDER-1B: imagen entrante = posible COMPROBANTE de pago. Camino propio (no pasa por el
     // bot): asocia a la orden pendiente, Storage, PENDING_VERIFICATION + handoff. Nunca PAID.
     // La respuesta sale por el mismo cliente (mock la retiene; la recepción no depende del modo).
@@ -64,11 +68,12 @@ export async function processWebhookEvent(eventId: string): Promise<void> {
         from: payload.from,
         messageId: payload.messageId ?? ev.id,
         image: { mediaId: payload.image!.mediaId!, mimeType: payload.image!.mimeType, caption: payload.image!.caption },
+        receivedByPhoneNumberId: receivedBy,
       });
       await incrementMessageUsage(tenantId).catch(() => { /* métrica de uso, no crítica */ });
       if (resultado.reply.trim()) {
         try {
-          const client = await getWhatsAppClient(tenantId);
+          const client = await getWhatsAppClient(tenantId, undefined, receivedBy);
           await client.sendText(payload.from, resultado.reply, { tenantId, channel: platform });
         } catch (e) {
           logger.error('No se pudo entregar la respuesta del comprobante', e, { tenantId });
@@ -94,13 +99,13 @@ export async function processWebhookEvent(eventId: string): Promise<void> {
     }
 
     // A esta altura no es imagen → el guard de arriba garantiza text presente.
-    const result = await handleMessage({ tenantId, from: payload.from, text: payload.text!, channel: platform });
+    const result = await handleMessage({ tenantId, from: payload.from, text: payload.text!, channel: platform, receivedByPhoneNumberId: receivedBy });
     await incrementMessageUsage(tenantId).catch(() => { /* métrica de uso, no crítica */ });
 
-    // Entregar la respuesta del bot por el canal (Cloud API en prod; mock en emulador/demo).
+    // Entregar la respuesta por el MISMO número que recibió (multi-número); mock/live intactos.
     if (result.reply && result.reply.trim() && !result.handledByHuman) {
       try {
-        const client = await getWhatsAppClient(tenantId);
+        const client = await getWhatsAppClient(tenantId, undefined, receivedBy);
         await client.sendText(payload.from, result.reply, { tenantId, channel: platform });
       } catch (e) {
         logger.error('No se pudo entregar la respuesta del bot', e, { tenantId });

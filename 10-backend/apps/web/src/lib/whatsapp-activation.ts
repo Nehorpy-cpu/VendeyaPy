@@ -96,6 +96,48 @@ export async function setManualWhatsappConnection(input: ManualWhatsappConnInput
   return (await call(input)).data;
 }
 
+// ---------------- MULTI-NUMBER-1: números adicionales por empresa ----------------
+
+export interface TenantWhatsappNumber {
+  phoneNumberId: string;
+  displayPhoneNumber: string;
+  connectionId: string;
+  status: string;
+  isDefault: boolean;
+}
+
+/** Números de WhatsApp de la empresa (assets phone). Lectura directa (rules: manager+/admin). */
+export async function listTenantWhatsappNumbers(tenantId: string): Promise<TenantWhatsappNumber[]> {
+  const { collection, getDocs, query, where } = await import('firebase/firestore');
+  const { firebaseDb } = await import('./firebase');
+  const snap = await getDocs(query(
+    collection(firebaseDb(), 'tenants', tenantId, 'metaAssets'),
+    where('assetType', '==', 'whatsapp_phone_number'),
+  ));
+  return snap.docs.map((d) => {
+    const a = d.data() as { externalId?: string; name?: string; connectionId?: string; status?: string; selected?: boolean };
+    return {
+      phoneNumberId: a.externalId ?? d.id,
+      displayPhoneNumber: a.name ?? d.id,
+      connectionId: a.connectionId ?? 'main',
+      status: a.status ?? 'active',
+      isDefault: !!a.selected,
+    };
+  }).sort((a, b) => Number(b.isDefault) - Number(a.isDefault));
+}
+
+/** (PLATFORM_ADMIN) Agrega un número ADICIONAL (no reemplaza el principal). */
+export async function adminAddWhatsappNumber(input: ManualWhatsappConnInput): Promise<{ ok: boolean; status: string; phoneNumberId: string; phoneNumber: string | null }> {
+  const call = httpsCallable<ManualWhatsappConnInput, { ok: boolean; status: string; phoneNumberId: string; phoneNumber: string | null }>(firebaseFunctions(), 'adminAddWhatsappNumber');
+  return (await call(input)).data;
+}
+
+/** (PLATFORM_ADMIN) Desactiva un número adicional: deja de rutear, historial intacto. */
+export async function adminDeactivateWhatsappNumber(tenantId: string, phoneNumberId: string): Promise<{ ok: boolean }> {
+  const call = httpsCallable<{ tenantId: string; phoneNumberId: string }, { ok: boolean }>(firebaseFunctions(), 'adminDeactivateWhatsappNumber');
+  return (await call({ tenantId, phoneNumberId })).data;
+}
+
 /** Mapea errores de los callables de WhatsApp a mensajes claros (el backend ya manda mensajes amables). */
 export function friendlyWhatsappError(e: unknown): string {
   const err = e as Partial<FunctionsError> & { code?: string; message?: string };

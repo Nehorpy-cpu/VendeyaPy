@@ -82,3 +82,38 @@ export async function resolveTenantWhatsappCreds(tenantId?: string): Promise<Wha
     return { ok: false, reason: 'token_unavailable' };
   }
 }
+
+/**
+ * Credenciales de UN número específico del tenant (MULTI-NUMBER-1): el asset del pnid
+ * (doc id = externalId) → su conexión (main o wa_{pnid}) → su token. Así la respuesta
+ * sale por el MISMO número que recibió el mensaje. No lanza; motivo claro → Mock.
+ */
+export async function resolveTenantWhatsappCredsFor(tenantId: string, phoneNumberId: string): Promise<WhatsappCredsResult> {
+  const nowMs = Date.now();
+  try {
+    const asset = (await db().doc(paths.metaAsset(tenantId, phoneNumberId)).get()).data() as
+      | (MetaAsset & { connectionId?: string })
+      | undefined;
+    if (!asset || asset.assetType !== 'whatsapp_phone_number' || asset.status !== 'active') {
+      return decideWhatsappCreds({ tenantId, connectionStatus: null, nowMs }); // → not_connected
+    }
+    const connectionId = asset.connectionId ?? 'main';
+    const conn = (await db().doc(paths.metaConnection(tenantId, connectionId)).get()).data() as MetaConnection | undefined;
+    const connectionStatus = conn?.status ?? null;
+    const tokenExpiresAtMs = conn?.tokenExpiresAt ? conn.tokenExpiresAt.toMillis() : null;
+    if (connectionStatus !== 'active') return decideWhatsappCreds({ tenantId, connectionStatus, nowMs });
+    let token: string | null = null;
+    if (conn?.tokenSecretRef) {
+      try {
+        token = await getSecretStore().get(conn.tokenSecretRef);
+      } catch (e) {
+        logger.error('resolveTenantWhatsappCredsFor: no se pudo recuperar el token', e, { tenantId, phoneNumberId });
+        token = null;
+      }
+    }
+    return decideWhatsappCreds({ tenantId, connectionStatus, tokenExpiresAtMs, phoneNumberId, token, nowMs });
+  } catch (e) {
+    logger.error('resolveTenantWhatsappCredsFor: error resolviendo credenciales', e, { tenantId, phoneNumberId });
+    return { ok: false, reason: 'token_unavailable' };
+  }
+}

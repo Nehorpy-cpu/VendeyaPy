@@ -42,6 +42,8 @@ export interface ComprobanteImageInput {
   from: string; // wa_id para responder
   messageId: string;
   image: { mediaId: string; mimeType?: string | null; caption?: string | null };
+  /** MULTI-NUMBER-1: número del negocio que recibió la imagen. */
+  receivedByPhoneNumberId?: string | null;
 }
 
 export interface ComprobanteImageResult {
@@ -114,11 +116,12 @@ export async function processComprobanteImage(
     text: image.caption?.trim() ? `📷 Comprobante: ${image.caption.trim()}` : '📷 Imagen recibida (posible comprobante)',
     now,
     channel: 'whatsapp',
+    receivedVia: input.receivedByPhoneNumberId ?? null,
   });
 
   // La respuesta se persiste acá (como hace handleMessage con las del bot); el caller la ENVÍA.
   const responder = async (reply: string, attachedOrderId: string | null): Promise<ComprobanteImageResult> => {
-    await appendMessage(tenantId, customerId, { direction: 'out', author: 'bot', text: reply, channel: 'whatsapp' });
+    await appendMessage(tenantId, customerId, { direction: 'out', author: 'bot', text: reply, channel: 'whatsapp', receivedVia: input.receivedByPhoneNumberId ?? null });
     return { reply, attachedOrderId };
   };
 

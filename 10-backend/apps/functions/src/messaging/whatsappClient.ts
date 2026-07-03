@@ -19,7 +19,7 @@ import { logger } from '../lib/logger.js';
 import { db } from '../lib/firebase.js';
 import type { MessageChannel, WhatsappSendMode } from '@vpw/shared';
 import { getChannelConfig } from './channelConfig.js';
-import { resolveTenantWhatsappCreds, type WhatsappCredsResult } from './resolveWhatsappCreds.js';
+import { resolveTenantWhatsappCreds, resolveTenantWhatsappCredsFor, type WhatsappCredsResult } from './resolveWhatsappCreds.js';
 
 export interface SendResult {
   ok: boolean;
@@ -153,12 +153,21 @@ const globalFallbackAllowed = () => process.env.ALLOW_GLOBAL_WHATSAPP_FALLBACK =
 /** Dependencias inyectables (para tests sin Firestore). */
 export interface WhatsappClientDeps {
   getMode: (tenantId?: string) => Promise<WhatsappSendMode>;
-  resolveCreds: (tenantId?: string) => Promise<WhatsappCredsResult>;
+  resolveCreds: (tenantId?: string, phoneNumberId?: string | null) => Promise<WhatsappCredsResult>;
 }
 
 const defaultDeps: WhatsappClientDeps = {
   getMode: async (t) => (t ? (await getChannelConfig(t)).whatsappSendMode : 'mock'),
-  resolveCreds: (t) => resolveTenantWhatsappCreds(t),
+  // MULTI-NUMBER-1: con pnid se resuelve ESE número (responder por donde entró); si ese
+  // número ya no está activo (desactivado con mensajes en vuelo), fallback al principal.
+  resolveCreds: async (t, pnid) => {
+    if (t && pnid) {
+      const specific = await resolveTenantWhatsappCredsFor(t, pnid);
+      if (specific.ok) return specific;
+      logger.warn('WhatsApp: número receptor no resoluble; fallback al principal', { tenantId: t, phoneNumberId: pnid, reason: specific.reason });
+    }
+    return resolveTenantWhatsappCreds(t);
+  },
 };
 
 /**
@@ -169,25 +178,29 @@ const defaultDeps: WhatsappClientDeps = {
 export async function getWhatsAppClient(
   tenantId?: string,
   deps: WhatsappClientDeps = defaultDeps,
+  /** MULTI-NUMBER-1: responder por ESTE número (el que recibió el mensaje). */
+  phoneNumberId?: string | null,
 ): Promise<WhatsAppClient> {
   const mode = await deps.getMode(tenantId);
 
-  // Emulador: nunca llamamos a Graph. Resolvemos creds igual para testear aislamiento,
-  // devolviendo un Mock inspeccionable (con el phone_number_id del tenant, sin el token).
+  // Emulador: nunca llamamos a Graph. Resolvemos creds igual para testear aislamiento
+  // (Mock inspeccionable con el phone_number_id resuelto — clave para multi-número).
   if (isEmulator()) {
+    const creds = await deps.resolveCreds(tenantId, phoneNumberId);
     if (mode === 'live') {
-      const creds = await deps.resolveCreds(tenantId);
       return creds.ok
         ? new MockWhatsAppClient({ mode, phoneNumberId: creds.phoneNumberId, tokenPresent: true })
         : new MockWhatsAppClient({ mode, reason: creds.reason });
     }
-    return new MockWhatsAppClient({ mode, reason: 'mode_mock' });
+    return creds.ok
+      ? new MockWhatsAppClient({ mode, phoneNumberId: creds.phoneNumberId, tokenPresent: true, reason: 'mode_mock' })
+      : new MockWhatsAppClient({ mode, reason: 'mode_mock' });
   }
 
   // Producción: solo se envía real si el tenant está en modo 'live'.
   if (mode !== 'live') return new MockWhatsAppClient({ mode, reason: 'mode_mock' });
 
-  const creds = await deps.resolveCreds(tenantId);
+  const creds = await deps.resolveCreds(tenantId, phoneNumberId);
   if (creds.ok && tenantId) return cloudClientFor(tenantId, creds);
 
   // Fallback global (DEPRECATED): solo si está habilitado explícitamente y hay env globales.

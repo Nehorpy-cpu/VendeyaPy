@@ -146,7 +146,8 @@ export { devMetaConnect, devMetaDisconnect } from './functions/meta/devMeta.js';
 // Embedded Signup — nonce + intercambio de code + discovery + preflight. No cablea frontend.
 export { startMetaConnect, connectMeta, verifyMetaChannel, selectMetaPhoneNumber, metaDisconnect } from './functions/meta/metaConnect.js';
 // WM-1: alta MANUAL de WhatsApp por PLATFORM_ADMIN (reusa el mismo modelo; no toca Embedded Signup).
-export { adminSetManualWhatsappConnection } from './functions/meta/manualWhatsappCallables.js';
+// MULTI-NUMBER-1: números adicionales por empresa (agregar/desactivar, solo PLATFORM_ADMIN).
+export { adminSetManualWhatsappConnection, adminAddWhatsappNumber, adminDeactivateWhatsappNumber } from './functions/meta/manualWhatsappCallables.js';
 // WM-2: solicitud de activación asistida (owner/admin) + cancelación. Solo metadatos, sin token.
 export { requestWhatsappActivation, cancelWhatsappActivationRequest } from './functions/meta/whatsappActivationCallables.js';
 

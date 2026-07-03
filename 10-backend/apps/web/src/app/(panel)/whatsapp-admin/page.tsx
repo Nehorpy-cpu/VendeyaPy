@@ -5,6 +5,7 @@ import { useAuth } from '@/lib/auth-context';
 import { SectionHeader, EmptyState } from '@/components/ui';
 import { WhatsappActivationQueue } from '@/components/whatsapp-admin/WhatsappActivationQueue';
 import { ManualWhatsappConnectForm } from '@/components/whatsapp-admin/ManualWhatsappConnectForm';
+import { TenantWhatsappNumbers } from '@/components/whatsapp-admin/TenantWhatsappNumbers';
 
 /**
  * Panel del PLATFORM_ADMIN (WM-2): bandeja de solicitudes de activación de WhatsApp + carga manual
@@ -33,6 +34,8 @@ export default function WhatsappAdminPage() {
         initial={selected ?? undefined}
         onDone={() => setSelected(null)}
       />
+      {/* MULTI-NUMBER-1: números de la empresa (agregar adicional / desactivar). */}
+      <TenantWhatsappNumbers />
     </div>
   );
 }

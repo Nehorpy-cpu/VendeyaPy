@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { setManualWhatsappConnection, friendlyWhatsappError, type ManualWhatsappConnResult } from '@/lib/whatsapp-activation';
+import { setManualWhatsappConnection, adminAddWhatsappNumber, friendlyWhatsappError, type ManualWhatsappConnResult } from '@/lib/whatsapp-activation';
 
 /**
  * Form del PLATFORM_ADMIN para cargar manualmente la conexión WhatsApp de una empresa (WM-1).
@@ -32,9 +32,12 @@ const TONE_CLS: Record<'ok' | 'info' | 'error', string> = {
 export function ManualWhatsappConnectForm({
   initial,
   onDone,
+  mode = 'replace',
 }: {
   initial?: { tenantId?: string; requestId?: string; businessName?: string };
   onDone?: () => void;
+  /** MULTI-NUMBER-1: 'replace' = conexión principal (WM-1); 'add' = número ADICIONAL. */
+  mode?: 'replace' | 'add';
 }) {
   const qc = useQueryClient();
   const requestId = initial?.requestId;
@@ -61,7 +64,7 @@ export function ManualWhatsappConnectForm({
       if (!displayPhoneNumber.trim()) throw new Error('Falta el número visible (display phone number).');
       if (!accessToken.trim()) throw new Error('Falta el access token.');
       const expMs = expiry ? new Date(expiry).getTime() : NaN;
-      return setManualWhatsappConnection({
+      const input = {
         tenantId: tid,
         wabaId: wabaId.trim(),
         phoneNumberId: phoneNumberId.trim(),
@@ -71,7 +74,12 @@ export function ManualWhatsappConnectForm({
         accessToken,
         tokenExpiresAt: Number.isFinite(expMs) && expMs > 0 ? expMs : undefined,
         requestId,
-      });
+      };
+      if (mode === 'add') {
+        // Número ADICIONAL: no toca la conexión principal. `ready` se deriva del estado.
+        return adminAddWhatsappNumber(input).then((r) => ({ ...r, ready: r.status === 'active' }));
+      }
+      return setManualWhatsappConnection(input);
     },
     onSuccess: (r) => {
       setResult(r);
@@ -87,7 +95,9 @@ export function ManualWhatsappConnectForm({
 
   return (
     <section className={card}>
-      <h2 className="text-base font-bold text-ink-900">Cargar conexión manual {requestId && <span className="text-ink-400">(solicitud {requestId.slice(0, 6)}…)</span>}</h2>
+      <h2 className="text-base font-bold text-ink-900">
+        {mode === 'add' ? 'Agregar número adicional' : 'Cargar conexión manual'} {requestId && <span className="text-ink-400">(solicitud {requestId.slice(0, 6)}…)</span>}
+      </h2>
       <p className="mt-1 text-xs text-ink-500">
         Datos del WhatsApp Business de la empresa. El <strong>Phone Number ID</strong> es el id numérico de Meta (no el número con +).
         El token se envía cifrado al servidor y <strong>no se guarda ni se muestra</strong> acá.

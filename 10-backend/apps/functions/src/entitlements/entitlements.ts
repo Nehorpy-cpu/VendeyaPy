@@ -182,13 +182,26 @@ export async function assertFeatureEnabled(tenantId: string, feature: keyof Plan
   throw new HttpsError('failed-precondition', `Tu plan no incluye esta función (${feature}). Actualizá tu plan.`);
 }
 
-/** Gate del canal WhatsApp: el plan debe permitir al menos un número (multi-número: fase posterior). */
-export async function assertWhatsappNumbersEntitled(tenantId: string, opts: { actorUid?: string | null } = {}): Promise<void> {
+/**
+ * Gate del canal WhatsApp (MULTI-NUMBER-1): el plan debe cubrir `needed` números en total.
+ * needed=1 (default) mantiene el comportamiento del alta/reemplazo del número principal;
+ * agregar un número adicional pasa needed = activos actuales + 1.
+ */
+export async function assertWhatsappNumbersEntitled(
+  tenantId: string,
+  opts: { actorUid?: string | null; needed?: number } = {},
+): Promise<void> {
+  const needed = Math.max(1, opts.needed ?? 1);
   const ent = await resolveEntitlements(tenantId);
   if (!ent.posture.operational) throw new HttpsError('failed-precondition', 'La empresa está suspendida por billing.');
-  if (ent.limits.maxWhatsappNumbers < 1) {
-    await auditBlock(tenantId, opts.actorUid, 'El plan no incluye números de WhatsApp', { metric: 'whatsappNumbers', limit: ent.limits.maxWhatsappNumbers });
-    throw new HttpsError('failed-precondition', 'Tu plan no incluye conectar un número de WhatsApp. Actualizá tu plan.');
+  if (ent.limits.maxWhatsappNumbers < needed) {
+    await auditBlock(tenantId, opts.actorUid, 'Límite de números de WhatsApp del plan', { metric: 'whatsappNumbers', limit: ent.limits.maxWhatsappNumbers, needed });
+    throw new HttpsError(
+      'failed-precondition',
+      needed <= 1
+        ? 'Tu plan no incluye conectar un número de WhatsApp. Actualizá tu plan.'
+        : `Tu plan permite hasta ${ent.limits.maxWhatsappNumbers} número(s) de WhatsApp. Actualizá tu plan para agregar más.`,
+    );
   }
 }
 

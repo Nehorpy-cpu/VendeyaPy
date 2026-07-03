@@ -26,6 +26,8 @@ export interface AppendMessageInput {
   countUnread?: boolean;
   /** Canal del mensaje (omnicanal, D2). Default 'whatsapp'. */
   channel?: MessageChannel;
+  /** MULTI-NUMBER-1: phone_number_id del número del NEGOCIO por el que entró/salió el mensaje. */
+  receivedVia?: string | null;
 }
 
 function preview(text: string): string {
@@ -52,7 +54,8 @@ export async function appendMessage(
     channel,
     createdAt: now,
   };
-  await ref.set(msg);
+  // receivedVia es metadata adicional (MULTI-NUMBER-1); el type Message no lo exige.
+  await ref.set(input.receivedVia ? { ...msg, receivedVia: input.receivedVia } : msg);
 
   // Resumen denormalizado (deep-merge sobre el doc del cliente).
   const conv: Record<string, unknown> = {
@@ -61,6 +64,7 @@ export async function appendMessage(
     lastMessageDirection: input.direction,
     channel,
   };
+  if (input.receivedVia) conv['receivedVia'] = input.receivedVia; // para el badge de /conversations
   if (input.state !== undefined) conv['state'] = input.state ?? null;
   if (input.humanTakeover !== undefined) conv['humanTakeover'] = input.humanTakeover;
   // "Sin leer" para el vendedor: solo cuando el bot no está atendiendo (handoff/bot off).
