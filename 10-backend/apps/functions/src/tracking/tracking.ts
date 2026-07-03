@@ -10,8 +10,9 @@ import { Timestamp } from 'firebase-admin/firestore';
 import type { Order, OrderFinancials, TrackingSource, CampaignAttribution } from '@vpw/shared';
 import { db, paths } from '../lib/firebase.js';
 import { logger } from '../lib/logger.js';
+import { PAID_ORDER_STATUSES } from '../orders/lifecycle.js';
 
-const PAID = ['PAID', 'PREPARING', 'ASSIGNED', 'IN_TRANSIT', 'DELIVERED'];
+const PAID = PAID_ORDER_STATUSES; // fuente única (ORDER-1): orders/lifecycle.ts
 
 /** Si el mensaje contiene un código activo, atribuye el cliente a esa fuente. */
 export async function captureTrackingCode(tenantId: string, customerId: string, text: string): Promise<string | null> {

@@ -11,8 +11,9 @@ import { Timestamp } from 'firebase-admin/firestore';
 import type { Customer, Order, CustomerType } from '@vpw/shared';
 import { db, paths } from '../lib/firebase.js';
 import { logger } from '../lib/logger.js';
+import { PAID_ORDER_STATUSES } from '../orders/lifecycle.js';
 
-const PAID = ['PAID', 'PREPARING', 'ASSIGNED', 'IN_TRANSIT', 'DELIVERED'];
+const PAID = PAID_ORDER_STATUSES; // fuente única (ORDER-1): orders/lifecycle.ts
 const DAY = 86_400_000;
 const PREMIUM_SPENT = 1_000_000; // ₲ — umbral "premium" (configurable a futuro)
 

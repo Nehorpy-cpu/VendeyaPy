@@ -194,15 +194,15 @@ service cloud.firestore {
         }
       }
 
-      // Órdenes (el vendedor las ve y puede cambiar estado/notas)
+      // Órdenes: SOLO lectura desde el cliente (ORDER-1). Toda mutación va por callables
+      // auditados (orderUpdate / orderCancel / orderUpdateStatus / adminOrderCorrect), que
+      // hacen cumplir la máquina de estados (orders/lifecycle.ts): editar/cancelar solo
+      // antes del pago, avance forward, correcciones solo PLATFORM_ADMIN. Nunca hard-delete.
+      // (Antes: update directo de status/notes para staff SIN validar transiciones — un
+      // seller podía marcar PAID sin pago. Cerrado.)
       match /orders/{orderId} {
         allow read: if isTenantStaff(tenantId) || isTenantViewer(tenantId) || isPlatformAdmin();
-        // Cambios de estado críticos solo vía Cloud Functions (Admin SDK)
-        allow create, delete: if false;
-        // Update limitado: staff puede cambiar estado o agregar notas
-        allow update: if (isTenantStaff(tenantId) || isPlatformAdmin())
-          && request.resource.data.diff(resource.data).affectedKeys()
-              .hasOnly(['status', 'notes', 'updatedAt']);
+        allow create, update, delete: if false;
 
         match /items/{itemId} {
           allow read: if isTenantStaff(tenantId) || isTenantViewer(tenantId) || isPlatformAdmin();

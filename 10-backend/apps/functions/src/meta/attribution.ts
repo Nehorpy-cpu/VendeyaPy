@@ -10,8 +10,9 @@ import { Timestamp } from 'firebase-admin/firestore';
 import type { Order, OrderFinancials, MetaCampaign, CampaignAttribution } from '@vpw/shared';
 import { db, paths } from '../lib/firebase.js';
 import { logger } from '../lib/logger.js';
+import { PAID_ORDER_STATUSES } from '../orders/lifecycle.js';
 
-const PAID = ['PAID', 'PREPARING', 'ASSIGNED', 'IN_TRANSIT', 'DELIVERED'];
+const PAID = PAID_ORDER_STATUSES; // fuente única (ORDER-1): orders/lifecycle.ts
 
 export async function computeAttribution(tenantId: string): Promise<number> {
   const [ordSnap, finSnap, campSnap] = await Promise.all([

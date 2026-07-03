@@ -97,6 +97,10 @@ export { agentTestCaseUpsert, agentTestCaseDelete, agentTestCaseRun } from './fu
 // (checkout/agente/canales) con gate owner/admin + validación + auditoría. No cierra rules aún.
 export { checkoutConfigUpdate, agentConfigUpdate, channelConfigUpdate } from './functions/config/configCallables.js';
 
+// Ciclo de vida de pedidos (ORDER-1): rules cierra el update directo; TODA mutación de orders
+// va por estas callables auditadas que hacen cumplir la máquina de estados (orders/lifecycle.ts).
+export { orderUpdate, orderCancel, orderUpdateStatus, adminOrderCorrect } from './functions/orders/orderCallables.js';
+
 // Observabilidad (Fase 5): bitácora de auditoría de cambios de catálogo.
 export { onProductWriteAudit } from './functions/products/onProductWriteAudit.js';
 
