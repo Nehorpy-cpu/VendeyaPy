@@ -24,6 +24,15 @@ describe('ai/prompts buildSalesSystemPrompt — prohibición de acciones (F2) y 
     expect(prompt).toContain('no pidas nombre/dirección/teléfono/datos de pago');
   });
 
+  it('F4: prohíbe afirmar/describir estado del carrito y responde reclamos con honestidad', () => {
+    expect(prompt).toContain('"ya está en tu carrito"');
+    expect(prompt).toContain('"pedido confirmado"');
+    expect(prompt).toContain('Tampoco AFIRMES ni describas el contenido del carrito');
+    expect(prompt).toContain('Si el cliente RECLAMA');
+    expect(prompt).toContain('NUNCA respondas que ya está hecho');
+    expect(prompt).toContain('Tenés razón, revisemos');
+  });
+
   it('F3: prohíbe dictar comandos/frases exactas y mencionar "el sistema"', () => {
     expect(prompt).toContain('NO tiene que aprender comandos');
     expect(prompt).toContain('NUNCA le pidas que escriba una palabra exacta');

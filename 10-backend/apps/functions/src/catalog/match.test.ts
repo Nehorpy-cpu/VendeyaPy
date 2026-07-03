@@ -28,6 +28,14 @@ describe('catalog/match normalizeText / queryTokens', () => {
     expect(queryTokens('dale, sumalo')).toEqual([]);
     expect(queryTokens('añadilo')).toEqual([]);
   });
+
+  it('F4: la cortesía es relleno, no producto ("Si, agrégalo porfa" no agregaba en prod)', () => {
+    expect(queryTokens('Sí, agrégalo porfa')).toEqual([]);
+    expect(queryTokens('dale, agregalo por favor')).toEqual([]);
+    expect(queryTokens('ok gracias')).toEqual([]);
+    expect(queryTokens('porfa')).toEqual([]);
+    expect(queryTokens('yo quería el supremacy')).toEqual(['supremacy']); // el reclamo identifica al producto
+  });
 });
 
 describe('catalog/match productMatchScore / bestNameMatch', () => {

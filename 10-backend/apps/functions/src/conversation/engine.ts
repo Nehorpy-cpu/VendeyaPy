@@ -23,6 +23,7 @@ import {
   pendingVigente,
   buildPendingConfirmation,
   tipoNegativa,
+  tipoReclamoCarrito,
   esPreguntaConsulta,
   contieneNegacion,
   eleccionPorNombre,
@@ -69,6 +70,28 @@ function esSaludo(text: string): boolean {
   return /\b(hola|buenas|buen[oa]s?\s+(d[ií]as|tardes|noches)|hi|hello|menu|men[uú]|inicio)\b/i.test(
     text.trim(),
   );
+}
+
+/**
+ * F4 (saludo + intención): SOLO es saludo puro si al quitar el saludo y la cortesía no queda
+ * contenido. "Hola, quiero un perfume para hombre" NO es saludo puro — la intención comercial
+ * del mismo mensaje se procesa (IA/catálogo), no se corta el flujo con la bienvenida.
+ * Exportada para tests.
+ */
+export function esSaludoPuro(text: string): boolean {
+  if (!esSaludo(text)) return false;
+  const resto = text
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    // Alternativas de MÁS LARGA a MÁS CORTA: la alternación es first-match-wins y "buenas+"
+    // antes que "buenas tardes" dejaba "tardes" como residuo (review F4: el saludo más común
+    // de es-PY se iba a la IA). "tardes|noches|dias" sueltos son relleno de saludo.
+    .replace(/\b(buen[oa]s? (dias?|tardes|noches)|buen dia|buenas+|hola+|hi|hello|hey|menu|inicio|que tal|como (estas|andas|va)|todo bien|otra vez|de nuevo|tardes|noches|dias)\b/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return resto.length <= 3;
 }
 
 const GS = (n: number) => '₲ ' + n.toLocaleString('es-PY');
@@ -200,7 +223,9 @@ function ordinalIndex(t: string): number | null {
  */
 export function ruleEngineWouldFallback(text: string, t: string): boolean {
   return (
-    !esSaludo(text) &&
+    // F4: el saludo solo retiene el turno si es PURO — "Hola, quiero un perfume para hombre"
+    // lleva intención comercial y la atiende la IA (o el catálogo), no la bienvenida.
+    !esSaludoPuro(text) &&
     !quiereVerCarrito(t) &&
     !quierePagar(t) &&
     !quiereAgregar(t) &&
@@ -286,8 +311,9 @@ export async function decidirRespuesta(
       nextState: 'BROWSING',
     };
   }
-  // 1b. Cliente que vuelve y saluda → bienvenida corta (no repetir el intro completo)
-  if (esSaludo(text)) {
+  // 1b. Cliente que vuelve y saluda → bienvenida corta (no repetir el intro completo).
+  //     F4: SOLO si es saludo puro — "Hola, mostrame el catálogo" procesa la intención.
+  if (esSaludoPuro(text)) {
     return {
       reply:
         '¡Hola de nuevo! 🌸 ¿Te ayudo con algo más? Decime qué estilo buscás ' +
@@ -509,6 +535,87 @@ export async function decidirRespuesta(
   };
 }
 
+/**
+ * F4 (anti-mentiras): responde un RECLAMO del cliente con el estado REAL del carrito — jamás
+ * la IA, que en prod inventó "Ya lo agregué" con el carrito vacío. Si el reclamo nombra un
+ * producto real, queda como oferta pendiente: el próximo "sí" lo agrega (reclamo ≠ consentimiento,
+ * acá no se agrega nada a ciegas). Devuelve null cuando el turno NO debe interceptarse:
+ *  - 'debil' sin producto nombrado ("yo quería saber si hacen envíos") → IA.
+ *  - 'debil' que nombra un candidato de la oferta VIGENTE → lo resuelve la elección por nombre (4b).
+ */
+export async function interceptarReclamoCarrito(
+  tenantId: string,
+  text: string,
+  prev: { cart: Cart; pendingVigente: PendingCartConfirmation | null; nowMs: number; enPago?: boolean },
+  tipo: 'fuerte' | 'debil',
+): Promise<{ reply: string; nextState: SessionState; pendingCart?: PendingCartConfirmation | null; lastShownSkus?: string[] } | null> {
+  const nombrado = (await findProductByName(tenantId, text)) ?? null;
+  if (tipo === 'debil') {
+    if (!nombrado) return null;
+    if (prev.pendingVigente?.products.some((p) => p.id === nombrado.id)) return null; // elección (4b)
+  }
+
+  // Post-checkout (AWAITING_PAYMENT) el carrito de la sesión conserva lo ya pedido (review F4):
+  // un reclamo acá NO puede ofrecer "pagar" ni re-agregar — el pedido existe y lo ve el vendedor.
+  if (prev.enPago) {
+    return {
+      reply:
+        'Tu pedido ya quedó registrado 🙌 Estamos revisando el pago y en breve te confirmamos por acá. ' +
+        'Si querés cambiar algo del pedido, avisanos y un vendedor te ayuda.',
+      nextState: 'AWAITING_PAYMENT',
+      pendingCart: null,
+    };
+  }
+
+  const items = prev.cart.items;
+  if (items.length === 0) {
+    if (nombrado) {
+      return {
+        // 'debil' suele ser un PEDIDO cortés ("yo quería el X"), no una queja: sin disculpas raras.
+        reply:
+          (tipo === 'fuerte'
+            ? `Tenés razón 🙏 Todavía no agregué nada al carrito.\n`
+            : `¡Dale! 🙌 `) + `¿Querés que agregue el *${nombrado.name}* (${GS(nombrado.price)})?`,
+        nextState: 'VIEWING_PRODUCT',
+        pendingCart: buildPendingConfirmation([{ id: nombrado.id, name: nombrado.name }], 'catalog_listing', prev.nowMs),
+        lastShownSkus: [nombrado.id],
+      };
+    }
+    return {
+      reply: 'Tenés razón 🙏 Todavía no agregué nada al carrito. Decime cuál querés y lo agrego.',
+      nextState: 'VIEWING_PRODUCT',
+      pendingCart: null,
+    };
+  }
+
+  const lista = items.map((i) => `• ${i.name} x${i.quantity}`).join('\n');
+  const resumen = `${lista}\nTotal: ${GS(prev.cart.subtotal)}`;
+  if (nombrado && items.some((i) => i.productId === nombrado.id)) {
+    return {
+      reply: `Sí — el *${nombrado.name}* está en tu carrito ✅\n${resumen}\n\n¿Querés *pagar* o seguís mirando?`,
+      nextState: 'CART',
+      // La pregunta ahora es OTRA ("¿pagás?"): una oferta vieja no puede capturar el próximo "sí".
+      pendingCart: null,
+    };
+  }
+  if (nombrado) {
+    return {
+      reply:
+        `Este es tu carrito hoy 🛒\n${resumen}\n\n` +
+        `El *${nombrado.name}* todavía NO está. ¿Querés que lo agregue?`,
+      nextState: 'VIEWING_PRODUCT',
+      pendingCart: buildPendingConfirmation([{ id: nombrado.id, name: nombrado.name }], 'catalog_listing', prev.nowMs),
+      lastShownSkus: [nombrado.id],
+    };
+  }
+  return {
+    reply: `Reviso tu carrito real 🛒\n${resumen}\n\n¿Está bien así o querés cambiar algo?`,
+    nextState: 'CART',
+    // Ídem: "¿está bien así?" es una pregunta nueva — descartar cualquier oferta previa.
+    pendingCart: null,
+  };
+}
+
 export async function handleMessage(input: ConversationInput): Promise<ConversationResult> {
   const { tenantId, from, text } = input;
   const channel: MessageChannel = input.channel ?? 'whatsapp';
@@ -625,7 +732,23 @@ export async function handleMessage(input: ConversationInput): Promise<Conversat
       nextState: existing?.state ?? 'BROWSING',
       pendingCart: null,
     };
-  } else if (!esNuevo && !confirmandoSeleccion && ruleEngineWouldFallback(text, t)) {
+  }
+  // F4 (anti-mentiras): un RECLAMO del cliente se responde desde el MOTOR con el estado real
+  // del carrito — nunca desde la IA (que en prod inventó "Ya lo agregué" con el carrito vacío).
+  const reclamo = !esNuevo && !result ? tipoReclamoCarrito(text) : null;
+  if (reclamo) {
+    const r = await interceptarReclamoCarrito(
+      tenantId,
+      text,
+      { cart: prevCart, pendingVigente: pendingActivo, nowMs, enPago: existing?.state === 'AWAITING_PAYMENT' },
+      reclamo,
+    );
+    if (r) {
+      result = r;
+      logger.info('Reclamo de carrito → respuesta determinística con estado real', { tenantId, customerId, tipo: reclamo });
+    }
+  }
+  if (!result && !esNuevo && !confirmandoSeleccion && ruleEngineWouldFallback(text, t)) {
     const ai = await delegarAlSalesAgent();
     if (ai.used) {
       // Ids/nombres SOLO del backend de buscar_productos (nunca del texto del modelo).

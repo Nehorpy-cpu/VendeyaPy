@@ -63,10 +63,37 @@ export function tipoNegativa(text: string): 'rechazo' | 'alternativa' | null {
 /**
  * Guarda DURA de negación (review adversarial F3): si el mensaje contiene una negación, NINGÚN
  * camino de agregado puede ejecutarse — "no lo quiero" contiene "(lo) quiero" y engañaba a
- * quiereAgregar. Prefiere un falso "no agrego" (el cliente re-pide) a un falso agregado.
+ * quiereAgregar. Prefiere un falso "no agrego" (un cliente re-pide) a un falso agregado.
  */
 export function contieneNegacion(text: string): boolean {
   return /\b(no|nunca|jamas|tampoco)\b/.test(normalizeText(text));
+}
+
+/**
+ * F4 (anti-mentiras): RECLAMO del cliente sobre el carrito/acciones del bot. En prod la IA
+ * respondió a un reclamo inventando estado ("Ya lo agregué" con el carrito vacío) — estos
+ * turnos deben responderse desde el MOTOR con el estado real, jamás desde el modelo.
+ *  - 'fuerte': reclamo inequívoco sobre acciones del bot → interceptar SIEMPRE.
+ *  - 'debil': "yo quería X"/"te pedí X" — solo cuenta como reclamo si nombra un producto real
+ *    (lo decide el caller con el catálogo); "yo quería saber si hacen envíos" va a la IA.
+ */
+export function tipoReclamoCarrito(text: string): 'fuerte' | 'debil' | null {
+  const t = normalizeText(text);
+  if (!t) return null;
+  // Reclamos INEQUÍVOCOS sobre el carrito/acciones del bot → interceptar siempre.
+  if (
+    /\b(no (me )?(lo |la )?agregaste|no (lo |la )?pusiste|no esta en (el |mi )?carrito|no aparece en (el |mi )?carrito|(me )?agregaste otr[oa]|eso no (era|es) lo que (queria|pedi)|no es lo que pedi)\b/.test(t)
+  ) {
+    return 'fuerte';
+  }
+  // "te equivocaste"/"no entendiste" a secas pueden ser sobre CUALQUIER cosa (envíos, precios).
+  // Solo cuentan como reclamo de carrito si el mensaje es corto y no es una pregunta; con más
+  // contenido degradan a 'debil' (interceptan solo si nombran un producto real; si no → IA).
+  if (/\b(te equivocaste|no entendiste)\b/.test(t)) {
+    return t.length <= 30 && !esPreguntaConsulta(text) ? 'fuerte' : 'debil';
+  }
+  if (/\b(yo (queria|pedi)|te pedi|no era ese|ese no era)\b/.test(t)) return 'debil';
+  return null;
 }
 
 /**

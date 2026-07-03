@@ -4,6 +4,7 @@ import {
   pendingVigente,
   buildPendingConfirmation,
   tipoNegativa,
+  tipoReclamoCarrito,
   contieneNegacion,
   esPreguntaConsulta,
   candidatosNombrados,
@@ -114,6 +115,35 @@ describe('cartIntent tipoNegativa — negativas no agregan', () => {
   it.each(['no sé si me alcanza', 'nombre raro', 'sí', 'el primero'])(
     '"%s" NO es negativa',
     (msg) => expect(tipoNegativa(msg)).toBeNull(),
+  );
+});
+
+describe('cartIntent tipoReclamoCarrito — F4: los reclamos los responde el MOTOR, no la IA', () => {
+  it.each([
+    'no agregaste nada',
+    'No me lo agregaste',
+    'me agregaste otro',
+    'agregaste otra cosa… te equivocaste',
+    'no está en el carrito',
+    'no aparece en mi carrito',
+    'no entendiste',
+    'te equivocaste',
+    'eso no era lo que pedí',
+  ])('"%s" → reclamo FUERTE (interceptar siempre)', (msg) => expect(tipoReclamoCarrito(msg)).toBe('fuerte'));
+
+  it.each(['yo quería el supremacy', 'te pedí el supremacy', 'yo pedí otra cosa', 'no era ese'])(
+    '"%s" → reclamo DÉBIL (interceptar solo si nombra un producto real)',
+    (msg) => expect(tipoReclamoCarrito(msg)).toBe('debil'),
+  );
+
+  it.each(['No entendiste, ¿hacen envíos a Encarnación?', 'te equivocaste, yo preguntaba por el precio del envío'])(
+    'REVIEW: queja genérica larga/pregunta ("%s") NO es fuerte → débil (sin producto nombrado va a la IA)',
+    (msg) => expect(tipoReclamoCarrito(msg)).toBe('debil'),
+  );
+
+  it.each(['sí', 'quiero pagar', 'gracias', 'el primero', 'tenés algo más barato?'])(
+    '"%s" NO es reclamo',
+    (msg) => expect(tipoReclamoCarrito(msg)).toBeNull(),
   );
 });
 

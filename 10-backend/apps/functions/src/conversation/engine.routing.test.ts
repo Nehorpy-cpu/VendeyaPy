@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { ruleEngineWouldFallback, detectarGenero, buildAiHistory, esConfirmacionCorta } from './engine.js';
+import { ruleEngineWouldFallback, detectarGenero, buildAiHistory, esConfirmacionCorta, esSaludoPuro } from './engine.js';
 
 /**
  * Invariante AG-3 / AG-3B: el sales agent IA SOLO recibe la "cola conversacional" — los turnos que el
@@ -29,9 +29,15 @@ describe('conversation/engine ruleEngineWouldFallback (ruteo al sales agent IA)'
     expect(wouldFallback('busco una fragancia rica')).toBe(true);
   });
 
-  it('NO delega el saludo (lo maneja el saludo rule-based)', () => {
+  it('NO delega el saludo PURO (lo maneja el saludo rule-based)', () => {
     expect(wouldFallback('hola')).toBe(false);
     expect(wouldFallback('buenas, qué tal')).toBe(false);
+  });
+
+  it('F4: saludo CON intención comercial NO se queda en el saludo — la intención se procesa', () => {
+    expect(wouldFallback('Hola, quiero un perfume para hombre')).toBe(true); // → IA
+    expect(wouldFallback('Buenas, tenés el Asad?')).toBe(true); // → IA
+    expect(wouldFallback('hola, mostrame el catálogo')).toBe(false); // → catálogo rule-based, no saludo
   });
 
   it('NO delega la selección por número (ordinal → rule-based: carrito)', () => {
@@ -71,6 +77,17 @@ describe('conversation/engine ruleEngineWouldFallback (ruteo al sales agent IA)'
     expect(wouldFallback('algo barato para el día')).toBe(false); // precio
     expect(wouldFallback('hasta 200 mil')).toBe(false); // precio numérico
   });
+});
+
+describe('esSaludoPuro (F4: saludo + intención)', () => {
+  it.each(['hola', 'Hola!!', 'buenas', 'hola de nuevo', 'buenos días', 'hola, qué tal?', 'buenas tardes', 'buenas noches', 'hola buenas tardes'])(
+    '"%s" ES saludo puro (bienvenida rule-based)',
+    (msg) => expect(esSaludoPuro(msg)).toBe(true),
+  );
+  it.each(['Hola, quiero un perfume para hombre', 'Buenas, tenés el Asad?', 'hola quiero hacer otro pedido', 'hola, mostrame el catálogo'])(
+    '"%s" NO es saludo puro (trae intención)',
+    (msg) => expect(esSaludoPuro(msg)).toBe(false),
+  );
 });
 
 describe('esConfirmacionCorta (F2: "sí"/"dale"/"ok" = agregar el primero SI está mirando productos)', () => {

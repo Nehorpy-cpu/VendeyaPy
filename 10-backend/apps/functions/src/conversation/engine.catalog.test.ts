@@ -16,7 +16,7 @@ vi.mock('../catalog/search.js', () => ({
 }));
 
 import { searchCatalog, getProductById, findProductByName } from '../catalog/search.js';
-import { decidirRespuesta } from './engine.js';
+import { decidirRespuesta, interceptarReclamoCarrito } from './engine.js';
 import { buildPendingConfirmation } from './cartIntent.js';
 import type { Product, Cart, SessionState } from '@vpw/shared';
 
@@ -240,6 +240,27 @@ describe('conversation/engine decidirRespuesta — F3: oferta pendiente contextu
     expect(r.pendingCart).toBeUndefined(); // conserva la oferta (la IA contesta el precio)
   });
 
+  // ---- F4-A: cortesía en confirmaciones (el bug real "Si, agrégalo porfa" no agregaba) ----
+
+  it.each(['Sí, agrégalo porfa', 'Dale, agregalo por favor', 'Ok gracias', 'si porfa', 'dale porfa'])(
+    'F4: confirmación con cortesía "%s" + ÚNICO candidato → AGREGA (porfa/gracias son relleno, no producto)',
+    async (msg) => {
+      getProductByIdMock.mockResolvedValueOnce(supremacy);
+      const r = await decidirRespuesta('t1', 'c1', msg, false, conPendiente([supremacy]));
+      expect(getProductByIdMock).toHaveBeenCalledWith('t1', '2wWm');
+      expect(r.cart?.items[0]?.productId).toBe('2wWm');
+      expect(r.pendingCart).toBeNull();
+    },
+  );
+
+  it('F4: "no gracias" y "mejor otro porfa" siguen SIN agregar', async () => {
+    const r1 = await decidirRespuesta('t1', 'c1', 'no gracias', false, conPendiente([supremacy]));
+    expect(r1.cart).toBeUndefined();
+    const r2 = await decidirRespuesta('t1', 'c1', 'mejor otro porfa', false, conPendiente([supremacy]));
+    expect(r2.cart).toBeUndefined();
+    expect(getProductByIdMock).not.toHaveBeenCalled();
+  });
+
   it('legacy (sesión sin oferta F3): "sí" con VARIOS lastShownSkus → desambigua leyendo nombres, nunca el primero a ciegas', async () => {
     getProductByIdMock.mockResolvedValueOnce(odyssey).mockResolvedValueOnce(supremacy);
     const r = await decidirRespuesta('t1', 'c1', 'sí', false, {
@@ -251,6 +272,93 @@ describe('conversation/engine decidirRespuesta — F3: oferta pendiente contextu
     expect(r.cart).toBeUndefined();
     expect(r.reply).toContain('¿Cuál querés que agregue?');
     expect(r.pendingCart?.products.map((p) => p.id)).toEqual(['zgpG', '2wWm']); // upgrade a F3
+  });
+});
+
+/**
+ * F4-B (anti-mentiras): el interceptor de reclamos responde con el estado REAL del carrito.
+ * En prod la IA dijo "Ya lo agregué" con el carrito vacío — estos tests fijan que el reclamo
+ * jamás llegue a inventar estado.
+ */
+describe('conversation/engine interceptarReclamoCarrito (F4-B)', () => {
+  const NOW = 1_000_000;
+  const supremacy = { id: '2wWm', name: 'Perfume Supremacy Not Only Intense', price: 250000 } as unknown as Product;
+  const odyssey = { id: 'zgpG', name: 'Armaf Odyssey Mega', price: 250000 } as unknown as Product;
+  const cartCon = (...ps: Product[]): Cart => ({
+    items: ps.map((p) => ({ productId: p.id, name: p.name, price: p.price, quantity: 1, imageUrl: '' })),
+    subtotal: ps.reduce((n, p) => n + p.price, 0),
+  });
+  const vacio: Cart = { items: [], subtotal: 0 };
+
+  it('reclamo FUERTE + carrito VACÍO + producto nombrado → verdad honesta + oferta pendiente (el próximo "sí" agrega)', async () => {
+    findProductByNameMock.mockResolvedValueOnce(supremacy);
+    const r = await interceptarReclamoCarrito('t1', 'no agregaste nada, yo quería el supremacy', { cart: vacio, pendingVigente: null, nowMs: NOW }, 'fuerte');
+    expect(r?.reply).toContain('Todavía no agregué nada');
+    expect(r?.reply).toContain('Supremacy');
+    expect(r?.reply).not.toContain('Agregué *'); // jamás afirma la acción no ejecutada
+    expect(r?.pendingCart?.primaryProductId).toBe('2wWm');
+    expect(r?.lastShownSkus).toEqual(['2wWm']);
+  });
+
+  it('reclamo FUERTE + carrito vacío SIN producto nombrado → honesto y pide precisión', async () => {
+    findProductByNameMock.mockResolvedValueOnce(null);
+    const r = await interceptarReclamoCarrito('t1', 'te equivocaste', { cart: vacio, pendingVigente: null, nowMs: NOW }, 'fuerte');
+    expect(r?.reply).toContain('Todavía no agregué nada');
+    expect(r?.pendingCart).toBeNull();
+  });
+
+  it('reclamo con carrito que tiene OTRO producto → muestra el estado real y ofrece agregar el nombrado', async () => {
+    findProductByNameMock.mockResolvedValueOnce(supremacy);
+    const r = await interceptarReclamoCarrito('t1', 'me agregaste otro, yo quería el supremacy', { cart: cartCon(odyssey), pendingVigente: null, nowMs: NOW }, 'fuerte');
+    expect(r?.reply).toContain('Armaf Odyssey Mega x1'); // estado REAL
+    expect(r?.reply).toContain('todavía NO está');
+    expect(r?.pendingCart?.primaryProductId).toBe('2wWm');
+  });
+
+  it('reclamo con el producto CORRECTO ya en el carrito → lo confirma con estado real, ofrece pagar y DESCARTA la oferta vieja', async () => {
+    findProductByNameMock.mockResolvedValueOnce(supremacy);
+    const r = await interceptarReclamoCarrito('t1', 'no agregaste el supremacy', { cart: cartCon(supremacy), pendingVigente: null, nowMs: NOW }, 'fuerte');
+    expect(r?.reply).toContain('está en tu carrito');
+    expect(r?.reply).toContain('pagar');
+    // REVIEW: la pregunta ahora es "¿pagás?" — un pending viejo no puede capturar el próximo "sí".
+    expect(r?.pendingCart).toBeNull();
+  });
+
+  it('REVIEW: reclamo genérico con carrito no vacío también descarta la oferta vieja ("¿está bien así?" ≠ "¿lo agrego?")', async () => {
+    findProductByNameMock.mockResolvedValueOnce(null);
+    const r = await interceptarReclamoCarrito('t1', 'te equivocaste', { cart: cartCon(odyssey), pendingVigente: null, nowMs: NOW }, 'fuerte');
+    expect(r?.reply).toContain('Reviso tu carrito real');
+    expect(r?.pendingCart).toBeNull();
+  });
+
+  it('REVIEW: pedido cortés ("yo quería el X", débil) con carrito vacío → tono amable, sin disculpa rara', async () => {
+    findProductByNameMock.mockResolvedValueOnce(supremacy);
+    const r = await interceptarReclamoCarrito('t1', 'yo quería el supremacy', { cart: vacio, pendingVigente: null, nowMs: NOW }, 'debil');
+    expect(r?.reply).toContain('¿Querés que agregue');
+    expect(r?.reply).not.toContain('Tenés razón'); // no es una queja: no pedir perdón
+    expect(r?.pendingCart?.primaryProductId).toBe('2wWm');
+  });
+
+  it('REVIEW: reclamo durante AWAITING_PAYMENT → "pedido registrado", jamás ofrece pagar/re-agregar', async () => {
+    findProductByNameMock.mockResolvedValueOnce(supremacy);
+    const r = await interceptarReclamoCarrito('t1', 'te pedí el supremacy', { cart: cartCon(supremacy), pendingVigente: null, nowMs: NOW, enPago: true }, 'debil');
+    expect(r?.reply).toContain('ya quedó registrado');
+    expect(r?.reply).not.toContain('¿Querés *pagar*');
+    expect(r?.pendingCart).toBeNull();
+    expect(r?.nextState).toBe('AWAITING_PAYMENT');
+  });
+
+  it('DÉBIL sin producto nombrado ("yo quería saber si hacen envíos") → null (va a la IA)', async () => {
+    findProductByNameMock.mockResolvedValueOnce(null);
+    const r = await interceptarReclamoCarrito('t1', 'yo quería saber si hacen envíos', { cart: vacio, pendingVigente: null, nowMs: NOW }, 'debil');
+    expect(r).toBeNull();
+  });
+
+  it('DÉBIL que nombra un candidato de la oferta VIGENTE → null (lo resuelve la elección por nombre 4b)', async () => {
+    findProductByNameMock.mockResolvedValueOnce(supremacy);
+    const pending = buildPendingConfirmation([{ id: '2wWm', name: supremacy.name }], 'ai_recommendation', NOW);
+    const r = await interceptarReclamoCarrito('t1', 'yo quería el supremacy', { cart: vacio, pendingVigente: pending, nowMs: NOW }, 'debil');
+    expect(r).toBeNull();
   });
 });
 

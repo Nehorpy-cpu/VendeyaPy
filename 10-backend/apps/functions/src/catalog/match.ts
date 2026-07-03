@@ -32,6 +32,10 @@ const STOPWORDS = new Set([
   'precio', 'precios', 'cuanto', 'cuesta', 'sale', 'vale', 'para', 'regalo', 'regalar',
   'hombre', 'mujer', 'algo', 'alguno', 'alguna', 'este', 'esta', 'estos', 'estas', 'ese', 'esa',
   'uno', 'una', 'unos', 'unas', 'los', 'las', 'del', 'con', 'por', 'que', 'mas', 'llamado', 'llamada',
+  // F4: cortesía/relleno — "Sí, agrégalo porfa" es una confirmación, no el nombre de un producto.
+  'porfa', 'porfavor', 'porfis', 'porfi', 'pls', 'plis', 'favor', 'gracias',
+  // F4: reclamo/pedido en pasado — "yo quería el Supremacy" identifica al producto, no a 'queria'.
+  'queria', 'pedi',
 ]);
 
 /** Tokens con poder identificatorio: normalizados, largo ≥3 y fuera de la stoplist. */
