@@ -38,6 +38,7 @@ import type { AiMessage } from '../ai/types.js';
 import { appendMessage, listRecentMessages } from './messages.js';
 import { queryTokens } from '../catalog/match.js';
 import { createPendingOrder } from '../orders/createPendingOrder.js';
+import { resolveCheckoutReuse } from '../orders/checkoutReuse.js';
 import { getCheckoutConfig, formatTransferInstructions } from '../orders/checkoutConfig.js';
 import { captureTrackingCode } from '../tracking/tracking.js';
 import { meterUsage, checkQuota } from '../entitlements/entitlements.js';
@@ -284,6 +285,8 @@ export async function decidirRespuesta(
     pendingCart?: PendingCartConfirmation | null;
     /** F3: había una oferta pero venció — una confirmación repregunta en vez de caer al genérico. */
     pendingExpirada?: boolean;
+    /** F5: orden pendiente de la sesión (checkout idempotente: reusar, no duplicar). */
+    pendingOrderId?: string | null;
     /** F3: reloj inyectable (tests); default Date.now(). */
     nowMs?: number;
   },
@@ -292,7 +295,8 @@ export async function decidirRespuesta(
   nextState: SessionState;
   cart?: Cart;
   lastShownSkus?: string[];
-  pendingOrderId?: string;
+  /** F5: tri-estado — string = nueva orden · null = LIMPIAR el puntero · undefined = conservar. */
+  pendingOrderId?: string | null;
   /** F1: la rama catálogo no encontró productos → el caller puede delegar a la IA antes del canned. */
   catalogEmpty?: boolean;
   /** F3: objeto = nueva oferta · null = limpiar · undefined = conservar la actual. */
@@ -327,7 +331,8 @@ export async function decidirRespuesta(
     return { reply: formatCart(prev.cart), nextState: 'CART' };
   }
 
-  // 3. Pagar → crear pre-orden + link de pago
+  // 3. Pagar → crear pre-orden + link de pago. F5: checkout IDEMPOTENTE — repreguntar por los
+  //    datos de transferencia ("Para pagar cuál es") reenvía la orden pendiente, no crea otra.
   if (quierePagar(t)) {
     if (prev.cart.items.length === 0) {
       return {
@@ -335,6 +340,41 @@ export async function decidirRespuesta(
         nextState: 'BROWSING',
       };
     }
+
+    const decision = await resolveCheckoutReuse(tenantId, customerId, prev.pendingOrderId ?? null, prev.cart);
+    if (decision.kind === 'reuse') {
+      const config = await getCheckoutConfig(tenantId);
+      logger.info('Checkout idempotente: se reenvía la orden pendiente', { tenantId, customerId, orderId: decision.order.id, repaired: decision.repaired });
+      return {
+        reply: 'Seguís con tu pedido pendiente 🧾 Te reenvío los datos:\n\n' + formatTransferInstructions(config, decision.order.totals.total),
+        nextState: 'AWAITING_PAYMENT',
+        pendingOrderId: decision.order.id, // mismo id (y repara el puntero si se había perdido)
+        pendingCart: null,
+      };
+    }
+    if (decision.kind === 'verification') {
+      return {
+        reply: '📸 Tu comprobante ya está en revisión 🙌 Ni bien lo confirmemos te avisamos por acá — no hace falta pagar de nuevo.',
+        nextState: 'AWAITING_PAYMENT',
+        pendingOrderId: decision.order.id,
+        pendingCart: null,
+      };
+    }
+    if (decision.kind === 'paid') {
+      // Cierra lo que confirmPayment no llegó a limpiar (puntero/carrito stale): sin esto el
+      // cliente quedaba en loop de "ya figura pagado" sin poder comprar de nuevo (review F5).
+      return {
+        reply: '✅ Tu pedido ya figura pagado y confirmado. Si querés hacer una compra nueva, decime qué buscás o escribí *catálogo*.',
+        nextState: 'BROWSING',
+        cart: { items: [], subtotal: 0 }, // lo del carrito ya se pagó en esa orden
+        pendingOrderId: null,
+        pendingCart: null,
+      };
+    }
+    const avisoCambio =
+      decision.kind === 'new_cart_changed'
+        ? 'Como tu carrito cambió, te generé un pedido nuevo 🧾\n\n'
+        : '';
     // PLAN-LIMITS-3A: gate de órdenes. Hoy lo que bloquea es el CUPO MENSUAL (maxOrdersPerMonth); checkQuota
     // también cubriría una suspensión por billing, pero por diseño la cuenta NUNCA se suspende
     // (billingPosture.operational siempre true → los datos se preservan). Si se bloquea: NO creamos la orden
@@ -355,7 +395,7 @@ export async function decidirRespuesta(
     await meterUsage(tenantId, 'orders').catch(() => { /* metering no crítico */ });
     const config = await getCheckoutConfig(tenantId);
     return {
-      reply: formatTransferInstructions(config, order.totals.total),
+      reply: avisoCambio + formatTransferInstructions(config, order.totals.total),
       nextState: 'AWAITING_PAYMENT',
       pendingOrderId: order.id,
       pendingCart: null, // F3: el checkout congela el contexto de oferta (no arrastra a la próxima)
@@ -765,6 +805,7 @@ export async function handleMessage(input: ConversationInput): Promise<Conversat
       state: existing?.state ?? null,
       pendingCart: pendingActivo,
       pendingExpirada,
+      pendingOrderId: existing?.context?.pendingOrderId ?? null,
       nowMs,
     });
     // F1: catálogo sin resultados → antes del canned "no encontré", intentar la IA (sus tools
@@ -790,7 +831,12 @@ export async function handleMessage(input: ConversationInput): Promise<Conversat
       lastMessageAt: now,
       currentPage: existing?.context?.currentPage ?? 0,
       currentCategoryId: existing?.context?.currentCategoryId ?? null,
-      pendingOrderId: result.pendingOrderId ?? existing?.context?.pendingOrderId ?? null,
+      // F5: tri-estado (string=nueva / null=limpiar / undefined=conservar) — sin el null, un
+      // puntero a una orden ya pagada quedaba stale para siempre y bloqueaba el checkout.
+      pendingOrderId:
+        result.pendingOrderId !== undefined
+          ? result.pendingOrderId
+          : (existing?.context?.pendingOrderId ?? null),
       pendingPaymentId: existing?.context?.pendingPaymentId ?? null,
       // F3: al vencer la oferta se limpia TAMBIÉN lastShownSkus — si sobreviviera, un "el 1"
       // posterior resolvería contra una lista vieja/desalineada (el bug original de nuevo).
