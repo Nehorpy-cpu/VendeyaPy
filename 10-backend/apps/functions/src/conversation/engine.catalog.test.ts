@@ -362,6 +362,53 @@ describe('conversation/engine interceptarReclamoCarrito (F4-B)', () => {
   });
 });
 
+/** F6: cliente NUEVO — bienvenida completa SOLO con saludo puro; con intención, la intención manda. */
+describe('conversation/engine decidirRespuesta — F6: primer mensaje con intención', () => {
+  it('1. cliente nuevo "Hola" → bienvenida completa (comportamiento intacto)', async () => {
+    const r = await decidirRespuesta('t1', 'c1', 'Hola', true, { ...prev, greeting: 'Bienvenida a Mi Tienda 💖\nSegunda línea larga.' });
+    expect(r.reply).toContain('Bienvenida a Mi Tienda');
+    expect(r.nextState).toBe('BROWSING');
+  });
+
+  it('2. cliente nuevo "Hola, cómo pago?" → NO se come la intención (la resuelve el motor: carrito vacío)', async () => {
+    const r = await decidirRespuesta('t1', 'c1', 'Hola, cómo pago?', true, prev);
+    expect(r.reply).toContain('carrito está vacío'); // quierePagar con carrito vacío
+    expect(r.reply).not.toContain('Bienvenida a *Perfumería');
+  });
+
+  it('3. cliente nuevo "Hola, mostrame el catálogo" → va a la rama catálogo, no a la bienvenida', async () => {
+    searchCatalogMock.mockResolvedValueOnce([producto]);
+    const r = await decidirRespuesta('t1', 'c1', 'Hola, mostrame el catálogo', true, prev);
+    expect(r.reply).toContain('Supremacy Not Only Intense');
+    expect(r.lastShownSkus).toEqual(['p1']);
+  });
+});
+
+describe('conversation/engine saludoBreve + sinSaludoInicial (F6)', async () => {
+  const { saludoBreve, sinSaludoInicial } = await import('./engine.js');
+  it('usa la PRIMERA LÍNEA de la bienvenida personalizada del tenant', () => {
+    expect(saludoBreve('¡Hola! 💖 Bienvenida a *Perfumería AFG*.\nContame qué buscás y bla bla…')).toBe('¡Hola! 💖 Bienvenida a *Perfumería AFG*.');
+  });
+  it('línea larguísima → corta en la primera oración; vacía → fallback genérico', () => {
+    const larga = 'Bienvenido a nuestra increíble tienda con los mejores precios del país entero. ' + 'x'.repeat(120);
+    expect(saludoBreve(larga)).toBe('Bienvenido a nuestra increíble tienda con los mejores precios del país entero.');
+    expect(saludoBreve('')).toBe('¡Hola! 👋 Bienvenido/a.');
+    expect(saludoBreve(undefined)).toBe('¡Hola! 👋 Bienvenido/a.');
+  });
+  it('REVIEW: quita la pregunta de enganche del final (los defaults de provision terminan en pregunta)', () => {
+    expect(saludoBreve('¡Hola! 💖 Bienvenida. Soy tu asesora de fragancias. ¿Buscás algo para vos o para regalar?'))
+      .toBe('¡Hola! 💖 Bienvenida. Soy tu asesora de fragancias.');
+    // Si TODO era pregunta → fallback (nunca prefijo vacío).
+    expect(saludoBreve('¿Qué estás buscando hoy?')).toBe('¡Hola! 👋 Bienvenido/a.');
+  });
+  it('REVIEW: sinSaludoInicial evita el doble saludo cuando la IA espeja el "Hola" del cliente', () => {
+    expect(sinSaludoInicial('¡Hola! Sí, tenemos el Supremacy a ₲ 250.000.')).toBe('Sí, tenemos el Supremacy a ₲ 250.000.');
+    expect(sinSaludoInicial('Buenas! Te cuento: hacemos envíos.')).toBe('Te cuento: hacemos envíos.');
+    expect(sinSaludoInicial('Sí, tenemos el Supremacy.')).toBe('Sí, tenemos el Supremacy.'); // sin saludo → intacto
+    expect(sinSaludoInicial('¡Hola!')).toBe('¡Hola!'); // el saludo era TODO el mensaje → no vaciar
+  });
+});
+
 describe('conversation/engine decidirRespuesta — rama catálogo (F1)', () => {
   it('catálogo sin resultados → canned con catalogEmpty:true (handleMessage delega a la IA)', async () => {
     searchCatalogMock.mockResolvedValueOnce([]);

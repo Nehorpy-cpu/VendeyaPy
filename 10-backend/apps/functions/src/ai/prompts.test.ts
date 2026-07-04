@@ -33,6 +33,10 @@ describe('ai/prompts buildSalesSystemPrompt — prohibición de acciones (F2) y 
     expect(prompt).toContain('Tenés razón, revisemos');
   });
 
+  it('F6: la IA no saluda al abrir (el sistema ya saluda — evita el doble "¡Hola!")', () => {
+    expect(prompt).toContain('NO empieces tus respuestas saludando');
+  });
+
   it('F3: prohíbe dictar comandos/frases exactas y mencionar "el sistema"', () => {
     expect(prompt).toContain('NO tiene que aprender comandos');
     expect(prompt).toContain('NUNCA le pidas que escriba una palabra exacta');

@@ -97,6 +97,42 @@ export function esSaludoPuro(text: string): boolean {
 
 const GS = (n: number) => '₲ ' + n.toLocaleString('es-PY');
 
+/**
+ * F6: versión BREVE de la bienvenida (para prefijar cuando el primer mensaje trae intención).
+ * Respeta la bienvenida personalizada del tenant (primera línea, capada); si es muy larga o
+ * vacía, cae a un saludo genérico corto. Pura y exportada para tests.
+ */
+export function saludoBreve(greeting: string | undefined | null): string {
+  let linea = (greeting ?? '').split('\n')[0]!.trim();
+  if (linea.length > 120) {
+    // Cortar en el fin de la primera oración dentro del tope.
+    linea = linea.slice(0, 120).match(/^.*[.!?…]/)?.[0]?.trim() ?? '';
+  }
+  // Quitar la(s) pregunta(s) de enganche del final ("¿Buscás algo para vos o para regalar?"):
+  // el cliente YA preguntó algo — repreguntarle qué busca justo antes de responderle es absurdo
+  // (review F6: los greetings default de provision son una línea que termina en pregunta).
+  let previa;
+  do {
+    previa = linea;
+    linea = linea.replace(/\s*¿[^?¿]*\?\s*$/u, '').trim();
+  } while (linea !== previa);
+  if (linea.length >= 3 && linea.length <= 120) return linea;
+  return '¡Hola! 👋 Bienvenido/a.';
+}
+
+/**
+ * F6: quita un saludo inicial de la respuesta de la IA cuando el sistema YA saluda (prefijo de
+ * bienvenida breve) — sin esto el cliente recibía "¡Hola! Bienvenida…\n\n¡Hola! Sí, tenemos…".
+ * Pura y exportada para tests.
+ */
+export function sinSaludoInicial(reply: string): string {
+  const limpio = reply
+    .replace(/^\s*(¡\s*)?(hola+|buenas+|buen[oa]s?\s+(d[ií]as?|tardes|noches)|buen d[ií]a|hey|hi|hello)(\s*!+)?[\s,.:;…—-]*/iu, '')
+    .trimStart();
+  // Si el saludo era TODO el mensaje, mejor dejar el original que devolver vacío.
+  return limpio.length >= 2 ? limpio : reply;
+}
+
 function detectarEstilo(t: string): string | undefined {
   const mapa: Record<string, string[]> = {
     dulce: ['dulce', 'azucar', 'vainilla', 'gourmand'],
@@ -304,8 +340,10 @@ export async function decidirRespuesta(
 }> {
   const t = text.toLowerCase();
 
-  // 1a. Cliente nuevo → saludo (configurable desde el panel; si está vacío, el default)
-  if (esNuevo) {
+  // 1a. Cliente nuevo con saludo PURO → bienvenida completa (configurable desde el panel).
+  //     F6: si el primer mensaje trae INTENCIÓN ("Hola, tenés Supremacy?"), NO se corta acá:
+  //     la intención sigue su curso (motor/IA) y handleMessage antepone la bienvenida breve.
+  if (esNuevo && esSaludoPuro(text)) {
     return {
       reply:
         prev.greeting ||
@@ -705,6 +743,9 @@ export async function handleMessage(input: ConversationInput): Promise<Conversat
   }
 
   const esNuevo = !existing || existing.state === 'GREETING';
+  // F6: primer mensaje CON intención ("Hola, tenés Supremacy?") → se procesa la intención y se
+  // antepone la bienvenida breve. La sesión creada en este turno es el flag anti-repetición.
+  const nuevoConIntencion = esNuevo && !esSaludoPuro(text);
   const prevCart: Cart = existing?.cart ?? { items: [], subtotal: 0 };
   const prevShown: string[] = existing?.context?.lastShownSkus ?? [];
 
@@ -775,7 +816,9 @@ export async function handleMessage(input: ConversationInput): Promise<Conversat
   }
   // F4 (anti-mentiras): un RECLAMO del cliente se responde desde el MOTOR con el estado real
   // del carrito — nunca desde la IA (que en prod inventó "Ya lo agregué" con el carrito vacío).
-  const reclamo = !esNuevo && !result ? tipoReclamoCarrito(text) : null;
+  // F6: el gate espeja al de la IA — un reclamo como PRIMER mensaje ("Hola, yo quería el X que
+  // te pedí") también lo responde el interceptor determinístico, jamás la IA (review F6).
+  const reclamo = (!esNuevo || nuevoConIntencion) && !result ? tipoReclamoCarrito(text) : null;
   if (reclamo) {
     const r = await interceptarReclamoCarrito(
       tenantId,
@@ -788,7 +831,7 @@ export async function handleMessage(input: ConversationInput): Promise<Conversat
       logger.info('Reclamo de carrito → respuesta determinística con estado real', { tenantId, customerId, tipo: reclamo });
     }
   }
-  if (!result && !esNuevo && !confirmandoSeleccion && ruleEngineWouldFallback(text, t)) {
+  if (!result && (!esNuevo || nuevoConIntencion) && !confirmandoSeleccion && ruleEngineWouldFallback(text, t)) {
     const ai = await delegarAlSalesAgent();
     if (ai.used) {
       // Ids/nombres SOLO del backend de buscar_productos (nunca del texto del modelo).
@@ -810,7 +853,8 @@ export async function handleMessage(input: ConversationInput): Promise<Conversat
     });
     // F1: catálogo sin resultados → antes del canned "no encontré", intentar la IA (sus tools
     // buscan con mejores parámetros y puede ofrecer alternativas reales). Si la IA no corre
-    // (gate/disabled/error), queda el canned de siempre. Nunca alcanzable con esNuevo (saludo).
+    // (gate/disabled/error), queda el canned de siempre. OJO (F6): también alcanzable con
+    // esNuevo cuando el primer mensaje trae intención de catálogo (existing puede ser null).
     if (result.catalogEmpty) {
       const ai = await delegarAlSalesAgent();
       if (ai.used) {
@@ -819,7 +863,14 @@ export async function handleMessage(input: ConversationInput): Promise<Conversat
       }
     }
   }
-  const { reply, nextState } = result;
+  const { nextState } = result;
+  let reply = result.reply;
+  // F6: primer mensaje con intención → bienvenida BREVE + la respuesta a la intención, en el
+  // mismo turno (nunca la bienvenida completa duplicada: el próximo turno ya no es esNuevo).
+  if (nuevoConIntencion && reply.trim()) {
+    // sinSaludoInicial: la IA suele espejar el "Hola" del cliente — sin esto salía doble saludo.
+    reply = saludoBreve(agentConfig.greetingMessage) + '\n\n' + sinSaludoInicial(reply);
+  }
 
   const session: Session = {
     id: 'active',
