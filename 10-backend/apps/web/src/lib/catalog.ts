@@ -48,6 +48,8 @@ export interface ProductInput {
   status: Product['status'];
   featured: boolean;
   perfume: Product['perfume'];
+  /** Ficha para recomendaciones del agente (CAT-1). */
+  aiFicha: Product['aiFicha'];
 }
 
 type ProductUpsertResp = { ok: boolean; id: string; created: boolean };
@@ -74,6 +76,7 @@ export async function upsertProduct(tenantId: string, input: ProductInput): Prom
     featured: input.featured,
     externalIds: { facebook: null, instagram: null, tiktok: null },
     perfume: input.perfume,
+    aiFicha: input.aiFicha ?? null,
   };
   // En CREATE seteamos `position` para que el producto aparezca en listProducts
   // (que ordena por `position`; un doc sin ese campo quedaría fuera del orderBy).

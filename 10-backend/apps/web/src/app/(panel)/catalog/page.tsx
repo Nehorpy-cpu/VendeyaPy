@@ -3,6 +3,7 @@
 import { useMemo, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import type { Product } from '@vpw/shared';
+import { aiFichaQuality } from '@vpw/shared';
 import { useActiveCompany } from '@/lib/active-company';
 import {
   listProducts,
@@ -156,6 +157,9 @@ export default function CatalogPage() {
                 const cost = finMap[p.id]?.costPrice ?? null;
                 const margin = productMargin(p.price, cost);
                 const stock = p.inventory?.stock ?? 0;
+                // Ficha para recomendaciones (CAT-1): avisar si al agente le falta info clave.
+                const calidad = aiFichaQuality(p);
+                const fichaIncompleta = calidad.level === 'incompleto' || calidad.level === 'basico';
                 return (
                   <tr key={p.id} className="hover:bg-ink-50/50">
                     <td className="px-4 py-3">
@@ -163,6 +167,14 @@ export default function CatalogPage() {
                         {p.emoji} {p.name} {p.featured && <span title="Destacado">🌟</span>}
                       </div>
                       {p.perfume?.brand && <div className="text-xs text-ink-400">{p.perfume.brand}</div>}
+                      {fichaIncompleta && (
+                        <span
+                          className="mt-1 inline-flex rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-[11px] font-semibold text-amber-700"
+                          title={'La IA recomienda mejor con la ficha completa. Falta: ' + calidad.faltantes.slice(0, 4).join(', ')}
+                        >
+                          Ficha IA incompleta
+                        </span>
+                      )}
                     </td>
                     <td className="px-4 py-3 text-ink-700">{gs(p.price)}</td>
                     <td className="px-4 py-3 text-ink-600">{gs(cost)}</td>

@@ -23,6 +23,31 @@ describe('validateProductPatch', () => {
     expect(() => validateProductPatch({ name: 'x', status: 'BORRADO' }, { requireName: true })).toThrow();
     expect(() => validateProductPatch({ name: 'x', price: 100, compareAtPrice: 50 }, { requireName: true })).toThrow();
   });
+  it('valida aiFicha (CAT-1): whitelist, topes y null', () => {
+    const ficha = {
+      cuandoRecomendar: 'busca duración', cuandoNoRecomendar: 'algo suave', objeciones: 'caro → rinde',
+      frasesVenta: ['favorito para regalar'], similares: ['Odyssey'], concentracion: 'EDP',
+      duracion: '8h', proyeccion: 'fuerte', ocasiones: ['cita'], clima: ['invierno'], perfil: 'juvenil',
+      hack: 'descartado', // fuera de whitelist
+    };
+    const r = validateProductPatch({ name: 'x', aiFicha: ficha }, { requireName: true });
+    expect(r.aiFicha).toMatchObject({ cuandoRecomendar: 'busca duración', frasesVenta: ['favorito para regalar'], proyeccion: 'fuerte' });
+    expect(r.aiFicha).not.toHaveProperty('hack');
+    // la ficha se normaliza COMPLETA (claves ausentes → ''/[]) para que set(merge:true)
+    // las pise: si quedaran ausentes, el merge profundo resucitaría el valor viejo al borrar
+    const parcial = validateProductPatch({ name: 'x', aiFicha: { perfil: 'juvenil' } }, { requireName: true }).aiFicha as Record<string, unknown>;
+    expect(parcial.perfil).toBe('juvenil');
+    expect(parcial.objeciones).toBe('');
+    expect(parcial.cuandoRecomendar).toBe('');
+    expect(parcial.frasesVenta).toEqual([]);
+    expect(parcial.similares).toEqual([]);
+    // null borra la ficha; tipos y topes se validan
+    expect(validateProductPatch({ name: 'x', aiFicha: null }, { requireName: true }).aiFicha).toBeNull();
+    expect(() => validateProductPatch({ name: 'x', aiFicha: { cuandoRecomendar: 5 } }, { requireName: true })).toThrow();
+    expect(() => validateProductPatch({ name: 'x', aiFicha: { frasesVenta: 'no-es-lista' } }, { requireName: true })).toThrow();
+    expect(() => validateProductPatch({ name: 'x', aiFicha: { perfil: 'x'.repeat(501) } }, { requireName: true })).toThrow();
+    expect(() => validateProductPatch({ name: 'x', aiFicha: { similares: Array.from({ length: 21 }, () => 'a') } }, { requireName: true })).toThrow();
+  });
   it('valida sub-estructuras (inventory, perfume)', () => {
     const r = validateProductPatch({ name: 'x', inventory: { trackStock: true, stock: 5, sku: 'A1' }, perfume: { gender: 'Femenino', sizeMl: 100 } }, { requireName: true });
     expect(r.inventory).toMatchObject({ trackStock: true, stock: 5, sku: 'A1' });

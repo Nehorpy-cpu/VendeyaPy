@@ -93,6 +93,24 @@ function validatePerfume(v: unknown): Record<string, unknown> {
   return out;
 }
 
+/**
+ * Ficha para recomendaciones (CAT-1): whitelist estricta, textos acotados.
+ * La ficha viaja COMPLETA desde el form (no es un patch por campo): las claves ausentes se
+ * normalizan a ''/[]  para que el set(..., {merge:true}) del upsert las PISE — si quedaran
+ * ausentes, el merge profundo de mapas de Firestore resucitaría el valor viejo al "borrar".
+ */
+function validateAiFicha(v: unknown): Record<string, unknown> {
+  const d = asObject(v, 'aiFicha');
+  const out: Record<string, unknown> = {};
+  for (const k of ['cuandoRecomendar', 'cuandoNoRecomendar', 'objeciones', 'concentracion', 'duracion', 'proyeccion', 'perfil'] as const) {
+    out[k] = d[k] !== undefined ? str(d[k], `aiFicha.${k}`, 500) : '';
+  }
+  for (const k of ['frasesVenta', 'similares', 'ocasiones', 'clima'] as const) {
+    out[k] = d[k] !== undefined ? strArray(d[k], 20, `aiFicha.${k}`, 200) : [];
+  }
+  return out;
+}
+
 /** Patch sanitizado de Product (solo campos permitidos). `requireName` en CREATE. */
 export function validateProductPatch(data: unknown, opts: { requireName: boolean }): Record<string, unknown> {
   const d = asObject(data, 'producto');
@@ -113,6 +131,7 @@ export function validateProductPatch(data: unknown, opts: { requireName: boolean
   if (d.inventory !== undefined) out.inventory = validateInventory(d.inventory);
   if (d.externalIds !== undefined) out.externalIds = validateExternalIds(d.externalIds);
   if (d.perfume !== undefined) out.perfume = d.perfume === null ? null : validatePerfume(d.perfume);
+  if (d.aiFicha !== undefined) out.aiFicha = d.aiFicha === null ? null : validateAiFicha(d.aiFicha);
   if (typeof out.price === 'number' && typeof out.compareAtPrice === 'number' && out.compareAtPrice < out.price) {
     throw new Error('compareAtPrice debe ser mayor o igual a price.');
   }

@@ -7,4 +7,5 @@
 
 export * from './enums.js';
 export * from './ids.js';
+export * from './aiFicha.js';
 export * from './types/index.js';

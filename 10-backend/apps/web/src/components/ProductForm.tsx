@@ -1,11 +1,21 @@
 'use client';
 
-import { useState } from 'react';
-import type { Product, Category } from '@vpw/shared';
+import { useMemo, useState } from 'react';
+import type { Product, Category, ProductAiFicha } from '@vpw/shared';
+import { aiFichaQuality, composeAiNotesFromFicha, composeDescriptionFromFicha, AI_FICHA_LEVEL_LABEL } from '@vpw/shared';
 import type { ProductInput } from '@/lib/catalog';
 
 const GENDERS = ['Femenino', 'Masculino', 'Unisex'] as const;
 const STATUSES: Product['status'][] = ['ACTIVE', 'INACTIVE', 'ARCHIVED'];
+const CONCENTRACIONES = ['', 'EDT', 'EDP', 'Extrait', 'Parfum', 'Body Mist', 'Otro'] as const;
+const PROYECCIONES = ['', 'suave', 'moderada', 'fuerte'] as const;
+
+const NIVEL_TONO: Record<string, string> = {
+  incompleto: 'bg-coral-50 text-coral-700 border-coral-200',
+  basico: 'bg-amber-50 text-amber-700 border-amber-200',
+  bueno: 'bg-sky-50 text-sky-700 border-sky-200',
+  excelente: 'bg-mint-50 text-mint-700 border-mint-200',
+};
 
 function priceRangeFromPrice(p: number): 'ACCESIBLE' | 'MID' | 'PREMIUM' | 'LUJO' {
   if (p <= 250000) return 'ACCESIBLE';
@@ -55,11 +65,76 @@ export function ProductForm({ initial, initialCost, initialPriority, categories,
     notesBase: (pf?.notes?.base ?? []).join(', '),
     sizeMl: pf?.sizeMl ?? 0,
     isNew: pf?.isNew ?? false,
+    // --- Ficha para recomendaciones (CAT-1) ---
+    concentracion: initial?.aiFicha?.concentracion ?? '',
+    duracion: initial?.aiFicha?.duracion ?? '',
+    proyeccion: initial?.aiFicha?.proyeccion ?? '',
+    ocasiones: (initial?.aiFicha?.ocasiones ?? []).join(', '),
+    clima: (initial?.aiFicha?.clima ?? []).join(', '),
+    perfil: initial?.aiFicha?.perfil ?? '',
+    cuandoRecomendar: initial?.aiFicha?.cuandoRecomendar ?? '',
+    cuandoNoRecomendar: initial?.aiFicha?.cuandoNoRecomendar ?? '',
+    objeciones: initial?.aiFicha?.objeciones ?? '',
+    frasesVenta: (initial?.aiFicha?.frasesVenta ?? []).join('; '),
+    similares: (initial?.aiFicha?.similares ?? []).join(', '),
   });
   const set = <K extends keyof typeof f>(k: K, v: (typeof f)[K]) => setF((s) => ({ ...s, [k]: v }));
 
+  // El producto es perfume salvo que la edición diga explícitamente lo contrario (vertical actual).
+  // != null cubre null y undefined, igual que aiFichaQuality — chip y badge deben coincidir.
+  const esPerfume = initial ? initial.perfume != null : true;
+
+  const buildFicha = (): ProductAiFicha => ({
+    ...(f.cuandoRecomendar.trim() ? { cuandoRecomendar: f.cuandoRecomendar.trim() } : {}),
+    ...(f.cuandoNoRecomendar.trim() ? { cuandoNoRecomendar: f.cuandoNoRecomendar.trim() } : {}),
+    ...(f.objeciones.trim() ? { objeciones: f.objeciones.trim() } : {}),
+    ...(f.frasesVenta.trim() ? { frasesVenta: f.frasesVenta.split(';').map((x) => x.trim()).filter(Boolean) } : {}),
+    ...(f.similares.trim() ? { similares: csv(f.similares) } : {}),
+    ...(esPerfume && f.concentracion ? { concentracion: f.concentracion } : {}),
+    ...(esPerfume && f.duracion.trim() ? { duracion: f.duracion.trim() } : {}),
+    ...(esPerfume && f.proyeccion ? { proyeccion: f.proyeccion } : {}),
+    ...(esPerfume && f.ocasiones.trim() ? { ocasiones: csv(f.ocasiones) } : {}),
+    ...(esPerfume && f.clima.trim() ? { clima: csv(f.clima) } : {}),
+    ...(esPerfume && f.perfil.trim() ? { perfil: f.perfil.trim() } : {}),
+  });
+
+  // Vista previa del producto tal como quedaría → nivel de calidad EN VIVO.
+  const calidad = useMemo(() => aiFichaQuality({
+    description: f.description,
+    aiNotes: f.aiNotes,
+    perfume: esPerfume
+      ? { olfactiveFamily: f.olfactiveFamily, styleTags: csv(f.styleTags), sizeMl: f.sizeMl ? Number(f.sizeMl) : null,
+          notes: { top: csv(f.notesTop), heart: csv(f.notesHeart), base: csv(f.notesBase) } }
+      : null,
+    aiFicha: buildFicha(),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }), [f, esPerfume]);
+
+  /** Rellena aiNotes (y description si está vacía) desde la ficha — plantilla, SIN IA externa. */
+  const generarDesdeFicha = () => {
+    const base = {
+      name: f.name,
+      description: f.description,
+      aiNotes: f.aiNotes,
+      perfume: esPerfume
+        ? { olfactiveFamily: f.olfactiveFamily, styleTags: csv(f.styleTags), sizeMl: f.sizeMl ? Number(f.sizeMl) : null,
+            notes: { top: csv(f.notesTop), heart: csv(f.notesHeart), base: csv(f.notesBase) } }
+        : null,
+      aiFicha: buildFicha(),
+    };
+    const notas = composeAiNotesFromFicha(base);
+    const desc = composeDescriptionFromFicha(base);
+    setF((s) => ({
+      ...s,
+      aiNotes: notas || s.aiNotes,
+      description: s.description.trim() ? s.description : (desc || s.description),
+    }));
+  };
+
   const submit = (e: React.FormEvent) => {
     e.preventDefault();
+    // Ficha vacía → null (no guardar `{}` en Firestore).
+    const ficha = buildFicha();
     const input: ProductInput = {
       ...(initial ? { id: initial.id } : {}),
       name: f.name.trim(),
@@ -75,7 +150,9 @@ export function ProductForm({ initial, initialCost, initialPriority, categories,
       sku: f.sku.trim() || f.name.trim().toLowerCase().replace(/\s+/g, '-'),
       status: f.status,
       featured: f.featured,
-      perfume: {
+      // Un producto genérico sigue siendo genérico al editarlo (si mandáramos el objeto
+      // perfume, el badge de la lista pasaría a exigir las señales de perfumería).
+      perfume: esPerfume ? {
         brand: f.brand.trim(),
         gender: f.gender,
         olfactiveFamily: f.olfactiveFamily.trim(),
@@ -84,7 +161,8 @@ export function ProductForm({ initial, initialCost, initialPriority, categories,
         priceRange: priceRangeFromPrice(Number(f.price) || 0),
         sizeMl: f.sizeMl ? Number(f.sizeMl) : null,
         isNew: f.isNew,
-      },
+      } : null,
+      aiFicha: Object.keys(ficha).length ? ficha : null,
     };
     onSubmit(input);
   };
@@ -105,10 +183,12 @@ export function ProductForm({ initial, initialCost, initialPriority, categories,
             <label className={lbl}>Nombre *</label>
             <input className={field} required value={f.name} onChange={(e) => set('name', e.target.value)} />
           </div>
-          <div>
-            <label className={lbl}>Marca</label>
-            <input className={field} value={f.brand} onChange={(e) => set('brand', e.target.value)} />
-          </div>
+          {esPerfume && (
+            <div>
+              <label className={lbl}>Marca</label>
+              <input className={field} value={f.brand} onChange={(e) => set('brand', e.target.value)} />
+            </div>
+          )}
           <div>
             <label className={lbl}>SKU / código</label>
             <input className={field} value={f.sku} onChange={(e) => set('sku', e.target.value)} placeholder="(auto si vacío)" />
@@ -129,10 +209,12 @@ export function ProductForm({ initial, initialCost, initialPriority, categories,
             <label className={lbl}>Stock</label>
             <input className={field} type="number" value={f.stock} onChange={(e) => set('stock', Number(e.target.value))} />
           </div>
-          <div>
-            <label className={lbl}>Tamaño (ml)</label>
-            <input className={field} type="number" value={f.sizeMl} onChange={(e) => set('sizeMl', Number(e.target.value))} />
-          </div>
+          {esPerfume && (
+            <div>
+              <label className={lbl}>Tamaño (ml)</label>
+              <input className={field} type="number" value={f.sizeMl} onChange={(e) => set('sizeMl', Number(e.target.value))} />
+            </div>
+          )}
           <div>
             <label className={lbl}>Categoría</label>
             <select className={field} value={f.categoryId} onChange={(e) => set('categoryId', e.target.value)}>
@@ -142,38 +224,46 @@ export function ProductForm({ initial, initialCost, initialPriority, categories,
               ))}
             </select>
           </div>
-          <div>
-            <label className={lbl}>Género</label>
-            <select className={field} value={f.gender} onChange={(e) => set('gender', e.target.value as (typeof GENDERS)[number])}>
-              {GENDERS.map((g) => <option key={g} value={g}>{g}</option>)}
-            </select>
-          </div>
-          <div>
-            <label className={lbl}>Familia olfativa</label>
-            <input className={field} value={f.olfactiveFamily} onChange={(e) => set('olfactiveFamily', e.target.value)} placeholder="Floral, Oriental…" />
-          </div>
+          {esPerfume && (
+            <>
+              <div>
+                <label className={lbl}>Género</label>
+                <select className={field} value={f.gender} onChange={(e) => set('gender', e.target.value as (typeof GENDERS)[number])}>
+                  {GENDERS.map((g) => <option key={g} value={g}>{g}</option>)}
+                </select>
+              </div>
+              <div>
+                <label className={lbl}>Familia olfativa</label>
+                <input className={field} value={f.olfactiveFamily} onChange={(e) => set('olfactiveFamily', e.target.value)} placeholder="Floral, Oriental…" />
+              </div>
+            </>
+          )}
           <div>
             <label className={lbl}>Estado</label>
             <select className={field} value={f.status} onChange={(e) => set('status', e.target.value as Product['status'])}>
               {STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
             </select>
           </div>
-          <div className="sm:col-span-2">
-            <label className={lbl}>Estilos (separá con coma)</label>
-            <input className={field} value={f.styleTags} onChange={(e) => set('styleTags', e.target.value)} placeholder="dulce, floral, intenso" />
-          </div>
-          <div>
-            <label className={lbl}>Notas de salida</label>
-            <input className={field} value={f.notesTop} onChange={(e) => set('notesTop', e.target.value)} />
-          </div>
-          <div>
-            <label className={lbl}>Notas de corazón</label>
-            <input className={field} value={f.notesHeart} onChange={(e) => set('notesHeart', e.target.value)} />
-          </div>
-          <div>
-            <label className={lbl}>Notas de fondo</label>
-            <input className={field} value={f.notesBase} onChange={(e) => set('notesBase', e.target.value)} />
-          </div>
+          {esPerfume && (
+            <>
+              <div className="sm:col-span-2">
+                <label className={lbl}>Estilos (separá con coma)</label>
+                <input className={field} value={f.styleTags} onChange={(e) => set('styleTags', e.target.value)} placeholder="dulce, floral, intenso" />
+              </div>
+              <div>
+                <label className={lbl}>Notas de salida</label>
+                <input className={field} value={f.notesTop} onChange={(e) => set('notesTop', e.target.value)} />
+              </div>
+              <div>
+                <label className={lbl}>Notas de corazón</label>
+                <input className={field} value={f.notesHeart} onChange={(e) => set('notesHeart', e.target.value)} />
+              </div>
+              <div>
+                <label className={lbl}>Notas de fondo</label>
+                <input className={field} value={f.notesBase} onChange={(e) => set('notesBase', e.target.value)} />
+              </div>
+            </>
+          )}
           <div>
             <label className={lbl}>Imagen (URL)</label>
             <input className={field} value={f.imageUrl} onChange={(e) => set('imageUrl', e.target.value)} placeholder="https://…" />
@@ -192,9 +282,88 @@ export function ProductForm({ initial, initialCost, initialPriority, categories,
           <label className="flex items-center gap-2 text-sm text-ink-700">
             <input type="checkbox" className="accent-mint-600" checked={f.featured} onChange={(e) => set('featured', e.target.checked)} /> Destacado
           </label>
-          <label className="flex items-center gap-2 text-sm text-ink-700">
-            <input type="checkbox" className="accent-mint-600" checked={f.isNew} onChange={(e) => set('isNew', e.target.checked)} /> Nuevo
-          </label>
+          {esPerfume && (
+            <label className="flex items-center gap-2 text-sm text-ink-700">
+              <input type="checkbox" className="accent-mint-600" checked={f.isNew} onChange={(e) => set('isNew', e.target.checked)} /> Nuevo
+            </label>
+          )}
+
+          {/* ===== Ficha para recomendaciones (CAT-1) ===== */}
+          <div className="sm:col-span-2 mt-2 rounded-xl border border-ink-100 bg-ink-50/40 p-4">
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <h3 className="text-sm font-semibold text-ink-900">Ficha para recomendaciones</h3>
+                <p className="text-xs text-ink-500">Opcional para vender, pero el agente recomienda mucho mejor si está completa.</p>
+              </div>
+              <span className={`rounded-full border px-2.5 py-1 text-xs font-semibold ${NIVEL_TONO[calidad.level]}`} title={calidad.faltantes.length ? 'Falta: ' + calidad.faltantes.slice(0, 5).join(', ') : 'Ficha completa'}>
+                {AI_FICHA_LEVEL_LABEL[calidad.level]} · {calidad.score}/{calidad.total}
+              </span>
+            </div>
+
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+              {esPerfume && (
+                <>
+                  <div>
+                    <label className={lbl}>Concentración</label>
+                    <select className={field} value={f.concentracion} onChange={(e) => set('concentracion', e.target.value)}>
+                      {CONCENTRACIONES.map((c) => <option key={c} value={c}>{c || '—'}</option>)}
+                    </select>
+                  </div>
+                  <div>
+                    <label className={lbl}>Duración</label>
+                    <input className={field} value={f.duracion} onChange={(e) => set('duracion', e.target.value)} placeholder="6-8 horas" />
+                  </div>
+                  <div>
+                    <label className={lbl}>Proyección</label>
+                    <select className={field} value={f.proyeccion} onChange={(e) => set('proyeccion', e.target.value)}>
+                      {PROYECCIONES.map((p) => <option key={p} value={p}>{p || '—'}</option>)}
+                    </select>
+                  </div>
+                  <div>
+                    <label className={lbl}>Ocasiones (coma)</label>
+                    <input className={field} value={f.ocasiones} onChange={(e) => set('ocasiones', e.target.value)} placeholder="cita, fiesta, diario" />
+                  </div>
+                  <div>
+                    <label className={lbl}>Clima (coma)</label>
+                    <input className={field} value={f.clima} onChange={(e) => set('clima', e.target.value)} placeholder="invierno, todo el año" />
+                  </div>
+                  <div>
+                    <label className={lbl}>Perfil recomendado</label>
+                    <input className={field} value={f.perfil} onChange={(e) => set('perfil', e.target.value)} placeholder="juvenil, elegante…" />
+                  </div>
+                </>
+              )}
+              <div className="sm:col-span-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <div>
+                  <label className={lbl}>Cuándo recomendarlo</label>
+                  <input className={field} value={f.cuandoRecomendar} onChange={(e) => set('cuandoRecomendar', e.target.value)} placeholder="busca duración y presencia" />
+                </div>
+                <div>
+                  <label className={lbl}>Cuándo NO recomendarlo</label>
+                  <input className={field} value={f.cuandoNoRecomendar} onChange={(e) => set('cuandoNoRecomendar', e.target.value)} placeholder="quiere algo suave para oficina" />
+                </div>
+                <div>
+                  <label className={lbl}>Objeciones frecuentes (y cómo responder)</label>
+                  <input className={field} value={f.objeciones} onChange={(e) => set('objeciones', e.target.value)} placeholder='"es caro" → rinde como uno de lujo' />
+                </div>
+                <div>
+                  <label className={lbl}>Similares / alternativas (coma)</label>
+                  <input className={field} value={f.similares} onChange={(e) => set('similares', e.target.value)} placeholder="Odyssey Mega, Asad" />
+                </div>
+                <div className="sm:col-span-2">
+                  <label className={lbl}>Frases de venta sugeridas (separá con ;)</label>
+                  <input className={field} value={f.frasesVenta} onChange={(e) => set('frasesVenta', e.target.value)} placeholder="Rendimiento de gama alta a precio accesible; El favorito para regalar" />
+                </div>
+              </div>
+            </div>
+
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              <button type="button" onClick={generarDesdeFicha} className="rounded-lg border border-mint-300 bg-mint-50 px-3 py-1.5 text-xs font-semibold text-mint-700 transition-colors hover:bg-mint-100">
+                ✨ Generar “Notas para la IA” desde la ficha
+              </button>
+              <span className="text-[11px] text-ink-400">Plantilla con TUS datos (sin IA): rellena las notas y, si está vacía, la descripción. Podés editarlas después.</span>
+            </div>
+          </div>
         </div>
 
           {error && (

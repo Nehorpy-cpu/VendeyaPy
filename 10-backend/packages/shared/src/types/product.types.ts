@@ -45,6 +45,39 @@ export interface ProductExternalIds {
   tiktok: string | null;
 }
 
+/**
+ * Ficha para recomendaciones (CATALOG-ENRICHMENT-1): datos ESTRUCTURADOS que el vendedor carga
+ * para que el agente recomiende bien sin inventar. Todo opcional (compatible con productos
+ * existentes). Los campos de venta sirven para cualquier rubro; los de perfumería complementan
+ * a PerfumeAttributes (familia/notas/tamaño ya viven ahí).
+ */
+export interface ProductAiFicha {
+  // --- Venta (cualquier rubro) ---
+  /** Cuándo conviene recomendarlo ("busca algo para regalar", "quiere duración"). */
+  cuandoRecomendar?: string;
+  /** Cuándo NO recomendarlo ("si busca algo suave para oficina"). */
+  cuandoNoRecomendar?: string;
+  /** Objeciones frecuentes y cómo responderlas. */
+  objeciones?: string;
+  /** Frases de venta sugeridas (el agente puede inspirarse en ellas). */
+  frasesVenta?: string[];
+  /** Nombres de productos similares/alternativas para ofrecer. */
+  similares?: string[];
+  // --- Perfumería ---
+  /** Concentración: EDT, EDP, Extrait, Parfum, etc. */
+  concentracion?: string;
+  /** Duración estimada ("6-8 horas", "todo el día"). */
+  duracion?: string;
+  /** Proyección: suave / moderada / fuerte. */
+  proyeccion?: string;
+  /** Ocasiones de uso: oficina, cita, fiesta, diario… */
+  ocasiones?: string[];
+  /** Clima recomendado: verano, invierno, todo el año… */
+  clima?: string[];
+  /** Perfil recomendado: juvenil, elegante, maduro… */
+  perfil?: string;
+}
+
 export interface Product {
   id: string;
   tenantId: string;
@@ -69,6 +102,8 @@ export interface Product {
   externalIds: ProductExternalIds;
   /** Atributos de perfumería. null para productos que no son perfumes. */
   perfume: PerfumeAttributes | null;
+  /** Ficha para recomendaciones del agente (CATALOG-ENRICHMENT-1). Opcional. */
+  aiFicha?: ProductAiFicha | null;
   // --- Sincronización con el Meta Catalog (D4). Lo escribe la sync (Admin SDK). ---
   syncToMeta?: boolean;
   metaSyncStatus?: MetaSyncStatus;
