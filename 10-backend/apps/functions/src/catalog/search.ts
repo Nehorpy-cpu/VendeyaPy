@@ -11,6 +11,7 @@
 import type { Product } from '@vpw/shared';
 import { db, paths } from '../lib/firebase.js';
 import { splitByQueryMatch, bestNameMatch } from './match.js';
+import { fichaScore } from './fichaRank.js';
 
 export interface CatalogFilters {
   /** F1B: texto libre del cliente (nombre/marca). Los matches van PRIMERO y no se filtran por género/precio. */
@@ -22,6 +23,11 @@ export interface CatalogFilters {
   limit?: number; // por defecto 3
   /** Modo Ganancia (P15): prioriza por margen + prioridad (lee productFinancials). */
   profitMode?: boolean;
+  /**
+   * CAT-2: texto libre del cliente para rankear por FICHA (ocasión/clima/proyección/notas/cuándo-NO).
+   * Solo afecta el ORDEN de los no-pinneados; no pinnea por nombre (eso es `query`) ni filtra.
+   */
+  texto?: string;
 }
 
 export async function searchCatalog(
@@ -67,10 +73,12 @@ export async function searchCatalog(
     });
   }
 
-  // Score por coincidencia de estilo + destacado/nuevo (relevancia) + rentabilidad (Modo Ganancia).
+  // Score por coincidencia de estilo + ficha (CAT-2) + destacado/nuevo + rentabilidad (Modo Ganancia).
   const scored = productos.map((p) => {
     let score = 0;
     if (filters.styleTag && p.perfume?.styleTags?.includes(filters.styleTag)) score += 5;
+    // CAT-2: ocasión/clima/proyección/notas/cuándo-NO de la ficha pesan en el orden.
+    if (filters.texto) score += fichaScore(p, filters.texto);
     if (p.featured) score += 1;
     if (p.perfume?.isNew) score += 0.5;
     if (filters.profitMode) {

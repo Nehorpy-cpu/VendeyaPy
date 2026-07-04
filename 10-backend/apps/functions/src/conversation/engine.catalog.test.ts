@@ -438,4 +438,10 @@ describe('conversation/engine decidirRespuesta — rama catálogo (F1)', () => {
     await decidirRespuesta('t1', 'c1', 'mostrame el catálogo para hombre', false, prev);
     expect(searchCatalogMock).toHaveBeenCalledWith('t1', expect.objectContaining({ gender: 'Masculino' }));
   });
+
+  it('CAT-2: el listado pasa el texto del cliente para el ranking por ficha', async () => {
+    searchCatalogMock.mockResolvedValueOnce([producto]);
+    await decidirRespuesta('t1', 'c1', 'Quiero algo intenso para salir de noche', false, prev);
+    expect(searchCatalogMock).toHaveBeenCalledWith('t1', expect.objectContaining({ texto: expect.stringContaining('noche') }));
+  });
 });

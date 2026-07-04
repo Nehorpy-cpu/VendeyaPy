@@ -10,9 +10,34 @@ import type { Product, Promotion, PromotionType, Currency, TenantStatsPublic, Te
 /** Topes hacia el modelo (F1B): material de venta sin inflar el payload/tokens. */
 const DESCRIPTION_MAX_CHARS = 200;
 const AI_NOTES_MAX_CHARS = 300;
+/** Topes de la ficha estructurada (CAT-2): por campo, para que el payload quede acotado. */
+const FICHA_TEXT_MAX_CHARS = 160;
+const FICHA_LIST_MAX_ITEMS = 6;
+const FICHA_ITEM_MAX_CHARS = 40;
 
 /** Truncado por code points (no parte surrogate pairs/emojis a la mitad). */
 const truncate = (s: string, max: number): string => Array.from(s.trim()).slice(0, max).join('');
+
+/**
+ * Ficha estructurada COMPACTA para el sales agent (CAT-2). Reemplaza depender solo de aiNotes
+ * (cuyo tope de 300 dejaba fuera "cuándo NO recomendarlo"). Todo opcional: los campos vacíos
+ * NO viajan. Sin datos privados: la ficha es guía de venta, no incluye costos/márgenes.
+ */
+export interface PublicProductFicha {
+  concentracion?: string;
+  familia?: string;
+  notas?: { salida?: string[]; corazon?: string[]; fondo?: string[] };
+  duracion?: string;
+  proyeccion?: string;
+  ocasiones?: string[];
+  clima?: string[];
+  perfil?: string;
+  cuandoRecomendar?: string;
+  cuandoNoRecomendar?: string;
+  objeciones?: string;
+  frasesVenta?: string[];
+  similares?: string[];
+}
 
 /** Producto PÚBLICO para el sales agent. SIN costo/margen/financials/tenantId/meta/inventario exacto. */
 export interface PublicProduct {
@@ -28,10 +53,49 @@ export interface PublicProduct {
   lowStock: boolean;
   featured: boolean;
   aiNotes: string;
+  /** Ficha estructurada (CAT-2). Ausente si el producto no tiene datos de ficha. */
+  ficha?: PublicProductFicha;
+}
+
+const fichaText = (s: string | undefined | null): string | undefined => {
+  const t = (s ?? '').trim();
+  return t ? truncate(t, FICHA_TEXT_MAX_CHARS) : undefined;
+};
+const fichaList = (a: string[] | undefined | null): string[] | undefined => {
+  const items = (a ?? []).map((x) => truncate(String(x ?? ''), FICHA_ITEM_MAX_CHARS)).filter(Boolean).slice(0, FICHA_LIST_MAX_ITEMS);
+  return items.length ? items : undefined;
+};
+
+/** Arma la ficha compacta desde aiFicha + perfumería (familia/notas). undefined si quedó vacía. */
+export function buildPublicFicha(p: Product): PublicProductFicha | undefined {
+  const f = p.aiFicha ?? {};
+  const notasRaw = {
+    salida: fichaList(p.perfume?.notes?.top),
+    corazon: fichaList(p.perfume?.notes?.heart),
+    fondo: fichaList(p.perfume?.notes?.base),
+  };
+  const notas = Object.fromEntries(Object.entries(notasRaw).filter(([, v]) => v !== undefined));
+  const ficha: PublicProductFicha = {
+    ...(fichaText(f.concentracion) ? { concentracion: fichaText(f.concentracion) } : {}),
+    ...(fichaText(p.perfume?.olfactiveFamily) ? { familia: fichaText(p.perfume?.olfactiveFamily) } : {}),
+    ...(Object.keys(notas).length ? { notas } : {}),
+    ...(fichaText(f.duracion) ? { duracion: fichaText(f.duracion) } : {}),
+    ...(fichaText(f.proyeccion) ? { proyeccion: fichaText(f.proyeccion) } : {}),
+    ...(fichaList(f.ocasiones) ? { ocasiones: fichaList(f.ocasiones) } : {}),
+    ...(fichaList(f.clima) ? { clima: fichaList(f.clima) } : {}),
+    ...(fichaText(f.perfil) ? { perfil: fichaText(f.perfil) } : {}),
+    ...(fichaText(f.cuandoRecomendar) ? { cuandoRecomendar: fichaText(f.cuandoRecomendar) } : {}),
+    ...(fichaText(f.cuandoNoRecomendar) ? { cuandoNoRecomendar: fichaText(f.cuandoNoRecomendar) } : {}),
+    ...(fichaText(f.objeciones) ? { objeciones: fichaText(f.objeciones) } : {}),
+    ...(fichaList(f.frasesVenta) ? { frasesVenta: fichaList(f.frasesVenta) } : {}),
+    ...(fichaList(f.similares) ? { similares: fichaList(f.similares) } : {}),
+  };
+  return Object.keys(ficha).length ? ficha : undefined;
 }
 
 export function sanitizeProduct(p: Product): PublicProduct {
   const stock = p.inventory?.stock ?? 0;
+  const ficha = buildPublicFicha(p);
   return {
     id: p.id,
     name: p.name,
@@ -45,6 +109,7 @@ export function sanitizeProduct(p: Product): PublicProduct {
     lowStock: stock > 0 && stock <= 3, // disponibilidad, no el stock exacto
     featured: !!p.featured,
     aiNotes: truncate(p.aiNotes ?? '', AI_NOTES_MAX_CHARS), // tope de payload (F1B)
+    ...(ficha ? { ficha } : {}), // CAT-2: ausente si no hay datos (payload compacto)
   };
 }
 

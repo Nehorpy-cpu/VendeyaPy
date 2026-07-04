@@ -64,4 +64,24 @@ describe('ai/prompts buildSalesSystemPrompt — prohibición de acciones (F2) y 
     expect(prompt).toContain('respondé CONCRETO');
     expect(prompt).toContain('consulta');
   });
+
+  it('CAT-2: la ficha manda sobre la complacencia, con corrección honesta + alternativa', () => {
+    expect(prompt).toContain('LA PALABRA DEL NEGOCIO');
+    expect(prompt).toContain('NO complazcas contra la ficha');
+    expect(prompt).toContain('ofrecé la alternativa del catálogo que SÍ encaja');
+    expect(prompt).toContain('para la noche te conviene más');
+  });
+
+  it('CAT-2: comparaciones solo con datos de ficha; sin dato → decirlo, no inventar', () => {
+    expect(prompt).toContain('¿cuál dura más?');
+    expect(prompt).toContain('buscalo con buscar_productos antes de afirmar');
+    expect(prompt).toContain('NUNCA inventes duración, proyección, notas ni ocasión');
+    expect(prompt).toContain('no lo tenés confirmado');
+  });
+
+  it('CAT-2: objeciones/frases de venta son guía interna, no citas textuales', () => {
+    expect(prompt).toContain('guía interna');
+    expect(prompt).toContain('nunca las cites textual');
+    expect(prompt).toContain('"la ficha dice"');
+  });
 });

@@ -580,6 +580,7 @@ export async function decidirRespuesta(
       ...detectarPrecio(t),
       limit: 3,
       profitMode: prev.profitMode,
+      texto: t, // CAT-2: la ficha (ocasión/notas/cuándo-NO) pesa en el orden del listado
     };
     const productos = await searchCatalog(tenantId, filtros);
     if (productos.length === 0) {

@@ -24,7 +24,7 @@ const defaultSearchDeps: SalesSearchDeps = { searchCatalog };
 
 const buscarProductosDef: AiTool = {
   name: 'buscar_productos',
-  description: 'Busca productos públicos activos y con stock del negocio. Si `consulta` menciona un nombre o marca, esos productos vienen PRIMERO. Devuelve nombre, marca, precio, descripción, estilo y disponibilidad. NO devuelve costos ni márgenes.',
+  description: 'Busca productos públicos activos y con stock del negocio. Si `consulta` menciona un nombre o marca, esos productos vienen PRIMERO; si menciona una ocasión (noche, oficina...) o una nota (piña...), el orden ya lo refleja. Devuelve nombre, marca, precio, descripción, estilo, disponibilidad y una `ficha` con duración, proyección, ocasiones, clima, perfil, notas, cuándo recomendarlo y cuándo NO, objeciones y similares. NO devuelve costos ni márgenes.',
   inputSchema: {
     type: 'object',
     properties: {
@@ -48,6 +48,7 @@ export const buscarProductos: AiToolHandler = {
       maxPrice: num(input.precioMax),
       limit: MAX_RESULTS,
       profitMode: false, // NUNCA modo ganancia para el bot público.
+      texto: str(input.consulta), // CAT-2: la ficha (ocasión/notas/cuándo-NO) pesa en el orden
     };
     const productos = await deps.searchCatalog(tenantId, filters);
     return productos.map(sanitizeProduct);

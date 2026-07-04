@@ -50,6 +50,75 @@ describe('ai/sanitize sanitizeProduct', () => {
     const p = { ...rogueProduct, inventory: { stock: 0 } } as unknown as Product;
     expect(sanitizeProduct(p).available).toBe(false);
   });
+
+  // ===== CAT-2: ficha estructurada compacta =====
+
+  it('CAT-2: sin aiFicha ni datos de perfumería extra → el campo `ficha` NO viaja', () => {
+    // rogueProduct no tiene aiFicha/olfactiveFamily/notes → payload idéntico al de F1B.
+    expect('ficha' in sanitizeProduct(rogueProduct)).toBe(false);
+  });
+
+  it('CAT-2: la ficha viaja completa y compacta (aiFicha + familia + pirámide), sin vacíos', () => {
+    const p = {
+      ...rogueProduct,
+      perfume: {
+        ...(rogueProduct.perfume ?? {}), olfactiveFamily: 'Cítrico',
+        notes: { top: ['naranja', 'limón'], heart: ['piña'], base: [] },
+      },
+      aiFicha: {
+        concentracion: 'EDP', duracion: '5-6 horas', proyeccion: 'moderada',
+        ocasiones: ['diario', 'oficina'], clima: ['verano'], perfil: 'juvenil',
+        cuandoRecomendar: 'busca algo fresco', cuandoNoRecomendar: 'quiere para la noche',
+        objeciones: '"es suave" → ideal oficina', frasesVenta: ['El fresco favorito'],
+        similares: ['Otro Cítrico'],
+      },
+    } as unknown as Product;
+    const ficha = sanitizeProduct(p).ficha!;
+    expect(ficha).toMatchObject({
+      concentracion: 'EDP', familia: 'Cítrico', duracion: '5-6 horas', proyeccion: 'moderada',
+      ocasiones: ['diario', 'oficina'], clima: ['verano'], perfil: 'juvenil',
+      cuandoRecomendar: 'busca algo fresco', cuandoNoRecomendar: 'quiere para la noche',
+    });
+    expect(ficha.notas).toEqual({ salida: ['naranja', 'limón'], corazon: ['piña'] }); // base vacía NO viaja
+    expect('fondo' in (ficha.notas ?? {})).toBe(false);
+  });
+
+  it('CAT-2: topes por campo — textos a 160, listas a 6 items de 40 chars', () => {
+    const p = {
+      ...rogueProduct,
+      aiFicha: {
+        cuandoRecomendar: 'x'.repeat(500),
+        ocasiones: Array.from({ length: 12 }, (_, i) => `ocasión-${i}-` + 'y'.repeat(80)),
+      },
+    } as unknown as Product;
+    const ficha = sanitizeProduct(p).ficha!;
+    expect(Array.from(ficha.cuandoRecomendar!)).toHaveLength(160);
+    expect(ficha.ocasiones).toHaveLength(6);
+    for (const o of ficha.ocasiones!) expect(Array.from(o).length).toBeLessThanOrEqual(40);
+  });
+
+  it('CAT-2: el payload con ficha máxima queda acotado (compacto para el modelo)', () => {
+    const maxFicha = Object.fromEntries([
+      ...['concentracion', 'duracion', 'proyeccion', 'perfil', 'cuandoRecomendar', 'cuandoNoRecomendar', 'objeciones'].map((k) => [k, 'z'.repeat(500)]),
+      ...['ocasiones', 'clima', 'frasesVenta', 'similares'].map((k) => [k, Array.from({ length: 20 }, () => 'w'.repeat(200))]),
+    ]);
+    const p = {
+      ...rogueProduct,
+      description: 'd'.repeat(5000), aiNotes: 'n'.repeat(5000),
+      perfume: { ...(rogueProduct.perfume ?? {}), olfactiveFamily: 'f'.repeat(500), notes: { top: Array(50).fill('nota-larguisima-de-prueba'), heart: [], base: [] } },
+      aiFicha: maxFicha,
+    } as unknown as Product;
+    // Cota generosa pero real: 1 producto ≲ 3.5KB ⇒ 5 resultados ≲ 18KB de payload de tool.
+    expect(JSON.stringify(sanitizeProduct(p)).length).toBeLessThan(3500);
+  });
+
+  it('CAT-2: la ficha NUNCA incluye datos privados aunque el doc los tenga', () => {
+    const p = { ...rogueProduct, aiFicha: { duracion: '8h', costPrice: 90000, margen: 0.5 } } as unknown as Product;
+    const ficha = sanitizeProduct(p).ficha as Record<string, unknown>;
+    expect(ficha.duracion).toBe('8h');
+    expect('costPrice' in ficha).toBe(false);
+    expect('margen' in ficha).toBe(false);
+  });
 });
 
 const roguePromo = {

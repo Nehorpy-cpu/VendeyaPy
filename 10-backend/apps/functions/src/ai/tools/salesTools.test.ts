@@ -47,6 +47,28 @@ describe('ai/salesTools buscar_productos', () => {
     expect('margin' in out[0]!).toBe(false);
     expect(out[0]!.price).toBe(100);
   });
+
+  it('CAT-2: pasa `consulta` también como `texto` (ranking por ficha) y la salida incluye la ficha compacta', async () => {
+    let seen: { filters?: CatalogFilters } = {};
+    const conFicha = product({
+      aiFicha: { duracion: '8-10', proyeccion: 'fuerte', ocasiones: ['noche'], cuandoNoRecomendar: 'para oficina' },
+      perfume: { brand: 'B', styleTags: [], olfactiveFamily: 'Oriental', notes: { top: ['piña'], heart: [], base: [] } },
+    });
+    const deps = {
+      searchCatalog: async (_t: string, filters: CatalogFilters) => { seen = { filters }; return [conFicha]; },
+    };
+    const out = (await buscarProductos.execute('perfumeria', { consulta: 'para salir de noche' }, deps)) as Array<Record<string, unknown>>;
+    expect(seen.filters?.texto).toBe('para salir de noche');
+    const ficha = out[0]!.ficha as Record<string, unknown>;
+    expect(ficha).toMatchObject({ duracion: '8-10', proyeccion: 'fuerte', ocasiones: ['noche'], cuandoNoRecomendar: 'para oficina', familia: 'Oriental' });
+    expect(ficha.notas).toEqual({ salida: ['piña'] });
+  });
+
+  it('CAT-2: producto sin ficha → el campo `ficha` no viaja (payload compacto, legacy intacto)', async () => {
+    const deps = { searchCatalog: async () => [product({})] };
+    const out = (await buscarProductos.execute('perfumeria', {}, deps)) as Array<Record<string, unknown>>;
+    expect('ficha' in out[0]!).toBe(false);
+  });
 });
 
 const promo = (over: Partial<Record<string, unknown>>) => ({
