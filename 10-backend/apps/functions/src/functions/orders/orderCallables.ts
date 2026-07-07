@@ -24,6 +24,7 @@ import { db, paths } from '../../lib/firebase.js';
 import { resolvePanelAuth } from '../../panel/auth.js';
 import { canTenantCancel, canTenantEdit, canAdvanceStatus } from '../../orders/lifecycle.js';
 import { confirmPayment } from '../../orders/confirmPayment.js';
+import { resolveComprobanteView, defaultComprobanteViewDeps } from '../../orders/comprobanteView.js';
 import { recordAudit } from '../../audit/audit.js';
 import { logger } from '../../lib/logger.js';
 
@@ -240,3 +241,21 @@ export const adminOrderCorrect = onCall<AdminCorrectInput>({ region: 'us-central
   logger.info('Pedido corregido por PLATFORM_ADMIN', { tenantId, orderId: order.id, fields: Object.keys(after) });
   return { ok: true, corrected: Object.keys(after) };
 });
+
+/**
+ * orderGetComprobanteViewUrl (ORDER-COMPROBANTE-VIEW-1) — enlace TEMPORAL para ver el comprobante.
+ * LECTURA (no muta la orden): staff del tenant (owner/manager/seller) o PLATFORM_ADMIN.
+ * La validación de la referencia y la firma viven en orders/comprobanteView.ts (pura + deps).
+ * La URL firmada NO se persiste y NO se loguea (solo orden + expiración).
+ */
+export const orderGetComprobanteViewUrl = onCall<{ tenantId?: string; orderId?: string }>(
+  { region: 'us-central1' },
+  async (req) => {
+    const auth = authorizeStaff(req, req.data?.tenantId);
+    const { order } = await loadOrder(auth.tenantId, str(req.data?.orderId) ?? '');
+    const r = await resolveComprobanteView(auth.tenantId, order.id, order.payment?.comprobanteUrl, defaultComprobanteViewDeps);
+    if (!r.ok) throw new HttpsError(r.code, r.message);
+    logger.info('Comprobante: enlace temporal generado', { tenantId: auth.tenantId, orderId: order.id, role: auth.role, expiresAtMs: r.expiresAtMs });
+    return { ok: true, url: r.url, expiresAt: r.expiresAtMs };
+  },
+);

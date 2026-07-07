@@ -10,7 +10,9 @@ import {
   listOrders, listOrderFinancials,
   canTenantEditOrder, canTenantCancelOrder, NEXT_STATUS,
   cancelOrder, updateOrderData, advanceOrderStatus, adminCorrectOrder, friendlyOrderError,
+  comprobanteEstado,
 } from '@/lib/orders';
+import { ComprobanteViewer } from '@/components/ComprobanteViewer';
 
 const gs = (n: number | null | undefined) => (n == null ? '—' : '₲ ' + Math.round(n).toLocaleString('es-PY'));
 
@@ -246,6 +248,21 @@ export default function OrdersPage() {
               <div className="text-ink-900">Total: <span className="font-bold">{gs(detail.totals.total)}</span></div>
               {!isSeller && <div className="text-ink-500">Ganancia: {orderProfit(detail.id) == null ? '⚠️ incompleta' : gs(orderProfit(detail.id))}</div>}
             </div>
+
+            {/* ORDER-COMPROBANTE-VIEW-1: comprobante del cliente — imagen por enlace temporal seguro */}
+            {comprobanteEstado(detail) !== 'none' && (
+              <div className="mt-4 flex items-center justify-between gap-3 rounded-xl border border-mint-100 bg-mint-50/50 px-4 py-3">
+                <div className="min-w-0">
+                  <div className="text-sm font-semibold text-ink-900">🧾 Comprobante recibido</div>
+                  <p className="text-xs text-ink-500">
+                    {comprobanteEstado(detail) === 'image'
+                      ? 'El cliente envió la foto del pago por WhatsApp. Verificá el monto antes de confirmar.'
+                      : 'El cliente envió un comprobante, pero la imagen todavía no está disponible desde el panel.'}
+                  </p>
+                </div>
+                {comprobanteEstado(detail) === 'image' && <ComprobanteViewer tenantId={tenantId} orderId={detail.id} />}
+              </div>
+            )}
 
             {/* ORDER-2: acciones según estado. Sin borrar, nunca: pagado/entregado = registro permanente. */}
             <div className="mt-5 border-t border-ink-100 pt-4">

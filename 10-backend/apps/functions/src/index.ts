@@ -99,7 +99,7 @@ export { checkoutConfigUpdate, agentConfigUpdate, channelConfigUpdate } from './
 
 // Ciclo de vida de pedidos (ORDER-1): rules cierra el update directo; TODA mutación de orders
 // va por estas callables auditadas que hacen cumplir la máquina de estados (orders/lifecycle.ts).
-export { orderUpdate, orderCancel, orderUpdateStatus, adminOrderCorrect } from './functions/orders/orderCallables.js';
+export { orderUpdate, orderCancel, orderUpdateStatus, adminOrderCorrect, orderGetComprobanteViewUrl } from './functions/orders/orderCallables.js';
 
 // Observabilidad (Fase 5): bitácora de auditoría de cambios de catálogo.
 export { onProductWriteAudit } from './functions/products/onProductWriteAudit.js';

@@ -77,6 +77,38 @@ export async function adminCorrectOrder(
   return (await call({ tenantId, orderId, reason, set })).data;
 }
 
+/**
+ * ORDER-COMPROBANTE-VIEW-1: estado del comprobante de un pedido para la UI.
+ *  - 'image'   → hay foto en nuestro Storage (se puede pedir el enlace temporal);
+ *  - 'pending' → llegó comprobante pero sin imagen visible aún (media:/simulado);
+ *  - 'none'    → sin comprobante.
+ */
+export function comprobanteEstado(o: Pick<Order, 'payment'>): 'image' | 'pending' | 'none' {
+  const ref = o.payment?.comprobanteUrl ?? '';
+  if (!ref) return 'none';
+  return ref.startsWith('tenants/') ? 'image' : 'pending';
+}
+
+/**
+ * ¿El texto es el mensaje que GENERA nuestro backend al recibir una imagen (comprobanteImage.ts)?
+ * Review OCV-1: el cliente puede escribir texto libre que empiece con 📷 — solo los dos formatos
+ * exactos del sistema muestran la card, y aun así la card NO afirma que sea un pago (el botón
+ * real está gateado por la orden). Sniffing de texto porque Message no tiene campo estructurado.
+ */
+export function esMensajeImagenCliente(text: string): boolean {
+  return /^📷 (Imagen recibida \(posible comprobante\)$|Comprobante: )/.test(text);
+}
+
+/** Enlace TEMPORAL para ver el comprobante (callable seguro; nunca write, nunca se persiste). */
+export async function getComprobanteViewUrl(tenantId: string, orderId: string): Promise<{ url: string; expiresAt: number }> {
+  const call = httpsCallable<{ tenantId: string; orderId: string }, { ok: boolean; url: string; expiresAt: number }>(
+    firebaseFunctions(),
+    'orderGetComprobanteViewUrl',
+  );
+  const r = (await call({ tenantId, orderId })).data;
+  return { url: r.url, expiresAt: r.expiresAt };
+}
+
 /** Errores de callables → mensajes claros (el backend ya manda mensajes amables en español). */
 export function friendlyOrderError(e: unknown): string {
   const err = e as { code?: string; message?: string };

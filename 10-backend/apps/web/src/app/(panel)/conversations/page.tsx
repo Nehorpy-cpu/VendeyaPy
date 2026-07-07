@@ -17,7 +17,8 @@ import {
 } from '@/lib/conversations';
 import { listTenantWhatsappNumbers } from '@/lib/whatsapp-activation';
 import { getChannelConfig } from '@/lib/channels';
-import { getCustomerOpenOrder } from '@/lib/orders';
+import { getCustomerOpenOrder, comprobanteEstado, esMensajeImagenCliente } from '@/lib/orders';
+import { ComprobanteViewer } from '@/components/ComprobanteViewer';
 
 const ORDER_STATUS_LABEL: Record<string, string> = {
   PENDING_PAYMENT: 'Esperando pago',
@@ -296,9 +297,15 @@ function ConversationsInner() {
                     <span className="font-semibold">{ORDER_STATUS_LABEL[orderQ.data.status] ?? orderQ.data.status}</span> · ₲{' '}
                     {orderQ.data.totals?.total?.toLocaleString('es-PY') ?? '—'}
                   </span>
-                  <a href="/orders" className="shrink-0 font-semibold text-amber-700 hover:underline">
-                    Ver en Pedidos →
-                  </a>
+                  <span className="flex shrink-0 items-center gap-2">
+                    {/* ORDER-COMPROBANTE-VIEW-1: la foto del pago, sin salir del chat (enlace temporal) */}
+                    {comprobanteEstado(orderQ.data) === 'image' && (
+                      <ComprobanteViewer tenantId={tenantId} orderId={orderQ.data.id} compact />
+                    )}
+                    <a href="/orders" className="font-semibold text-amber-700 hover:underline">
+                      Ver en Pedidos →
+                    </a>
+                  </span>
                 </div>
               )}
 
@@ -371,6 +378,22 @@ function Bubble({ m }: { m: Message }) {
     return (
       <div className="text-center">
         <span className="inline-block rounded-full bg-ink-100 px-3 py-1 text-[11px] text-ink-600">{m.text}</span>
+      </div>
+    );
+  }
+  // ORDER-COMPROBANTE-VIEW-1: la imagen del cliente se muestra como card. SOLO los formatos
+  // exactos del sistema (comprobanteImage.ts) — texto libre del cliente con 📷 va como burbuja
+  // normal (review OCV-1: el prefijo es spoofeable). La card no afirma que sea un pago: la foto
+  // real se ve con "Ver comprobante" en la barra del pedido, gateado por la orden.
+  if (m.direction === 'in' && esMensajeImagenCliente(m.text)) {
+    return (
+      <div className="text-left">
+        <div className="inline-block max-w-[80%] rounded-2xl border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+          <div className="text-[10px] font-semibold uppercase tracking-wide text-amber-700">📎 Imagen del cliente</div>
+          <div className="mt-0.5 whitespace-pre-wrap">{m.text}</div>
+          <div className="mt-1 text-[10px] text-amber-700/80">Si corresponde a un pedido, podés verla con “Ver comprobante” en la barra del pedido ↑</div>
+        </div>
+        <div className="mt-0.5 text-[10px] text-ink-400">{hhmm(m.createdAt)}</div>
       </div>
     );
   }
