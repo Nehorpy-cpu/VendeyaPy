@@ -37,6 +37,8 @@ import { runSalesAgent } from '../ai/salesAgent.js';
 import type { AiMessage } from '../ai/types.js';
 import { appendMessage, listRecentMessages } from './messages.js';
 import { queryTokens } from '../catalog/match.js';
+import { detectarOcasionContexto } from '../catalog/fichaRank.js';
+import { veredictoOcasion, respuestaOcasionNoConviene, respuestaOcasionConviene } from './productOccasion.js';
 import { createPendingOrder } from '../orders/createPendingOrder.js';
 import { resolveCheckoutReuse } from '../orders/checkoutReuse.js';
 import { getCheckoutConfig, formatTransferInstructions } from '../orders/checkoutConfig.js';
@@ -695,6 +697,100 @@ export async function interceptarReclamoCarrito(
   };
 }
 
+/**
+ * CAT-2B: pregunta "¿PRODUCTO sirve para OCASIÓN?" — respuesta HONESTA desde el motor con la
+ * ficha. El bug real de prod: estas preguntas caían al listado genérico (detectarEstilo mapea
+ * 'noche'→'intenso' y quiereCatalogo captura ANTES del gate de la IA), en loop y sin responder.
+ *
+ * Devuelve:
+ *  - { tipo:'respuesta' }  → veredicto de la ficha: cuándo-NO → corrección honesta + alternativa
+ *    del ranking CAT-2 (excluyendo el consultado) con oferta pendiente; sí → confirmación + oferta.
+ *  - { tipo:'delegar' }    → pregunta sobre producto SIN señal suficiente en la ficha (o sin
+ *    ocasión pero con quiereCatalogo que la capturaría): va a la IA, JAMÁS al listado genérico.
+ *  - null                  → no es una pregunta producto+ocasión; sigue el ruteo normal.
+ *
+ * El producto sale del matcher por nombre (F1B) o, con anáfora ("ese/este"), de la oferta
+ * pendiente VIGENTE / único último mostrado — nunca se adivina entre varios.
+ */
+export async function interceptarPreguntaProductoOcasion(
+  tenantId: string,
+  text: string,
+  t: string,
+  prev: { pendingVigente: PendingCartConfirmation | null; lastShownSkus: string[]; nowMs: number },
+): Promise<
+  | { tipo: 'respuesta'; result: { reply: string; nextState: SessionState; pendingCart: PendingCartConfirmation | null; lastShownSkus: string[] } }
+  | { tipo: 'delegar' }
+  | null
+> {
+  const esPregunta = esPreguntaConsulta(text) || /\b(sirve|servir[ií]a|va bien|funciona|anda) (para|de|en)\b/.test(t);
+  if (!esPregunta) return null;
+  // Review CAT-2B: los turnos TRANSACCIONALES nunca se interceptan — "¿me agregás el X para la
+  // noche?" es un agregado y "¿puedo pagar el X esta noche?" es un pago, aunque traigan "?" y
+  // ocasión. El flujo de conversión (F2/F5) tiene prioridad.
+  if (quierePagar(t) || quiereAgregar(t) || quiereVerCarrito(t)) return null;
+  // Review CAT-2B: logística de entrega ("¿me lo mandás esta noche?") — 'esta noche' ahí es un
+  // horario, no una ocasión de uso. Se deja al ruteo normal.
+  if (/\b(mand|env[ií]|entreg|lleg|retir|deposit|transfer)\w*/.test(t)) return null;
+
+  // Producto: nombrado ("el mega sirve...") → anafórico ("ese sirve..." → oferta vigente/único
+  // mostrado) → ordinal ("¿el 2 sirve para la noche?" → producto 2 de la oferta vigente).
+  let producto = await findProductByName(tenantId, text);
+  if (!producto && /\b(ese|esa|este|esta|eso)\b/.test(t)) {
+    const id =
+      prev.pendingVigente?.primaryProductId ??
+      (prev.pendingVigente?.products.length === 1 ? prev.pendingVigente.products[0]!.id : null) ??
+      (prev.lastShownSkus.length === 1 ? prev.lastShownSkus[0]! : null);
+    if (id) producto = await getProductById(tenantId, id);
+  }
+  if (!producto) {
+    const idx = ordinalIndex(t);
+    const porOrdinal = idx !== null ? (prev.pendingVigente?.products[idx] ?? null) : null;
+    if (porOrdinal) producto = await getProductById(tenantId, porOrdinal.id);
+  }
+  if (!producto) return null;
+
+  const ocasion = detectarOcasionContexto(text);
+  if (!ocasion) {
+    // Pregunta sobre un producto sin ocasión ("¿el odyssey es dulce?"): si el catálogo la
+    // capturaría (estilo/precio en el texto), delegamos a la IA; si no, el ruteo normal ya la manda.
+    return quiereCatalogo(t) ? { tipo: 'delegar' } : null;
+  }
+
+  const veredicto = veredictoOcasion(producto, ocasion);
+  if (veredicto === 'sin_senal') return { tipo: 'delegar' };
+
+  if (veredicto === 'no_conviene') {
+    // Alternativa del ranking CAT-2 (texto → ficha ordena por ocasión). SIN profitMode a propósito:
+    // la corrección honesta se argumenta por ficha, no por margen. Review CAT-2B: la alternativa
+    // tampoco puede tener un cuándo-NO para esta ocasión (el ranking penaliza pero no filtra) —
+    // sin candidata válida, mejor la variante sin alternativa que auto-contradecirse.
+    const candidatos = await searchCatalog(tenantId, { texto: text, limit: 3 });
+    const alternativa = candidatos.find((c) => c.id !== producto!.id && veredictoOcasion(c, ocasion) !== 'no_conviene') ?? null;
+    return {
+      tipo: 'respuesta',
+      result: {
+        reply: respuestaOcasionNoConviene(producto, ocasion, alternativa),
+        nextState: 'VIEWING_PRODUCT',
+        // La oferta pendiente es la ALTERNATIVA: el próximo "sí" agrega lo que se ofreció.
+        pendingCart: alternativa
+          ? buildPendingConfirmation([{ id: alternativa.id, name: alternativa.name }], 'catalog_listing', prev.nowMs)
+          : null,
+        lastShownSkus: alternativa ? [alternativa.id] : [],
+      },
+    };
+  }
+
+  return {
+    tipo: 'respuesta',
+    result: {
+      reply: respuestaOcasionConviene(producto, ocasion),
+      nextState: 'VIEWING_PRODUCT',
+      pendingCart: buildPendingConfirmation([{ id: producto.id, name: producto.name }], 'catalog_listing', prev.nowMs),
+      lastShownSkus: [producto.id],
+    },
+  };
+}
+
 export async function handleMessage(input: ConversationInput): Promise<ConversationResult> {
   const { tenantId, from, text } = input;
   const channel: MessageChannel = input.channel ?? 'whatsapp';
@@ -832,12 +928,42 @@ export async function handleMessage(input: ConversationInput): Promise<Conversat
       logger.info('Reclamo de carrito → respuesta determinística con estado real', { tenantId, customerId, tipo: reclamo });
     }
   }
-  if (!result && (!esNuevo || nuevoConIntencion) && !confirmandoSeleccion && ruleEngineWouldFallback(text, t)) {
+  // CAT-2B: "¿PRODUCTO sirve para OCASIÓN?" → el MOTOR responde honesto con la ficha (cuándo-NO
+  // gana; alternativa del ranking como oferta). Sin señal en la ficha → se DELEGA a la IA aunque
+  // quiereCatalogo capture el texto: estas preguntas jamás vuelven al listado genérico (bug prod).
+  let delegarPreguntaProducto = false;
+  // Review CAT-2B: en AWAITING_PAYMENT no se intercepta — colgar una oferta acá rompería el
+  // estado de pago (invariante F4: en pago no se ofrece re-agregar); la IA/reglas lo atienden.
+  if (!result && (!esNuevo || nuevoConIntencion) && !confirmandoSeleccion && existing?.state !== 'AWAITING_PAYMENT') {
+    const po = await interceptarPreguntaProductoOcasion(tenantId, text, t, {
+      pendingVigente: pendingActivo,
+      lastShownSkus: prevShown,
+      nowMs,
+    });
+    if (po?.tipo === 'respuesta') {
+      result = po.result;
+      logger.info('Pregunta producto+ocasión → respuesta determinística por ficha', { tenantId, customerId });
+    } else if (po?.tipo === 'delegar') {
+      delegarPreguntaProducto = true;
+    }
+  }
+  if (!result && (!esNuevo || nuevoConIntencion) && !confirmandoSeleccion && (delegarPreguntaProducto || ruleEngineWouldFallback(text, t))) {
     const ai = await delegarAlSalesAgent();
     if (ai.used) {
       // Ids/nombres SOLO del backend de buscar_productos (nunca del texto del modelo).
       result = resultadoDesdeIA(ai, existing?.state ?? 'BROWSING');
       logger.info('Respuesta por sales agent IA', { tenantId, customerId, shown: ai.shownProducts.length, tools: ai.usedTools.length });
+    } else if (delegarPreguntaProducto) {
+      // La IA no corrió (gate/cupo/falla) y era una pregunta sobre un producto: canned honesto,
+      // NUNCA el listado genérico del catálogo (guard CAT-2B).
+      result = {
+        reply:
+          'No tengo ese dato confirmado de este producto 🙏 ¿Querés que te muestre otras opciones, ' +
+          'o preferís que te ayude una persona del equipo?',
+        nextState: existing?.state ?? 'BROWSING',
+        pendingCart: null,
+      };
+      logger.info('Pregunta producto sin señal y sin IA → canned honesto (sin listado)', { tenantId, customerId });
     }
   }
   if (!result) {

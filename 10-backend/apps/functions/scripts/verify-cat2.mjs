@@ -154,17 +154,17 @@ const fresh = (n) => { const f = `59599391${String(n).padStart(4, '0')}`; custom
     !!t1 && shown[0] === ODY_ID, `shown=${JSON.stringify(shown)}`);
 }
 
-// ===== 4. IA: "¿El Odyssey sirve para salidas nocturnas?" → fixture honesto; carrito INTACTO =====
+// ===== 4. "¿El Odyssey sirve para salidas nocturnas?" → CAT-2B: interceptor honesto, SIN IA =====
+// (Antes de CAT-2B esto lo respondía la IA vía fixture; ahora el motor responde determinístico
+// con el cuándo-NO de la ficha — mismo contenido honesto, garantizado por código.)
 {
   const from = fresh(4);
-  await setFixture({ responses: [
-    { toolUses: [{ id: 'tu-cat2-2', name: 'buscar_productos', input: { consulta: 'Odyssey' } }] },
-    { text: `El Odyssey es más fresco, ideal para el día u oficina; para la noche te conviene más el Supremacy, que proyecta fuerte y dura 8-10 horas. ${MARK}` },
-  ] });
-  const t1 = await sendAndWaitNew(from, 'El Odyssey sirve para salidas nocturnas?', (t) => t.includes(MARK));
+  await setFixture({ fail: true, failMessage: 'CAT-2B: responde el interceptor, no la IA' });
+  const t1 = await sendAndWaitNew(from, 'El Odyssey sirve para salidas nocturnas?', (t) => t.includes('Supremacy') || t.includes('opciones'));
   const ses = await sessionOf(from);
-  check('4. consulta de ocasión (IA con ficha en el payload) → respuesta pasa; el motor no interfiere',
-    !!t1 && t1.includes('para la noche te conviene más'), JSON.stringify((t1 ?? '').slice(0, 70)));
+  check('4. consulta de ocasión → corrección honesta determinística (CAT-2B) con alternativa',
+    !!t1 && t1.includes('no es mi primera recomendación') && t1.includes('Supremacy') && !t1.includes('te elegí estas opciones'),
+    JSON.stringify((t1 ?? '').slice(0, 70)));
   check('4b. preguntar NO toca el carrito', ((ses?.cart?.items ?? []).length === 0), `items=${(ses?.cart?.items ?? []).length}`);
 }
 

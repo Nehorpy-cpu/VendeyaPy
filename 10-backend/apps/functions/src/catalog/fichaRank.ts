@@ -27,7 +27,7 @@ export type OcasionContexto = 'noche' | 'dia';
  * - sin 'salida'/'salidas' ("notas de salida" es jerga de pirámide olfativa — queda 'salir');
  * - sin 'manana' ("mañana paso a retirar" = tomorrow, no morning).
  */
-const KW_NOCHE = ['noche', 'nocturna', 'nocturno', 'salir', 'fiesta', 'fiestas', 'evento', 'eventos', 'boliche', 'cita', 'citas'];
+const KW_NOCHE = ['noche', 'nocturna', 'nocturno', 'nocturnas', 'nocturnos', 'salir', 'fiesta', 'fiestas', 'evento', 'eventos', 'boliche', 'cita', 'citas'];
 const KW_DIA = ['dia', 'diario', 'oficina', 'trabajo', 'laburo', 'clase', 'clases', 'facultad', 'cotidiano'];
 
 /**
@@ -66,6 +66,18 @@ const intersecta = (fichaCampos: Array<string | string[] | undefined | null>, se
     const list = Array.isArray(campo) ? campo : [campo];
     return list.some((x) => tokens(typeof x === 'string' ? x : '').some((t) => set.has(t)));
   });
+
+/**
+ * ¿Algún campo de la FICHA (texto o lista) menciona la ocasión? Lado vendedor: usa el
+ * vocabulario amplio (FICHA_*). La consume el interceptor de preguntas producto+ocasión (CAT-2B)
+ * para leer cuándo-NO/ocasiones/clima con la MISMA semántica que el ranking.
+ */
+export function fichaMencionaOcasion(
+  campos: Array<string | string[] | undefined | null>,
+  ocasion: OcasionContexto,
+): boolean {
+  return intersecta(campos, ocasion === 'noche' ? FICHA_NOCHE : FICHA_DIA);
+}
 
 /**
  * Score de la ficha contra el texto del cliente. 0 si no hay ficha o el texto no da señales.
