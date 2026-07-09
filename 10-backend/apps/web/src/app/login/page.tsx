@@ -7,6 +7,7 @@ import { signInWithEmailAndPassword, sendPasswordResetEmail } from 'firebase/aut
 import { firebaseAuth } from '@/lib/firebase';
 import { useAuth } from '@/lib/auth-context';
 import { isValidEmail, resetOutcome } from '@/lib/password-reset';
+import { selfRegistrationEnabled } from '@/lib/registration';
 import { Logo } from '@/components/marketing/ui';
 import { MetricCard } from '@/components/marketing/MetricCard';
 import { AnimatedChart } from '@/components/marketing/AnimatedChart';
@@ -250,12 +251,15 @@ export default function LoginPage() {
                   </button>
                 </form>
 
-                <p className="mt-5 text-center text-sm text-ink-500">
-                  ¿No tenés cuenta?{' '}
-                  <Link href="/register" className="font-semibold text-mint-700 transition-colors hover:text-mint-800">
-                    Creá tu empresa
-                  </Link>
-                </p>
+                {/* SINGLE-TENANT-LOCK: con el registro cerrado, el login no invita a crear empresas. */}
+                {selfRegistrationEnabled() && (
+                  <p className="mt-5 text-center text-sm text-ink-500">
+                    ¿No tenés cuenta?{' '}
+                    <Link href="/register" className="font-semibold text-mint-700 transition-colors hover:text-mint-800">
+                      Creá tu empresa
+                    </Link>
+                  </p>
+                )}
 
                 {process.env['NEXT_PUBLIC_USE_EMULATORS'] === 'true' && (
                   <div className="mt-6 rounded-xl border border-ink-100 bg-ink-50/60 p-3.5 text-xs text-ink-500">

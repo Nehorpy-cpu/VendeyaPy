@@ -20,8 +20,37 @@ import { createUserWithEmailAndPassword, sendEmailVerification, reload } from 'f
 import { COUNTRY, CURRENCY } from '@vpw/shared';
 import { firebaseAuth } from '@/lib/firebase';
 import { useAuth } from '@/lib/auth-context';
-import { registerTenantOwner, friendlyRegisterError, waitForTenantClaim } from '@/lib/registration';
+import { registerTenantOwner, friendlyRegisterError, waitForTenantClaim, selfRegistrationEnabled } from '@/lib/registration';
 import { Logo } from '@/components/marketing/ui';
+
+const SUPPORT_WHATSAPP = process.env['NEXT_PUBLIC_SUPPORT_WHATSAPP'] ?? '';
+
+/** SINGLE-TENANT-LOCK: registro cerrado → aviso amable (la barrera real es el backend). */
+function RegistroCerrado() {
+  const waHref = SUPPORT_WHATSAPP ? `https://wa.me/${SUPPORT_WHATSAPP.replace(/\D/g, '')}` : '';
+  return (
+    <div className="flex min-h-screen items-center justify-center bg-ink-50/50 px-6 text-center">
+      <div className="w-full max-w-md rounded-2xl border border-ink-100 bg-white p-8 shadow-soft">
+        <div className="mx-auto mb-4 w-fit"><Logo /></div>
+        <h1 className="text-lg font-semibold text-ink-900">Registro por invitación</h1>
+        <p className="mt-2 text-sm text-ink-500">
+          Por ahora el alta de nuevas empresas está cerrada. Si querés usar VendeYaPy en tu negocio,
+          escribinos y te avisamos apenas abramos nuevos cupos.
+        </p>
+        <div className="mt-6 flex flex-col gap-2">
+          {waHref && (
+            <a href={waHref} target="_blank" rel="noreferrer" className="inline-flex h-11 items-center justify-center rounded-full bg-mint-600 text-sm font-semibold text-white transition hover:bg-mint-700">
+              Escribinos por WhatsApp
+            </a>
+          )}
+          <Link href="/login" className="inline-flex h-11 items-center justify-center rounded-full border border-ink-200 text-sm font-medium text-ink-700 transition hover:bg-ink-50">
+            Ya tengo cuenta — Iniciar sesión
+          </Link>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 const COUNTRY_LABEL: Record<string, string> = { PY: 'Paraguay', AR: 'Argentina', BR: 'Brasil', MX: 'México', CO: 'Colombia' };
 const CURRENCY_LABEL: Record<string, string> = { PYG: 'Guaraní (₲)', ARS: 'Peso argentino ($)', USD: 'Dólar (US$)' };
@@ -38,6 +67,12 @@ function mapAuthError(e: unknown): string {
 }
 
 export default function RegisterPage() {
+  // SINGLE-TENANT-LOCK: con el alta cerrada, TODOS los CTAs que apuntan acá ven el aviso.
+  if (!selfRegistrationEnabled()) return <RegistroCerrado />;
+  return <RegisterFlow />;
+}
+
+function RegisterFlow() {
   const router = useRouter();
   const { user, claims, loading } = useAuth();
 

@@ -13,6 +13,14 @@ import { httpsCallable, type FunctionsError } from 'firebase/functions';
 import { doc, getDoc } from 'firebase/firestore';
 import { firebaseAuth, firebaseDb, firebaseFunctions } from './firebase';
 
+/**
+ * SINGLE-TENANT-LOCK: ¿está abierto el alta self-service? El flag del frontend solo decide QUÉ
+ * mostrar (aviso vs formulario y CTAs); la barrera real vive en el callable registerTenantOwner
+ * (ALLOW_SELF_REGISTRATION del backend). Default ABIERTO si la var no está.
+ */
+export const selfRegistrationEnabled = (): boolean =>
+  process.env['NEXT_PUBLIC_ALLOW_SELF_REGISTRATION'] !== 'false';
+
 /** Datos de empresa que SÍ acepta el callable. role/tenantId/planId/ownerUid/ownerEmail los pone el backend. */
 export interface RegisterTenantInput {
   businessName: string;

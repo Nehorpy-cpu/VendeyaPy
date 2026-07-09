@@ -11,6 +11,10 @@
  *   - exige email verificado (token.email_verified === true).
  *   - rechaza si el caller ya tiene tenantId/role (anti multi-tenant; cubre seller/manager/admin existentes).
  *   - plan inicial = free; slug reservado atómicamente (colisión → already-exists, sin auto-sufijo).
+ *
+ * SINGLE-TENANT-LOCK: `ALLOW_SELF_REGISTRATION=false` cierra el alta self-service (operación
+ * single-tenant). Default ABIERTO (ausente/otro valor) para no romper emulador/E2E. El frontend
+ * espeja el aviso con NEXT_PUBLIC_ALLOW_SELF_REGISTRATION, pero la barrera real es esta.
  */
 import { onCall, HttpsError } from 'firebase-functions/v2/https';
 import { COUNTRY, CURRENCY } from '@vpw/shared';
@@ -18,9 +22,21 @@ import { db, paths } from '../../lib/firebase.js';
 import { provisionTenantCore, slugify, TenantSlugTakenError } from '../../tenants/provision.js';
 import { logger } from '../../lib/logger.js';
 
+/** SINGLE-TENANT-LOCK: ¿el alta self-service está cerrada por configuración? (pura, para tests) */
+export const selfRegistrationClosed = (env: NodeJS.ProcessEnv = process.env): boolean =>
+  env['ALLOW_SELF_REGISTRATION'] === 'false';
+
 export const registerTenantOwner = onCall<{ businessName?: string; slug?: string; ownerName?: string; industry?: string; country?: string; currency?: string; phone?: string }>(
   { region: 'us-central1' },
   async (req) => {
+    // SINGLE-TENANT-LOCK: registro cerrado por configuración — se corta ANTES de mirar el auth,
+    // así el smoke de prod puede verificarlo sin crear usuarios.
+    if (selfRegistrationClosed()) {
+      throw new HttpsError(
+        'failed-precondition',
+        'El registro de nuevas empresas está temporalmente cerrado. Escribinos y te avisamos cuando abra.',
+      );
+    }
     if (!req.auth) throw new HttpsError('unauthenticated', 'Iniciá sesión para crear tu empresa.');
     const token = req.auth.token as { role?: string; tenantId?: string; email?: string; email_verified?: boolean };
 
