@@ -46,16 +46,21 @@ export async function getCustomer(tenantId: string, customerId: string): Promise
   return snap.exists() ? (snap.data() as Customer) : null;
 }
 
-/** Historial de mensajes de una conversación (orden cronológico). */
+/**
+ * Historial de mensajes de una conversación (orden cronológico).
+ * Los ÚLTIMOS `max` mensajes: se consulta descendente y se invierte. Con 'asc' + límite,
+ * Firestore devuelve los N MÁS VIEJOS y el chat queda congelado apenas la conversación
+ * supera el límite (mismo patrón correcto que listRecentMessages en functions).
+ */
 export async function getMessages(
   tenantId: string,
   customerId: string,
   max = 200,
 ): Promise<Message[]> {
   const snap = await getDocs(
-    query(messagesCol(tenantId, customerId), orderBy('createdAt', 'asc'), fbLimit(max)),
+    query(messagesCol(tenantId, customerId), orderBy('createdAt', 'desc'), fbLimit(max)),
   );
-  return snap.docs.map((d) => d.data() as Message);
+  return snap.docs.map((d) => d.data() as Message).reverse();
 }
 
 export interface HandoffResult {
