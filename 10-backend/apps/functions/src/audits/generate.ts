@@ -65,7 +65,9 @@ export async function generateAgentAudits(tenantId: string): Promise<number> {
     return t && nowMs - t <= 30 * DAY;
   });
   for (const c of active) {
-    const msgs = (await db().collection(paths.messages(tenantId, c.id)).orderBy('createdAt', 'asc').limit(100).get()).docs.map((d) => d.data() as Message);
+    // Los ÚLTIMOS 100 mensajes en orden cronológico: con 'asc' + límite Firestore
+    // devuelve los 100 MÁS VIEJOS y la auditoría ignora lo reciente (mismo patrón que listRecentMessages).
+    const msgs = (await db().collection(paths.messages(tenantId, c.id)).orderBy('createdAt', 'desc').limit(100).get()).docs.map((d) => d.data() as Message).reverse();
     const fallbacks = msgs.filter((m) => m.direction === 'out' && m.author === 'bot' && m.text.includes(FALLBACK_MARK)).length;
     if (fallbacks >= 2) {
       items.push({ id: `audit-nounderstand-${c.id}`, audit: { issueType: 'NOT_UNDERSTOOD', severity: 'MEDIUM', conversationId: c.id, relatedEntityType: 'conversation', relatedEntityId: c.id, summary: `El bot no entendió ${fallbacks} veces en el chat de ${cname(c)}.`, recommendedFix: 'Agregá esas preguntas a las FAQ o ampliá las reglas de venta.' } });
