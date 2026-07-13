@@ -2,6 +2,10 @@
 
 > Estas instrucciones aplican a cualquier sesión de Claude Code que opere en `C:\AI_AFG\` o subdirectorios.
 
+> **⚠️ PRIMERO: leé `docs/HANDOFF.md`** — estado actual del proyecto, fase EN CURSO (hay una
+> migración de dominio a medio terminar), prioridades y reglas operativas de deploy. Se mantiene
+> actualizado entre sesiones/máquinas; actualizalo al cerrar cada fase.
+
 ---
 
 ## Cómo trabajar (reglas del agente)
