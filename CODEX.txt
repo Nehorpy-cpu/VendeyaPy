@@ -1,0 +1,95 @@
+## Resumen para continuar en otra computadora
+
+**Proyecto:** VendeYaPy, plataforma SaaS multi-tenant para automatizar ventas por WhatsApp en Paraguay.
+
+**Repositorio:** GitHub `Nehorpy-cpu/VendeyaPy`, monorepo ubicado actualmente en `C:\AI_AFG\10-backend`.
+
+**Stack:** Next.js, TypeScript, Firebase Auth/Firestore/Storage/Cloud Functions, WhatsApp Cloud API, Anthropic Claude y pnpm workspaces.
+
+### Estado actual
+
+- Producción: `vpw-prod-dd6ff`
+- Panel: `https://vpw-prod-dd6ff.web.app`
+- Tenant real: `arfagi`
+- WhatsApp real conectado y en modo `live`.
+- Webhook Meta operativo y firmado.
+- Token de WhatsApp cifrado por tenant.
+- Arquitectura multi-número implementada.
+- Handoff humano implementado: el vendedor puede tomar una conversación, responder desde el panel y devolverla al bot.
+- Flujo completo probado: consulta → recomendación → carrito → checkout → comprobante → verificación → pedido.
+- Pedidos protegidos por callables, reglas, auditoría y estados permanentes.
+- Comprobantes recibidos por WhatsApp se descargan y guardan en Firebase Storage.
+- Agente F1–F6 desplegado: contexto, nombres de productos, confirmaciones naturales, anti-alucinaciones, checkout idempotente y bienvenida con intención.
+- Catálogo CAT-1/CAT-2/CAT-2B desplegado: ficha estructurada para IA, ranking por ocasión, respuestas honestas y alternativas determinísticas.
+- OCV-1 (ORDER-COMPROBANTE-VIEW-1) completado: visor de comprobantes en el panel con URLs temporales firmadas; el bucket sigue privado.
+- Migración de dominio completada (2026-07-13): `vendeyapy.com` sirve producción con SSL y ownership activos; `www.vendeyapy.com` redirige 301 al apex (restaurado vía `customDomains.undelete` tras un borrado accidental). Sin deploy ni cambios de DNS adicionales.
+- Último commit desplegado conocido: `fb1d02d`.
+- Último smoke real: Odyssey para noche → el bot lo desaconsejó correctamente, recomendó Supremacy y agregó Supremacy al confirmar.
+
+### Próxima fase prioritaria
+
+1. Evidencia de Fase 3 (Meta en vivo): prueba completa con un número EXTERNO (no del owner) — inbound real → respuesta del bot → carrito → orden → comprobante visible en el panel → logs sin errores. Verificación read-only.
+2. Fase 5 — Operación: runbook para el owner, backups semanales documentados, alertas mínimas (presupuesto GCP + errores de functions) y documentación operativa al día.
+3. Criterio de cierre del proyecto: una persona externa completa el ciclo entero sin intervención técnica (WhatsApp → recomendación → carrito → orden → comprobante → el vendedor lo ve y confirma en el panel desde vendeyapy.com).
+
+Después (backlog, solo a pedido del owner):
+
+1. `CATALOG-IMPORT-1`: importación desde CSV/Excel/Sheets.
+2. `META-CATALOG-SYNC-1`: sincronización con Meta Commerce/WhatsApp.
+3. `CATALOG-ENRICHMENT-3`: generación asistida de fichas IA.
+4. `WHATSAPP-COEXISTENCE-1`: Embedded Signup con coexistencia.
+5. `META-ADS-GROWTH`: métricas, anuncios, ROAS y recomendaciones.
+6. Integración genérica con CRM, postergada.
+
+## Forma de trabajo
+
+Cada fase sigue este formato:
+
+1. Codex analiza el estado, riesgos y dependencias.
+2. Codex redacta un prompt técnico completo para Claude Code.
+3. Claude Code audita el repositorio antes de modificar.
+4. Implementa el cambio más pequeño compatible con la arquitectura existente.
+5. Ejecuta typecheck, lint, tests, E2E y regresiones.
+6. Realiza review adversarial cuando corresponde.
+7. Commita y pushea, pero no despliega sin aprobación explícita.
+8. El usuario pega en Codex el reporte completo de Claude Code.
+9. Codex revisa resultados, detecta vacíos y prepara el deploy o la siguiente fase.
+10. Los despliegues se verifican con smoke técnico y, cuando corresponde, una prueba real controlada.
+
+Los reportes deben incluir:
+
+- Qué se auditó.
+- Causa raíz.
+- Cambios realizados.
+- Archivos o módulos afectados.
+- Tests y regresiones.
+- Commit.
+- Estado de deploy.
+- Riesgos o pendientes.
+- Próximo prompt recomendado.
+
+## Relación Codex–Claude Code
+
+Codex y Claude Code no comparten automáticamente sus conversaciones.
+
+- **Codex:** mantiene la visión global, revisa resultados, define fases, seguridad, alcance y prompts.
+- **Claude Code:** trabaja directamente sobre el repositorio, implementa, prueba, commitea y despliega cuando se autoriza.
+- **Usuario:** actúa como puente, copiando el prompt de Codex a Claude Code y pegando su reporte nuevamente en Codex.
+
+Codex también puede trabajar directamente en el repositorio si está disponible localmente; Claude Code no es obligatorio. El flujo actual lo utiliza como ejecutor principal y a Codex como coordinador técnico y revisor.
+
+## Reglas esenciales
+
+- Leer `C:\AI_AFG\AGENTS.md` antes de trabajar.
+- No tocar `_archive/` ni `80-creditos.future/`.
+- No modificar producción ni desplegar sin aprobación explícita.
+- No imprimir ni compartir secretos, tokens, claves `.env` o credenciales por chat/WhatsApp.
+- `.env` no se commitea.
+- Mantener aislamiento multi-tenant.
+- No hardcodear Arfagi/perfumería en backend.
+- No hacer hard-delete de pedidos.
+- Ejecutar como mínimo `pnpm -r typecheck` y tests relacionados.
+- Conservar cambios existentes del usuario.
+- Functions, hosting, Firestore Rules y Storage Rules se despliegan por separado según la fase.
+
+En la computadora nueva: cloná el repositorio, iniciá Codex desde la raíz, asegurate de que lea `AGENTS.md` y pegale este resumen. Los secretos deben recuperarse mediante Firebase Secret Manager o un canal seguro, nunca desde Git ni WhatsApp.

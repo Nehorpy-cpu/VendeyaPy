@@ -2,7 +2,7 @@
 
 > **INSTRUCCIONES PARA CLAUDE CODE**: este documento es para VOS, el agente. Leelo completo al
 > iniciar sesión antes de tocar nada. Resume el estado real del proyecto al **2026-07-13**,
-> lo desarrollado hasta ahora, la fase EN CURSO (con un paso a medio terminar) y las prioridades.
+> lo desarrollado hasta ahora, el estado por fases y las prioridades.
 > Fue escrito por la sesión anterior de Claude Code al migrar el desarrollo a otra computadora,
 > donde no está disponible la memoria local de aquella máquina — este documento es autocontenido.
 > Mantenelo actualizado: cuando cierres una fase o cambie el estado, editá este archivo y commitealo.
@@ -14,7 +14,7 @@
 **VendeyaPy**: SaaS multi-tenant de ventas por WhatsApp (bot IA + panel web) operando en Paraguay.
 
 - **Repo activo**: `10-backend/` de este monorepo (`github.com/Nehorpy-cpu/VendeyaPy`, privado, rama `main`).
-- **Prod**: Firebase `vpw-prod-dd6ff` (Functions v2 + Hosting Next.js SSR + Firestore + Storage + Auth). Panel: `https://vpw-prod-dd6ff.web.app` (y `vendeyapy.com` en migración, ver §4-FASE 4).
+- **Prod**: Firebase `vpw-prod-dd6ff` (Functions v2 + Hosting Next.js SSR + Firestore + Storage + Auth). Panel: `https://vendeyapy.com` (dominio propio, migrado y verificado — ver §4-FASE 4) y `https://vpw-prod-dd6ff.web.app`.
 - **Tenant real único en operación**: `arfagi` (perfumería del owner). Número WhatsApp real +595 986 440752 (PNID 1251346811387904), `whatsappSendMode=live`, plan `growth` activo. Segundo tenant `credipower` existe (starter) — **decisión del owner: SE QUEDA, no tocarlo**.
 - **Owner**: Marco — **no técnico**. Comunicarse en español, sin jerga, con reportes claros de qué se hizo y qué falta. Él maneja los dashboards externos (Meta, Hostinger) siguiendo instrucciones paso a paso.
 - **Norte del producto** (post-cierre): atribución Meta anuncio→pedido→ganancia. Hoy NO se desarrolla: primero se cierra la operación single-tenant.
@@ -61,28 +61,19 @@ Registro público CERRADO por flag, reversible:
 ### FASE 3 — META-ARFAGI-LIVE ✅ según el owner, con UNA verificación pendiente
 El owner confirmó el checklist del dashboard de Meta (Business Verification, app en modo Live, display name, perfil). **PENDIENTE DE EVIDENCIA**: la prueba de aceptación con un número EXTERNO (no del owner) — al 2026-07-13 en Firestore solo hay conversaciones de sus 3 números propios (595994893000, 595972720060, 595991192613). **Cuando escriba un número externo, verificar read-only**: inbound con PNID real → respuesta del bot (wamid real) → carrito → orden → comprobante visible en panel → logs sin errores.
 
-### FASE 4 — DOMINIO ⚠️ EN CURSO — A MEDIO MIGRAR (prioridad #1)
-Migración de `vendeyapy.com` (Hostinger) del proyecto de PRUEBA (`vpw-staging`, project number 1038775023923) al real (`vpw-prod-dd6ff`).
+### FASE 4 — DOMINIO ✅ COMPLETA (2026-07-13)
+Migración de `vendeyapy.com` (Hostinger) del proyecto de PRUEBA (`vpw-staging`) al real (`vpw-prod-dd6ff`), verificada end-to-end (programas FASE-4-DOMINIO-VERIFY / RESTORE-1 / CLOSE-1).
 
-**Ya hecho (lado Firebase, 2026-07-13)**:
-1. Custom domains `vendeyapy.com` + `www.vendeyapy.com` ELIMINADOS de `vpw-staging`.
-2. CREADOS en `vpw-prod-dd6ff` (site default): apex sirve, `www` con `redirectTarget: vendeyapy.com`. Estado al crear: `HOST_ACTIVE` + `CERT_ACTIVE` pero `OWNERSHIP_MISMATCH` (el TXT del DNS aún dice staging).
-3. `vendeyapy.com` y `www.vendeyapy.com` agregados a `authorizedDomains` de Firebase Auth de prod.
-4. `WEB_BASE_URL` en `apps/functions/.env.vpw-prod-dd6ff` YA es `https://vendeyapy.com` — **no hace falta redeploy de functions**.
+**Evidencia final (2026-07-13 — API de Hosting + smoke HTTPS + navegador):**
+- DNS autoritativo (Hostinger, apollo/athena.dns-parking.com): A `@` → `199.36.158.100` · TXT `@` → `hosting-site=vpw-prod-dd6ff` · CNAME `www` → `vpw-prod-dd6ff.web.app`. Propagado también en 8.8.8.8 y 1.1.1.1; sin referencias restantes a staging.
+- `vendeyapy.com`: `OWNERSHIP_ACTIVE` + `HOST_ACTIVE` + `CERT_ACTIVE`; HTTPS 200 sirviendo el panel de producción (bundle con projectId `vpw-prod-dd6ff`, sin emuladores activados).
+- `www.vendeyapy.com`: `OWNERSHIP_ACTIVE` + `HOST_ACTIVE` + `CERT_ACTIVE`; redirect 301 → `https://vendeyapy.com`.
+- `https://vendeyapy.com/login` y `https://vpw-prod-dd6ff.web.app` responden 200.
+- `vendeyapy.com` y `www.vendeyapy.com` están en `authorizedDomains` de Firebase Auth de prod; `WEB_BASE_URL` en `apps/functions/.env.vpw-prod-dd6ff` ya era `https://vendeyapy.com` — no hizo falta redeploy de functions.
 
-**PENDIENTE — bloqueado en el owner (2 ediciones en Hostinger → hPanel → Dominios → vendeyapy.com → Zona DNS)**:
-| Registro | Nombre | Cambiar de → a |
-|---|---|---|
-| TXT | `@` | `hosting-site=vpw-staging` → `hosting-site=vpw-prod-dd6ff` |
-| CNAME | `www` | `vpw-staging.web.app` → `vpw-prod-dd6ff.web.app` |
+**Incidente registrado (2026-07-13):** el owner borró por accidente los custom domains desde la consola. El apex quedó recreado correctamente desde la propia consola; `www` quedó soft-deleted (recuperable 30 días) y se restauró con la operación oficial `customDomains.undelete`. No hubo deploy ni cambios adicionales de DNS.
 
-(El A `@` → `199.36.158.100` queda igual; no tocar otros TXT.)
-
-**Mientras tanto `vendeyapy.com` responde 404** (dejó staging, prod no lo sirve hasta el TXT). El bot de WhatsApp NO depende del dominio (webhook apunta directo a functions) y el panel sigue en `vpw-prod-dd6ff.web.app`.
-
-**Para cerrar la fase cuando el owner confirme el DNS**: verificar `nslookup -type=TXT vendeyapy.com` y CNAME de www → comprobar `ownershipState=OWNERSHIP_ACTIVE` vía API Hosting (`GET /v1beta1/projects/vpw-prod-dd6ff/sites/vpw-prod-dd6ff/customDomains`) → smoke: `https://vendeyapy.com` sirve el panel real (200, bundle con projectId `vpw-prod-dd6ff`), `www` redirige al apex, login funciona en el dominio, `vpw-prod-dd6ff.web.app` sigue OK → actualizar este doc y avisar al owner.
-
-### FASE 5 — OPERACIÓN ⏳ PENDIENTE (siguiente después de F4)
+### FASE 5 — OPERACIÓN ⏳ PENDIENTE (siguiente después de la evidencia de F3)
 1. `docs/runbook-arfagi.md` (nuevo): operación diaria del panel para el owner (pedidos/comprobantes/estados, tomar-devolver chats, catálogo con ficha IA, qué hacer si el bot no responde — OJO: si la conexión Meta se degrada, el envío cae a mock EN SILENCIO; la señal es que los clientes no reciben respuestas).
 2. Backups: rutina semanal documentada con `apps/functions/scripts/export-tenant.mjs --include-private`; evaluar exports programados de Firestore (GCP).
 3. Alertas mínimas: presupuesto de facturación GCP con aviso por email + alerta de Cloud Monitoring sobre errores de functions.
@@ -102,8 +93,7 @@ UI del asistente interno de growth · botón "generar ficha con IA" (excluido a 
 
 ## 6. PRIORIDADES (en orden)
 
-1. **Cerrar FASE 4**: en cuanto el owner confirme las 2 ediciones DNS en Hostinger, correr la verificación + smoke de §4-FASE 4. Es lo único que mantiene `vendeyapy.com` caído.
-2. **Evidencia de FASE 3**: primera conversación de número externo → verificación read-only completa (§4-FASE 3).
-3. **FASE 5 completa** (runbook + backups + alertas + docs al día) — programa estándar, sin deploy de código previsto.
-4. **Criterio de "terminado" del proyecto**: una persona externa completa el ciclo entero sin intervención técnica — escribe al +595 986 440752 → el bot recomienda con ficha (honesto en "¿sirve para X?") → carrito → "pagar" crea la orden → foto del comprobante → el vendedor la VE en el panel desde `vendeyapy.com` → confirma el pago → venta registrada con ganancia. Verificación read-only en cada paso + registro público cerrado + backup semanal documentado.
-5. Después de eso: FASE 6 solo a pedido del owner.
+1. **Evidencia de FASE 3**: primera conversación de número externo → verificación read-only completa (§4-FASE 3).
+2. **FASE 5 completa** (runbook + backups + alertas + docs al día) — programa estándar, sin deploy de código previsto.
+3. **Criterio de "terminado" del proyecto**: una persona externa completa el ciclo entero sin intervención técnica — escribe al +595 986 440752 → el bot recomienda con ficha (honesto en "¿sirve para X?") → carrito → "pagar" crea la orden → foto del comprobante → el vendedor la VE en el panel desde `vendeyapy.com` → confirma el pago → venta registrada con ganancia. Verificación read-only en cada paso + registro público cerrado + backup semanal documentado.
+4. Después de eso: FASE 6 solo a pedido del owner.
