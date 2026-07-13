@@ -54,3 +54,6 @@ _archive/
 
 # Seed generado por el importador de catálogo (no editar a mano)
 70-perfumeria/catalogo/seed-productos.json
+
+# Artefactos del navegador de pruebas (Playwright MCP): capturas/logs de smokes
+.playwright-mcp/
