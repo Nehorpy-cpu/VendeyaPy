@@ -85,3 +85,31 @@ describe('ai/prompts buildSalesSystemPrompt — prohibición de acciones (F2) y 
     expect(prompt).toContain('"la ficha dice"');
   });
 });
+
+describe('ai/prompts buildSalesSystemPrompt — F7 fidelidad de marca/nombre', () => {
+  const prompt = buildSalesSystemPrompt({ agent });
+
+  it('prohíbe presentar una alternativa como si fuera la marca/nombre consultado', () => {
+    expect(prompt).toContain('FIDELIDAD DE MARCA/NOMBRE');
+    expect(prompt).toContain('JAMÁS presentes ni describas un producto marcado "alternativa"');
+  });
+
+  it('sin coincidencia exacta: primero la honestidad, después las alternativas etiquetadas', () => {
+    expect(prompt).toContain('NINGÚN resultado viene marcado "exacta"');
+    expect(prompt).toContain('alternativas de otra marca');
+  });
+
+  it('similitud pedida: las opciones se presentan como alternativas, nunca como X', () => {
+    expect(prompt).toContain('nunca como si fueran X');
+  });
+});
+
+describe('ai/prompts buildSalesSystemPrompt — F7 review: fueraDeFiltros', () => {
+  const prompt = buildSalesSystemPrompt({ agent });
+
+  it('lo excluido por filtro se explica, jamás se niega', () => {
+    expect(prompt).toContain('fueraDeFiltros');
+    expect(prompt).toContain('JAMÁS digas que no lo tenés');
+    expect(prompt).toContain('mencionala como posible motivo en vez de afirmar que el producto no existe');
+  });
+});

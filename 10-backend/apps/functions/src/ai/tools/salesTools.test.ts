@@ -89,3 +89,86 @@ describe('ai/salesTools listar_promociones_activas', () => {
     expect('productIds' in out[0]!).toBe(false);
   });
 });
+
+/**
+ * F7 (fidelidad de marca/nombre): la pertenencia es DETERMINÍSTICA — cada resultado viaja marcado
+ * `coincidencia: exacta|alternativa` (mismo matcher que el pinning) y la similitud explícita
+ * ("parecido a X") habilita `allowSimilar`. El bug de prod: consulta "Supremacy" devolvió también
+ * Odyssey y la IA lo presentó como "opción Supremacy".
+ */
+describe('ai/salesTools buscar_productos — F7 fidelidad de marca/nombre', () => {
+  const nova = product({ id: 'nova', name: 'Nova Prime', perfume: { brand: 'Lumen', styleTags: [] } });
+  const zephyr = product({ id: 'zephyr', name: 'Zephyr Mega', perfume: { brand: 'Aris', styleTags: [] } });
+
+  it('consulta directa: NO habilita allowSimilar y marca exacta/alternativa por matcher', async () => {
+    let seen: { filters?: CatalogFilters } = {};
+    const deps = {
+      searchCatalog: async (_t: string, filters: CatalogFilters) => { seen = { filters }; return [nova]; },
+    };
+    const out = (await buscarProductos.execute('perfumeria', { consulta: '¿tenés el Nova Prime?' }, deps)) as Array<Record<string, unknown>>;
+    expect(seen.filters?.allowSimilar).toBe(false);
+    expect(out[0]!.coincidencia).toBe('exacta');
+  });
+
+  it('pedido de similares: habilita allowSimilar y las no-coincidencias van como alternativa', async () => {
+    let seen: { filters?: CatalogFilters } = {};
+    const deps = {
+      searchCatalog: async (_t: string, filters: CatalogFilters) => { seen = { filters }; return [nova, zephyr]; },
+    };
+    const out = (await buscarProductos.execute('perfumeria', { consulta: 'algo parecido al nova' }, deps)) as Array<Record<string, unknown>>;
+    expect(seen.filters?.allowSimilar).toBe(true);
+    expect(out.find((p) => p.id === 'nova')!.coincidencia).toBe('exacta');
+    expect(out.find((p) => p.id === 'zephyr')!.coincidencia).toBe('alternativa');
+  });
+
+  it('sin coincidencia real: TODOS los resultados van marcados alternativa', async () => {
+    const deps = { searchCatalog: async () => [nova, zephyr] };
+    const out = (await buscarProductos.execute('perfumeria', { consulta: 'tienen algo de marcafantasma?' }, deps)) as Array<Record<string, unknown>>;
+    expect(out.every((p) => p.coincidencia === 'alternativa')).toBe(true);
+  });
+
+  it('sin consulta: no viaja el campo coincidencia (recomendación general)', async () => {
+    const deps = { searchCatalog: async () => [nova] };
+    const out = (await buscarProductos.execute('perfumeria', { estilo: 'dulce' }, deps)) as Array<Record<string, unknown>>;
+    expect('coincidencia' in out[0]!).toBe(false);
+  });
+
+  it('normalización: acentos/mayúsculas/puntuación no rompen la marca de pertenencia', async () => {
+    const deps = { searchCatalog: async () => [nova] };
+    const out = (await buscarProductos.execute('perfumeria', { consulta: '¿NÓVA prime?!' }, deps)) as Array<Record<string, unknown>>;
+    expect(out[0]!.coincidencia).toBe('exacta');
+  });
+});
+
+describe('ai/salesTools buscar_productos — F7 review: gate de entidad y fueraDeFiltros', () => {
+  const nova2 = product({ id: 'nova', name: 'Nova Prime', perfume: { brand: 'Lumen', styleTags: [] } });
+  const zephyr2 = product({ id: 'zephyr', name: 'Zephyr Mega', perfume: { brand: 'Aris', styleTags: [] } });
+
+  it('consulta GENÉRICA (estilo/ocasión): el campo coincidencia NO viaja', async () => {
+    const deps = { searchCatalog: async () => [nova2, zephyr2] };
+    const out = (await buscarProductos.execute('perfumeria', { consulta: 'algo dulce para la noche' }, deps)) as Array<Record<string, unknown>>;
+    expect(out.every((p) => 'coincidencia' in p === false)).toBe(true);
+  });
+
+  it('coincidencia excluida por PRECIO: viaja primero, exacta + fueraDeFiltros (nunca "no lo tenemos")', async () => {
+    const caro = product({ id: 'caro', name: 'Nova Lux', price: 900000, perfume: { brand: 'Lumen', styleTags: [] } });
+    const deps = {
+      searchCatalog: async (_t: string, filters: CatalogFilters) => (filters.maxPrice ? [zephyr2] : [caro]),
+    };
+    const out = (await buscarProductos.execute('perfumeria', { consulta: '¿tenés el nova lux?', precioMax: 200000 }, deps)) as Array<Record<string, unknown>>;
+    expect(out[0]!.name).toBe('Nova Lux');
+    expect(out[0]!.coincidencia).toBe('exacta');
+    expect(out[0]!.fueraDeFiltros).toBe(true);
+    expect(out.find((p) => p.id === 'zephyr')!.coincidencia).toBe('alternativa');
+  });
+
+  it('coincidencia excluida por GÉNERO: mismo rescate', async () => {
+    const masc = product({ id: 'masc', name: 'Nova Homme', perfume: { brand: 'Lumen', gender: 'Masculino', styleTags: [] } });
+    const deps = {
+      searchCatalog: async (_t: string, filters: CatalogFilters) => (filters.gender ? [] : [masc]),
+    };
+    const out = (await buscarProductos.execute('perfumeria', { consulta: 'nova homme para mujer', genero: 'Femenino' }, deps)) as Array<Record<string, unknown>>;
+    expect(out[0]!.name).toBe('Nova Homme');
+    expect(out[0]!.fueraDeFiltros).toBe(true);
+  });
+});

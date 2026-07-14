@@ -36,7 +36,7 @@ import { getAgentConfig } from './agentConfig.js';
 import { runSalesAgent } from '../ai/salesAgent.js';
 import type { AiMessage } from '../ai/types.js';
 import { appendMessage, listRecentMessages } from './messages.js';
-import { queryTokens } from '../catalog/match.js';
+import { queryTokens, esBusquedaSimilar } from '../catalog/match.js';
 import { detectarOcasionContexto } from '../catalog/fichaRank.js';
 import { veredictoOcasion, respuestaOcasionNoConviene, respuestaOcasionConviene } from './productOccasion.js';
 import { createPendingOrder } from '../orders/createPendingOrder.js';
@@ -577,6 +577,11 @@ export async function decidirRespuesta(
   // 5. Catálogo / búsqueda
   if (quiereCatalogo(t)) {
     const filtros: CatalogFilters = {
+      // F7 (review): si el turno NOMBRA un producto/marca ("mostrame el supremacy", "tenes X o
+      // algo dulce" sin "?"), la fidelidad estricta aplica también en esta ruta rule-based —
+      // antes solo la IA la tenía y la cobertura dependía del signo de pregunta.
+      query: t,
+      allowSimilar: esBusquedaSimilar(t),
       gender: detectarGenero(t),
       styleTag: detectarEstilo(t),
       ...detectarPrecio(t),

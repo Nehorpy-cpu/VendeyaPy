@@ -100,6 +100,67 @@ export function productMatchScore(query: string, p: NameMatchable): number {
   return score;
 }
 
+/**
+ * F7: vocabulario de ESTILO/OCASIÓN que puede colisionar con nombres de producto ("Dulce
+ * Tentación"). Gatea SOLO la fidelidad estricta (nunca el pinning/orden): una consulta cuyo
+ * único vínculo con el producto es una palabra de estilo es una búsqueda por TIPO, no por
+ * entidad. Espeja el vocabulario de detectarEstilo (engine) y las ocasiones (fichaRank).
+ */
+const STYLE_OCCASION_WORDS = new Set([
+  'dulce', 'dulces', 'azucar', 'vainilla', 'gourmand', 'floral', 'florales', 'flor', 'rosas',
+  'jazmin', 'fresco', 'fresca', 'frescos', 'ligero', 'limpio', 'intenso', 'intensa', 'fuerte',
+  'seductor', 'potente', 'arabe', 'oud', 'citrico', 'citrica', 'limon', 'frutal', 'fruta',
+  'amaderado', 'amaderada', 'madera', 'noche', 'nocturno', 'dia', 'oficina', 'verano',
+  'invierno', 'otono', 'primavera', 'elegante', 'suave', 'moderado', 'moderada', 'diario', 'fiesta', 'fiestas',
+]);
+
+/** F7: tokens de la consulta con poder de IDENTIDAD (ni genéricos ni de estilo/ocasión). */
+export function tokensIdentitarios(text: string): string[] {
+  return queryTokens(text).filter((t) => !STYLE_OCCASION_WORDS.has(t));
+}
+
+/**
+ * F7: ¿la consulta identifica una ENTIDAD (nombre/marca) dentro de los matches? Verdadero si
+ * algún token identitario de la consulta aparece en el nombre/marca de algún match. Gatea la
+ * fidelidad estricta: "algo dulce" que matchea "Dulce Tentación" es búsqueda por estilo (no
+ * recorta el listado); "¿tenés supremacy?" es búsqueda por entidad (recorta a las coincidencias).
+ */
+export function hayConsultaDeEntidad(query: string, matches: NameMatchable[]): boolean {
+  const ids = new Set(tokensIdentitarios(query));
+  if (ids.size === 0) return false;
+  return matches.some((p) =>
+    normalizeText(`${p.name ?? ''} ${p.perfume?.brand ?? ''}`)
+      .split(' ')
+      .some((t) => ids.has(t)),
+  );
+}
+
+/** Frases de similitud, sobre texto YA normalizado (sin acentos/signos). Jerga real de es-PY. */
+const SIMILAR_PATTERNS: RegExp[] = [
+  /\b(parecid[oa]s?|similar(es)?|alternativas?|equivalentes?|sustitutos?|reemplazos?)\b/,
+  /\bclon(es)?\b/, // "un clon del invictus" (jerga perfumera)
+  /\bversion(es)? (de|del)\b/,
+  /\btipo [a-z0-9]/, // "un perfume tipo invictus"
+  /\bhuel[ae]n? (a|como|igual|parecido)\b/, // "que huela como el..."
+  /\bmismo (olor|aroma|perfume) que\b/,
+  /\bigual(it[oa])? al? \S/, // "igual al invictus"
+  /\b(algo|alguno|alguna|uno|una) como \S/,
+  /\b(del|un|el|mismo) estilo (de|del|que|a)\b/,
+  /\bse parezcan?\b/,
+];
+
+/**
+ * F7: ¿el cliente pide SIMILARES/alternativas ("parecido a X", "tipo X", "un clon del X")?
+ * Determinística y genérica (sin marcas ni productos). Decide si la búsqueda por nombre/marca
+ * puede acompañarse con no-coincidentes (searchCatalog `allowSimilar`). La NEGACIÓN de
+ * similitud ("no quiero nada parecido, quiero el original") es consulta directa.
+ */
+export function esBusquedaSimilar(text: string): boolean {
+  const t = normalizeText(text);
+  if (/\b(no (quiero|busco|me interesa)( nada| algo)?|nada) (parecid|similar|tipo|igual)/.test(t)) return false;
+  return SIMILAR_PATTERNS.some((re) => re.test(t));
+}
+
 export interface NameMatchOptions {
   minScore?: number;
   /**

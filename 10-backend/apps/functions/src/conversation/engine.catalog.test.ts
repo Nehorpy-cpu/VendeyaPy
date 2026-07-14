@@ -445,3 +445,20 @@ describe('conversation/engine decidirRespuesta — rama catálogo (F1)', () => {
     expect(searchCatalogMock).toHaveBeenCalledWith('t1', expect.objectContaining({ texto: expect.stringContaining('noche') }));
   });
 });
+
+describe('conversation/engine decidirRespuesta — F7: la ruta catálogo pasa query/allowSimilar', () => {
+  it('el texto del turno viaja como query (fidelidad estricta server-side)', async () => {
+    searchCatalogMock.mockResolvedValue([producto]);
+    await decidirRespuesta('t1', 'c1', 'mostrame el supremacy', false, { ...prev });
+    expect(searchCatalogMock).toHaveBeenCalledWith(
+      't1',
+      expect.objectContaining({ query: 'mostrame el supremacy', allowSimilar: false }),
+    );
+  });
+
+  it('la similitud pedida viaja como allowSimilar', async () => {
+    searchCatalogMock.mockResolvedValue([producto]);
+    await decidirRespuesta('t1', 'c1', 'mostrame algo parecido al supremacy', false, { ...prev });
+    expect(searchCatalogMock).toHaveBeenCalledWith('t1', expect.objectContaining({ allowSimilar: true }));
+  });
+});

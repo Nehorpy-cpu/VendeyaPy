@@ -64,11 +64,29 @@ export function respuestaOcasionNoConviene(p: Product, ocasion: OcasionContexto,
   );
 }
 
+/**
+ * F7 (gramática): compone ": ideal …" desde el cuándo-recomendar del vendedor SIN dobles
+ * conectores — el bug de prod: "ideal si cuando buscan proyección monstruosa y duración".
+ * Respeta el conector que el vendedor ya escribió (si/cuando/para) y agrega "si" solo cuando
+ * falta; quita prefijos ya redactados ("es ideal…") y la puntuación colgante. '' sin texto.
+ * Pura y exportada para tests.
+ */
+export function fraseCuandoRecomendar(cuandoRecomendar: string | undefined | null): string {
+  let t = (cuandoRecomendar ?? '').trim().replace(/\s+/g, ' ');
+  // Prefijos ya redactados: "Es ideal para la noche" / "Ideal si busca duración" → no duplicar "ideal".
+  t = t.replace(/^(es\s+)?ideal(es)?\b[\s,:]*/iu, '');
+  if (!t) return '';
+  t = cap(t).replace(/[.,;:\s]+$/u, ''); // tope de burbuja + sin puntuación antes del ". ¿Te lo agrego?"
+  // Sin letras (solo emojis/números) no hay frase componible: mejor caer al motivo por ficha.
+  if (!/[a-zñáéíóúü]/iu.test(t)) return '';
+  t = t.charAt(0).toLowerCase() + t.slice(1); // sigue a "ideal …" en minúscula
+  const traeConector = /^(si|cuando|para|en|durante|al)\b/iu.test(t);
+  return `: ideal ${traeConector ? '' : 'si '}${t}`;
+}
+
 /** La ficha dice que sí: confirmación honesta con el porqué + oferta del consultado. */
 export function respuestaOcasionConviene(p: Product, ocasion: OcasionContexto): string {
   const f = p.aiFicha ?? {};
-  const motivo = f.cuandoRecomendar?.trim()
-    ? `: ideal si ${cap(f.cuandoRecomendar)}`
-    : motivoDesdeFicha(p).replace(' — ', ': ');
+  const motivo = fraseCuandoRecomendar(f.cuandoRecomendar) || motivoDesdeFicha(p).replace(' — ', ': ');
   return `¡Sí! El *${p.name}* va muy bien para ${OCASION_LABEL[ocasion]}${motivo}. ¿Te lo agrego?`;
 }

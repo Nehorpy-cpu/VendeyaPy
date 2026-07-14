@@ -10,7 +10,7 @@
 
 import type { Product } from '@vpw/shared';
 import { db, paths } from '../lib/firebase.js';
-import { splitByQueryMatch, bestNameMatch } from './match.js';
+import { splitByQueryMatch, bestNameMatch, hayConsultaDeEntidad } from './match.js';
 import { fichaScore } from './fichaRank.js';
 
 export interface CatalogFilters {
@@ -28,20 +28,26 @@ export interface CatalogFilters {
    * Solo afecta el ORDEN de los no-pinneados; no pinnea por nombre (eso es `query`) ni filtra.
    */
   texto?: string;
+  /**
+   * F7: el cliente pidió SIMILARES ("parecido a X", "alternativa a X") → los no-coincidentes
+   * pueden acompañar a los matches de `query`. Sin este flag, una consulta que nombró un
+   * producto/marca con coincidencias reales devuelve SOLO esas (fidelidad estricta).
+   */
+  allowSimilar?: boolean;
 }
 
-export async function searchCatalog(
-  tenantId: string,
-  filters: CatalogFilters = {},
-): Promise<Product[]> {
-  // Solo productos activos y con stock
-  const snap = await db()
-    .collection(paths.products(tenantId))
-    .where('status', '==', 'ACTIVE')
-    .get();
+/** Costo/prioridad privados por producto (Modo Ganancia). */
+type FinMap = Map<string, { cost: number | null; priority: number }>;
 
-  const activos = snap.docs.map((d) => d.data() as Product).filter((p) => p.inventory?.stock > 0);
-
+/**
+ * F7: composición PURA de resultados (sin E/S) — filtros explícitos, pinning por nombre/marca
+ * y ranking. Exportada para tests. Los `activos` ya vienen filtrados por status/stock.
+ */
+export function componerResultados(
+  activos: Product[],
+  filters: CatalogFilters,
+  finMap: FinMap = new Map(),
+): Product[] {
   // Filtros explícitos PRIMERO (F1B): el contrato de la tool (precioMax/género/estilo declarados
   // por el cliente) se respeta siempre. Con F1 el género ya no tiene default, así que acá solo
   // llega lo que el cliente dijo.
@@ -58,20 +64,18 @@ export async function searchCatalog(
     productos = productos.filter((p) => p.price <= filters.maxPrice!);
   }
 
-  // F1B: la consulta por nombre/marca decide el ORDEN — los matches van PRIMERO (pinned),
-  // el resto se rankea por relevancia como siempre.
+  // F1B: la consulta por nombre/marca decide el ORDEN — los matches van PRIMERO (pinned).
   const { pinned, rest } = splitByQueryMatch(filters.query, productos);
-  productos = rest;
 
-  // Modo Ganancia: leer costo/prioridad (privado, server-side) para rankear por rentabilidad.
-  const finMap = new Map<string, { cost: number | null; priority: number }>();
-  if (filters.profitMode) {
-    const fs = await db().collection(paths.productFinancials(tenantId)).get();
-    fs.docs.forEach((d) => {
-      const f = d.data() as { costPrice?: number | null; priorityScore?: number | null };
-      finMap.set(d.id, { cost: f.costPrice ?? null, priority: f.priorityScore ?? 0 });
-    });
+  // F7 (fidelidad estricta): si la consulta NOMBRÓ un producto/marca (token de ENTIDAD, no de
+  // estilo — "algo dulce" que matchea "Dulce Tentación" no recorta) y hay coincidencias reales,
+  // se devuelven SOLO esas — jamás rellenar con similares (el bug de prod: "¿tienen Supremacy?"
+  // devolvía también Odyssey y la IA lo presentó como si fuera Supremacy). El relleno por
+  // similitud queda reservado al pedido explícito de similares (`allowSimilar`).
+  if (pinned.length > 0 && !filters.allowSimilar && hayConsultaDeEntidad(filters.query ?? '', pinned)) {
+    return pinned.slice(0, filters.limit ?? 3);
   }
+  productos = rest;
 
   // Score por coincidencia de estilo + ficha (CAT-2) + destacado/nuevo + rentabilidad (Modo Ganancia).
   const scored = productos.map((p) => {
@@ -91,6 +95,31 @@ export async function searchCatalog(
   scored.sort((a, b) => b.score - a.score || Number(b.p.featured) - Number(a.p.featured));
 
   return [...pinned, ...scored.map((s) => s.p)].slice(0, filters.limit ?? 3);
+}
+
+export async function searchCatalog(
+  tenantId: string,
+  filters: CatalogFilters = {},
+): Promise<Product[]> {
+  // Solo productos activos y con stock
+  const snap = await db()
+    .collection(paths.products(tenantId))
+    .where('status', '==', 'ACTIVE')
+    .get();
+
+  const activos = snap.docs.map((d) => d.data() as Product).filter((p) => p.inventory?.stock > 0);
+
+  // Modo Ganancia: leer costo/prioridad (privado, server-side) para rankear por rentabilidad.
+  const finMap: FinMap = new Map();
+  if (filters.profitMode) {
+    const fs = await db().collection(paths.productFinancials(tenantId)).get();
+    fs.docs.forEach((d) => {
+      const f = d.data() as { costPrice?: number | null; priorityScore?: number | null };
+      finMap.set(d.id, { cost: f.costPrice ?? null, priority: f.priorityScore ?? 0 });
+    });
+  }
+
+  return componerResultados(activos, filters, finMap);
 }
 
 /** Trae un producto por su id (SKU). null si no existe. */

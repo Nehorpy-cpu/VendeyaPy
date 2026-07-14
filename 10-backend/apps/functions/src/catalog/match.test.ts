@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { normalizeText, queryTokens, productMatchScore, bestNameMatch, splitByQueryMatch } from './match.js';
+import { normalizeText, queryTokens, productMatchScore, bestNameMatch, splitByQueryMatch, esBusquedaSimilar, tokensIdentitarios, hayConsultaDeEntidad } from './match.js';
 
 /**
  * F1B: matcher parcial tokenizado por nombre/marca. Casos reales del catálogo de arfagi
@@ -119,5 +119,57 @@ describe('catalog/match splitByQueryMatch (pinning para buscar_productos)', () =
   it('varios matches → orden por score (marca+nombre gana a marca sola)', () => {
     const { pinned } = splitByQueryMatch('Armaf Odyssey', catalogo);
     expect(pinned[0]).toBe(odyssey);
+  });
+});
+
+describe('catalog/match esBusquedaSimilar (F7)', () => {
+  it('detecta pedidos de similares/alternativas', () => {
+    expect(esBusquedaSimilar('algo parecido al Supremacy')).toBe(true);
+    expect(esBusquedaSimilar('una alternativa al supremacy')).toBe(true);
+    expect(esBusquedaSimilar('¿tenés algo SIMILAR?')).toBe(true);
+    expect(esBusquedaSimilar('algo como el odyssey')).toBe(true);
+    expect(esBusquedaSimilar('algo tipo good girl')).toBe(true);
+    expect(esBusquedaSimilar('del estilo de la vie est belle')).toBe(true);
+    expect(esBusquedaSimilar('que se parezca al invictus')).toBe(true);
+  });
+
+  it('NO detecta consultas directas por producto/marca (fidelidad estricta)', () => {
+    expect(esBusquedaSimilar('¿Qué perfumes tienen que sean Supremacy?')).toBe(false);
+    expect(esBusquedaSimilar('tenes supremacy?')).toBe(false);
+    expect(esBusquedaSimilar('mostrame los armaf')).toBe(false);
+    expect(esBusquedaSimilar('quiero ver el odyssey')).toBe(false);
+    expect(esBusquedaSimilar('un perfume dulce para regalar')).toBe(false);
+  });
+});
+
+describe('catalog/match esBusquedaSimilar — F7 review: jerga real y negación', () => {
+  it('jerga perfumera de similares (tipo/clon/huela como/igual al/versión)', () => {
+    expect(esBusquedaSimilar('quiero un perfume tipo invictus')).toBe(true);
+    expect(esBusquedaSimilar('un clon del invictus')).toBe(true);
+    expect(esBusquedaSimilar('que huela como el invictus')).toBe(true);
+    expect(esBusquedaSimilar('algo igual al invictus')).toBe(true);
+    expect(esBusquedaSimilar('el mismo olor que el invictus')).toBe(true);
+    expect(esBusquedaSimilar('una versión del invictus')).toBe(true);
+  });
+
+  it('la negación de similitud es consulta DIRECTA (fidelidad estricta)', () => {
+    expect(esBusquedaSimilar('no quiero nada parecido, quiero el supremacy original')).toBe(false);
+    expect(esBusquedaSimilar('nada similar, el original')).toBe(false);
+    expect(esBusquedaSimilar('¿no tenés algo parecido al invictus?')).toBe(true); // pregunta real de similares
+  });
+});
+
+describe('catalog/match tokensIdentitarios / hayConsultaDeEntidad (F7 review)', () => {
+  it('las palabras de estilo/ocasión no identifican entidades', () => {
+    expect(tokensIdentitarios('algo dulce para la noche')).toEqual([]);
+    expect(tokensIdentitarios('¿tenés supremacy?')).toEqual(['supremacy']);
+  });
+
+  it('gate de entidad: estilo que colisiona con el nombre NO es entidad; el nombre real SÍ', () => {
+    const dulce = { name: 'Dulce Tentación', perfume: { brand: 'Lumen' } };
+    expect(hayConsultaDeEntidad('algo dulce', [dulce])).toBe(false);
+    expect(hayConsultaDeEntidad('tenes la tentacion dulce?', [dulce])).toBe(true);
+    expect(hayConsultaDeEntidad('tenes supremacy', [supremacy])).toBe(true);
+    expect(hayConsultaDeEntidad('mostrame los lumen', [dulce])).toBe(true); // marca también es entidad
   });
 });

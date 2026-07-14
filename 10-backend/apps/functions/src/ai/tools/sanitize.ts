@@ -55,6 +55,17 @@ export interface PublicProduct {
   aiNotes: string;
   /** Ficha estructurada (CAT-2). Ausente si el producto no tiene datos de ficha. */
   ficha?: PublicProductFicha;
+  /**
+   * F7: pertenencia DETERMINÍSTICA respecto de la `consulta` (la marca salesTools, no este
+   * sanitizador): 'exacta' = coincide de verdad con el nombre/marca consultado; 'alternativa' =
+   * NO pertenece a lo consultado (solo ofrecible como alternativa explícita). Ausente sin consulta.
+   */
+  coincidencia?: 'exacta' | 'alternativa';
+  /**
+   * F7: el producto SÍ existe y coincide con la consulta, pero quedó fuera del filtro explícito
+   * que pidió el cliente (precio máximo / género). La IA debe explicarlo, nunca negarlo.
+   */
+  fueraDeFiltros?: boolean;
 }
 
 const fichaText = (s: string | undefined | null): string | undefined => {
