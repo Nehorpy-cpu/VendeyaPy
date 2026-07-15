@@ -56,6 +56,14 @@ export interface SessionContext {
   humanTakeover: boolean;
   /** F3: oferta de carrito pendiente de confirmación (ausente/null = no hay oferta vigente). */
   pendingCartConfirmation?: PendingCartConfirmation | null;
+  /** HANDOFF-2: razón estructurada del takeover vigente (null al liberar). */
+  handoffReason?: 'customer_requested' | 'payment_verification' | 'coverage_review' | 'seller_manual' | null;
+  /** HANDOFF-2: nombre del vendedor al que se derivó (auditoría mínima). */
+  handoffSellerName?: string | null;
+  /** HANDOFF-2: momento del handoff vigente. */
+  handoffAt?: Timestamp | null;
+  /** HANDOFF-2: id determinístico del disparador (wamid entrante / orderId) para idempotencia. */
+  handoffSourceId?: string | null;
 }
 
 export interface Session {

@@ -99,7 +99,16 @@ export async function processWebhookEvent(eventId: string): Promise<void> {
     }
 
     // A esta altura no es imagen → el guard de arriba garantiza text presente.
-    const result = await handleMessage({ tenantId, from: payload.from, text: payload.text!, channel: platform, receivedByPhoneNumberId: receivedBy });
+    const result = await handleMessage({
+      tenantId,
+      from: payload.from,
+      text: payload.text!,
+      channel: platform,
+      receivedByPhoneNumberId: receivedBy,
+      // HANDOFF-2: el wamid viaja al motor para que el aviso de handoff sea idempotente
+      // ante reintentos/duplicados del webhook.
+      messageId: payload.messageId ?? ev.id,
+    });
     await incrementMessageUsage(tenantId).catch(() => { /* métrica de uso, no crítica */ });
 
     // Entregar la respuesta por el MISMO número que recibió (multi-número); mock/live intactos.

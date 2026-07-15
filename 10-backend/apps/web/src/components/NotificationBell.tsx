@@ -63,8 +63,14 @@ export function NotificationBell() {
                   <div className="text-sm font-semibold text-ink-900">{nf.title}</div>
                   <p className="mt-0.5 text-xs leading-snug text-ink-500">{nf.body}</p>
                   <div className="mt-2 flex items-center gap-3">
-                    <Link href="/billing" onClick={() => setOpen(false)} className="text-xs font-semibold text-mint-700 hover:text-mint-600">
-                      Ver planes
+                    {/* HANDOFF-2: el CTA depende de la categoría — un pedido de atención humana
+                        lleva a Conversaciones, no a facturación. */}
+                    <Link
+                      href={nf.category === 'handoff' ? '/conversations' : '/billing'}
+                      onClick={() => setOpen(false)}
+                      className="text-xs font-semibold text-mint-700 hover:text-mint-600"
+                    >
+                      {nf.category === 'handoff' ? 'Ver conversación' : 'Ver planes'}
                     </Link>
                     <button
                       onClick={() => markRead.mutate(nf.id)}

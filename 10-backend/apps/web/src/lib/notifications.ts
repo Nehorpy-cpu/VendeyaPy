@@ -5,7 +5,7 @@
  * `{ read, readAt }` — lo único que permiten las rules (`update: hasOnly(['read','readAt'])`).
  */
 import { collection, doc, getDocs, updateDoc, serverTimestamp } from 'firebase/firestore';
-import type { Notification, TrialNotificationType } from '@vpw/shared';
+import type { Notification } from '@vpw/shared';
 import { firebaseDb } from './firebase';
 
 const notificationsCol = (tenantId: string) => collection(firebaseDb(), 'tenants', tenantId, 'notifications');
@@ -30,7 +30,13 @@ export async function markNotificationRead(tenantId: string, notificationId: str
 }
 
 // Severidad para ordenar (más urgente primero). PURA → testeable.
-const SEVERITY: Record<TrialNotificationType, number> = { trial_expired: 3, trial_ending_today: 2, trial_ending_soon: 1 };
+// HANDOFF-2: un cliente esperando a una persona es lo más urgente de la campana.
+const SEVERITY: Record<Notification['type'], number> = {
+  handoff_customer_requested: 4,
+  trial_expired: 3,
+  trial_ending_today: 2,
+  trial_ending_soon: 1,
+};
 
 /** No leídas, más urgentes primero (vencido > hoy > por vencer). PURA. */
 export function selectUnreadSorted(list: Notification[]): Notification[] {

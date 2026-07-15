@@ -16,6 +16,7 @@ import type { Order } from '@vpw/shared';
 import { db, paths } from '../lib/firebase.js';
 import { logger } from '../lib/logger.js';
 import { getCheckoutConfig, pickSeller } from './checkoutConfig.js';
+import { executeHandoff } from '../conversation/handoff.js';
 
 export interface ComprobanteResult {
   ok: boolean;
@@ -70,22 +71,22 @@ export async function submitComprobante(
       createdAt: now,
     });
 
-  // 4. Sesión → atención humana (el bot deja de responder). La oferta de carrito pendiente
-  //    muere acá (F3): el flujo pasó a verificación de pago, un "sí" al vendedor no agrega nada.
-  await db()
-    .doc(paths.session(tenantId, order.customerId))
-    .update({
-      'context.humanTakeover': true,
-      'context.pendingOrderId': orderId,
-      'context.pendingCartConfirmation': null,
-      updatedAt: now,
-    });
-  // HUMAN-HANDOFF-1: sincronizar TAMBIÉN el resumen del customer — el panel calcula "quién
-  // atiende" y el composer desde conversation.humanTakeover; si queda desfasado, el vendedor
-  // no ve el composer justo en el caso central (comprobante recién recibido).
-  await db()
-    .doc(paths.customer(tenantId, order.customerId))
-    .set({ conversation: { humanTakeover: true }, updatedAt: now }, { merge: true });
+  // 4. Sesión → atención humana vía el servicio CANÓNICO (HANDOFF-2): transaccional e
+  //    idempotente, con razón estructurada 'payment_verification'. La oferta de carrito
+  //    pendiente muere ahí (F3) y el resumen del customer queda sincronizado para el panel
+  //    (HUMAN-HANDOFF-1: composer visible + quién atiende).
+  const handoff = await executeHandoff(tenantId, order.customerId, {
+    reason: 'payment_verification',
+    sellerName: seller?.name ?? null,
+    sourceId: orderId,
+    pendingOrderId: orderId,
+    // Review: sin sesión (edge), el takeover se persiste igual creando la sesión mínima —
+    // la confirmación "te estoy pasando con…" jamás sale sin takeover persistido.
+    createSessionIfMissing: true,
+  });
+  if (!handoff.ok) {
+    logger.warn('submitComprobante: takeover no aplicado', { tenantId, orderId });
+  }
 
   // 5. Notificar al vendedor (producción: WhatsApp; dev: log)
   logger.info('Handoff a vendedor', {

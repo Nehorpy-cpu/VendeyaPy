@@ -113,3 +113,14 @@ describe('ai/prompts buildSalesSystemPrompt — F7 review: fueraDeFiltros', () =
     expect(prompt).toContain('mencionala como posible motivo en vez de afirmar que el producto no existe');
   });
 });
+
+describe('ai/prompts buildSalesSystemPrompt — HANDOFF-2: prohibición de transferencias falsas', () => {
+  const prompt = buildSalesSystemPrompt({ agent });
+
+  it('la IA jamás promete pases ni avisos a personas', () => {
+    expect(prompt).toContain('NO podés transferir el chat');
+    expect(prompt).toContain('"te paso con"');
+    expect(prompt).toContain('"un segundo que lo llamo"');
+    expect(prompt).toContain('sin prometer transferencias ni tiempos');
+  });
+});

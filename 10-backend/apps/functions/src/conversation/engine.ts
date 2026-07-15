@@ -39,6 +39,7 @@ import { appendMessage, listRecentMessages } from './messages.js';
 import { queryTokens, esBusquedaSimilar } from '../catalog/match.js';
 import { detectarOcasionContexto } from '../catalog/fichaRank.js';
 import { veredictoOcasion, respuestaOcasionNoConviene, respuestaOcasionConviene } from './productOccasion.js';
+import { esPosiblePedidoHumano, procesarPedidoHumano } from './humanRequest.js';
 import { createPendingOrder } from '../orders/createPendingOrder.js';
 import { resolveCheckoutReuse } from '../orders/checkoutReuse.js';
 import { getCheckoutConfig, formatTransferInstructions } from '../orders/checkoutConfig.js';
@@ -55,6 +56,8 @@ export interface ConversationInput {
   channel?: MessageChannel;
   /** MULTI-NUMBER-1: phone_number_id del número del negocio que RECIBIÓ el mensaje. */
   receivedByPhoneNumberId?: string | null;
+  /** HANDOFF-2: wamid del mensaje entrante (idempotencia de avisos de handoff). */
+  messageId?: string | null;
 }
 
 export interface ConversationResult {
@@ -916,6 +919,37 @@ export async function handleMessage(input: ConversationInput): Promise<Conversat
       pendingCart: null,
     };
   }
+  // HANDOFF-2: el cliente PIDE una persona ("quiero hablar con un vendedor / con [nombre]") →
+  // transición REAL server-side ANTES de la IA (que en prod prometió "un segundo que lo llamo"
+  // sin poder ejecutar nada). La confirmación sale recién DESPUÉS de persistir el takeover.
+  if (!result && esPosiblePedidoHumano(text)) {
+    const hr = await procesarPedidoHumano(tenantId, customerId, text, { messageId: input.messageId ?? null });
+    if (hr.handled && hr.takeover) {
+      if (hr.reply.trim()) {
+        await appendMessage(tenantId, customerId, {
+          direction: 'out',
+          author: 'bot',
+          text: hr.reply,
+          state: existing?.state ?? 'IDLE',
+          humanTakeover: true,
+          // El vendedor tiene algo pendiente: el badge de "sin leer" de /conversations es la
+          // señal operativa del handoff (la campana avisa al owner).
+          countUnread: true,
+          channel,
+          receivedVia: input.receivedByPhoneNumberId ?? null,
+        });
+      }
+      // El estado del handoff ya quedó persistido por el servicio canónico: acá NO se pisa la
+      // sesión (el tail genérico escribiría humanTakeover=false del snapshot previo).
+      logger.info('Handoff por pedido del cliente', { tenantId, customer: `…${customerId.slice(-4)}`, reason: 'customer_requested' });
+      return { reply: hr.reply, state: existing?.state ?? 'IDLE' };
+    }
+    if (hr.handled) {
+      // Honestidad sin transición (nombre desconocido/inactivo/ambiguo/sin vendedores): sigue
+      // el flujo normal de sesión — jamás se promete un pase que no persistió.
+      result = { reply: hr.reply, nextState: existing?.state ?? 'BROWSING' };
+    }
+  }
   // F4 (anti-mentiras): un RECLAMO del cliente se responde desde el MOTOR con el estado real
   // del carrito — nunca desde la IA (que en prod inventó "Ya lo agregué" con el carrito vacío).
   // F6: el gate espeja al de la IA — un reclamo como PRIMER mensaje ("Hola, yo quería el X que
@@ -1042,7 +1076,24 @@ export async function handleMessage(input: ConversationInput): Promise<Conversat
   await db()
     .doc(paths.customer(tenantId, customerId))
     .set({ id: customerId, tenantId, whatsappPhone: from, updatedAt: now }, { merge: true });
-  await sessionRef.set(session);
+  // HANDOFF-2 (review): escritura TRANSACCIONAL con re-chequeo fresco — un turno lento en vuelo
+  // (p.ej. IA de varios segundos) no puede PISAR un takeover que se persistió mientras tanto
+  // (pedido de humano / comprobante / panel). Si un humano tomó el chat en el medio, este turno
+  // no escribe la sesión NI responde: la promesa de pausa al cliente se cumple siempre.
+  const tomadoEnElMedio = await db().runTransaction(async (tx) => {
+    const fresh = await tx.get(sessionRef);
+    const ctxFresh = (fresh.data()?.context ?? {}) as Session['context'];
+    if (fresh.exists && ctxFresh.humanTakeover === true) {
+      tx.set(sessionRef, { context: { lastMessageAt: now }, updatedAt: now }, { merge: true });
+      return true;
+    }
+    tx.set(sessionRef, session);
+    return false;
+  });
+  if (tomadoEnElMedio) {
+    logger.info('Turno en vuelo descartado: un humano tomó el chat en el medio', { tenantId, customer: `…${customerId.slice(-4)}` });
+    return { reply: '', state: existing?.state ?? 'IDLE', handledByHuman: true };
+  }
 
   // Guardar la respuesta del bot en el historial (sale por el mismo número que recibió).
   if (reply.trim()) {

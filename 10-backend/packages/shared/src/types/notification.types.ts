@@ -8,12 +8,15 @@ import type { Timestamp } from './common.types.js';
 
 export type TrialNotificationType = 'trial_ending_soon' | 'trial_ending_today' | 'trial_expired';
 
+/** HANDOFF-2: aviso al staff de que un cliente pidió atención humana. */
+export type HandoffNotificationType = 'handoff_customer_requested';
+
 export interface Notification {
   id: string;
   tenantId: string;
-  /** Categoría (por ahora solo `trial`; extensible a futuro). */
-  category: 'trial';
-  type: TrialNotificationType;
+  /** Categoría (`trial` | `handoff`; extensible a futuro). */
+  category: 'trial' | 'handoff';
+  type: TrialNotificationType | HandoffNotificationType;
   title: string;
   body: string;
   /** Clave determinística de idempotencia (= id del doc). 1 por (tenant, tipo) por trial. */
@@ -21,4 +24,6 @@ export interface Notification {
   read: boolean;
   readAt: Timestamp | null;
   createdAt: Timestamp;
+  /** HANDOFF-2: cliente al que refiere el aviso (para abrir /conversations). Solo category 'handoff'. */
+  customerId?: string;
 }
