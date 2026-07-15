@@ -54,6 +54,22 @@ export function extractShownSkus(toolName: string, toolResult: unknown, max = MA
   return extractShownProducts(toolName, toolResult, max).map((p) => p.id);
 }
 
+/**
+ * AI-FALLBACK-HONESTO-1: razón ESTRUCTURADA del bloqueo (nunca comparar textos de error).
+ *  - quota_exhausted: cuota/presupuesto mensual agotado (confirmado por el gate) — único caso
+ *    que habilita el handoff automático `ai_unavailable`.
+ *  - feature_unavailable: feature apagada / trial vencido / cuenta suspendida.
+ *  - configuration_error: sin API key/cliente (gateway 'disabled').
+ *  - provider_transient_error: error/timeout del proveedor (transitorio: NO deriva).
+ *  - empty_reply: el modelo respondió vacío.
+ */
+export type SalesAgentBlockReason =
+  | 'quota_exhausted'
+  | 'feature_unavailable'
+  | 'configuration_error'
+  | 'provider_transient_error'
+  | 'empty_reply';
+
 export type SalesAgentOutcome =
   | {
       used: true;
@@ -63,7 +79,7 @@ export type SalesAgentOutcome =
       shownProducts: Array<{ id: string; name: string }>;
       usedTools: string[];
     }
-  | { used: false; reason: string };
+  | { used: false; reason: SalesAgentBlockReason };
 
 export interface SalesAgentDeps {
   assertBudget: (tenantId: string, estTokens: number) => Promise<void>;
@@ -82,11 +98,21 @@ export async function runSalesAgent(
   input: { tenantId: string; agentConfig: AgentConfig; messages: AiMessage[] },
   deps: SalesAgentDeps = defaultDeps,
 ): Promise<SalesAgentOutcome> {
-  // GATE: feature aiAssistant + presupuesto de tokens. Si no pasa (feature off / cuota) → fallback.
+  // GATE: feature aiAssistant + presupuesto de tokens. Si no pasa → fallback con razón
+  // ESTRUCTURADA por código de error (HttpsError.code), jamás por texto:
+  //  - 'resource-exhausted'  → cuota/presupuesto agotado (habilita el fallback honesto).
+  //  - 'failed-precondition' → feature off / trial vencido / suspensión.
   try {
     await deps.assertBudget(input.tenantId, EST_TOKENS_PER_TURN);
-  } catch {
-    return { used: false, reason: 'gate' };
+  } catch (e) {
+    const code = (e as { code?: string }).code;
+    const reason: SalesAgentBlockReason =
+      code === 'resource-exhausted' ? 'quota_exhausted'
+      : code === 'failed-precondition' ? 'feature_unavailable'
+      // Sin código conocido (Firestore caído, error de infraestructura): transitorio — jamás
+      // se interpreta como cuota agotada ni como feature apagada (review).
+      : 'provider_transient_error';
+    return { used: false, reason };
   }
 
   // Metadata SEGURA capturada server-side durante el loop de tools (no del texto del modelo).
@@ -114,8 +140,11 @@ export async function runSalesAgent(
 
   // disabled (sin API key/cliente) / error (Claude falló) / texto vacío o inválido → fallback rule-based.
   if (result.status !== 'ok' || !result.reply || !result.reply.trim()) {
-    // status 'ok' con reply vacío = 'empty_reply' (no 'ok'): el reason es para diagnóstico/logging.
-    return { used: false, reason: result.status === 'ok' ? 'empty_reply' : result.status };
+    const reason: SalesAgentBlockReason =
+      result.status === 'ok' ? 'empty_reply'
+      : result.status === 'disabled' ? 'configuration_error'
+      : 'provider_transient_error';
+    return { used: false, reason };
   }
 
   // METER: registrar el uso real (tokens + costo). No bloquea la respuesta si falla.

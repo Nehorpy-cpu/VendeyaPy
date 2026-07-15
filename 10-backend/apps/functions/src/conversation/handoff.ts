@@ -21,8 +21,8 @@ export interface HandoffResult {
 /** Mantengo el alias por compatibilidad con código existente. */
 export type ReleaseResult = HandoffResult;
 
-/** HANDOFF-2: razón estructurada de todo takeover (auditable en la sesión). */
-export type HandoffReason = 'customer_requested' | 'payment_verification' | 'coverage_review' | 'seller_manual';
+/** HANDOFF-2 / AI-FALLBACK-HONESTO-1: razón estructurada de todo takeover (auditable en la sesión). */
+export type HandoffReason = 'customer_requested' | 'payment_verification' | 'coverage_review' | 'seller_manual' | 'ai_unavailable';
 
 export interface ExecuteHandoffOptions {
   reason: HandoffReason;
@@ -162,22 +162,29 @@ export async function notifyHandoffRequested(
   customerId: string,
   sellerName: string | null,
   sourceId: string | null,
+  /** AI-FALLBACK-HONESTO-1: motivo del aviso (cambia tipo/título/cuerpo, misma idempotencia). */
+  motivo: 'customer_requested' | 'ai_unavailable' = 'customer_requested',
 ): Promise<boolean> {
   // Sin wamid (dev/simulador): bucket por hora — repetir en la misma hora no duplica el aviso.
   const fallback = `sin-wamid-${new Date(Timestamp.now().toMillis()).toISOString().slice(0, 13)}`;
   const safe = String(sourceId ?? fallback).replace(/[^a-zA-Z0-9_.-]/g, '-').slice(-120);
   const id = `handoff-${customerId}-${safe}`;
   const cliente = `…${customerId.slice(-4)}`;
+  const esIa = motivo === 'ai_unavailable';
   try {
     await db().doc(`${paths.notifications(tenantId)}/${id}`).create({
       id,
       tenantId,
       category: 'handoff',
-      type: 'handoff_customer_requested',
-      title: '🙋 Un cliente pidió atención humana',
-      body: sellerName
-        ? `El cliente ${cliente} pidió hablar con ${sellerName}. El bot quedó en pausa: respondele desde Conversaciones.`
-        : `El cliente ${cliente} pidió hablar con una persona. El bot quedó en pausa: respondele desde Conversaciones.`,
+      type: esIa ? 'handoff_ai_unavailable' : 'handoff_customer_requested',
+      title: esIa ? '🙋 Un cliente necesita atención humana' : '🙋 Un cliente pidió atención humana',
+      body: esIa
+        ? sellerName
+          ? `El asistente no pudo completar la consulta del cliente ${cliente} y lo derivó a ${sellerName}. El bot quedó en pausa: respondele desde Conversaciones.`
+          : `El asistente no pudo completar la consulta del cliente ${cliente} y no hay un vendedor disponible para derivarlo. Revisá la conversación desde Conversaciones.`
+        : sellerName
+          ? `El cliente ${cliente} pidió hablar con ${sellerName}. El bot quedó en pausa: respondele desde Conversaciones.`
+          : `El cliente ${cliente} pidió hablar con una persona. El bot quedó en pausa: respondele desde Conversaciones.`,
       dedupeKey: id,
       customerId,
       read: false,

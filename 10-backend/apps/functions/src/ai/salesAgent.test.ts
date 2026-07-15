@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { runSalesAgent, extractShownSkus, extractShownProducts, MAX_SHOWN_SKUS } from './salesAgent.js';
 import type { SalesAgentDeps } from './salesAgent.js';
 import type { AgentConfig } from '@vpw/shared';
@@ -41,10 +41,10 @@ describe('ai/salesAgent runSalesAgent', () => {
     expect(calls.usage).toEqual([['perfumeria', 200, 0.001]]); // metering DESPUÉS (120+80)
   });
 
-  it('gate falla (feature off / cuota excedida) → used:false, NO llama al modelo ni mide', async () => {
-    const { deps, calls } = makeDeps({ assertBudget: async () => { throw new Error('quota_exceeded'); } });
+  it('gate falla (feature off / trial vencido) → used:false, NO llama al modelo ni mide', async () => {
+    const { deps, calls } = makeDeps({ assertBudget: async () => { const e = new Error('feature off'); (e as Error & { code: string }).code = 'failed-precondition'; throw e; } });
     const out = await runSalesAgent({ tenantId: 'perfumeria', agentConfig: AGENT, messages: [{ role: 'user', content: 'hola' }] }, deps);
-    expect(out).toEqual({ used: false, reason: 'gate' });
+    expect(out).toEqual({ used: false, reason: 'feature_unavailable' });
     expect(calls.runAgent).toHaveLength(0); // nunca se llamó a Claude
     expect(calls.usage).toHaveLength(0); // sin metering
   });
@@ -52,14 +52,14 @@ describe('ai/salesAgent runSalesAgent', () => {
   it('gateway disabled (sin API key/cliente) → used:false, sin metering', async () => {
     const { deps, calls } = makeDeps({ runAgent: async () => okResult({ status: 'disabled', reply: undefined, usage: undefined, costUsd: undefined }) });
     const out = await runSalesAgent({ tenantId: 'perfumeria', agentConfig: AGENT, messages: [{ role: 'user', content: 'hola' }] }, deps);
-    expect(out).toEqual({ used: false, reason: 'disabled' });
+    expect(out).toEqual({ used: false, reason: 'configuration_error' });
     expect(calls.usage).toHaveLength(0);
   });
 
   it('gateway error (Claude falló) → used:false (fallback rule-based)', async () => {
     const { deps } = makeDeps({ runAgent: async () => okResult({ status: 'error', reply: undefined, usage: undefined, costUsd: undefined, errorCode: 'http_500' }) });
     const out = await runSalesAgent({ tenantId: 'perfumeria', agentConfig: AGENT, messages: [{ role: 'user', content: 'hola' }] }, deps);
-    expect(out).toEqual({ used: false, reason: 'error' });
+    expect(out).toEqual({ used: false, reason: 'provider_transient_error' });
   });
 
   it('respuesta vacía/inválida (status ok, texto vacío) → used:false, reason empty_reply, sin metering', async () => {
@@ -165,5 +165,64 @@ describe('ai/salesAgent extractShownSkus (fuente de verdad = resultado backend)'
   it('F3: extractShownProducts captura name (y tolera name ausente/no-string → "")', () => {
     expect(extractShownProducts('buscar_productos', [{ id: 'a', name: ' Yara ' }, { id: 'b' }, { id: 'c', name: 9 }]))
       .toEqual([{ id: 'a', name: 'Yara' }, { id: 'b', name: '' }, { id: 'c', name: '' }]);
+  });
+});
+
+describe('ai/salesAgent — AI-FALLBACK-HONESTO-1: razones ESTRUCTURADAS de bloqueo', () => {
+  const baseDeps = () => ({
+    assertBudget: vi.fn(async () => undefined),
+    recordUsage: vi.fn(async () => undefined),
+    runAgent: vi.fn(async () => ({ status: 'ok' as const, model: 'm', latencyMs: 1, reply: 'hola', usage: { inputTokens: 1, outputTokens: 1 }, costUsd: 0 })),
+    execTool: vi.fn(async () => ({ ok: true as const, result: [] })),
+  });
+  const input = { tenantId: 't1', agentConfig: {} as never, messages: [{ role: 'user' as const, content: 'hola' }] };
+
+  it('cuota agotada (resource-exhausted) → quota_exhausted, sin llamar al proveedor', async () => {
+    const deps = baseDeps();
+    deps.assertBudget = vi.fn(async () => { const e = new Error('límite'); (e as Error & { code: string }).code = 'resource-exhausted'; throw e; });
+    const r = await runSalesAgent(input, deps as never);
+    expect(r).toEqual({ used: false, reason: 'quota_exhausted' });
+    expect(deps.runAgent).not.toHaveBeenCalled(); // el proveedor JAMÁS se llama con cuota agotada
+  });
+
+  it('feature off / trial vencido (failed-precondition) → feature_unavailable (NO deriva)', async () => {
+    const deps = baseDeps();
+    deps.assertBudget = vi.fn(async () => { const e = new Error('trial'); (e as Error & { code: string }).code = 'failed-precondition'; throw e; });
+    const r = await runSalesAgent(input, deps as never);
+    expect(r).toEqual({ used: false, reason: 'feature_unavailable' });
+  });
+
+  it('gateway disabled (sin API key) → configuration_error, jamás filtrado al cliente', async () => {
+    const deps = baseDeps();
+    deps.runAgent = vi.fn(async () => ({ status: 'disabled' as const, model: 'm', latencyMs: 1 }));
+    const r = await runSalesAgent(input, deps as never);
+    expect(r).toEqual({ used: false, reason: 'configuration_error' });
+  });
+
+  it('error transitorio del proveedor → provider_transient_error (NO se confunde con cuota)', async () => {
+    const deps = baseDeps();
+    deps.runAgent = vi.fn(async () => ({ status: 'error' as const, model: 'm', latencyMs: 1, errorCode: 'http_529' }));
+    const r = await runSalesAgent(input, deps as never);
+    expect(r).toEqual({ used: false, reason: 'provider_transient_error' });
+  });
+
+  it('respuesta vacía → empty_reply', async () => {
+    const deps = baseDeps();
+    deps.runAgent = vi.fn(async () => ({ status: 'ok' as const, model: 'm', latencyMs: 1, reply: '   ', usage: { inputTokens: 1, outputTokens: 0 }, costUsd: 0 }));
+    const r = await runSalesAgent(input, deps as never);
+    expect(r).toEqual({ used: false, reason: 'empty_reply' });
+  });
+});
+
+describe('ai/salesAgent — review: errores de infraestructura del gate', () => {
+  it('error del gate SIN código conocido → provider_transient_error (jamás cuota ni feature)', async () => {
+    const deps = {
+      assertBudget: vi.fn(async () => { throw new Error('firestore UNAVAILABLE'); }),
+      recordUsage: vi.fn(async () => undefined),
+      runAgent: vi.fn(),
+      execTool: vi.fn(),
+    };
+    const r = await runSalesAgent({ tenantId: 't1', agentConfig: {} as never, messages: [{ role: 'user' as const, content: 'x' }] }, deps as never);
+    expect(r).toEqual({ used: false, reason: 'provider_transient_error' });
   });
 });

@@ -40,6 +40,7 @@ import { queryTokens, esBusquedaSimilar } from '../catalog/match.js';
 import { detectarOcasionContexto } from '../catalog/fichaRank.js';
 import { veredictoOcasion, respuestaOcasionNoConviene, respuestaOcasionConviene } from './productOccasion.js';
 import { esPosiblePedidoHumano, procesarPedidoHumano } from './humanRequest.js';
+import { derivarPorIaNoDisponible, esConsultaDerivable } from './aiUnavailable.js';
 import { createPendingOrder } from '../orders/createPendingOrder.js';
 import { resolveCheckoutReuse } from '../orders/checkoutReuse.js';
 import { getCheckoutConfig, formatTransferInstructions } from '../orders/checkoutConfig.js';
@@ -58,6 +59,11 @@ export interface ConversationInput {
   receivedByPhoneNumberId?: string | null;
   /** HANDOFF-2: wamid del mensaje entrante (idempotencia de avisos de handoff). */
   messageId?: string | null;
+  /**
+   * AI-FALLBACK-HONESTO-1: herramientas internas (chat de prueba del panel / test cases).
+   * El fallback por IA-no-disponible se REPRESENTA (mismo texto) sin takeover ni aviso reales.
+   */
+  simulation?: boolean;
 }
 
 export interface ConversationResult {
@@ -992,6 +998,41 @@ export async function handleMessage(input: ConversationInput): Promise<Conversat
       // Ids/nombres SOLO del backend de buscar_productos (nunca del texto del modelo).
       result = resultadoDesdeIA(ai, existing?.state ?? 'BROWSING');
       logger.info('Respuesta por sales agent IA', { tenantId, customerId, shown: ai.shownProducts.length, tools: ai.usedTools.length });
+    } else if (ai.reason === 'quota_exhausted' && esConsultaDerivable(text)) {
+      // AI-FALLBACK-HONESTO-1: la consulta NECESITABA IA y la cuota/presupuesto está agotado →
+      // derivación REAL al vendedor (servicio canónico de HANDOFF-2, razón ai_unavailable) en
+      // vez del fallback genérico. SOLO cuota agotada deriva: errores transitorios, config
+      // faltante o respuestas vacías siguen al fallback rule-based (no convertimos un parpadeo
+      // del proveedor en takeover). El rescate de catálogo vacío también queda fuera: ahí las
+      // reglas SÍ resuelven con su canned honesto.
+      const fb = await derivarPorIaNoDisponible(tenantId, customerId, {
+        messageId: input.messageId ?? null,
+        simulation: input.simulation === true,
+      });
+      if (fb.takeover && !input.simulation) {
+        // Primer mensaje con intención (F6): misma bienvenida breve que el resto de los caminos.
+        let replyFb = fb.reply;
+        if (nuevoConIntencion && replyFb.trim()) {
+          replyFb = saludoBreve(agentConfig.greetingMessage) + '\n\n' + sinSaludoInicial(replyFb);
+        }
+        if (replyFb.trim()) {
+          await appendMessage(tenantId, customerId, {
+            direction: 'out',
+            author: 'bot',
+            text: replyFb,
+            state: existing?.state ?? 'IDLE',
+            humanTakeover: true,
+            countUnread: true,
+            channel,
+            receivedVia: input.receivedByPhoneNumberId ?? null,
+          });
+        }
+        logger.info('IA no disponible → derivado a humano', { tenantId, customer: `…${customerId.slice(-4)}` });
+        return { reply: replyFb, state: existing?.state ?? 'IDLE' };
+      }
+      // Simulación (sin efectos) o sin vendedor/persistencia: sigue el flujo normal de sesión.
+      // pendingCart se limpia: la conversación cambió de tema hacia "atención humana" (review).
+      result = { reply: fb.reply, nextState: existing?.state ?? 'BROWSING', pendingCart: null };
     } else if (delegarPreguntaProducto) {
       // La IA no corrió (gate/cupo/falla) y era una pregunta sobre un producto: canned honesto,
       // NUNCA el listado genérico del catálogo (guard CAT-2B).

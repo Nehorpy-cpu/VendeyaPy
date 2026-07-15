@@ -141,11 +141,16 @@ const errNoLeak = errDoc ? !JSON.stringify(errDoc).includes('fallo simulado') &&
 check('5. aiRequests error → registra errorCode SIN cuerpo del error ni prompt',
   !!errDoc && typeof errDoc.errorCode === 'string' && errDoc.errorCode.length > 0 && errNoLeak, JSON.stringify(errDoc));
 
-// === 6. presupuesto excedido (aiTokens sobre el límite) → fallback ===
+// === 6. presupuesto excedido → derivación honesta (AI-FALLBACK-HONESTO-1) ===
+// Este script no configura vendedores reales (checkout queda en placeholder), así que la
+// respuesta honesta esperada es el mensaje temporal SIN promesa de pase — nunca el fallback
+// genérico ni la IA.
 await setFixture({ text: `respuesta IA bloqueada por presupuesto ${AI_MARK}` });
 await db.doc(`tenants/${T}`).set({ usage: { aiTokensThisMonth: 999_999, currentPeriodStart: Timestamp.now() } }, { merge: true });
-const r6 = await probeUntil(fresh(6), (t) => t.includes(FALLBACK_MARK), 18_000);
-check('6. presupuesto de IA excedido → fallback rule-based', !!r6 && r6.includes(FALLBACK_MARK) && !r6.includes(AI_MARK), JSON.stringify(r6));
+const r6 = await probeUntil(fresh(6), (t) => t.includes('no puedo completar esta consulta'), 18_000);
+check('6. presupuesto de IA excedido → respuesta honesta de IA-no-disponible (sin IA, sin promesa de pase)',
+  !!r6 && r6.includes('no puedo completar esta consulta') && !r6.includes(AI_MARK) && !/te paso con/i.test(r6),
+  JSON.stringify(r6));
 
 // === 7/8/9. Reglas de aiRequests (con auth real, vía REST) ===
 const anyDocId = okSnap.docs[0]?.id ?? errSnap.docs[0]?.id;
@@ -266,6 +271,13 @@ await db.doc(`tenants/${T}`).set({
 // de functions (30s) podría seguir sirviendo 'starter' y contaminar la regresión siguiente (p.ej.
 // fase4 caso 6 asume perfumeria en su plan sembrado). Esperamos a que expire → suite order-independent.
 await sleep(31_000);
+
+// Limpiar las notifications de handoff generadas por el check 6 (AI-FALLBACK-HONESTO-1) para
+// no contaminar los conteos de los verifies que corren después en la misma sesión de emulador.
+{
+  const notifs = await db.collection(`tenants/${T}/notifications`).get();
+  for (const d of notifs.docs) { if ((d.data().category ?? '') === 'handoff') await d.ref.delete().catch(() => {}); }
+}
 
 const ok = results.every((x) => x);
 console.log(`\nRESULTADO AG-3/AG-3B (sales agent + lastShownSkus): ${ok ? 'TODO OK ✅' : 'HAY FALLOS ❌'} (${results.filter((x) => x).length}/${results.length})`);

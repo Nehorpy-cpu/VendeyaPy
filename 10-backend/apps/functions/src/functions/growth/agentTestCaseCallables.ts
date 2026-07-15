@@ -87,8 +87,8 @@ export const agentTestCaseRun = onCall<{ tenantId?: string; id?: string }>({ reg
   // (saludo + userMessage), igual que el simulador del frontend. NO consume cuota (no es mensaje real).
   let result: Awaited<ReturnType<typeof handleMessage>>;
   try {
-    await handleMessage({ tenantId, from, text: 'hola', channel: 'whatsapp' });
-    result = await handleMessage({ tenantId, from, text: userMessage, channel: 'whatsapp' });
+    await handleMessage({ tenantId, from, text: 'hola', channel: 'whatsapp', simulation: true });
+    result = await handleMessage({ tenantId, from, text: userMessage, channel: 'whatsapp', simulation: true });
   } catch (e) {
     logger.error('Error corriendo el caso de prueba', e, { tenantId, testId: id });
     throw new HttpsError('internal', 'No se pudo correr el caso de prueba.');

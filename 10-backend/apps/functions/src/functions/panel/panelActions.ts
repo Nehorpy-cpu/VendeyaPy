@@ -60,7 +60,7 @@ export const simulateAgentMessage = onCall<{ from?: string; text?: string; tenan
     if (!from || !text) throw new HttpsError('invalid-argument', 'Faltan from y text.');
     const tenantId = authorizeTenant(req, req.data?.tenantId);
     try {
-      const result = await handleMessage({ tenantId, from: String(from), text: String(text), channel: 'whatsapp' });
+      const result = await handleMessage({ tenantId, from: String(from), text: String(text), channel: 'whatsapp', simulation: true });
       return { ok: true, ...result };
     } catch (e) {
       logger.error('Error en simulateAgentMessage', e, { tenantId });

@@ -55,7 +55,7 @@ const msgsOf = async (c) => (await db.collection(`tenants/${T}/customers/${c}/me
   .map((d) => d.data()).sort((a, b) => a.createdAt.toMillis() - b.createdAt.toMillis());
 const sessionOf = async (c) => (await db.doc(`tenants/${T}/customers/${c}/sessions/active`).get()).data();
 const notifsHandoff = async () => (await db.collection(`tenants/${T}/notifications`).get()).docs
-  .map((d) => ({ id: d.id, ...d.data() })).filter((n) => n.category === 'handoff');
+  .map((d) => ({ id: d.id, ...d.data() })).filter((n) => n.category === 'handoff' && [CUST, CUST2].includes(n.customerId));
 const waitFor = async (pred, maxMs = 15000) => { const end = Date.now() + maxMs; while (Date.now() < end) { if (await pred()) return true; await sleep(600); } return false; };
 
 // ---- Snapshot (convivencia con otros verifies) ----
