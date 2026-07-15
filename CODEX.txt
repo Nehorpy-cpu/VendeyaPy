@@ -23,14 +23,18 @@
 - Catálogo CAT-1/CAT-2/CAT-2B desplegado: ficha estructurada para IA, ranking por ocasión, respuestas honestas y alternativas determinísticas.
 - OCV-1 (ORDER-COMPROBANTE-VIEW-1) completado: visor de comprobantes en el panel con URLs temporales firmadas; el bucket sigue privado.
 - Migración de dominio completada (2026-07-13): `vendeyapy.com` sirve producción con SSL y ownership activos; `www.vendeyapy.com` redirige 301 al apex (restaurado vía `customDomains.undelete` tras un borrado accidental). Sin deploy ni cambios de DNS adicionales.
-- Último commit desplegado conocido: `fb1d02d`.
+- WHATSAPP-AGENT-F7 desplegado y cerrado técnicamente (2026-07-15): fidelidad estricta en consultas por producto/marca (commit `97bb035`), deploy con selector mínimo de 4 funciones y `.env` sin cambios. Smoke live final aprobado: consulta estricta devuelve solo coincidencias reales, negación honesta de pertenencia, similitud con alternativas etiquetadas, marcas correctas, cero mutaciones comerciales. Observación de baja prioridad: posible desliz de marca de la IA en comparaciones (no se reprodujo en el smoke final).
+- Incidente de cupo de IA (2026-07-15, mitigado): 251.398 tokens usados vs límite anterior de 250.000; 65 llamadas 100% atribuidas (WhatsApp real del owner), sin doble conteo, consumo dominado por input/contexto; sin IA el bot degrada a reglas determinísticas en silencio. Límite growth actualizado 250.000 → 1.500.000 (contador y período preservados), servicio restaurado y verificado. Próximo reset: 01-ago-2026.
+- Hay un pedido reciente en PENDING_VERIFICATION: el owner debe verificar la transferencia y confirmar el pago en el panel (no está pagado hasta esa confirmación).
+- Último commit desplegado conocido: `97bb035` (deploy selectivo de 4 funciones del motor, 2026-07-15; evidencia: salida del deploy con 4 "Successful update operation").
 - Último smoke real: Odyssey para noche → el bot lo desaconsejó correctamente, recomendó Supremacy y agregó Supremacy al confirmar.
 
 ### Próxima fase prioritaria
 
-1. Evidencia de Fase 3 (Meta en vivo): prueba completa con un número EXTERNO (no del owner) — inbound real → respuesta del bot → carrito → orden → comprobante visible en el panel → logs sin errores. Verificación read-only.
+1. Evidencia de Fase 3 (Meta en vivo): prueba completa con un número EXTERNO (no del owner) — inbound real → respuesta del bot → carrito → orden → comprobante visible en el panel → logs sin errores. Verificación read-only. Sigue PENDIENTE: todas las pruebas hasta ahora salieron de números del owner.
 2. Fase 5 — Operación: runbook para el owner, backups semanales documentados, alertas mínimas (presupuesto GCP + errores de functions) y documentación operativa al día.
-3. Criterio de cierre del proyecto: una persona externa completa el ciclo entero sin intervención técnica (WhatsApp → recomendación → carrito → orden → comprobante → el vendedor lo ve y confirma en el panel desde vendeyapy.com).
+3. Programas pendientes ya identificados: HANDOFF-2 (cliente pide humano → pase real), AI-FALLBACK-HONESTO-1 (sin IA: aviso honesto + handoff canónico), AI-QUOTA-ALERTS-1 (alertas 70/85/95/100%), AI-PROMPT-CACHING-1, AI-USAGE-ATTRIBUTION-1, AI-GATE-RESERVA-1, COVERAGE-1 (ubicación/cobertura) y Meta Catalog Live.
+4. Criterio de cierre del proyecto: una persona externa completa el ciclo entero sin intervención técnica (WhatsApp → recomendación → carrito → orden → comprobante → el vendedor lo ve y confirma en el panel desde vendeyapy.com).
 
 Después (backlog, solo a pedido del owner):
 

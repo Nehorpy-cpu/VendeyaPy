@@ -1,7 +1,7 @@
 # HANDOFF — Estado del proyecto y prioridades para Claude Code
 
 > **INSTRUCCIONES PARA CLAUDE CODE**: este documento es para VOS, el agente. Leelo completo al
-> iniciar sesión antes de tocar nada. Resume el estado real del proyecto al **2026-07-13**,
+> iniciar sesión antes de tocar nada. Resume el estado real del proyecto al **2026-07-15**,
 > lo desarrollado hasta ahora, el estado por fases y las prioridades.
 > Fue escrito por la sesión anterior de Claude Code al migrar el desarrollo a otra computadora,
 > donde no está disponible la memoria local de aquella máquina — este documento es autocontenido.
@@ -37,13 +37,14 @@ Reglas innegociables (todas confirmadas por el owner en sesiones anteriores):
 - **Pedidos**: ciclo de vida con callables auditados (ORDER-1/2/2B), comprobantes por foto a Storage (ORDER-1B), **visor de comprobante en el panel** con URL firmada de 10 min (OCV-1; requirió grant IAM, ver §5).
 - **Handoff humano** (HUMAN-HANDOFF-1): el vendedor toma el chat y responde por WhatsApp desde `/conversations`; `humanTakeover` se valida contra la SESIÓN.
 - **Multi-número** por tenant con ruteo por PNID.
-- **Catálogo enriquecido** (CAT-1/2/2B): ficha estructurada por producto (`PublicProduct.ficha`), ranking por ocasión (`fichaRank.ts`), interceptor determinístico "¿X sirve para Y?" honesto con alternativa (`productOccasion.ts`). IA solo en turno 1 (~US$0,007/conversación); turnos siguientes determinísticos.
+- **Catálogo enriquecido** (CAT-1/2/2B): ficha estructurada por producto (`PublicProduct.ficha`), ranking por ocasión (`fichaRank.ts`), interceptor determinístico "¿X sirve para Y?" honesto con alternativa (`productOccasion.ts`). los turnos transaccionales/interceptados son determinísticos; los conversacionales delegan a la IA (costo real por turno: ver §5).
 - **Planes y límites** (free→enterprise), activación manual de billing (PLATFORM_ADMIN), trial enforcement + notificaciones (campana + scheduler diario). Cloud Scheduler activo (3 jobs).
 - **AI Gateway** Claude Haiku (modelo pineado `claude-haiku-4-5-20251001`).
 - **Registro + onboarding** self-service (R-1/2/3) — **hoy CERRADO por flag** (ver FASE 2 abajo).
 - **Frontend premium completo** (programa FRONTEND-UX 1A–1G): landing + panel + responsive + kit `components/ui`.
 - **Meta**: app de producción propia (ID 1739140590442740, portafolio comercial de la perfumería), token permanente `source:manual_admin` cifrado AES-256-GCM, webhook firmado, Graph v19.0. Smoke inbound end-to-end verificado.
 - **Fixes recientes (2026-07-13)**: `8552091` el chat del panel mostraba los 200 mensajes más viejos (asc+limit → desc+reverse); `db18e30` mismo patrón en `audits/generate.ts`.
+- **WHATSAPP-AGENT-F7 — fidelidad estricta de producto/marca** (commit `97bb035`, EN PROD 2026-07-15): una consulta por nombre/marca devuelve SOLO coincidencias reales (marcado determinístico `coincidencia: exacta|alternativa` + rescate `fueraDeFiltros` cuando el precio/género excluye la coincidencia); la similitud explícita ("parecido a X") habilita alternativas SIEMPRE etiquetadas como tales; gramática del template de ocasión corregida. Desplegado con **selector mínimo de 4 funciones** (`onWebhookInbox`, `simulateAgentMessage`, `agentTestCaseRun`, `devMessage`), `.env` sin cambios (hash SHA-256 verificado pre/post). **Smoke live final aprobado**: consulta estricta, negación de pertenencia y búsqueda por similitud verificadas con marcas correctas y cero mutaciones comerciales. Cierre técnico completo. Observación de baja prioridad: en una comparación de dos productos la IA agrupó mal una marca en prosa (se corrigió sola al desafiarla y NO se reprodujo en el smoke final) — candidata a una regla de prompt para comparaciones.
 
 ## 4. PLAN MAESTRO VIGENTE: cierre single-tenant (operar solo con arfagi)
 
@@ -58,7 +59,7 @@ Registro público CERRADO por flag, reversible:
 - Frontend: `NEXT_PUBLIC_ALLOW_SELF_REGISTRATION=false` → `/register` muestra "Registro por invitación", login sin CTA. Los CTAs del marketing siguen apuntando a /register a propósito (leads de WhatsApp).
 - Verificado que NO hay otra vía de alta (provisionTenant = admin-only; dev endpoints 404 en prod).
 
-### FASE 3 — META-ARFAGI-LIVE ✅ según el owner, con UNA verificación pendiente
+### FASE 3 — META-ARFAGI-LIVE ⚠️ checklist del owner OK — PENDIENTE la evidencia externa
 El owner confirmó el checklist del dashboard de Meta (Business Verification, app en modo Live, display name, perfil). **PENDIENTE DE EVIDENCIA**: la prueba de aceptación con un número EXTERNO (no del owner) — al 2026-07-13 en Firestore solo hay conversaciones de sus 3 números propios (595994893000, 595972720060, 595991192613). **Cuando escriba un número externo, verificar read-only**: inbound con PNID real → respuesta del bot (wamid real) → carrito → orden → comprobante visible en panel → logs sin errores.
 
 ### FASE 4 — DOMINIO ✅ COMPLETA (2026-07-13)
@@ -89,11 +90,13 @@ UI del asistente interno de growth · botón "generar ficha con IA" (excluido a 
 - **IAM**: el SA de functions `410226633946-compute@developer.gserviceaccount.com` tiene `iam.serviceAccountTokenCreator` sobre sí mismo (firma de URLs de comprobantes). **Si se cambia el SA de functions, re-otorgar el grant.**
 - **Acceso a prod sin gcloud** (patrón usado por todos los scripts de verificación): en Node, `require('<ruta firebase-tools global>/lib/requireAuth')` + `auth.getProjectDefaultAccount()` + `apiv2.Client` contra las APIs REST (Firestore runQuery, Identity Toolkit, Cloud Logging, Hosting). Requiere `firebase login` con la cuenta owner del proyecto en la máquina. Usuarios de prueba en prod: crear temporal por Identity Toolkit (claims `{tenantId, role:'TENANT_MANAGER'}`), smoke por Playwright, **eliminar al terminar**.
 - **Emulador E2E**: SIEMPRE `--project demo-aiafg` + build + **seed-users.mjs Y load-catalog.mjs** (sin catálogo, verify-human-handoff falla 5/11); `.env.local` con TODAS las vars de `getConfig()`; esperar ~30s el settle del caché de entitlements; nunca pipe `emulators:start` a `head`.
-- **Costo IA**: ~US$0,007 por conversación con búsqueda (solo turno 1); turnos determinísticos gratis.
+- **Costo IA**: los turnos determinísticos son gratis; un turno del sales agent cuesta ~3.900 tokens promedio (hasta ~7.700) porque cada llamada re-envía system+tools+historial+fichas y el loop de tools re-factura el input (sin prompt caching todavía). Costo real observado: ~US$1,16 por millón de tokens.
+- **Incidente de cupo de IA (2026-07-15, MITIGADO)**: el tenant `arfagi` agotó el cupo mensual — 251.398 tokens usados contra el límite anterior de 250.000 (plan growth). Auditoría completa: **65 llamadas 100% atribuidas** (todas `whatsapp_sales_agent` desde WhatsApp real de los números del owner — smokes de desarrollo + operación), **sin doble conteo confirmado**, consumo dominado por input/contexto (96%). Al agotarse, la degradación es **determinística y silenciosa**: el cliente recibe respuestas de reglas (fallback genérico) sin aviso al owner. **Restauración**: `plans/growth.limits.maxAiTokensPerMonth` 250.000 → **1.500.000** (única mutación, con precondición y updateMask; contador y período PRESERVADOS — nunca se borra consumo). Servicio restaurado y verificado con smoke live. **Próximo reset: 01-ago-2026** (mes calendario UTC, job `resetUsageMonthly`).
 
 ## 6. PRIORIDADES (en orden)
 
-1. **Evidencia de FASE 3**: primera conversación de número externo → verificación read-only completa (§4-FASE 3).
+1. **Evidencia de FASE 3**: primera conversación de número externo → verificación read-only completa (§4-FASE 3). Las pruebas hechas hasta ahora salieron de números del owner: la fase NO está completa.
 2. **FASE 5 completa** (runbook + backups + alertas + docs al día) — programa estándar, sin deploy de código previsto.
-3. **Criterio de "terminado" del proyecto**: una persona externa completa el ciclo entero sin intervención técnica — escribe al +595 986 440752 → el bot recomienda con ficha (honesto en "¿sirve para X?") → carrito → "pagar" crea la orden → foto del comprobante → el vendedor la VE en el panel desde `vendeyapy.com` → confirma el pago → venta registrada con ganancia. Verificación read-only en cada paso + registro público cerrado + backup semanal documentado.
-4. Después de eso: FASE 6 solo a pedido del owner.
+3. **Programas pendientes ya identificados** (mitigación operativa del cupo COMPLETA; esto es lo estructural): **HANDOFF-2** (el cliente pide un humano → pase real vía takeoverChat) · **AI-FALLBACK-HONESTO-1** (sin IA: mensaje honesto + pase a humano, reutilizando el handoff canónico takeoverChat/releaseToBot) · **AI-QUOTA-ALERTS-1** (campana 70/85/95/100% + aviso al bloquear) · **AI-PROMPT-CACHING-1** (cache_control en system+tools + contar cache tokens) · **AI-USAGE-ATTRIBUTION-1** (origen/customerId en aiRequests + marcar/eximir simulador y test cases) · **AI-GATE-RESERVA-1** (estimación realista o reserva transaccional) · **COVERAGE-1** (gate de ubicación/cobertura con handoff) · **Meta Catalog Live** (el "norte" — mismo ítem que en FASE 6/backlog; requiere Advanced Access). Además hay un pedido reciente en **PENDING_VERIFICATION** esperando que el owner verifique la transferencia y confirme el pago en el panel (no confirmar sin verificar).
+4. **Criterio de "terminado" del proyecto**: una persona externa completa el ciclo entero sin intervención técnica — escribe al +595 986 440752 → el bot recomienda con ficha (honesto en "¿sirve para X?") → carrito → "pagar" crea la orden → foto del comprobante → el vendedor la VE en el panel desde `vendeyapy.com` → confirma el pago → venta registrada con ganancia. Verificación read-only en cada paso + registro público cerrado + backup semanal documentado.
+5. Después de eso: FASE 6 solo a pedido del owner.
