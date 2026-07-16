@@ -8,6 +8,7 @@
 
 import { onCall, HttpsError, type CallableRequest } from 'firebase-functions/v2/https';
 import { takeoverChat, releaseToBot } from '../../conversation/handoff.js';
+import { reactivarResumeTrasLiberacion } from '../../conversation/coverageResume.js';
 import { assertStaffAccess } from './staffAuth.js';
 import { recordAudit } from '../../audit/audit.js';
 
@@ -38,5 +39,7 @@ export const chatRelease = onCall<HandoffData>({ region: 'us-central1' }, async 
   const result = await releaseToBot(tenantId, customerId);
   // HUMAN-HANDOFF-1: acción de audit con el nombre pedido por el programa (antes 'chat.released').
   await recordAudit({ tenantId, action: 'conversation.returned_to_bot', actorUid: actor.uid, targetType: 'customer', targetId: customerId, summary: `${actor.name ?? 'Staff'} devolvió la conversación al bot` });
+  // COVERAGE-1D: si había una reanudación retenida por este takeover, re-encolarla.
+  await reactivarResumeTrasLiberacion(tenantId, customerId);
   return result;
 });

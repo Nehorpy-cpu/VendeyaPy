@@ -78,6 +78,13 @@ export function buildCloudApiLocationRequestBody(to: string, bodyText: string) {
 
 const isEmulator = () => process.env.FUNCTIONS_EMULATOR === 'true';
 
+/** Hash simple determinístico (djb2) para ids de mock — no criptográfico, no sensible. */
+function simpleHash(s: string): string {
+  let h = 5381;
+  for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) >>> 0;
+  return h.toString(36);
+}
+
 /** Metadatos de resolución para el Mock inspeccionable. NUNCA incluye el token. */
 export interface MockResolution {
   mode?: WhatsappSendMode;
@@ -91,6 +98,17 @@ export class MockWhatsAppClient implements WhatsAppClient {
   constructor(public readonly resolution?: MockResolution) {}
 
   async sendText(to: string, text: string, ctx?: SendContext): Promise<SendResult> {
+    // Fixture SOLO-emulador (COVERAGE-1D): simular fallo confirmado ('error') o resultado
+    // ambiguo ('timeout') del proveedor — para testear los estados failed/unknown del outbox.
+    if (isEmulator() && ctx?.tenantId) {
+      try {
+        const fx = (await db().doc(`tenants/${ctx.tenantId}/_debug/whatsappFixtures`).get()).data();
+        if (fx?.failSendText === 'error') return { ok: false, error: 'fixture: {"code":100} fallo confirmado' };
+        if (fx?.failSendText === 'timeout') return { ok: false, error: 'fixture: timeout of 10000ms exceeded' };
+      } catch {
+        /* sin fixture → camino normal */
+      }
+    }
     logger.info('WhatsApp (mock): respuesta NO enviada a Meta', {
       tenantId: ctx?.tenantId,
       channel: ctx?.channel,
@@ -116,7 +134,9 @@ export class MockWhatsAppClient implements WhatsAppClient {
         /* la traza de debug nunca debe romper el envío */
       }
     }
-    return { ok: true, viaMock: true };
+    // COVERAGE-1D: id determinístico por (to, texto) — el outbox de mensajería lo persiste como
+    // providerMessageId y una re-ejecución con el mismo contenido produce el mismo id (testeable).
+    return { ok: true, viaMock: true, id: `mock-${simpleHash(`${to}|${text}`)}` };
   }
 
   /** Mock del location_request_message: no llama a Meta; traza inspeccionable en emulador. */

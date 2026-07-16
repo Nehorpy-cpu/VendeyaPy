@@ -27,13 +27,31 @@ function emptyAddress(): Address {
   };
 }
 
+/** COVERAGE-1D: opciones para la reanudación idempotente del checkout. */
+export interface CreatePendingOrderOpts {
+  /** orderId RESERVADO previamente (idempotencia del worker de reanudación). */
+  orderId?: string;
+  /** Referencia auditable a la cobertura aprobada (jamás coordenadas). */
+  coverage?: { requestId: string; locationFingerprint: string | null };
+  /** Dirección TEXTUAL del cliente (la exacta con coordenadas vive solo en coverageRequests). */
+  deliveryAddress?: Address;
+}
+
 export async function createPendingOrder(
   tenantId: string,
   customerId: string,
   cart: Cart,
+  opts: CreatePendingOrderOpts = {},
 ): Promise<Order> {
   const now = Timestamp.now();
-  const orderId = newOrderId();
+  const orderId = opts.orderId ?? newOrderId();
+
+  // COVERAGE-1D (review): con un orderId RESERVADO, un worker stale jamás pisa la orden que
+  // otro worker ya creó (ni sus finanzas congeladas) — si existe, se reusa tal cual.
+  if (opts.orderId) {
+    const existente = await db().doc(paths.order(tenantId, orderId)).get();
+    if (existente.exists) return existente.data() as Order;
+  }
 
   // El costo (privado) se lee de productFinancials y se "congela" en orderFinancials.
   // La orden visible NO lleva costo/ganancia (legible por el vendedor). Ver ADR-0008.
@@ -80,12 +98,13 @@ export async function createPendingOrder(
     items,
     totals: { subtotal: cart.subtotal, discount: 0, total: cart.subtotal, currency: 'PYG' },
     payment: { method: 'BANCARD', paymentId: '', paidAt: null, comprobanteUrl: null }, // provisional; se confirma al pagar
-    delivery: { deliveryId: null, address: emptyAddress() }, // domicilio: fase logística
+    delivery: { deliveryId: null, address: opts.deliveryAddress ?? emptyAddress() },
     invoice: { invoiceId: null, number: null },
     channel: 'WHATSAPP',
     sellerId: null, // se asigna en el handoff
     source: 'whatsapp-bot', // tracking (prep Track C)
     ...(attribution ? { attribution } : {}),
+    ...(opts.coverage ? { coverage: opts.coverage } : {}),
     notes: '',
     createdAt: now,
     updatedAt: now,
@@ -106,7 +125,20 @@ export async function createPendingOrder(
   // Finanzas privadas PRIMERO: así el trigger de stats (que escucha la orden) ya las encuentra.
   // Un orphan de orderFinancials (si fallara el 2º write) es inofensivo: no hay orden visible.
   await db().doc(paths.orderFinancial(tenantId, orderId)).set(orderFinancials);
-  await db().doc(paths.order(tenantId, orderId)).set(order);
+  if (opts.orderId) {
+    // Reserva 1D: `create()` — si otro worker ganó la carrera, se devuelve SU orden intacta.
+    try {
+      await db().doc(paths.order(tenantId, orderId)).create(order);
+    } catch (e) {
+      const code = (e as { code?: number | string }).code;
+      if (code === 6 || code === 'already-exists') {
+        return (await db().doc(paths.order(tenantId, orderId)).get()).data() as Order;
+      }
+      throw e;
+    }
+  } else {
+    await db().doc(paths.order(tenantId, orderId)).set(order);
+  }
 
   logger.info('Pre-orden creada', { tenantId, customerId, orderId });
   return order;

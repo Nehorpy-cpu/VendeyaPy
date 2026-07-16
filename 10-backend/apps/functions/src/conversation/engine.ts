@@ -1211,10 +1211,9 @@ export async function handleMessage(input: ConversationInput): Promise<Conversat
       currentCategoryId: existing?.context?.currentCategoryId ?? null,
       // F5: tri-estado (string=nueva / null=limpiar / undefined=conservar) — sin el null, un
       // puntero a una orden ya pagada quedaba stale para siempre y bloqueaba el checkout.
-      pendingOrderId:
-        result.pendingOrderId !== undefined
-          ? result.pendingOrderId
-          : (existing?.context?.pendingOrderId ?? null),
+      // 1D (review): el "conservar" se re-resuelve contra la lectura FRESCA dentro del tail —
+      // este valor es provisional (ver la transacción de abajo).
+      pendingOrderId: result.pendingOrderId !== undefined ? result.pendingOrderId : (existing?.context?.pendingOrderId ?? null),
       pendingPaymentId: existing?.context?.pendingPaymentId ?? null,
       // F3: al vencer la oferta se limpia TAMBIÉN lastShownSkus — si sobreviviera, un "el 1"
       // posterior resolvería contra una lista vieja/desalineada (el bug original de nuevo).
@@ -1260,7 +1259,19 @@ export async function handleMessage(input: ConversationInput): Promise<Conversat
         : propio && fresco && fresco.requestId === propio.requestId && fresco.updatedAt.toMillis() > propio.updatedAt.toMillis()
           ? fresco
           : propio;
-    tx.set(sessionRef, { ...session, context: { ...session.context, coverage: coverageFinal } });
+    tx.set(sessionRef, {
+      ...session,
+      context: {
+        ...session.context,
+        coverage: coverageFinal,
+        // 1D: la marca de reanudación-en-curso la escribe SOLO el worker — siempre del fresco.
+        coverageResumeInProgress: ctxFresh.coverageResumeInProgress ?? null,
+        // 1D (review): "conservar" el pendingOrderId se resuelve FRESCO — un turno lento en
+        // vuelo no borra el puntero que el worker de reanudación fijó mientras tanto.
+        pendingOrderId:
+          result.pendingOrderId !== undefined ? result.pendingOrderId : (ctxFresh.pendingOrderId ?? null),
+      },
+    });
     return false;
   });
   if (tomadoEnElMedio) {

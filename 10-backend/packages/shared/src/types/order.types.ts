@@ -60,6 +60,8 @@ export interface Order {
   source: string | null;
   /** Atribución a la campaña que trajo al cliente (D5). */
   attribution?: Attribution;
+  /** COVERAGE-1D: la orden nació de una cobertura APROBADA (referencia auditable; SIN coordenadas). */
+  coverage?: { requestId: string; locationFingerprint: string | null };
   notes: string;
   createdAt: Timestamp;
   updatedAt: Timestamp;

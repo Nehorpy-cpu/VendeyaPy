@@ -67,6 +67,9 @@ export interface SessionContext {
   handoffSourceId?: string | null;
   /** COVERAGE-1B: puntero al request de cobertura vigente (SIN PII — jamás dirección/coords). */
   coverage?: CoverageSessionPointer | null;
+  /** COVERAGE-1D: requestId cuya reanudación está EN CURSO — un turno concurrente no debe
+   * disparar otro checkout mientras el worker crea la orden y manda las instrucciones. */
+  coverageResumeInProgress?: string | null;
 }
 
 export interface Session {

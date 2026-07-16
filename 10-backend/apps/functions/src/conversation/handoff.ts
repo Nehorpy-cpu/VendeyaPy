@@ -65,13 +65,25 @@ export async function executeHandoff(
   const result = await db().runTransaction(async (tx) => {
     const snap = await tx.get(ref);
     if (!snap.exists && !opts.createSessionIfMissing) return { ok: false, already: false };
-    const ctx = (snap.data()?.context ?? {}) as { humanTakeover?: boolean };
+    const ctx = (snap.data()?.context ?? {}) as { humanTakeover?: boolean; handoffReason?: string | null };
     if (snap.exists && ctx.humanTakeover === true) {
       if (!opts.reassignIfTaken) {
         // Review: el comprobante que llega con el chat YA tomado debe actualizar igual el
         // puntero de orden (el código previo lo escribía incondicional).
         if (opts.pendingOrderId !== undefined) {
           tx.update(ref, { 'context.pendingOrderId': opts.pendingOrderId, updatedAt: now });
+        }
+        // COVERAGE-1D (review): excepción ÚNICA — un comprobante (payment_verification) ESCALA
+        // un takeover coverage_review vigente: el pago en verificación manda sobre la revisión
+        // de zona. Sin esto, el worker de reanudación "liberaría" (candado razón+sourceId) un
+        // chat que ya contiene un pago en curso y re-mandaría instrucciones bancarias.
+        if (opts.reason === 'payment_verification' && ctx.handoffReason === 'coverage_review') {
+          tx.update(ref, {
+            'context.handoffReason': 'payment_verification',
+            'context.handoffSourceId': opts.sourceId ?? null,
+            'context.handoffAt': now,
+            updatedAt: now,
+          });
         }
         return { ok: true, already: true };
       }

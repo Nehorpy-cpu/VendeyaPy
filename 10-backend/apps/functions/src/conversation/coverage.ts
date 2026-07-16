@@ -89,6 +89,9 @@ export const MENSAJE_COBERTURA_CANCELADA =
 export const MENSAJE_INTENTO_VENCIDO =
   'Ese intento de compra venció ⏳ Escribí *pagar* y lo retomamos desde tu carrito.';
 
+export const MENSAJE_RESUME_EN_CURSO =
+  'Estamos preparando tu pedido 🙌 En un momento te paso los datos para el pago.';
+
 export const MENSAJE_UBICACION_FALLO =
   'No pude registrar tu ubicación recién 🙏 Probá mandarla de nuevo en un momento.';
 
@@ -250,7 +253,11 @@ export async function gateCoberturaCheckout(
   const now = Timestamp.now();
   const out = await db().runTransaction(async (tx) => {
     const ses = await tx.get(sessionRef);
-    const ptr = (ses.data() as Session | undefined)?.context?.coverage ?? null;
+    const ctxSes = (ses.data() as Session | undefined)?.context;
+    // 1D: hay una reanudación EN CURSO (el worker está creando la orden): un "pagar" concurrente
+    // no dispara OTRO checkout — se le pide un momento al cliente.
+    if (ctxSes?.coverageResumeInProgress) return { kind: 'resuming' as const };
+    const ptr = ctxSes?.coverage ?? null;
     if (ptr) {
       const reqSnap = await tx.get(db().doc(requestPath(tenantId, ptr.requestId)));
       const req = reqSnap.exists ? (reqSnap.data() as CoverageRequest) : null;
@@ -259,6 +266,12 @@ export async function gateCoberturaCheckout(
         if (!vencido) {
           if (req.status === 'awaiting_location') return { kind: 'ask' as const, ptr: ptrOf(req, now) };
           if (req.status === 'pending_coverage_review') return { kind: 'pending' as const, ptr: ptrOf(req, now) };
+          // coverage_approved con reanudación AÚN NO COMPLETADA (1D): un "pagar" en la ventana
+          // decisión→worker NO dispara el checkout normal — habría DOS órdenes (review).
+          const resume = req.resume?.status;
+          if (resume === 'pending' || resume === 'processing' || resume === 'held_by_seller') {
+            return { kind: 'resuming' as const };
+          }
           // coverage_approved VIGENTE: la aprobación vale para la ubicación aunque el carrito
           // haya cambiado (decisión de producto) → el checkout continúa por el camino normal.
           return { kind: 'approved' as const };
@@ -297,6 +310,7 @@ export async function gateCoberturaCheckout(
   });
 
   if (out.kind === 'approved') return null;
+  if (out.kind === 'resuming') return { reply: MENSAJE_RESUME_EN_CURSO };
   if (out.kind === 'pending') return { reply: MENSAJE_UBICACION_EN_REVISION, coverage: out.ptr };
   logger.info('Cobertura: checkout en espera de ubicación', { tenantId, customer: `…${customerId.slice(-4)}`, requestId: out.ptr.requestId });
   return { reply: solicitudPara(cfg, opts.channel), locationRequest: true, coverage: out.ptr };

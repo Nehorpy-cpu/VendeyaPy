@@ -166,7 +166,8 @@ check('7a. audits: manual_message_sent y returned_to_bot registrados',
   aSend.length >= 1 && aRet.length >= 1, `send=${aSend.length} ret=${aRet.length}`);
 const todoJson = JSON.stringify([msgs2, audits, dbg]);
 check('7b. sin leaks: el access token no aparece en mensajes/audits/debug',
-  !todoJson.includes(TOKEN_FAKE) && !todoJson.includes('EAA') && !todoJson.includes('Bearer '));
+  // 'EAA' solo cuenta como token REAL de Meta (largo): un id nanoid puede contener la subcadena.
+  !todoJson.includes(TOKEN_FAKE) && !/EAA[A-Za-z0-9]{15,}/.test(todoJson) && !todoJson.includes('Bearer '));
 
 // ---- Cleanup completo (convivencia) ----
 if (orderId) {

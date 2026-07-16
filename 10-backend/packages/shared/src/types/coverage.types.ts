@@ -59,16 +59,59 @@ export interface CoverageResumeJob {
   coverageRequestId: string;
   customerId: string;
   action: 'approved' | 'rejected';
-  status: 'pending' | 'done' | 'send_failed' | 'held_by_seller';
+  status: CoverageResumeStatus;
   channel: MessageChannel;
   receivedVia: string | null;
+  /** 1D: idempotencia del pedido (reservado ANTES de crear la orden). */
+  checkoutAttemptId?: string | null;
+  /** 1D: orderId reservado/creado (una sola vez por checkoutAttemptId). */
+  orderId?: string | null;
+  /** 1D: lease del worker (claim transaccional; vencido ⇒ recuperable). */
+  leaseUntil?: Timestamp | null;
+  /** 1D: reintentos consumidos (tope duro — jamás retries infinitos). */
+  attempts?: number;
   createdAt: Timestamp;
   updatedAt: Timestamp;
 }
 
-/** Reanudación del checkout post-aprobación (1D). En 1B siempre null. */
+/**
+ * Outbox de MENSAJERÍA de la reanudación (1D). Doc-id determinístico
+ * `{coverageRequestId}_{action}[_{checkoutAttemptId}]` — reduce la ventana envío→persistencia:
+ * el mensaje queda `prepared` ANTES de llamar a Meta; `sent` guarda el wamid del proveedor;
+ * `unknown` (timeout/ACK perdido) JAMÁS se reenvía automáticamente. Solo backend (rules deny).
+ * No contiene secretos: el texto es exactamente lo que el cliente recibe.
+ */
+export interface CoverageOutboxMessage {
+  id: string;
+  tenantId: string;
+  coverageRequestId: string;
+  action: 'approved' | 'rejected' | 'expired' | 'empty_cart';
+  checkoutAttemptId: string | null;
+  customerId: string;
+  channel: MessageChannel;
+  receivedVia: string | null;
+  text: string;
+  status: 'prepared' | 'sending' | 'sent' | 'failed' | 'unknown';
+  providerMessageId: string | null;
+  attempts: number;
+  leaseUntil: Timestamp | null;
+  createdAt: Timestamp;
+  updatedAt: Timestamp;
+}
+
+/** Estados del ciclo de reanudación (job del outbox y espejo en el request). */
+export type CoverageResumeStatus =
+  | 'pending'
+  | 'processing'
+  | 'held_by_seller'
+  | 'send_failed'
+  | 'send_unknown'
+  | 'done'
+  | 'cancelled';
+
+/** Reanudación del checkout post-decisión (1D). */
 export interface CoverageResume {
-  status: 'pending' | 'done' | 'send_failed' | 'held_by_seller';
+  status: CoverageResumeStatus;
   orderId: string | null;
 }
 

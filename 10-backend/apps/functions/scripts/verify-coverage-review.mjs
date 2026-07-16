@@ -95,6 +95,9 @@ await db.doc(`tenants/${T}`).set({
   usage: { messagesThisMonth: 0, aiTokensThisMonth: 0, aiCostUsdThisMonth: 0, currentPeriodStart: now0 },
 }, { merge: true });
 await db.doc(FIX).set({ text: 'Respuesta IA [fixture-cr]' });
+// 1D: pausar el CONSUMIDOR de resume — este script verifica la DECISIÓN pura (el consumidor
+// tiene su propio verify: coverage-resume). Solo emulador.
+await db.doc(`tenants/${T}/_debug/coverageFixtures`).set({ pauseResume: true });
 await db.doc(`tenants/${T}/config/checkout`).set({
   sellers: [{ name: 'Vendedor CR', whatsapp: '595991000013', active: true }],
   bankAccounts: [{ bank: 'Banco CR', accountNumber: '000-2', holder: 'Titular CR', document: '2222' }],
@@ -357,6 +360,7 @@ await db.doc(`tenants/${T}/metaAssets/${PNID}`).delete().catch(() => {});
 await db.doc(`metaExternalIndex/whatsapp_${PNID}`).delete().catch(() => {});
 await db.doc(`tenants/${T}/notifications/trial-test-cr`).delete().catch(() => {});
 await db.doc(`tenants/${T}/_debug/lastWhatsappSend`).delete().catch(() => {});
+await db.doc(`tenants/${T}/_debug/coverageFixtures`).delete().catch(() => {});
 await db.doc(`tenants/${T}`).set(beforeTenant);
 if (beforeChannels) await db.doc(`tenants/${T}/config/channels`).set(beforeChannels); else await db.doc(`tenants/${T}/config/channels`).delete();
 if (beforeAgent) await db.doc(`tenants/${T}/config/agent`).set(beforeAgent); else await db.doc(`tenants/${T}/config/agent`).delete();
