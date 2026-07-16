@@ -6,6 +6,7 @@
 
 import type { SessionState } from '../enums.js';
 import type { Timestamp } from './common.types.js';
+import type { CoverageSessionPointer } from './coverage.types.js';
 
 export interface CartItem {
   productId: string;
@@ -64,6 +65,8 @@ export interface SessionContext {
   handoffAt?: Timestamp | null;
   /** HANDOFF-2: id determinístico del disparador (wamid entrante / orderId) para idempotencia. */
   handoffSourceId?: string | null;
+  /** COVERAGE-1B: puntero al request de cobertura vigente (SIN PII — jamás dirección/coords). */
+  coverage?: CoverageSessionPointer | null;
 }
 
 export interface Session {

@@ -32,7 +32,8 @@ export async function markNotificationRead(tenantId: string, notificationId: str
 // Severidad para ordenar (más urgente primero). PURA → testeable.
 // HANDOFF-2: un cliente esperando a una persona es lo más urgente de la campana.
 const SEVERITY: Record<Notification['type'], number> = {
-  handoff_ai_unavailable: 5, // el bot no pudo atender: lo más urgente de la campana
+  handoff_coverage_review: 6, // cliente queriendo PAGAR a la espera de cobertura: lo más urgente
+  handoff_ai_unavailable: 5, // el bot no pudo atender
   handoff_customer_requested: 4,
   trial_expired: 3,
   trial_ending_today: 2,

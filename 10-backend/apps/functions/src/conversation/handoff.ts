@@ -162,8 +162,8 @@ export async function notifyHandoffRequested(
   customerId: string,
   sellerName: string | null,
   sourceId: string | null,
-  /** AI-FALLBACK-HONESTO-1: motivo del aviso (cambia tipo/título/cuerpo, misma idempotencia). */
-  motivo: 'customer_requested' | 'ai_unavailable' = 'customer_requested',
+  /** Motivo del aviso (cambia tipo/título/cuerpo, misma idempotencia por sourceId). */
+  motivo: 'customer_requested' | 'ai_unavailable' | 'coverage_review' = 'customer_requested',
 ): Promise<boolean> {
   // Sin wamid (dev/simulador): bucket por hora — repetir en la misma hora no duplica el aviso.
   const fallback = `sin-wamid-${new Date(Timestamp.now().toMillis()).toISOString().slice(0, 13)}`;
@@ -171,14 +171,19 @@ export async function notifyHandoffRequested(
   const id = `handoff-${customerId}-${safe}`;
   const cliente = `…${customerId.slice(-4)}`;
   const esIa = motivo === 'ai_unavailable';
+  const esCobertura = motivo === 'coverage_review';
   try {
     await db().doc(`${paths.notifications(tenantId)}/${id}`).create({
       id,
       tenantId,
       category: 'handoff',
-      type: esIa ? 'handoff_ai_unavailable' : 'handoff_customer_requested',
-      title: esIa ? '🙋 Un cliente necesita atención humana' : '🙋 Un cliente pidió atención humana',
-      body: esIa
+      type: esCobertura ? 'handoff_coverage_review' : esIa ? 'handoff_ai_unavailable' : 'handoff_customer_requested',
+      title: esCobertura
+        ? '📍 Un cliente espera confirmación de cobertura'
+        : esIa ? '🙋 Un cliente necesita atención humana' : '🙋 Un cliente pidió atención humana',
+      body: esCobertura
+        ? `El cliente ${cliente} compartió su ubicación para confirmar la cobertura antes de pagar. Revisala desde Conversaciones (el bot quedó en pausa).`
+        : esIa
         ? sellerName
           ? `El asistente no pudo completar la consulta del cliente ${cliente} y lo derivó a ${sellerName}. El bot quedó en pausa: respondele desde Conversaciones.`
           : `El asistente no pudo completar la consulta del cliente ${cliente} y no hay un vendedor disponible para derivarlo. Revisá la conversación desde Conversaciones.`

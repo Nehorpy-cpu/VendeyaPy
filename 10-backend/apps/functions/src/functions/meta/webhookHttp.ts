@@ -87,7 +87,10 @@ export const metaWebhook = onRequest({ region: 'us-central1', cors: false }, asy
         timestamp: m.timestamp,
         ...(m.adReferral ? { adReferral: m.adReferral } : {}),
         ...(m.image ? { image: m.image } : {}), // ORDER-1B: comprobante por imagen
-        rawMessage: m.rawMessage, // mínimo para auditoría/debug; sin tokens ni secretos
+        // COVERAGE-1B: ubicación nativa VALIDADA (tránsito hacia el trigger; process.ts la anula
+        // del inbox al terminar — la ubicación exacta persiste SOLO en coverageRequests).
+        ...(m.location ? { location: m.location } : {}),
+        rawMessage: m.rawMessage, // mínimo para auditoría/debug; sin tokens ni secretos (location redactada)
       };
       const id = inboxDocId(m.platform, m.messageId);
       const ref = id ? db().collection(paths.metaWebhookInbox()).doc(id) : db().collection(paths.metaWebhookInbox()).doc();

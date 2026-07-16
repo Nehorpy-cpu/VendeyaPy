@@ -3,6 +3,7 @@ import {
   MockWhatsAppClient,
   CloudAPIClient,
   buildCloudApiTextBody,
+  buildCloudApiLocationRequestBody,
   getWhatsAppClient,
   clearWhatsappClientCache,
   type WhatsappClientDeps,
@@ -32,6 +33,24 @@ describe('whatsappClient', () => {
     const r = await new MockWhatsAppClient().sendText('+595981111111', 'hola', { tenantId: 'perfumeria' });
     expect(r.ok).toBe(true);
     expect(r.viaMock).toBe(true);
+  });
+
+  it('COVERAGE-1B: Mock sendLocationRequest no llama a Meta, resultado tipado ok/viaMock', async () => {
+    const r = await new MockWhatsAppClient().sendLocationRequest('+595981111111', 'compartí tu ubicación', { tenantId: 'perfumeria' });
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.viaMock).toBe(true);
+  });
+
+  it('COVERAGE-1B: buildCloudApiLocationRequestBody arma el interactive oficial (Graph actual, sin upgrade)', () => {
+    const b = buildCloudApiLocationRequestBody('595981111111', '📍 Compartí tu ubicación');
+    expect(b).toEqual({
+      messaging_product: 'whatsapp',
+      recipient_type: 'individual',
+      to: '595981111111',
+      type: 'interactive',
+      // action.name 'send_location' es OBLIGATORIO (doc oficial): sin él Graph rechaza el POST.
+      interactive: { type: 'location_request_message', body: { text: '📍 Compartí tu ubicación' }, action: { name: 'send_location' } },
+    });
   });
 
   it('buildCloudApiTextBody arma el payload correcto de Cloud API', () => {

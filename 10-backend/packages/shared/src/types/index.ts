@@ -26,6 +26,7 @@ export * from './meta.types.js';
 export * from './events.types.js';
 export * from './delivery.types.js';
 export * from './payment.types.js';
+export * from './coverage.types.js';
 export * from './invoice.types.js';
 export * from './user.types.js';
 export * from './plan.types.js';

@@ -33,8 +33,18 @@ export interface SendContext {
   channel?: MessageChannel;
 }
 
+/**
+ * COVERAGE-1B: resultado TIPADO del pedido de ubicación nativa (nada de strings mágicos).
+ * `unsupported_channel` ⇒ el llamador manda el texto plano (fallback textual, UNA sola vez).
+ */
+export type LocationRequestResult =
+  | { ok: true; id?: string; viaMock?: boolean }
+  | { ok: false; reason: 'unsupported_channel' | 'send_error' };
+
 export interface WhatsAppClient {
   sendText(to: string, text: string, ctx?: SendContext): Promise<SendResult>;
+  /** COVERAGE-1B: interactive `location_request_message` (botón nativo "Enviar ubicación"). */
+  sendLocationRequest(to: string, bodyText: string, ctx?: SendContext): Promise<LocationRequestResult>;
 }
 
 const GRAPH_VERSION = 'v19.0';
@@ -47,6 +57,22 @@ export function buildCloudApiTextBody(to: string, text: string) {
     to,
     type: 'text',
     text: { preview_url: false, body: text },
+  };
+}
+
+/**
+ * Body oficial del location_request_message (puro → testeable). Graph ACTUAL del proyecto
+ * (sin upgrade): el tipo interactivo está disponible en la Cloud API desde v16.
+ */
+export function buildCloudApiLocationRequestBody(to: string, bodyText: string) {
+  return {
+    messaging_product: 'whatsapp',
+    recipient_type: 'individual',
+    to,
+    type: 'interactive',
+    // `action: { name: 'send_location' }` es OBLIGATORIO según la doc oficial: sin él, Graph
+    // rechaza el POST y el botón nativo jamás sale (review adversarial, hallazgo alto).
+    interactive: { type: 'location_request_message', body: { text: bodyText }, action: { name: 'send_location' } },
   };
 }
 
@@ -92,6 +118,43 @@ export class MockWhatsAppClient implements WhatsAppClient {
     }
     return { ok: true, viaMock: true };
   }
+
+  /** Mock del location_request_message: no llama a Meta; traza inspeccionable en emulador. */
+  async sendLocationRequest(to: string, bodyText: string, ctx?: SendContext): Promise<LocationRequestResult> {
+    // Fixture SOLO-emulador para testear el fallback textual (mismo patrón que aiTestFixtures).
+    if (isEmulator() && ctx?.tenantId) {
+      try {
+        const fx = await db().doc(`tenants/${ctx.tenantId}/_debug/whatsappFixtures`).get();
+        if (fx.data()?.failLocationRequest === true) return { ok: false, reason: 'send_error' };
+      } catch {
+        /* sin fixture → camino normal */
+      }
+    }
+    logger.info('WhatsApp (mock): location request NO enviado a Meta', {
+      tenantId: ctx?.tenantId,
+      channel: ctx?.channel,
+      to: `…${to.slice(-4)}`,
+      chars: bodyText.length,
+      mode: this.resolution?.mode,
+      reason: this.resolution?.reason,
+    });
+    if (isEmulator() && ctx?.tenantId) {
+      try {
+        await db().doc(`tenants/${ctx.tenantId}/_debug/lastWhatsappSend`).set({
+          to,
+          kind: 'location_request',
+          channel: ctx.channel ?? null,
+          phoneNumberId: this.resolution?.phoneNumberId ?? null,
+          mode: this.resolution?.mode ?? null,
+          viaMock: true,
+          at: Timestamp.now(),
+        });
+      } catch {
+        /* la traza de debug nunca debe romper el envío */
+      }
+    }
+    return { ok: true, viaMock: true };
+  }
 }
 
 /** Cliente real de WhatsApp Cloud API. */
@@ -120,6 +183,23 @@ export class CloudAPIClient implements WhatsAppClient {
         : String(e);
       logger.error('WhatsApp Cloud API: error al enviar', e, { tenantId: ctx?.tenantId, to });
       return { ok: false, error };
+    }
+  }
+
+  /** COVERAGE-1B: interactive location_request_message por la Cloud API (Graph actual). */
+  async sendLocationRequest(to: string, bodyText: string, ctx?: SendContext): Promise<LocationRequestResult> {
+    try {
+      const url = `https://graph.facebook.com/${GRAPH_VERSION}/${this.phoneNumberId}/messages`;
+      const res = await axios.post(url, buildCloudApiLocationRequestBody(to, bodyText), {
+        headers: { Authorization: `Bearer ${this.accessToken}`, 'Content-Type': 'application/json' },
+        timeout: 10_000,
+      });
+      const id = res.data?.messages?.[0]?.id as string | undefined;
+      return { ok: true, id };
+    } catch (e) {
+      // Sin payloads sensibles: solo el error de Meta (mismo criterio que sendText, to enmascarado).
+      logger.error('WhatsApp Cloud API: error al enviar location request', e, { tenantId: ctx?.tenantId, to: `…${to.slice(-4)}` });
+      return { ok: false, reason: 'send_error' };
     }
   }
 }

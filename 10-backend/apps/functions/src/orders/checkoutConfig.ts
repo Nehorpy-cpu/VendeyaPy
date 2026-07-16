@@ -43,6 +43,8 @@ export async function getCheckoutConfig(tenantId: string): Promise<CheckoutConfi
   return {
     bankAccounts: data.bankAccounts?.length ? data.bankAccounts : DEFAULT_CONFIG.bankAccounts,
     sellers: data.sellers?.length ? data.sellers : DEFAULT_CONFIG.sellers,
+    // COVERAGE-1B: crudo tal cual — lo valida coverageSettings() (ausente/inválido ⇒ off).
+    ...(data.coverage !== undefined ? { coverage: data.coverage } : {}),
   };
 }
 

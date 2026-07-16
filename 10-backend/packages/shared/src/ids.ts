@@ -25,6 +25,7 @@ export const ID_PREFIX = {
   SUBSCRIPTION: 'sub',
   WEBHOOK_EVENT: 'evt',
   PLAN: 'pln',
+  COVERAGE_REQUEST: 'covr',
 } as const;
 
 export type IdPrefix = (typeof ID_PREFIX)[keyof typeof ID_PREFIX];
@@ -57,3 +58,4 @@ export const newPaymentId = () => newId(ID_PREFIX.PAYMENT);
 export const newInvoiceId = () => newId(ID_PREFIX.INVOICE);
 export const newSubscriptionId = () => newId(ID_PREFIX.SUBSCRIPTION);
 export const newWebhookEventId = () => newId(ID_PREFIX.WEBHOOK_EVENT);
+export const newCoverageRequestId = () => newId(ID_PREFIX.COVERAGE_REQUEST);

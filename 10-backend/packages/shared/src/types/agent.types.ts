@@ -27,6 +27,8 @@ export interface Seller {
 export interface CheckoutConfig {
   bankAccounts: BankAccount[];
   sellers: Seller[];
+  /** COVERAGE-1B: revisión manual de cobertura antes del pago (opcional; ausente ⇒ off). */
+  coverage?: import('./coverage.types.js').CoverageConfig;
 }
 
 export interface AgentConfig {

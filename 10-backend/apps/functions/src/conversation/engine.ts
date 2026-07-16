@@ -42,6 +42,8 @@ import { veredictoOcasion, respuestaOcasionNoConviene, respuestaOcasionConviene 
 import { esPosiblePedidoHumano, procesarPedidoHumano } from './humanRequest.js';
 import { derivarPorIaNoDisponible, esConsultaDerivable } from './aiUnavailable.js';
 import { esConsultaCobertura, RESPUESTA_COBERTURA_SEGURA } from './coverageGuard.js';
+import { gateCoberturaCheckout, clasificarTextoEnEspera, manejarTurnoEnEsperaUbicacion } from './coverage.js';
+import type { CoverageSessionPointer } from '@vpw/shared';
 import { createPendingOrder } from '../orders/createPendingOrder.js';
 import { resolveCheckoutReuse } from '../orders/checkoutReuse.js';
 import { getCheckoutConfig, formatTransferInstructions } from '../orders/checkoutConfig.js';
@@ -72,6 +74,8 @@ export interface ConversationResult {
   state: SessionState;
   /** true si el chat está en atención humana: el bot no generó respuesta. */
   handledByHuman?: boolean;
+  /** COVERAGE-1B: el turno pide ubicación → el caller intenta el botón nativo (fallback textual). */
+  locationRequest?: boolean;
 }
 
 /** El teléfono (solo dígitos) sirve de id de cliente. */
@@ -337,6 +341,8 @@ export async function decidirRespuesta(
     pendingOrderId?: string | null;
     /** F3: reloj inyectable (tests); default Date.now(). */
     nowMs?: number;
+    /** COVERAGE-1B: metadata del turno para el gate de cobertura (flag ON solamente). */
+    coverageTurno?: { messageId?: string | null; simulation?: boolean; channel?: MessageChannel; receivedVia?: string | null };
   },
 ): Promise<{
   reply: string;
@@ -349,6 +355,10 @@ export async function decidirRespuesta(
   catalogEmpty?: boolean;
   /** F3: objeto = nueva oferta · null = limpiar · undefined = conservar la actual. */
   pendingCart?: PendingCartConfirmation | null;
+  /** COVERAGE-1B: puntero de cobertura (tri-estado: objeto/null/undefined=conservar). */
+  coverage?: CoverageSessionPointer | null;
+  /** COVERAGE-1B: el turno pide ubicación → intentar el botón nativo con fallback textual. */
+  locationRequest?: boolean;
 }> {
   const t = text.toLowerCase();
 
@@ -388,6 +398,20 @@ export async function decidirRespuesta(
       return {
         reply: '🛒 Tu carrito está vacío. Agregá algún perfume primero (escribí *catálogo*).',
         nextState: 'BROWSING',
+      };
+    }
+
+    // COVERAGE-1B: con `coverage.enabled` y SIN aprobación vigente para la ubicación, el
+    // checkout se frena ANTES de crear orden / mostrar banco / pasar a AWAITING_PAYMENT:
+    // primero la ubicación (botón nativo o dirección escrita). Flag off ⇒ gate null ⇒ intacto.
+    const gate = await gateCoberturaCheckout(tenantId, customerId, prev.cart, prev.coverageTurno ?? {});
+    if (gate) {
+      return {
+        reply: gate.reply,
+        nextState: 'CART',
+        pendingCart: null, // el checkout congela el contexto de oferta (mismo criterio que pagar)
+        ...(gate.coverage !== undefined ? { coverage: gate.coverage } : {}),
+        ...(gate.locationRequest ? { locationRequest: true } : {}),
       };
     }
 
@@ -824,11 +848,24 @@ export async function handleMessage(input: ConversationInput): Promise<Conversat
   const agentConfig = await getAgentConfig(tenantId);
   const botSilent = humanTakeover || !agentConfig.botEnabled;
 
+  // COVERAGE-1B: turno mientras se espera la ubicación. La clasificación es PURA y corre ANTES
+  // de persistir el inbound: si el texto ES una dirección, el historial recibe SOLO el
+  // placeholder (la dirección exacta va al coverageRequest, jamás a messages). Los interceptores
+  // PREVIOS conservan la prioridad (review): un pedido de humano o un reclamo que además parezca
+  // dirección se trata como 'otro' — su texto real queda en el historial y su flujo responde.
+  const coveragePtr: CoverageSessionPointer | null = existing?.context?.coverage ?? null;
+  const clasifBase =
+    !botSilent && coveragePtr?.status === 'awaiting_location' ? clasificarTextoEnEspera(text) : null;
+  const clasifCobertura: typeof clasifBase =
+    clasifBase && clasifBase !== 'otro' && (esPosiblePedidoHumano(text) || tipoReclamoCarrito(text) !== null)
+      ? 'otro'
+      : clasifBase;
+
   // Guardar SIEMPRE el mensaje entrante del cliente (incluso si el bot está en pausa).
   await appendMessage(tenantId, customerId, {
     direction: 'in',
     author: 'customer',
-    text,
+    text: clasifCobertura === 'direccion' ? '📍 Dirección recibida' : text,
     now,
     state: existing?.state ?? null,
     humanTakeover,
@@ -974,6 +1011,53 @@ export async function handleMessage(input: ConversationInput): Promise<Conversat
       logger.info('Reclamo de carrito → respuesta determinística con estado real', { tenantId, customerId, tipo: reclamo });
     }
   }
+  // COVERAGE-1B: request `awaiting_location` vigente → dirección escrita, cancelación, "¿cómo
+  // comparto?" y texto ambiguo se resuelven acá, SIN IA. Lo clasificado 'otro' (producto,
+  // carrito, pagar, vendedor, reclamos, comprobantes, preguntas) sigue su flujo normal.
+  if (!result && clasifCobertura && clasifCobertura !== 'otro') {
+    const ce = await manejarTurnoEnEsperaUbicacion(tenantId, customerId, text, clasifCobertura, {
+      messageId: input.messageId ?? null,
+      simulation: input.simulation === true,
+      channel,
+    });
+    if (ce?.takeover) {
+      // El takeover coverage_review ya quedó persistido: NO se pisa la sesión (mismo criterio
+      // que HANDOFF-2) y la confirmación sale recién después de persistir.
+      if (ce.reply.trim()) {
+        let replyCe = ce.reply;
+        if (nuevoConIntencion) replyCe = saludoBreve(agentConfig.greetingMessage) + '\n\n' + sinSaludoInicial(replyCe);
+        await appendMessage(tenantId, customerId, {
+          direction: 'out',
+          author: 'bot',
+          text: replyCe,
+          state: existing?.state ?? 'IDLE',
+          humanTakeover: true,
+          countUnread: true,
+          channel,
+          receivedVia: input.receivedByPhoneNumberId ?? null,
+        });
+        return { reply: replyCe, state: existing?.state ?? 'IDLE' };
+      }
+      return { reply: '', state: existing?.state ?? 'IDLE', handledByHuman: true };
+    }
+    if (ce) {
+      result = {
+        reply: ce.reply,
+        nextState: existing?.state ?? 'CART',
+        ...(ce.coverage !== undefined ? { coverage: ce.coverage } : {}),
+        ...(ce.locationRequest ? { locationRequest: true } : {}),
+      };
+    } else if (clasifCobertura === 'direccion') {
+      // El texto ES una dirección pero el flujo ya no aplica (flag apagado a mitad / request
+      // desaparecido): JAMÁS sigue al flujo normal — la dirección cruda no debe llegar a la IA
+      // (el historial ya guardó solo el placeholder). Se limpia el puntero y se responde honesto.
+      result = {
+        reply: 'No pude procesar tu dirección automáticamente 🙏 Contame qué estás buscando o escribí *catálogo*.',
+        nextState: existing?.state ?? 'BROWSING',
+        coverage: null,
+      };
+    }
+  }
   // CAT-2B: "¿PRODUCTO sirve para OCASIÓN?" → el MOTOR responde honesto con la ficha (cuándo-NO
   // gana; alternativa del ranking como oferta). Sin señal en la ficha → se DELEGA a la IA aunque
   // quiereCatalogo capture el texto: estas preguntas jamás vuelven al listado genérico (bug prod).
@@ -1069,6 +1153,12 @@ export async function handleMessage(input: ConversationInput): Promise<Conversat
       pendingExpirada,
       pendingOrderId: existing?.context?.pendingOrderId ?? null,
       nowMs,
+      coverageTurno: {
+        messageId: input.messageId ?? null,
+        simulation: input.simulation === true,
+        channel,
+        receivedVia: input.receivedByPhoneNumberId ?? null,
+      },
     });
     // F1: catálogo sin resultados → antes del canned "no encontré", intentar la IA (sus tools
     // buscan con mejores parámetros y puede ofrecer alternativas reales). Si la IA no corre
@@ -1140,7 +1230,19 @@ export async function handleMessage(input: ConversationInput): Promise<Conversat
       tx.set(sessionRef, { context: { lastMessageAt: now }, updatedAt: now }, { merge: true });
       return true;
     }
-    tx.set(sessionRef, session);
+    // COVERAGE-1B: el puntero de cobertura se preserva desde la lectura FRESCA (no del snapshot
+    // del inicio del turno). Si el propio turno trae un puntero (gate) pero el fresco apunta al
+    // MISMO request con un update más nuevo (una ubicación concurrente ya lo avanzó), gana el
+    // fresco — jamás se retrocede un pending_coverage_review a awaiting_location (review).
+    const fresco = ctxFresh.coverage ?? null;
+    const propio = result.coverage;
+    const coverageFinal =
+      propio === undefined
+        ? fresco
+        : propio && fresco && fresco.requestId === propio.requestId && fresco.updatedAt.toMillis() > propio.updatedAt.toMillis()
+          ? fresco
+          : propio;
+    tx.set(sessionRef, { ...session, context: { ...session.context, coverage: coverageFinal } });
     return false;
   });
   if (tomadoEnElMedio) {
@@ -1162,5 +1264,5 @@ export async function handleMessage(input: ConversationInput): Promise<Conversat
   }
 
   logger.info('Mensaje procesado', { tenantId, customerId, state: nextState });
-  return { reply, state: nextState };
+  return { reply, state: nextState, ...(result.locationRequest ? { locationRequest: true } : {}) };
 }

@@ -10,6 +10,7 @@ import { Timestamp } from 'firebase-admin/firestore';
 import type { WebhookInboxEvent, MetaExternalIndexEntry, MessageChannel } from '@vpw/shared';
 import { db, paths } from '../lib/firebase.js';
 import { handleMessage } from '../conversation/engine.js';
+import { procesarUbicacionEntrante } from '../conversation/coverage.js';
 import { processComprobanteImage } from '../orders/comprobanteImage.js';
 import { getWhatsAppClient } from '../messaging/whatsappClient.js';
 import { checkTenantInboundGate, incrementMessageUsage } from '../tenants/lifecycle.js';
@@ -36,18 +37,21 @@ export async function processWebhookEvent(eventId: string): Promise<void> {
       tenantId = (idx.data() as MetaExternalIndexEntry | undefined)?.tenantId ?? null;
     }
     const payload = ev.payload as
-      | { from?: string; text?: string; adReferral?: { campaignId?: string; adId?: string }; messageId?: string; image?: { mediaId?: string; mimeType?: string | null; caption?: string | null } }
+      | { from?: string; text?: string; adReferral?: { campaignId?: string; adId?: string }; messageId?: string; image?: { mediaId?: string; mimeType?: string | null; caption?: string | null }; location?: { latitude?: number; longitude?: number; name?: string | null; address?: string | null; contextMessageId?: string | null } }
       | undefined;
     const esImagen = !!payload?.image?.mediaId && ev.platform === 'whatsapp';
-    if (!tenantId || !payload?.from || (!payload?.text && !esImagen)) {
-      await ref.update({ processingStatus: 'ignored', errorMessage: !tenantId ? 'empresa no resuelta' : 'payload sin from/text', processedAt: Timestamp.now() });
+    // COVERAGE-1B: ubicación nativa (solo WhatsApp; el parser ya validó rangos/strings).
+    const esUbicacion = ev.platform === 'whatsapp' && typeof payload?.location?.latitude === 'number' && typeof payload?.location?.longitude === 'number';
+    if (!tenantId || !payload?.from || (!payload?.text && !esImagen && !esUbicacion)) {
+      // PRIVACIDAD: la ubicación exacta jamás queda retenida en el inbox, ni en los ignorados.
+      await ref.update({ processingStatus: 'ignored', errorMessage: !tenantId ? 'empresa no resuelta' : 'payload sin from/text', processedAt: Timestamp.now(), ...(esUbicacion ? { 'payload.location': null } : {}) });
       return;
     }
 
     // Gate de empresa (Fase 4): suspendida o sobre el límite de mensajes → no procesar.
     const gate = await checkTenantInboundGate(tenantId);
     if (!gate.allowed) {
-      await ref.update({ processingStatus: 'ignored', tenantId, errorMessage: `empresa ${gate.reason}`, processedAt: Timestamp.now() });
+      await ref.update({ processingStatus: 'ignored', tenantId, errorMessage: `empresa ${gate.reason}`, processedAt: Timestamp.now(), ...(esUbicacion ? { 'payload.location': null } : {}) });
       logger.info('Inbound bloqueado por gate de empresa', { tenantId, reason: gate.reason });
       return;
     }
@@ -57,6 +61,38 @@ export async function processWebhookEvent(eventId: string): Promise<void> {
     // MULTI-NUMBER-1: en WhatsApp, ev.externalId ES el phone_number_id del número del negocio
     // que recibió el mensaje → se persiste en la conversación y la respuesta sale por ese número.
     const receivedBy = ev.platform === 'whatsapp' ? ev.externalId : null;
+
+    // COVERAGE-1B: ubicación nativa → camino propio (JAMÁS pasa por el bot/IA). El handler
+    // persiste solo el placeholder en el historial; las coordenadas van al coverageRequest.
+    // Al terminar se ANULA payload.location del inbox (la ubicación exacta no queda acá).
+    if (esUbicacion) {
+      const resultado = await procesarUbicacionEntrante({
+        tenantId,
+        from: payload.from,
+        location: {
+          latitude: payload.location!.latitude!,
+          longitude: payload.location!.longitude!,
+          name: payload.location!.name ?? null,
+          address: payload.location!.address ?? null,
+          contextMessageId: payload.location!.contextMessageId ?? null,
+        },
+        messageId: payload.messageId ?? ev.id,
+        receivedByPhoneNumberId: receivedBy,
+        channel: platform,
+      });
+      await incrementMessageUsage(tenantId).catch(() => { /* métrica de uso, no crítica */ });
+      if (resultado.reply.trim()) {
+        try {
+          const client = await getWhatsAppClient(tenantId, undefined, receivedBy);
+          await client.sendText(payload.from, resultado.reply, { tenantId, channel: platform });
+        } catch (e) {
+          logger.error('No se pudo entregar la respuesta de cobertura', e, { tenantId });
+        }
+      }
+      await ref.update({ processingStatus: 'processed', tenantId, processedAt: Timestamp.now(), 'payload.location': null });
+      logger.info('Webhook procesado (ubicación)', { eventId, tenantId });
+      return;
+    }
 
     // ORDER-1B: imagen entrante = posible COMPROBANTE de pago. Camino propio (no pasa por el
     // bot): asocia a la orden pendiente, Storage, PENDING_VERIFICATION + handoff. Nunca PAID.
@@ -115,7 +151,18 @@ export async function processWebhookEvent(eventId: string): Promise<void> {
     if (result.reply && result.reply.trim() && !result.handledByHuman) {
       try {
         const client = await getWhatsAppClient(tenantId, undefined, receivedBy);
-        await client.sendText(payload.from, result.reply, { tenantId, channel: platform });
+        // COVERAGE-1B: si el turno pide ubicación, se intenta el botón nativo
+        // (location_request_message). Si el canal no es WhatsApp o el interactivo falla,
+        // FALLBACK TEXTUAL UNA SOLA VEZ (el mismo texto ya incluye la alternativa escrita).
+        if (result.locationRequest && platform === 'whatsapp') {
+          const lr = await client.sendLocationRequest(payload.from, result.reply, { tenantId, channel: platform });
+          if (!lr.ok) {
+            logger.info('Cobertura: location request falló, fallback textual', { tenantId, reason: lr.reason });
+            await client.sendText(payload.from, result.reply, { tenantId, channel: platform });
+          }
+        } else {
+          await client.sendText(payload.from, result.reply, { tenantId, channel: platform });
+        }
       } catch (e) {
         logger.error('No se pudo entregar la respuesta del bot', e, { tenantId });
       }
@@ -133,7 +180,10 @@ export async function processWebhookEvent(eventId: string): Promise<void> {
     await ref.update({ processingStatus: 'processed', tenantId, processedAt: Timestamp.now() });
     logger.info('Webhook procesado', { eventId, tenantId, platform: ev.platform });
   } catch (e) {
-    await ref.update({ processingStatus: 'failed', errorMessage: String(e), processedAt: Timestamp.now() });
+    // PRIVACIDAD: si el evento traía ubicación, se anula también en 'failed' (los failed no se
+    // reprocesan — sin esto las coordenadas quedarían retenidas en el inbox hasta el TTL).
+    const teniaUbicacion = !!(ev.payload as { location?: unknown } | undefined)?.location;
+    await ref.update({ processingStatus: 'failed', errorMessage: String(e), processedAt: Timestamp.now(), ...(teniaUbicacion ? { 'payload.location': null } : {}) });
     logger.error('Error procesando webhook', e, { eventId });
   }
 }
