@@ -88,7 +88,7 @@ check('1. saludo con cuota agotada → reglas normales, sin handoff ni IA',
 
 // ===== 2. Consulta que NECESITABA IA → handoff ai_unavailable =====
 const WAMID_Q = `wamid.AIFB-QUOTA-${Date.now()}`;
-await postText(CUST, 'hacen envios al interior del pais?', WAMID_Q);
+await postText(CUST, 'atienden los domingos?', WAMID_Q);
 const derivado = await waitFor(async () => (await msgsOf(CUST)).some((m) => m.text?.includes('Te paso con Vendedor E2E')));
 const ses2 = await sessionOf(CUST);
 const outs2 = (await msgsOf(CUST)).filter((m) => m.direction === 'out');
@@ -100,7 +100,7 @@ check('2. consulta consultiva → handoff ai_unavailable PERSISTIDO + vendedor +
   `reason=${ses2?.context?.handoffReason} notifs=${n2.length}`);
 
 // ===== 3. Mismo wamid repetido → sin duplicados =====
-await postText(CUST, 'hacen envios al interior del pais?', WAMID_Q);
+await postText(CUST, 'atienden los domingos?', WAMID_Q);
 await sleep(2500);
 const confs = (await msgsOf(CUST)).filter((m) => m.text?.includes('Te paso con Vendedor E2E')).length;
 check('3. wamid repetido → UNA confirmación y UNA notificación', confs === 1 && (await notifsIa()).length === 1);
@@ -146,7 +146,7 @@ await sleep(31000); // caché de entitlements (30s)
 const CUST3 = '595993700003';
 await postText(CUST3, 'hola');
 await waitFor(async () => (await msgsOf(CUST3)).some((m) => m.direction === 'out'));
-await postText(CUST3, 'hacen envios al interior del pais?');
+await postText(CUST3, 'atienden los domingos?');
 const generico = await waitFor(async () => (await msgsOf(CUST3)).some((m) => m.text?.includes('Puedo ayudarte a encontrar')));
 const ses8b = await sessionOf(CUST3);
 check('8. feature_unavailable (override off) → fallback genérico, SIN derivación ni takeover',
@@ -158,7 +158,7 @@ await sleep(31000); // reset del caché para el paso 9
 // ===== 9. agentTestCaseRun (simulation:true) → CERO efectos operativos (review) =====
 const owner9 = await signIn('owner@perfumeria.com');
 const notifsAntes9 = (await notifsIa()).length;
-const rUp = await call('agentTestCaseUpsert', owner9, { tenantId: T, data: { name: 'aifb-sim', userMessage: 'hacen envios al interior del pais?' } });
+const rUp = await call('agentTestCaseUpsert', owner9, { tenantId: T, data: { name: 'aifb-sim', userMessage: 'atienden los domingos?' } });
 const caseId = rUp.result?.id;
 const rRun = caseId ? await call('agentTestCaseRun', owner9, { tenantId: T, id: caseId }) : { result: null };
 const notifsDespues9 = (await notifsIa()).length;

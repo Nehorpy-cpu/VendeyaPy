@@ -123,13 +123,15 @@ const fresh = (n) => { const f = `59599390${String(n).padStart(4, '0')}`; custom
     !!t3 && t3.includes('¡Hola de nuevo!') && !t3.includes('Bienvenida a Perfumería F6'), JSON.stringify((t3 ?? '').slice(0, 60)));
 }
 
-// ===== 5. Cliente nuevo "Buen día, hacen envíos?" → breve + FAQ =====
+// ===== 5. Cliente nuevo "Buen día, hacen envíos?" → breve + respuesta SEGURA (COVERAGE-GUARD-1) =====
 {
   const from = fresh(3);
+  // El fixture simula la IA inventando cobertura ("a todo el país"): el guard debe ganar ANTES y
+  // el marker JAMÁS debe aparecer — la consulta de envíos ya no llega a la IA.
   await setFixture({ text: `¡Sí, hacemos envíos a todo el país! 🚚 ${MARK}` });
-  const t1 = await sendAndWaitNew(from, 'Buen día, hacen envíos?', (t) => t.includes(MARK), 40000);
-  check('6. "Buen día, hacen envíos?" (nuevo) → bienvenida breve + FAQ, sin bienvenida doble',
-    !!t1 && t1.startsWith(GREETING_LINE1) && t1.includes('envíos') && !t1.includes('Soy Sofía'),
+  const t1 = await sendAndWaitNew(from, 'Buen día, hacen envíos?', (t) => t.includes('deben ser confirmados por el equipo'), 40000);
+  check('6. "Buen día, hacen envíos?" (nuevo) → bienvenida breve + respuesta segura del guard (sin IA), sin bienvenida doble',
+    !!t1 && t1.startsWith(GREETING_LINE1) && t1.includes('deben ser confirmados por el equipo') && !t1.includes(MARK) && !t1.includes('Soy Sofía'),
     JSON.stringify((t1 ?? '').slice(0, 80)));
 }
 

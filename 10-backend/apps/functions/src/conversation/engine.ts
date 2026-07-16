@@ -41,6 +41,7 @@ import { detectarOcasionContexto } from '../catalog/fichaRank.js';
 import { veredictoOcasion, respuestaOcasionNoConviene, respuestaOcasionConviene } from './productOccasion.js';
 import { esPosiblePedidoHumano, procesarPedidoHumano } from './humanRequest.js';
 import { derivarPorIaNoDisponible, esConsultaDerivable } from './aiUnavailable.js';
+import { esConsultaCobertura, RESPUESTA_COBERTURA_SEGURA } from './coverageGuard.js';
 import { createPendingOrder } from '../orders/createPendingOrder.js';
 import { resolveCheckoutReuse } from '../orders/checkoutReuse.js';
 import { getCheckoutConfig, formatTransferInstructions } from '../orders/checkoutConfig.js';
@@ -991,6 +992,17 @@ export async function handleMessage(input: ConversationInput): Promise<Conversat
     } else if (po?.tipo === 'delegar') {
       delegarPreguntaProducto = true;
     }
+  }
+  // COVERAGE-GUARD-1: consultas de cobertura/costo/plazo de envío → respuesta SEGURA determinística,
+  // jamás la IA (que extrapolaba la FAQ genérica de envíos a cobertura geográfica — hallazgo del
+  // smoke de AI-FALLBACK). No deriva solo: si el cliente pide una persona, HANDOFF-2 hace el pase
+  // real. El flujo de conversión GANA (review): un turno de pagar/agregar jamás se intercepta
+  // ("¿me mandan el QR para pagar?" es checkout F5, no cobertura). pendingCart null: la invitación
+  // "decime que querés hablar con un vendedor" convierte un "sí" posterior en pedido de contacto,
+  // no en confirmación de la oferta vieja (mismo criterio que el fallback de IA no disponible).
+  if (!result && (!esNuevo || nuevoConIntencion) && !confirmandoSeleccion && !quierePagar(t) && !quiereAgregar(t) && esConsultaCobertura(text)) {
+    result = { reply: RESPUESTA_COBERTURA_SEGURA, nextState: existing?.state ?? 'BROWSING', pendingCart: null };
+    logger.info('Consulta de cobertura → respuesta segura determinística (sin IA)', { tenantId, customer: `…${customerId.slice(-4)}` });
   }
   if (!result && (!esNuevo || nuevoConIntencion) && !confirmandoSeleccion && (delegarPreguntaProducto || ruleEngineWouldFallback(text, t))) {
     const ai = await delegarAlSalesAgent();

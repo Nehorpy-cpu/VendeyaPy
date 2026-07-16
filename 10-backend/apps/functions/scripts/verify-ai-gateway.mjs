@@ -35,7 +35,7 @@ const FIX = 'aiTestFixtures/ai';
 const AI_MARK = '[fixture-ai]';
 const FALLBACK_MARK = 'Puedo ayudarte a encontrar'; // texto del fallback rule-based del engine
 const GREETING = 'hola';
-const PROBE = '¿hacen envíos al interior del país?'; // cae al fallback del engine → elegible para IA
+const PROBE = '¿atienden los domingos?'; // cae al fallback del engine → elegible para IA (COVERAGE-GUARD-1 intercepta las de envíos)
 
 const results = [];
 const check = (n, c, e = '') => { results.push(!!c); console.log(`${c ? '✅' : '❌'} ${n}${e ? '  — ' + e : ''}`); };
@@ -124,7 +124,7 @@ const okDoc = okSnap.docs.map((d) => d.data())[0];
 const keys = okDoc ? Object.keys(okDoc) : [];
 const SENSITIVE = ['prompt', 'prompts', 'messages', 'message', 'system', 'content', 'payload', 'text', 'body', 'pii']; // 'context' (= nombre del contexto) es metadato OK
 const noPromptKeys = !keys.some((k) => SENSITIVE.includes(k.toLowerCase()));
-const noProbeLeak = okDoc ? !JSON.stringify(okDoc).includes('envíos al interior') && !JSON.stringify(okDoc).includes(AI_MARK) : false;
+const noProbeLeak = okDoc ? !JSON.stringify(okDoc).includes('atienden los domingos') && !JSON.stringify(okDoc).includes(AI_MARK) : false;
 check('3. aiRequests ok → registra modelo/tokens/costo SIN prompt ni PII',
   !!okDoc && okDoc.model === 'claude-haiku-4-5-20251001' && typeof okDoc.inputTokens === 'number' && typeof okDoc.costUsd === 'number' && noPromptKeys && noProbeLeak,
   `keys=${keys.join(',')}`);
@@ -137,7 +137,7 @@ check('4. Claude falla → fallback rule-based (el bot nunca queda mudo)', !!r4 
 // === 5. aiRequests 'error' → errorCode SIN prompt ===
 const errSnap = await db.collection(`tenants/${T}/aiRequests`).where('status', '==', 'error').get();
 const errDoc = errSnap.docs.map((d) => d.data())[0];
-const errNoLeak = errDoc ? !JSON.stringify(errDoc).includes('fallo simulado') && !JSON.stringify(errDoc).includes('envíos al interior') : false;
+const errNoLeak = errDoc ? !JSON.stringify(errDoc).includes('fallo simulado') && !JSON.stringify(errDoc).includes('atienden los domingos') : false;
 check('5. aiRequests error → registra errorCode SIN cuerpo del error ni prompt',
   !!errDoc && typeof errDoc.errorCode === 'string' && errDoc.errorCode.length > 0 && errNoLeak, JSON.stringify(errDoc));
 

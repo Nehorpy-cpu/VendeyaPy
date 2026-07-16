@@ -37,6 +37,14 @@ describe('ai/prompts buildSalesSystemPrompt — prohibición de acciones (F2) y 
     expect(prompt).toContain('NO empieces tus respuestas saludando');
   });
 
+  it('COVERAGE-GUARD-1: prohíbe extrapolar la FAQ de envíos a cobertura/costo/plazo', () => {
+    expect(prompt).toContain('ENVÍOS Y COBERTURA');
+    expect(prompt).toContain('JAMÁS la extrapoles');
+    expect(prompt).toContain('NUNCA inventes ni afirmes cobertura');
+    expect(prompt).toContain('llegamos a todo el país');
+    expect(prompt).toContain('dependen de la ubicación');
+  });
+
   it('F3: prohíbe dictar comandos/frases exactas y mencionar "el sistema"', () => {
     expect(prompt).toContain('NO tiene que aprender comandos');
     expect(prompt).toContain('NUNCA le pidas que escriba una palabra exacta');
