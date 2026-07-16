@@ -23,6 +23,7 @@ const FIX = 'aiTestFixtures/ai';
 const AI_MARK = '[fixture-cov]';
 const LAT = -25.28646;
 const LNG = -57.64701;
+const ACT = 'act-e2e-state-0001'; // HARDEN-1: activación vigente del flujo en este script
 
 const results = [];
 const check = (n, c, e = '') => { results.push(!!c); console.log(`${c ? '✅' : '❌'} ${n}${e ? '  — ' + e : ''}`); };
@@ -119,8 +120,17 @@ check('2. flag OFF → ubicación: respuesta honesta, sin request, placeholder s
   msgsA2.some((m) => m.text === '📍 Ubicación recibida') && !msgsA2.some((m) => /25\.28|57\.64/.test(m.text ?? '')),
   JSON.stringify((rA2 ?? '').slice(0, 50)));
 
-// ===== FLAG ON de acá en adelante =====
-await setCoverage({ enabled: true, expiryHours: 24 });
+// ===== 2b. HARDEN-1: enabled SIN activationId → fail-closed (checkout intacto) =====
+await setCoverage({ enabled: true, expiryHours: 24 }); // sin activationId: contrato ⇒ OFF
+const A3 = CUST(14);
+await armarCarrito(A3);
+const rA3 = await sendAndWait(A3, 'quiero pagar');
+check('2b. enabled:true SIN activationId → fail-closed: checkout normal (orden+banco), cero requests',
+  (rA3 ?? '').includes('transferir') && (await ordersOf(A3)) === 1 && (await requestsOf(A3)).length === 0,
+  `orders=${await ordersOf(A3)} reqs=${(await requestsOf(A3)).length}`);
+
+// ===== FLAG ON de acá en adelante (activación válida) =====
+await setCoverage({ enabled: true, expiryHours: 24, activationId: ACT });
 
 // ===== 3. "pagar" → awaiting_location SIN orden ni banco; botón nativo por el MISMO número =====
 const B = CUST(3);
@@ -321,10 +331,13 @@ const rL = await sendAndWait(L, '¿Hacen envíos al interior del país?');
 check('21. COVERAGE-GUARD activo: consulta de envíos → respuesta segura (sin IA)',
   (rL ?? '').includes('deben ser confirmados por el equipo') && !(rL ?? '').includes(AI_MARK));
 
-// ===== 22. Aislamiento por tenant: todos los requests viven bajo tenants/perfumeria =====
+// ===== 22. Aislamiento por tenant + sello de activación (HARDEN-1) =====
 const todosReqs = (await db.collection(`tenants/${T}/coverageRequests`).get()).docs.map((d) => d.data());
-check('22. aislamiento: todos los requests llevan el tenantId correcto y viven bajo su tenant',
-  todosReqs.length >= 6 && todosReqs.every((r) => r.tenantId === T), `reqs=${todosReqs.length}`);
+const reqsDeEsteRun = todosReqs.filter((r) => String(r.customerId ?? '').startsWith('59599400'));
+check('22. aislamiento: todos los requests llevan el tenantId correcto y el activationId vigente',
+  todosReqs.length >= 6 && todosReqs.every((r) => r.tenantId === T) &&
+  reqsDeEsteRun.length >= 6 && reqsDeEsteRun.every((r) => r.activationId === ACT),
+  `reqs=${todosReqs.length} conActivacion=${reqsDeEsteRun.filter((r) => r.activationId === ACT).length}/${reqsDeEsteRun.length}`);
 
 // ---- Cleanup (convivencia con otros verifies) ----
 for (const c of [CUST(6), CUST(8)]) await call('chatRelease', ownerX, { tenantId: T, customerId: c }).catch(() => {});

@@ -14,7 +14,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import type { CoverageRequest } from '@vpw/shared';
 import { useAuth } from '@/lib/auth-context';
-import { getCoverageRequestFor, approveCoverage, rejectCoverage, requestCoverageInfo, mapsUrlFor } from '@/lib/coverage';
+import { getCoverageRequestFor, getCoverageFlowState, approveCoverage, rejectCoverage, requestCoverageInfo, mapsUrlFor } from '@/lib/coverage';
 
 const ESTADO_LABEL: Record<CoverageRequest['status'], string> = {
   awaiting_location: 'Esperando la ubicación del cliente',
@@ -27,6 +27,14 @@ const ESTADO_LABEL: Record<CoverageRequest['status'], string> = {
 
 /** Roles que pueden VER la revisión (los demás ni consultan — evita polls denegados). */
 const ROLES_LECTURA = new Set(['TENANT_OWNER', 'TENANT_MANAGER', 'SELLER', 'PLATFORM_ADMIN']);
+
+/** Estados de reanudación que exigen atención (los sanos — pending/processing/done — no avisan). */
+const RESUME_AVISO: Partial<Record<string, string>> = {
+  cancelled: 'La reanudación quedó cancelada (cambió la activación del flujo): atendé el pedido de este cliente a mano.',
+  held_by_seller: 'La reanudación está retenida: el chat está tomado por el equipo — al devolverlo al bot, continúa sola.',
+  send_failed: 'El mensaje de reanudación no se pudo enviar: se reintenta automáticamente.',
+  send_unknown: 'El envío de la reanudación quedó sin confirmación: revisá el historial del chat antes de reintentar.',
+};
 
 const fmtFecha = (t: { toMillis?: () => number } | null | undefined) =>
   t?.toMillis ? new Date(t.toMillis()).toLocaleString('es-PY', { dateStyle: 'short', timeStyle: 'short' }) : '—';
@@ -48,6 +56,15 @@ export function CoverageReviewCard({ tenantId, customerId }: { tenantId: string;
     refetchInterval: 8000,
   });
   const req = covQ.data?.request ?? null;
+  // HARDEN-1: estado del flujo para GATING DE UI (fail-closed mientras carga). La autoridad
+  // sigue siendo el gate server-side: acá solo se ocultan acciones que el server rechazaría.
+  const flowQ = useQuery({
+    queryKey: ['coverage-flow', tenantId],
+    queryFn: () => getCoverageFlowState(tenantId),
+    enabled: !!tenantId && puedeVer,
+    refetchInterval: 30000,
+  });
+  const flujo = flowQ.data ?? { enabled: false, activationId: null };
 
   // Cambió el request (otro cliente u otro intento del mismo): limpiar el estado local.
   const reqId = req?.id ?? null;
@@ -81,6 +98,9 @@ export function CoverageReviewCard({ tenantId, customerId }: { tenantId: string;
   const pendiente = req.status === 'pending_coverage_review' && !vencido;
   // El soporte de plataforma LEE pero no decide (el server lo rechaza igual — acá ni se ofrece).
   const puedeDecidir = claims.role !== 'PLATFORM_ADMIN';
+  // HARDEN-1: acciones SOLO con el flujo activo y la MISMA activación del request. Histórico o
+  // deshabilitado → solo lectura (el server-side rechazaría igual; acá ni se ofrece el botón).
+  const flujoActivo = flujo.enabled && flujo.activationId !== null && flujo.activationId === (req.activationId ?? null);
   const cliente = `…${customerId.slice(-4)}`;
 
   return (
@@ -122,6 +142,10 @@ export function CoverageReviewCard({ tenantId, customerId }: { tenantId: string;
           Decidido por <span className="font-medium">{req.decision.byName}</span> ({req.decision.byRole}) el {fmtFecha(req.decision.at)}.
         </p>
       )}
+      {/* HARDEN-1 (review): sin esto, una reanudación cancelada/trabada parecía "resuelta". */}
+      {req.decision && req.resume && RESUME_AVISO[req.resume.status] && (
+        <p className="mt-1 font-medium text-amber-700" role="status">{RESUME_AVISO[req.resume.status]}</p>
+      )}
       {vencido && !req.decision && (req.status === 'pending_coverage_review' || req.status === 'awaiting_location' || req.status === 'coverage_expired') && (
         <p className="mt-1 text-amber-700">La solicitud venció: el cliente tiene que escribir *pagar* para retomar.</p>
       )}
@@ -130,7 +154,15 @@ export function CoverageReviewCard({ tenantId, customerId }: { tenantId: string;
       {aviso && !hecho && <p className="mt-2 font-medium text-sky-700" role="status">{aviso}</p>}
       {error && <p className="mt-2 font-semibold text-coral-700" role="alert">{error}</p>}
 
-      {pendiente && !hecho && puedeDecidir && (
+      {pendiente && !hecho && puedeDecidir && !flujoActivo && !flowQ.isLoading && !flowQ.isError && (
+        <p className="mt-2 text-ink-500" role="status">
+          {flujo.enabled
+            ? 'Esta solicitud pertenece a una activación anterior del flujo de cobertura: queda en solo lectura, sin acciones disponibles.'
+            : 'El flujo de cobertura está deshabilitado: esta solicitud queda en solo lectura, sin acciones disponibles.'}
+        </p>
+      )}
+
+      {pendiente && !hecho && puedeDecidir && flujoActivo && (
         <div className="mt-2 flex flex-wrap items-center gap-2">
           <button
             type="button"

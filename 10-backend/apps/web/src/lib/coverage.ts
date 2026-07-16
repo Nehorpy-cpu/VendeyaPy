@@ -6,7 +6,7 @@
  */
 import { collection, getDocs, query, where } from 'firebase/firestore';
 import { httpsCallable } from 'firebase/functions';
-import type { CoverageRequest } from '@vpw/shared';
+import type { CoverageRequest, CoverageActivation } from '@vpw/shared';
 import { firebaseDb, firebaseFunctions } from './firebase';
 
 export interface CoverageViewer {
@@ -67,6 +67,25 @@ export async function rejectCoverage(tenantId: string, requestId: string, expect
 export async function requestCoverageInfo(tenantId: string, requestId: string): Promise<CoverageDecisionResult> {
   const fn = httpsCallable<{ tenantId: string; requestId: string }, CoverageDecisionResult>(firebaseFunctions(), 'coverageRequestInfo');
   return (await fn({ tenantId, requestId })).data;
+}
+
+/**
+ * HARDEN-1 — Estado del flujo de cobertura del tenant, para GATING DE UI solamente (mostrar u
+ * ocultar acciones): la autoridad real es el gate server-side de las callables. Se consulta por
+ * la callable `coverageFlowState` (Admin SDK) porque las rules niegan `config/checkout` al
+ * SELLER (contiene cuentas bancarias) — review: leerlo con el SDK cliente dejaba al seller
+ * asignado sin botones con el flujo ACTIVO. Solo permission-denied se trata como OFF; un error
+ * transitorio se RELANZA (react-query conserva el último estado bueno y reintenta) — el gating
+ * sigue fail-closed mientras no hay datos.
+ */
+export async function getCoverageFlowState(tenantId: string): Promise<CoverageActivation> {
+  try {
+    const fn = httpsCallable<{ tenantId: string }, CoverageActivation>(firebaseFunctions(), 'coverageFlowState');
+    return (await fn({ tenantId })).data;
+  } catch (e) {
+    if ((e as { code?: string })?.code === 'functions/permission-denied') return { enabled: false, activationId: null };
+    throw e;
+  }
 }
 
 /**

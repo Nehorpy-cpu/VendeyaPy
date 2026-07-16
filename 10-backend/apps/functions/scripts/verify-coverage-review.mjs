@@ -25,6 +25,7 @@ const PNID = '900000000000103';
 const FIX = 'aiTestFixtures/ai';
 const LAT = -25.30001;
 const LNG = -57.60002;
+const ACT = 'act-e2e-review-0001'; // HARDEN-1: activación vigente del flujo en este script
 
 const results = [];
 const check = (n, c, e = '') => { results.push(!!c); console.log(`${c ? '✅' : '❌'} ${n}${e ? '  — ' + e : ''}`); };
@@ -98,11 +99,12 @@ await db.doc(FIX).set({ text: 'Respuesta IA [fixture-cr]' });
 // 1D: pausar el CONSUMIDOR de resume — este script verifica la DECISIÓN pura (el consumidor
 // tiene su propio verify: coverage-resume). Solo emulador.
 await db.doc(`tenants/${T}/_debug/coverageFixtures`).set({ pauseResume: true });
-await db.doc(`tenants/${T}/config/checkout`).set({
+const setCoverage = (coverage) => db.doc(`tenants/${T}/config/checkout`).set({
   sellers: [{ name: 'Vendedor CR', whatsapp: '595991000013', active: true }],
   bankAccounts: [{ bank: 'Banco CR', accountNumber: '000-2', holder: 'Titular CR', document: '2222' }],
-  coverage: { enabled: true, expiryHours: 24 },
+  ...(coverage !== undefined ? { coverage } : {}),
 });
+await setCoverage({ enabled: true, expiryHours: 24, activationId: ACT });
 
 const superadmin = await signIn('superadmin@aiafg.com');
 const rConn = await call('adminSetManualWhatsappConnection', superadmin, {
@@ -156,8 +158,9 @@ check('1. owner aprueba → coverage_approved con decision (actor/rol/fingerprin
   r1b.decision?.byRole === 'TENANT_OWNER' && r1b.decision?.locationFingerprint === r1.locationFingerprint &&
   r1b.resume?.status === 'pending',
   `status=${r1b?.status} err=${a1.err}`);
-check('2. outbox creado EXACTAMENTE una vez (doc-id = requestId, action approved, pending)',
-  job1?.action === 'approved' && job1?.status === 'pending' && job1?.coverageRequestId === r1.id);
+check('2. outbox creado EXACTAMENTE una vez (doc-id = requestId, action approved, pending) y con el activationId vigente',
+  job1?.action === 'approved' && job1?.status === 'pending' && job1?.coverageRequestId === r1.id &&
+  job1?.activationId === ACT, `jobAct=${job1?.activationId}`);
 check('3. la decisión NO libera el chat, NO crea orden, NO manda banco ni mensajes',
   (await sessionOf(C1))?.context?.humanTakeover === true && (await ordersOf(C1)) === 0 &&
   (await outsCount(C1)) === outsAntes1 && !((await lastOut(C1)) ?? '').includes('transferir'));
@@ -351,10 +354,75 @@ const r11b = await requestOf(C11);
 check('26. dirección durante takeover MANUAL (no coverage_review) → el request NO cambia',
   r11b.locationFingerprint === r11.locationFingerprint && (await sessionOf(C11))?.context?.handoffReason === 'seller_manual');
 
+// ===== 27-29. HARDEN-1: callables inertes con flag OFF y con activación stale =====
+const C12 = CUST(12);
+const r12 = await crearPendiente(C12);
+const outsAntes12 = await outsCount(C12);
+
+// 27: flag OFF → las TRES callables fallan con failed-precondition SIN mutar nada.
+// Aislamiento de tenant: OTRO tenant con el flujo ACTIVO no habilita las solicitudes de este
+// (la callable lee la config del tenant de los CLAIMS dentro de su propia transacción).
+await db.doc('tenants/otro-tenant/config/checkout').set({ coverage: { enabled: true, expiryHours: 24, activationId: 'act-otro-tenant-01' } });
+await setCoverage({ enabled: false });
+const off12a = await call('coverageApprove', owner, { tenantId: T, requestId: r12.id, expectedFingerprint: r12.locationFingerprint });
+const off12b = await call('coverageReject', owner, { tenantId: T, requestId: r12.id, expectedFingerprint: r12.locationFingerprint });
+const off12c = await call('coverageRequestInfo', owner, { tenantId: T, requestId: r12.id });
+await sleep(1500);
+const r12off = await requestOf(C12);
+check('27. flag OFF (aunque OTRO tenant esté activo) → approve/reject/requestInfo = FAILED_PRECONDITION; request intacto, sin job, sin mensajes',
+  off12a.err === 'FAILED_PRECONDITION' && off12b.err === 'FAILED_PRECONDITION' && off12c.err === 'FAILED_PRECONDITION' &&
+  r12off.status === 'pending_coverage_review' && !r12off.decision && (r12off.infoRequestedAt ?? null) === null &&
+  (await jobOf(r12.id)) === null && (await outsCount(C12)) === outsAntes12 && (await ordersOf(C12)) === 0,
+  `a=${off12a.err} r=${off12b.err} i=${off12c.err} status=${r12off?.status}`);
+await db.doc('tenants/otro-tenant/config/checkout').delete().catch(() => {});
+
+// 27b: enabled:true SIN activationId → mismo fail-closed (contrato ETAPA A).
+await setCoverage({ enabled: true, expiryHours: 24 });
+const sinAct = await call('coverageApprove', owner, { tenantId: T, requestId: r12.id, expectedFingerprint: r12.locationFingerprint });
+check('27b. enabled:true SIN activationId → FAILED_PRECONDITION (fail-closed), request intacto',
+  sinAct.err === 'FAILED_PRECONDITION' && (await requestOf(C12)).status === 'pending_coverage_review' && (await jobOf(r12.id)) === null);
+
+// 28: activación NUEVA (request stale) → failed-precondition sin mutación.
+await setCoverage({ enabled: true, expiryHours: 24, activationId: 'act-e2e-review-0002' });
+const st12a = await call('coverageApprove', owner, { tenantId: T, requestId: r12.id, expectedFingerprint: r12.locationFingerprint });
+const st12c = await call('coverageRequestInfo', owner, { tenantId: T, requestId: r12.id });
+await sleep(1200);
+const r12st = await requestOf(C12);
+check('28. request de una activación ANTERIOR → FAILED_PRECONDITION en decidir y en pedir info; sin mutación',
+  st12a.err === 'FAILED_PRECONDITION' && st12c.err === 'FAILED_PRECONDITION' &&
+  r12st.status === 'pending_coverage_review' && !r12st.decision && (await jobOf(r12.id)) === null &&
+  (await outsCount(C12)) === outsAntes12,
+  `a=${st12a.err} i=${st12c.err}`);
+
+// 29: restaurada la activación ORIGINAL → la decisión funciona (el request no quedó dañado).
+await setCoverage({ enabled: true, expiryHours: 24, activationId: ACT });
+const ok12 = await call('coverageApprove', owner, { tenantId: T, requestId: r12.id, expectedFingerprint: r12.locationFingerprint });
+check('29. con la MISMA activación restaurada → aprueba OK (los gates no dañaron el request) y el job sella la activación',
+  ok12.result?.ok === true && (await requestOf(C12)).status === 'coverage_approved' && (await jobOf(r12.id))?.activationId === ACT,
+  `err=${ok12.err ?? '—'}`);
+
+// ===== 30. coverageFlowState: el SELLER consulta el estado del flujo SIN leer config/checkout =====
+// (review HARDEN-1: las rules le niegan config/checkout —tiene cuentas bancarias— y el gating de
+// UI fail-closed lo dejaba sin botones con el flujo ACTIVO; esta callable es su fuente segura.)
+const fsSeller = await call('coverageFlowState', seller1, { tenantId: T });
+const fsRulesSeller = await restGet(seller1, `tenants/${T}/config/checkout`);
+await setCoverage({ enabled: false });
+const fsSellerOff = await call('coverageFlowState', seller1, { tenantId: T });
+await setCoverage({ enabled: true, expiryHours: 24, activationId: ACT });
+check('30. coverageFlowState: seller ve {enabled:true, activationId} con el flujo activo y {enabled:false} apagado; config/checkout crudo sigue denegado por rules',
+  fsSeller.result?.enabled === true && fsSeller.result?.activationId === ACT &&
+  fsSellerOff.result?.enabled === false && fsSellerOff.result?.activationId === null &&
+  fsRulesSeller === 403,
+  `on=${JSON.stringify(fsSeller.result)} off=${JSON.stringify(fsSellerOff.result)} rules=${fsRulesSeller}`);
+const fsCross = await call('coverageFlowState', otroOwner, { tenantId: T });
+check('30b. coverageFlowState: un owner de OTRO tenant no consulta este tenant (PERMISSION_DENIED)',
+  fsCross.err === 'PERMISSION_DENIED', `err=${fsCross.err}`);
+
 } finally {
 // ---- Cleanup (SIEMPRE, incluso si un check explota) ----
-for (const i of [1, 2, 3, 4, 5, 6, 7, 8, 10, 11]) await call('chatRelease', owner, { tenantId: T, customerId: CUST(i) }).catch(() => {});
+for (const i of [1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12]) await call('chatRelease', owner, { tenantId: T, customerId: CUST(i) }).catch(() => {});
 await limpiarClientes();
+await db.doc('tenants/otro-tenant/config/checkout').delete().catch(() => {});
 await db.doc(FIX).delete().catch(() => {});
 await db.doc(`tenants/${T}/metaAssets/${PNID}`).delete().catch(() => {});
 await db.doc(`metaExternalIndex/whatsapp_${PNID}`).delete().catch(() => {});

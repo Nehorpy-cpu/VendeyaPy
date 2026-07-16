@@ -22,6 +22,7 @@
 import { onCall, HttpsError } from 'firebase-functions/v2/https';
 import { Timestamp } from 'firebase-admin/firestore';
 import type { CoverageRequest, CoverageResumeJob, CoverageSessionPointer } from '@vpw/shared';
+import { coverageActivationOf, type CoverageActivation } from '@vpw/shared';
 import { db, paths } from '../../lib/firebase.js';
 import { logger } from '../../lib/logger.js';
 import { recordAudit } from '../../audit/audit.js';
@@ -94,6 +95,23 @@ export function validarInput(data: DecisionInput | undefined): { requestId: stri
 
 const requestRef = (tenantId: string, requestId: string) => db().doc(`tenants/${tenantId}/coverageRequests/${requestId}`);
 const jobRef = (tenantId: string, requestId: string) => db().doc(`tenants/${tenantId}/coverageResumeJobs/${requestId}`);
+const configRef = (tenantId: string) => db().doc(`tenants/${tenantId}/config/checkout`);
+
+export const MENSAJE_FLUJO_DESHABILITADO =
+  'El flujo de cobertura está deshabilitado: no se pueden tomar acciones sobre esta solicitud.';
+export const MENSAJE_ACTIVACION_ANTERIOR =
+  'Esta solicitud pertenece a una activación anterior del flujo de cobertura: queda en solo lectura.';
+
+/**
+ * HARDEN-1 — Gate server-side del flag DENTRO de la transacción (misma lectura atómica que la
+ * decisión: sin ventana flag→mutación). Lanza failed-precondition ANTES de cualquier escritura
+ * si el flujo está apagado o el request pertenece a otra activación. El estado visual del panel
+ * NO es autoridad: este gate corre siempre.
+ */
+function assertFlujoVigente(act: CoverageActivation, req: Pick<CoverageRequest, 'activationId'>): void {
+  if (!act.enabled || !act.activationId) throw new HttpsError('failed-precondition', MENSAJE_FLUJO_DESHABILITADO);
+  if ((req.activationId ?? null) !== act.activationId) throw new HttpsError('failed-precondition', MENSAJE_ACTIVACION_ANTERIOR);
+}
 
 /**
  * Núcleo transaccional de la decisión. Devuelve el request YA decidido.
@@ -108,6 +126,11 @@ async function decidirCobertura(
 ): Promise<CoverageRequest> {
   const now = Timestamp.now();
   const resultado = await db().runTransaction(async (tx) => {
+    // HARDEN-1: el flag se lee EN LA MISMA transacción que decide (sin ventana TOCTOU
+    // flag→mutación) y se valida ANTES de cualquier escritura: apagado ⇒ failed-precondition.
+    const cfgSnap = await tx.get(configRef(tenantId));
+    const act = coverageActivationOf((cfgSnap.data() as { coverage?: unknown } | undefined)?.coverage);
+    if (!act.enabled) throw new HttpsError('failed-precondition', MENSAJE_FLUJO_DESHABILITADO);
     const snap = await tx.get(requestRef(tenantId, input.requestId));
     const req = snap.exists ? (snap.data() as CoverageRequest) : null;
     if (!req || req.tenantId !== tenantId) throw new HttpsError('not-found', 'La solicitud de cobertura no existe.');
@@ -118,6 +141,7 @@ async function decidirCobertura(
       const por = req.decision?.byName ? ` por ${req.decision.byName}` : '';
       throw new HttpsError('failed-precondition', req.decision ? `Esta solicitud ya fue decidida${por}.` : 'Esta solicitud no está pendiente de revisión.');
     }
+    assertFlujoVigente(act, req); // request de una activación anterior ⇒ solo lectura (sin mutación)
     if (req.expiresAt.toMillis() <= now.toMillis()) {
       // OJO: lanzar acá ABORTARÍA la transacción y la marca de expirado se perdería (review).
       // La transición se commitea y el error al usuario sale DESPUÉS, fuera de la transacción.
@@ -155,6 +179,7 @@ async function decidirCobertura(
       status: 'pending',
       channel: req.channel,
       receivedVia: req.receivedVia ?? null,
+      activationId: act.activationId,
       createdAt: now,
       updatedAt: now,
     };
@@ -188,6 +213,32 @@ async function decidirCobertura(
   return decidido;
 }
 
+/**
+ * HARDEN-1 (review) — Estado del flujo para el GATING DE UI del panel: {enabled, activationId},
+ * SIN datos sensibles (jamás cuentas bancarias). Existe porque las rules niegan config/checkout
+ * al SELLER (contiene bankAccounts) y el gating fail-closed lo dejaba sin botones con el flujo
+ * ACTIVO — el server lee la config con Admin SDK y devuelve solo el estado validado.
+ * Solo lectura: no muta nada; PLATFORM_ADMIN puede consultarlo (soporte, read-only por rules).
+ */
+export const coverageFlowState = onCall<{ tenantId?: string }>({ region: REGION }, async (req) => {
+  const auth = req.auth as AuthLike | undefined;
+  if (!auth) throw new HttpsError('unauthenticated', 'Iniciá sesión para continuar.');
+  const role = auth.token?.role ?? '';
+  let tenantId: string;
+  if (role === 'PLATFORM_ADMIN') {
+    const requested = typeof req.data?.tenantId === 'string' ? req.data.tenantId.trim() : '';
+    if (!/^[A-Za-z0-9_-]{1,64}$/.test(requested)) throw new HttpsError('invalid-argument', 'Falta un tenantId válido.');
+    tenantId = requested;
+  } else {
+    if (role !== 'TENANT_OWNER' && role !== 'TENANT_MANAGER' && role !== 'SELLER' && role !== 'TENANT_VIEWER') {
+      throw new HttpsError('permission-denied', 'Tu rol no puede consultar el flujo de cobertura.');
+    }
+    tenantId = resolveTenant(auth, req.data?.tenantId);
+  }
+  const snap = await configRef(tenantId).get();
+  return coverageActivationOf((snap.data() as { coverage?: unknown } | undefined)?.coverage);
+});
+
 export const coverageApprove = onCall<DecisionInput>({ region: REGION }, async (req) => {
   const tenantId = resolveTenant(req.auth as AuthLike, req.data?.tenantId);
   const actor = assertCoverageActor(req.auth as AuthLike, tenantId);
@@ -213,6 +264,10 @@ export const coverageRequestInfo = onCall<{ tenantId?: string; requestId?: strin
   const now = Timestamp.now();
   // Claim transaccional (idempotencia de doble clic): si ya se pidió hace <60s, no se re-envía.
   const claim = await db().runTransaction(async (tx) => {
+    // HARDEN-1: flag validado DENTRO de la transacción, antes de cualquier escritura.
+    const cfgSnap = await tx.get(configRef(tenantId));
+    const act = coverageActivationOf((cfgSnap.data() as { coverage?: unknown } | undefined)?.coverage);
+    if (!act.enabled) throw new HttpsError('failed-precondition', MENSAJE_FLUJO_DESHABILITADO);
     const snap = await tx.get(requestRef(tenantId, requestId));
     const cov = snap.exists ? (snap.data() as CoverageRequest) : null;
     if (!cov || cov.tenantId !== tenantId) throw new HttpsError('not-found', 'La solicitud de cobertura no existe.');
@@ -220,6 +275,7 @@ export const coverageRequestInfo = onCall<{ tenantId?: string; requestId?: strin
       throw new HttpsError('permission-denied', 'Esta revisión está asignada a otra persona del equipo.');
     }
     if (cov.status !== 'pending_coverage_review') throw new HttpsError('failed-precondition', 'La solicitud no está pendiente de revisión.');
+    assertFlujoVigente(act, cov); // activación anterior ⇒ solo lectura (sin claim ni mensaje)
     if (cov.expiresAt.toMillis() <= now.toMillis()) throw new HttpsError('failed-precondition', 'La solicitud venció.');
     const last = cov.infoRequestedAt?.toMillis?.() ?? 0;
     if (now.toMillis() - last < INFO_DEDUPE_MS) return { already: true as const, customerId: cov.customerId };
@@ -228,11 +284,16 @@ export const coverageRequestInfo = onCall<{ tenantId?: string; requestId?: strin
   });
   if (claim.already) return { ok: true, already: true };
 
-  // Review: re-chequeo best-effort ANTES de enviar — si alguien decidió en la ventana
-  // claim→send, no se le pide más información a un cliente ya resuelto (achica la carrera).
-  const fresco = (await requestRef(tenantId, requestId).get()).data() as CoverageRequest | undefined;
+  // Review: re-chequeo best-effort ANTES de enviar — si alguien decidió (o el flujo se apagó)
+  // en la ventana claim→send, no se le manda nada a un cliente ya resuelto (achica la carrera).
+  const [frescoSnap, cfgFrescoSnap] = await Promise.all([requestRef(tenantId, requestId).get(), configRef(tenantId).get()]);
+  const fresco = frescoSnap.data() as CoverageRequest | undefined;
   if (fresco?.status !== 'pending_coverage_review') {
     throw new HttpsError('failed-precondition', 'La solicitud ya no está pendiente de revisión.');
+  }
+  const actFresco = coverageActivationOf((cfgFrescoSnap.data() as { coverage?: unknown } | undefined)?.coverage);
+  if (!actFresco.enabled || (fresco.activationId ?? null) !== actFresco.activationId) {
+    throw new HttpsError('failed-precondition', MENSAJE_FLUJO_DESHABILITADO);
   }
 
   try {

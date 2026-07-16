@@ -179,7 +179,7 @@ export { askInternalGrowthAssistant } from './functions/ai/internalAssistantCall
 
 // Revisión humana de cobertura (COVERAGE-1C): aprobar / rechazar / pedir más información.
 // Decisión transaccional con outbox para la reanudación (1D). Owner/manager, o SELLER asignado.
-export { coverageApprove, coverageReject, coverageRequestInfo } from './functions/coverage/coverageCallables.js';
+export { coverageApprove, coverageReject, coverageRequestInfo, coverageFlowState } from './functions/coverage/coverageCallables.js';
 
 // Reanudación del checkout tras la decisión (COVERAGE-1D): consumidor idempotente del outbox
 // (orden única + instrucciones por el mismo número) + mantenimiento diario (expiración + purga

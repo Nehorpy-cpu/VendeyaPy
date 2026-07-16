@@ -58,6 +58,7 @@ export const AUDIT_ACTIONS = [
   'coverage.approved',
   'coverage.rejected',
   'coverage.info_requested',
+  'coverage.resume_cancelled',
   'chat.released',
   'conversation.manual_message_sent',
   'conversation.returned_to_bot',

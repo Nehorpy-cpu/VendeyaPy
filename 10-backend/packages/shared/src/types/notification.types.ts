@@ -8,8 +8,12 @@ import type { Timestamp } from './common.types.js';
 
 export type TrialNotificationType = 'trial_ending_soon' | 'trial_ending_today' | 'trial_expired';
 
-/** HANDOFF-2 / AI-FALLBACK-HONESTO-1 / COVERAGE-1B: avisos de atención humana. */
-export type HandoffNotificationType = 'handoff_customer_requested' | 'handoff_ai_unavailable' | 'handoff_coverage_review';
+/**
+ * HANDOFF-2 / AI-FALLBACK-HONESTO-1 / COVERAGE-1B: avisos de atención humana.
+ * HARDEN-1 agrega `handoff_coverage_stale`: la reanudación de una decisión quedó cancelada por
+ * cambio de activación y el chat necesita atención manual.
+ */
+export type HandoffNotificationType = 'handoff_customer_requested' | 'handoff_ai_unavailable' | 'handoff_coverage_review' | 'handoff_coverage_stale';
 
 export interface Notification {
   id: string;

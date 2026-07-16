@@ -10,11 +10,14 @@ import {
   MENSAJE_UBICACION_SIN_PEDIDO,
 } from './coverage.js';
 import type { Cart, CheckoutConfig } from '@vpw/shared';
+import { coverageActivationOf, COVERAGE_ACTIVATION_ID_RE } from '@vpw/shared';
 
 /**
  * COVERAGE-1B: partes PURAS de la máquina de cobertura. Nada hardcodeado de tenant/país/ciudades
  * (las ciudades de los tests son datos de prueba, no lógica).
+ * HARDEN-1: el contrato exige `enabled: true` + `activationId` VÁLIDO — todo lo demás es OFF.
  */
+const ACT = 'act-test-000001';
 const cfgWith = (coverage: unknown): CheckoutConfig =>
   ({ bankAccounts: [], sellers: [], coverage }) as unknown as CheckoutConfig;
 
@@ -28,14 +31,27 @@ describe('coverage coverageSettings — config validada server-side (fail-safe a
   it('config inválida (no-objeto, enabled no-boolean-true) → deshabilitado', () => {
     expect(coverageSettings(cfgWith('si')).enabled).toBe(false);
     expect(coverageSettings(cfgWith(['enabled'])).enabled).toBe(false);
-    expect(coverageSettings(cfgWith({ enabled: 'true' })).enabled).toBe(false);
-    expect(coverageSettings(cfgWith({ enabled: 1 })).enabled).toBe(false);
+    expect(coverageSettings(cfgWith({ enabled: 'true', activationId: ACT })).enabled).toBe(false);
+    expect(coverageSettings(cfgWith({ enabled: 1, activationId: ACT })).enabled).toBe(false);
     expect(coverageSettings(cfgWith({})).enabled).toBe(false);
   });
 
-  it('enabled true → habilitado con defaults (expiry 24h, mensaje default)', () => {
-    const r = coverageSettings(cfgWith({ enabled: true }));
+  it('HARDEN-1: enabled true SIN activationId (o inválido) → deshabilitado (fail-closed)', () => {
+    expect(coverageSettings(cfgWith({ enabled: true })).enabled).toBe(false);
+    expect(coverageSettings(cfgWith({ enabled: true, activationId: '' })).enabled).toBe(false);
+    expect(coverageSettings(cfgWith({ enabled: true, activationId: 'corto' })).enabled).toBe(false); // <6
+    expect(coverageSettings(cfgWith({ enabled: true, activationId: 'con espacios 123' })).enabled).toBe(false);
+    expect(coverageSettings(cfgWith({ enabled: true, activationId: 'x'.repeat(65) })).enabled).toBe(false);
+    expect(coverageSettings(cfgWith({ enabled: true, activationId: 123456 })).enabled).toBe(false);
+    expect(coverageSettings(cfgWith({ enabled: true, activationId: null })).enabled).toBe(false);
+    // deshabilitado ⇒ activationId SIEMPRE null (nunca queda uno colgado)
+    expect(coverageSettings(cfgWith({ enabled: true })).activationId).toBeNull();
+  });
+
+  it('enabled true + activationId válido → habilitado con defaults (expiry 24h, mensaje default)', () => {
+    const r = coverageSettings(cfgWith({ enabled: true, activationId: ACT }));
     expect(r.enabled).toBe(true);
+    expect(r.activationId).toBe(ACT);
     expect(r.expiryHours).toBe(24);
     expect(r.requestMessage).toBe(MENSAJE_SOLICITUD_UBICACION);
     expect(r.rejectedMessage).toBeNull();
@@ -43,16 +59,36 @@ describe('coverage coverageSettings — config validada server-side (fail-safe a
 
   it('expiryHours inválido (0, negativo, NaN, string, gigante) → default 24', () => {
     for (const bad of [0, -5, Number.NaN, '24', Number.POSITIVE_INFINITY, 24 * 31 * 24]) {
-      expect(coverageSettings(cfgWith({ enabled: true, expiryHours: bad })).expiryHours).toBe(24);
+      expect(coverageSettings(cfgWith({ enabled: true, activationId: ACT, expiryHours: bad })).expiryHours).toBe(24);
     }
-    expect(coverageSettings(cfgWith({ enabled: true, expiryHours: 48 })).expiryHours).toBe(48);
+    expect(coverageSettings(cfgWith({ enabled: true, activationId: ACT, expiryHours: 48 })).expiryHours).toBe(48);
   });
 
   it('mensajes custom: trim + tope; vacíos → default/null', () => {
-    const r = coverageSettings(cfgWith({ enabled: true, requestMessage: '  hola  ', rejectedMessage: 'x'.repeat(1000) }));
+    const r = coverageSettings(cfgWith({ enabled: true, activationId: ACT, requestMessage: '  hola  ', rejectedMessage: 'x'.repeat(1000) }));
     expect(r.requestMessage).toBe('hola');
     expect(r.rejectedMessage).toHaveLength(600);
-    expect(coverageSettings(cfgWith({ enabled: true, requestMessage: '   ' })).requestMessage).toBe(MENSAJE_SOLICITUD_UBICACION);
+    expect(coverageSettings(cfgWith({ enabled: true, activationId: ACT, requestMessage: '   ' })).requestMessage).toBe(MENSAJE_SOLICITUD_UBICACION);
+  });
+});
+
+describe('coverageActivationOf (@vpw/shared) — contrato compartido backend/panel (HARDEN-1)', () => {
+  it('fail-closed: ausente, enabled!==true o activationId inválido → OFF con id null', () => {
+    for (const raw of [undefined, null, 'si', [], {}, { enabled: false, activationId: ACT }, { enabled: true }, { enabled: true, activationId: 'a b' }]) {
+      expect(coverageActivationOf(raw)).toEqual({ enabled: false, activationId: null });
+    }
+  });
+
+  it('válido → enabled con el id EXACTO (comparación por igualdad, sin interpretar el contenido)', () => {
+    expect(coverageActivationOf({ enabled: true, activationId: ACT })).toEqual({ enabled: true, activationId: ACT });
+    expect(coverageActivationOf({ enabled: true, activationId: 'ABC_def-123' })).toEqual({ enabled: true, activationId: 'ABC_def-123' });
+  });
+
+  it('la forma exigida es opaca y no sensible: solo [A-Za-z0-9_-], 6 a 64 chars', () => {
+    expect(COVERAGE_ACTIVATION_ID_RE.test('act-2026-07-r1')).toBe(true);
+    expect(COVERAGE_ACTIVATION_ID_RE.test('tiene espacios')).toBe(false);
+    expect(COVERAGE_ACTIVATION_ID_RE.test('corto')).toBe(false);
+    expect(COVERAGE_ACTIVATION_ID_RE.test('x'.repeat(65))).toBe(false);
   });
 });
 

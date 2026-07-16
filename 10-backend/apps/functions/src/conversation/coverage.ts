@@ -27,7 +27,7 @@ import type {
   MessageChannel,
   Session,
 } from '@vpw/shared';
-import { newCoverageRequestId } from '@vpw/shared';
+import { newCoverageRequestId, coverageActivationOf } from '@vpw/shared';
 import { db, paths } from '../lib/firebase.js';
 import { logger } from '../lib/logger.js';
 import { getCheckoutConfig, pickSeller } from '../orders/checkoutConfig.js';
@@ -42,6 +42,8 @@ import type { InboundLocation } from '../meta/parseWebhook.js';
 
 export interface ResolvedCoverageConfig {
   enabled: boolean;
+  /** HARDEN-1: activación vigente. null ⇔ enabled false (el contrato exige un id válido). */
+  activationId: string | null;
   expiryHours: number;
   requestMessage: string;
   rejectedMessage: string | null;
@@ -101,19 +103,23 @@ export function solicitudPara(cfg: ResolvedCoverageConfig, channel?: MessageChan
   return cfg.requestMessage;
 }
 
-/** Valida la config cruda del tenant. Cualquier cosa rara ⇒ `enabled:false` (fail-safe). */
+/**
+ * Valida la config cruda del tenant. Cualquier cosa rara ⇒ `enabled:false` (fail-safe).
+ * HARDEN-1: `enabled: true` SIN un activationId VÁLIDO también ⇒ OFF (contrato fail-closed;
+ * la regla vive en @vpw/shared/coverageActivation — misma validación en backend y panel).
+ */
 export function coverageSettings(config: CheckoutConfig | null | undefined): ResolvedCoverageConfig {
-  const off: ResolvedCoverageConfig = { enabled: false, expiryHours: EXPIRY_DEFAULT_HOURS, requestMessage: MENSAJE_SOLICITUD_UBICACION, rejectedMessage: null };
+  const off: ResolvedCoverageConfig = { enabled: false, activationId: null, expiryHours: EXPIRY_DEFAULT_HOURS, requestMessage: MENSAJE_SOLICITUD_UBICACION, rejectedMessage: null };
   const raw = config?.coverage;
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return off;
-  if ((raw as { enabled?: unknown }).enabled !== true) return off;
+  const act = coverageActivationOf(raw);
+  if (!act.enabled || !act.activationId) return off;
   const hours = (raw as { expiryHours?: unknown }).expiryHours;
   const expiryHours = typeof hours === 'number' && Number.isFinite(hours) && hours > 0 && hours <= EXPIRY_MAX_HOURS ? hours : EXPIRY_DEFAULT_HOURS;
   const msg = (raw as { requestMessage?: unknown }).requestMessage;
   const rej = (raw as { rejectedMessage?: unknown }).rejectedMessage;
   const requestMessage = typeof msg === 'string' && msg.trim() !== '' ? msg.trim().slice(0, MESSAGE_MAX) : MENSAJE_SOLICITUD_UBICACION;
   const rejectedMessage = typeof rej === 'string' && rej.trim() !== '' ? rej.trim().slice(0, MESSAGE_MAX) : null;
-  return { enabled: true, expiryHours, requestMessage, rejectedMessage };
+  return { enabled: true, activationId: act.activationId, expiryHours, requestMessage, rejectedMessage };
 }
 
 // ---------------------------------------------------------------------------
@@ -263,7 +269,11 @@ export async function gateCoberturaCheckout(
       const req = reqSnap.exists ? (reqSnap.data() as CoverageRequest) : null;
       if (req && req.customerId === customerId && !TERMINALES.includes(req.status)) {
         const vencido = req.expiresAt.toMillis() <= now.toMillis();
-        if (!vencido) {
+        // HARDEN-1: un request de una activación ANTERIOR es indecidible (las callables lo
+        // rechazan) — se expira acá mismo para que el checkout no quede congelado, y se crea
+        // uno nuevo bajo la activación vigente. El dato histórico queda, jamás se borra.
+        const activacionVigente = (req.activationId ?? null) === cfg.activationId;
+        if (!vencido && activacionVigente) {
           if (req.status === 'awaiting_location') return { kind: 'ask' as const, ptr: ptrOf(req, now) };
           if (req.status === 'pending_coverage_review') return { kind: 'pending' as const, ptr: ptrOf(req, now) };
           // coverage_approved con reanudación AÚN NO COMPLETADA (1D): un "pagar" en la ventana
@@ -287,6 +297,7 @@ export async function gateCoberturaCheckout(
       customerId,
       channel: opts.channel ?? 'whatsapp',
       receivedVia: opts.receivedVia ?? null,
+      activationId: cfg.activationId,
       status: 'awaiting_location',
       location: null,
       locationFingerprint: null,
@@ -331,6 +342,7 @@ async function registrarUbicacion(
   customerId: string,
   location: CoverageLocation,
   wamid: string | null,
+  activationId: string | null,
 ): Promise<RegistroResultado> {
   const sessionRef = db().doc(paths.session(tenantId, customerId));
   const now = Timestamp.now();
@@ -342,6 +354,13 @@ async function registrarUbicacion(
     const reqSnap = await tx.get(db().doc(requestPath(tenantId, ptr.requestId)));
     const req = reqSnap.exists ? (reqSnap.data() as CoverageRequest) : null;
     if (!req || req.customerId !== customerId || TERMINALES.includes(req.status)) return { kind: 'no_active' as const };
+    // HARDEN-1: request de una activación ANTERIOR (incluso aprobado) — nadie puede decidirlo
+    // ni reanudarlo: se expira acá y el cliente retoma con *pagar* bajo la activación vigente.
+    if ((req.activationId ?? null) !== activationId) {
+      tx.update(reqSnap.ref, { status: 'coverage_expired', updatedAt: now, coordinatesPurgeAt: purgeAtFrom(now, req) });
+      tx.set(sessionRef, { context: { coverage: null }, updatedAt: now }, { merge: true });
+      return { kind: 'expired' as const };
+    }
     if (req.status === 'coverage_approved') return { kind: 'approved_activo' as const }; // aprobado: no se re-abre solo
     if (req.expiresAt.toMillis() <= now.toMillis()) {
       tx.update(reqSnap.ref, { status: 'coverage_expired', updatedAt: now, coordinatesPurgeAt: purgeAtFrom(now, req) });
@@ -490,7 +509,7 @@ export async function procesarUbicacionEntrante(input: UbicacionEntranteInput): 
         name: input.location.name,
         coordinates: { lat: input.location.latitude, lng: input.location.longitude },
       };
-      const registro = await registrarUbicacion(tenantId, customerId, location, input.messageId);
+      const registro = await registrarUbicacion(tenantId, customerId, location, input.messageId, cfg.activationId);
       if (registro.kind === 'ok') {
         const r = await derivarARevision(tenantId, customerId, registro, input.messageId);
         reply = r.reply;
@@ -588,7 +607,7 @@ export async function manejarTurnoEnEsperaUbicacion(
     // como placeholder (el engine lo reemplaza ANTES de escribir el historial).
     const addressText = text.replace(/\s+/g, ' ').trim().slice(0, 512);
     const location: CoverageLocation = { source: 'text', addressText, name: null, coordinates: null };
-    const registro = await registrarUbicacion(tenantId, customerId, location, opts.messageId ?? null);
+    const registro = await registrarUbicacion(tenantId, customerId, location, opts.messageId ?? null, cfg.activationId);
     if (registro.kind === 'expired') return { takeover: false, reply: MENSAJE_INTENTO_VENCIDO, coverage: null };
     if (registro.kind === 'approved_activo') return { takeover: false, reply: MENSAJE_ZONA_YA_CONFIRMADA };
     if (registro.kind === 'no_active') return null; // el flujo normal atiende el turno
@@ -621,7 +640,7 @@ export async function actualizarUbicacionEnRevision(
     if (!cfg.enabled) return false;
     const addressText = text.replace(/\s+/g, ' ').trim().slice(0, 512);
     const location: CoverageLocation = { source: 'text', addressText, name: null, coordinates: null };
-    const registro = await registrarUbicacion(tenantId, customerId, location, wamid);
+    const registro = await registrarUbicacion(tenantId, customerId, location, wamid, cfg.activationId);
     if (registro.kind !== 'ok') return false;
     logger.info('Cobertura: dirección actualizada durante la revisión (bot en silencio)', { tenantId, customer: `…${customerId.slice(-4)}`, requestId: registro.requestId });
     return true;

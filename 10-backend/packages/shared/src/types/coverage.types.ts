@@ -62,6 +62,8 @@ export interface CoverageResumeJob {
   status: CoverageResumeStatus;
   channel: MessageChannel;
   receivedVia: string | null;
+  /** HARDEN-1: activación bajo la que se creó. Distinta de la vigente ⇒ el job es INERTE. */
+  activationId?: string | null;
   /** 1D: idempotencia del pedido (reservado ANTES de crear la orden). */
   checkoutAttemptId?: string | null;
   /** 1D: orderId reservado/creado (una sola vez por checkoutAttemptId). */
@@ -90,6 +92,8 @@ export interface CoverageOutboxMessage {
   customerId: string;
   channel: MessageChannel;
   receivedVia: string | null;
+  /** HARDEN-1: activación bajo la que se creó (trazabilidad del artefacto). */
+  activationId?: string | null;
   text: string;
   status: 'prepared' | 'sending' | 'sent' | 'failed' | 'unknown';
   providerMessageId: string | null;
@@ -130,6 +134,11 @@ export interface CoverageRequest {
   channel: MessageChannel;
   /** phone_number_id del negocio que recibió la conversación (responder por el MISMO número). */
   receivedVia: string | null;
+  /**
+   * HARDEN-1: activación del flujo bajo la que se creó el request. Si no coincide con la
+   * activación VIGENTE del tenant, el request es histórico/inerte: no se decide ni se reanuda.
+   */
+  activationId?: string | null;
   status: CoverageStatus;
   location: CoverageLocation | null;
   /** Huella de la ubicación: la aprobación vale para ESTA huella durante su vigencia. */
@@ -167,9 +176,17 @@ export interface CoverageSessionPointer {
   updatedAt: Timestamp;
 }
 
-/** Config opcional por tenant (dentro de `config/checkout`). Ausente/ inválida ⇒ deshabilitado. */
+/**
+ * Config opcional por tenant (dentro de `config/checkout`). Ausente/ inválida ⇒ deshabilitado.
+ * HARDEN-1: `enabled: true` SIN `activationId` válido también ⇒ deshabilitado (fail-closed).
+ * Cada reactivación futura DEBE usar un activationId nuevo (lo escribe el programa de
+ * activación aprobado — el runtime jamás lo genera): los artefactos de la activación
+ * anterior quedan inertes sin borrarlos.
+ */
 export interface CoverageConfig {
   enabled: boolean; // default false
+  /** Identificador opaco de la activación (ver coverageActivation.ts). Sin él, todo queda OFF. */
+  activationId?: string;
   expiryHours: number; // default 24
   requestMessage?: string;
   rejectedMessage?: string;

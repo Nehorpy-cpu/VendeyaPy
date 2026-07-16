@@ -12,6 +12,7 @@ import { mapsUrlFor } from '@/lib/coverage';
 import type { CoverageRequest } from '@vpw/shared';
 
 const getCoverageRequestFor = vi.fn();
+const getCoverageFlowState = vi.fn();
 const approveCoverage = vi.fn();
 const rejectCoverage = vi.fn();
 const requestCoverageInfo = vi.fn();
@@ -20,6 +21,7 @@ vi.mock('@/lib/coverage', async (importOriginal) => {
   return {
     ...real,
     getCoverageRequestFor: (...a: unknown[]) => getCoverageRequestFor(...a),
+    getCoverageFlowState: (...a: unknown[]) => getCoverageFlowState(...a),
     approveCoverage: (...a: unknown[]) => approveCoverage(...a),
     rejectCoverage: (...a: unknown[]) => rejectCoverage(...a),
     requestCoverageInfo: (...a: unknown[]) => requestCoverageInfo(...a),
@@ -31,11 +33,13 @@ vi.mock('@/lib/auth-context', () => ({
 }));
 
 const ts = (ms: number) => ({ toMillis: () => ms }) as unknown as CoverageRequest['createdAt'];
+const ACT = 'act-test-000001';
 const baseReq = (over: Partial<CoverageRequest> = {}): CoverageRequest =>
   ({
     id: 'covr_abc123DEF456',
     tenantId: 'perfumeria',
     customerId: '595991234567',
+    activationId: ACT,
     status: 'pending_coverage_review',
     location: { source: 'text', addressText: 'Av. Test 123, Luque', name: null, coordinates: null },
     locationFingerprint: 'txt:abc',
@@ -59,6 +63,8 @@ const renderCard = () => {
 beforeEach(() => {
   vi.clearAllMocks();
   mockAuth.claims = { role: 'TENANT_OWNER', tenantId: 'perfumeria' };
+  // HARDEN-1: por defecto el flujo está ACTIVO bajo la misma activación del request base.
+  getCoverageFlowState.mockResolvedValue({ enabled: true, activationId: ACT });
 });
 
 describe('CoverageReviewCard', () => {
@@ -161,6 +167,67 @@ describe('CoverageReviewCard — review 1C', () => {
     renderCard();
     expect(await screen.findByText(/pendiente de revisión/i)).toBeTruthy();
     expect(screen.queryByRole('button', { name: /aprobar cobertura/i })).toBeNull();
+  });
+
+  it('HARDEN-1: flujo DESHABILITADO → solo lectura, sin botones, con explicación breve', async () => {
+    getCoverageFlowState.mockResolvedValue({ enabled: false, activationId: null });
+    getCoverageRequestFor.mockResolvedValue({ request: baseReq(), denied: false });
+    renderCard();
+    expect(await screen.findByText(/pendiente de revisión/i)).toBeTruthy();
+    expect(await screen.findByText(/flujo de cobertura está deshabilitado/i)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /aprobar cobertura/i })).toBeNull();
+    expect(screen.queryByRole('button', { name: /rechazar/i })).toBeNull();
+    expect(screen.queryByRole('button', { name: /más información/i })).toBeNull();
+  });
+
+  it('HARDEN-1: request de una activación ANTERIOR (id no coincide) → solo lectura, sin botones, con la nota PRECISA', async () => {
+    getCoverageFlowState.mockResolvedValue({ enabled: true, activationId: 'act-nueva-000002' });
+    getCoverageRequestFor.mockResolvedValue({ request: baseReq(), denied: false });
+    renderCard();
+    expect(await screen.findByText(/activación anterior del flujo/i)).toBeTruthy();
+    expect(screen.queryByText(/flujo de cobertura está deshabilitado/i)).toBeNull(); // el flujo SÍ está activo
+    expect(screen.queryByRole('button', { name: /aprobar cobertura/i })).toBeNull();
+  });
+
+  it('HARDEN-1: el SELLER con el flujo activo y la misma activación VE las tres acciones (regresión de review)', async () => {
+    mockAuth.claims = { role: 'SELLER', tenantId: 'perfumeria' };
+    getCoverageRequestFor.mockResolvedValue({ request: baseReq(), denied: false });
+    renderCard();
+    expect(await screen.findByRole('button', { name: /aprobar cobertura/i })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /rechazar/i })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /más información/i })).toBeTruthy();
+  });
+
+  it('HARDEN-1: mientras carga el estado del flujo → fail-closed (sin botones, sin aviso todavía)', async () => {
+    getCoverageFlowState.mockReturnValue(new Promise(() => {})); // nunca resuelve
+    getCoverageRequestFor.mockResolvedValue({ request: baseReq(), denied: false });
+    renderCard();
+    expect(await screen.findByText(/pendiente de revisión/i)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /aprobar cobertura/i })).toBeNull();
+    expect(screen.queryByText(/flujo de cobertura está deshabilitado/i)).toBeNull();
+  });
+
+  it('HARDEN-1: error TRANSITORIO del estado del flujo → sin botones (fail-closed) pero sin la nota engañosa', async () => {
+    getCoverageFlowState.mockRejectedValue(new Error('unavailable'));
+    getCoverageRequestFor.mockResolvedValue({ request: baseReq(), denied: false });
+    renderCard();
+    expect(await screen.findByText(/pendiente de revisión/i)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /aprobar cobertura/i })).toBeNull();
+    expect(screen.queryByText(/flujo de cobertura está deshabilitado/i)).toBeNull();
+  });
+
+  it('HARDEN-1: aprobado con reanudación CANCELADA (cambio de activación) → aviso de atención manual, no parece "resuelto"', async () => {
+    getCoverageRequestFor.mockResolvedValue({
+      request: baseReq({
+        status: 'coverage_approved',
+        decision: { action: 'approved', byUid: 'u', byName: 'Ana Owner', byRole: 'TENANT_OWNER', at: ts(Date.now()), note: null, locationFingerprint: 'txt:abc' } as CoverageRequest['decision'],
+        resume: { status: 'cancelled', orderId: null },
+      }),
+      denied: false,
+    });
+    renderCard();
+    expect(await screen.findByText(/reanudación quedó cancelada/i)).toBeTruthy();
+    expect(screen.getByText(/atendé el pedido/i)).toBeTruthy();
   });
 
   it('la nota interna viaja al rechazar', async () => {

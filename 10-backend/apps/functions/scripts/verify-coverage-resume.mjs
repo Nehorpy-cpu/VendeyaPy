@@ -23,6 +23,7 @@ const PNID = '900000000000104';
 const FIX = 'aiTestFixtures/ai';
 const LAT = -25.31111;
 const LNG = -57.61111;
+const ACT = 'act-e2e-resume-0001'; // HARDEN-1: activación vigente del flujo en este script
 
 const results = [];
 const check = (n, c, e = '') => { results.push(!!c); console.log(`${c ? '✅' : '❌'} ${n}${e ? '  — ' + e : ''}`); };
@@ -95,7 +96,7 @@ const setCoverage = (coverage) => db.doc(`tenants/${T}/config/checkout`).set({
   bankAccounts: [{ bank: 'Banco RS', accountNumber: '000-3', holder: 'Titular RS', document: '3333' }],
   ...(coverage !== undefined ? { coverage } : {}),
 });
-await setCoverage({ enabled: true, expiryHours: 24 });
+await setCoverage({ enabled: true, expiryHours: 24, activationId: ACT });
 
 const superadmin = await signIn('superadmin@aiafg.com');
 const rConn = await call('adminSetManualWhatsappConnection', superadmin, {
@@ -121,7 +122,7 @@ const limpiar = async () => {
   }
   const notifs = await db.collection(`tenants/${T}/notifications`).get();
   for (const d of notifs.docs) { if (String(d.data().customerId ?? '').startsWith('59599420')) await d.ref.delete().catch(() => {}); }
-  for (let i = 1; i <= 12; i++) await db.doc(`tenants/${T}/customers/${CUST(i)}/sessions/active`).delete().catch(() => {});
+  for (let i = 1; i <= 14; i++) await db.doc(`tenants/${T}/customers/${CUST(i)}/sessions/active`).delete().catch(() => {});
 };
 await limpiar();
 
@@ -171,7 +172,7 @@ check('6. comprobante tras la reanudación → PENDING_VERIFICATION + handoff pa
   (await ordersOf(C1))[0]?.payment?.paidAt === null);
 
 // ===== 7. REJECTED: sin orden/banco, mensaje honesto (custom), puntero limpio =====
-await setCoverage({ enabled: true, expiryHours: 24, rejectedMessage: 'No llegamos a esa zona por ahora 🙏 Podés pasarnos otra dirección.' });
+await setCoverage({ enabled: true, expiryHours: 24, activationId: ACT, rejectedMessage: 'No llegamos a esa zona por ahora 🙏 Podés pasarnos otra dirección.' });
 const C2 = CUST(2);
 const r2 = await crearPendiente(C2);
 await call('coverageReject', owner, { tenantId: T, requestId: r2.id, expectedFingerprint: r2.locationFingerprint, note: 'nota secreta interna' });
@@ -292,7 +293,7 @@ check('18. purga: coordenadas y nombre eliminados; dirección textual, decisión
 // ===== 19. Feature OFF → cero procesamiento =====
 const C10 = CUST(10);
 const r10 = await crearPendiente(C10);
-await setCoverage({ enabled: true, expiryHours: 24 }); // sin rejectedMessage custom
+await setCoverage({ enabled: true, expiryHours: 24, activationId: ACT }); // sin rejectedMessage custom
 await call('coverageApprove', owner, { tenantId: T, requestId: r10.id, expectedFingerprint: r10.locationFingerprint });
 await waitFor(async () => (await jobOf(r10.id))?.status === 'done');
 await setCoverage({ enabled: false });
@@ -303,7 +304,7 @@ const r11fake = { ...r10, id: 'covr_flagoffTest1', customerId: C11, status: 'cov
 await db.doc(`tenants/${T}/coverageRequests/covr_flagoffTest1`).set({ ...r11fake, decision: (await requestOf(C10)).decision });
 await db.doc(`tenants/${T}/coverageResumeJobs/covr_flagoffTest1`).set({
   id: 'covr_flagoffTest1', tenantId: T, coverageRequestId: 'covr_flagoffTest1', customerId: C11,
-  action: 'approved', status: 'pending', channel: 'whatsapp', receivedVia: PNID,
+  action: 'approved', status: 'pending', channel: 'whatsapp', receivedVia: PNID, activationId: ACT,
   createdAt: Timestamp.now(), updatedAt: Timestamp.now(),
 });
 await sleep(4000);
@@ -312,7 +313,121 @@ check('19. feature OFF → el consumidor NO procesa (job queda pending, cero ór
 // borrar el job fake ANTES de re-encender (un trigger demorado no debe procesarlo con el flag on)
 await db.doc(`tenants/${T}/coverageResumeJobs/covr_flagoffTest1`).delete().catch(() => {});
 await db.doc(`tenants/${T}/coverageRequests/covr_flagoffTest1`).delete().catch(() => {});
-await setCoverage({ enabled: true, expiryHours: 24 });
+
+// ===== 19b. HARDEN-1: job de una activación ANTERIOR + activación NUEVA → cancelado sin efectos =====
+await setCoverage({ enabled: true, expiryHours: 24, activationId: 'act-e2e-resume-0002' });
+const C12 = CUST(12);
+// La sesión arranca con la marca anti-doble-checkout puesta (como si un worker viejo hubiera
+// crasheado post-claim): la cancelación stale DEBE limpiarla en la MISMA transacción del claim.
+await db.doc(`tenants/${T}/customers/${C12}/sessions/active`).set({
+  id: 'active', tenantId: T, customerId: C12, state: 'CART', cart: { items: [], subtotal: 0 },
+  context: { coverageResumeInProgress: 'covr_staleActTest1' }, createdAt: Timestamp.now(), updatedAt: Timestamp.now(),
+});
+const r12fake = { ...r10, id: 'covr_staleActTest1', customerId: C12, status: 'coverage_approved', activationId: ACT };
+await db.doc(`tenants/${T}/coverageRequests/covr_staleActTest1`).set({ ...r12fake, decision: (await requestOf(C10)).decision, resume: { status: 'pending', orderId: null } });
+await db.doc(`tenants/${T}/coverageResumeJobs/covr_staleActTest1`).set({
+  id: 'covr_staleActTest1', tenantId: T, coverageRequestId: 'covr_staleActTest1', customerId: C12,
+  action: 'approved', status: 'pending', channel: 'whatsapp', receivedVia: PNID, activationId: ACT,
+  createdAt: Timestamp.now(), updatedAt: Timestamp.now(),
+});
+await waitFor(async () => (await jobOf('covr_staleActTest1'))?.status === 'cancelled', 12000);
+const rStale = (await db.doc(`tenants/${T}/coverageRequests/covr_staleActTest1`).get()).data() ?? {};
+check('19b. job de activación ANTERIOR con el flag re-encendido (id nuevo) → cancelled: cero orden/mensaje/banco/liberación',
+  (await jobOf('covr_staleActTest1'))?.status === 'cancelled' && rStale.resume?.status === 'cancelled' &&
+  rStale.status === 'coverage_approved' && rStale.decision?.action === 'approved' && // la DECISIÓN histórica no se toca
+  (await ordersOf(C12)).length === 0 && (await outsCount(C12)) === 0,
+  `job=${(await jobOf('covr_staleActTest1'))?.status} resume=${rStale.resume?.status}`);
+const notifStale = (await db.collection(`tenants/${T}/notifications`).get()).docs
+  .map((d) => d.data()).find((n) => n.type === 'handoff_coverage_stale' && n.customerId === C12);
+check('19b2. la cancelación limpió la marca anti-doble-checkout EN el claim y avisó al equipo por la campana (sin PII)',
+  ((await sessionOf(C12))?.context?.coverageResumeInProgress ?? null) === null &&
+  !!notifStale && !JSON.stringify(notifStale).includes('Resume 777') &&
+  !String(notifStale?.title ?? '').includes(C12) && String(notifStale?.body ?? '').includes(C12.slice(-4)),
+  `marca=${(await sessionOf(C12))?.context?.coverageResumeInProgress} notif=${notifStale?.type}`);
+await db.doc(`tenants/${T}/coverageRequests/covr_staleActTest1`).delete().catch(() => {});
+await db.doc(`tenants/${T}/coverageResumeJobs/covr_staleActTest1`).delete().catch(() => {});
+
+// ===== 19b3. HARDEN-1 (review): `processing` HUÉRFANO de una activación anterior → el
+// mantenimiento lo RE-ENCOLA y el claim lo cancela limpiando la marca (saltearlo lo dejaba
+// congelado para siempre con el cliente clavado en "estamos preparando tu pedido") =====
+const rP = { ...r10, id: 'covr_staleProcTest1', customerId: C12, status: 'coverage_approved', activationId: ACT };
+await db.doc(`tenants/${T}/coverageRequests/covr_staleProcTest1`).set({ ...rP, decision: (await requestOf(C10)).decision, resume: { status: 'processing', orderId: null } });
+await db.doc(`tenants/${T}/customers/${C12}/sessions/active`).update({ 'context.coverageResumeInProgress': 'covr_staleProcTest1' });
+await db.doc(`tenants/${T}/coverageResumeJobs/covr_staleProcTest1`).set({
+  id: 'covr_staleProcTest1', tenantId: T, coverageRequestId: 'covr_staleProcTest1', customerId: C12,
+  action: 'approved', status: 'processing', channel: 'whatsapp', receivedVia: PNID, activationId: ACT,
+  leaseUntil: Timestamp.fromMillis(Date.now() - 5000), attempts: 1,
+  createdAt: Timestamp.now(), updatedAt: Timestamp.now(),
+});
+await fetch(`${BASE}/devRunCoverageMaintenance`);
+await waitFor(async () => (await jobOf('covr_staleProcTest1'))?.status === 'cancelled', 15000);
+check('19b3. processing huérfano de activación anterior → mantenimiento re-encola → cancelled + marca limpia, cero efectos',
+  (await jobOf('covr_staleProcTest1'))?.status === 'cancelled' &&
+  ((await sessionOf(C12))?.context?.coverageResumeInProgress ?? null) === null &&
+  (await ordersOf(C12)).length === 0 && (await outsCount(C12)) === 0,
+  `job=${(await jobOf('covr_staleProcTest1'))?.status}`);
+await db.doc(`tenants/${T}/coverageRequests/covr_staleProcTest1`).delete().catch(() => {});
+await db.doc(`tenants/${T}/coverageResumeJobs/covr_staleProcTest1`).delete().catch(() => {});
+
+// ===== 19c-19e. chatRelease gated + mantenimiento con flag OFF =====
+await setCoverage({ enabled: true, expiryHours: 24, activationId: ACT });
+const C13 = CUST(13);
+const r13 = await crearPendiente(C13);
+await call('chatTakeover', owner, { tenantId: T, customerId: C13 }); // seller_manual pisa la razón
+await call('coverageApprove', owner, { tenantId: T, requestId: r13.id, expectedFingerprint: r13.locationFingerprint });
+await waitFor(async () => (await jobOf(r13.id))?.status === 'held_by_seller');
+
+// 19c: flag OFF → la liberación manual NO re-encola el job retenido.
+await setCoverage({ enabled: false });
+await call('chatRelease', owner, { tenantId: T, customerId: C13 });
+await sleep(3500);
+check('19c. chatRelease con flag OFF → el job held_by_seller NO se re-encola (queda inerte, sin orden/mensaje)',
+  (await jobOf(r13.id))?.status === 'held_by_seller' && (await ordersOf(C13)).length === 0 && (await outsCon(C13, 'transferir')) === 0);
+
+// 19d: activación NUEVA (job stale) → tampoco se re-encola, ni por release ni por mantenimiento.
+await setCoverage({ enabled: true, expiryHours: 24, activationId: 'act-e2e-resume-0003' });
+await call('chatTakeover', owner, { tenantId: T, customerId: C13 });
+await call('chatRelease', owner, { tenantId: T, customerId: C13 });
+await fetch(`${BASE}/devRunCoverageMaintenance`);
+await sleep(3500);
+check('19d. chatRelease + mantenimiento con activación NUEVA → el job de la activación anterior sigue held (inerte)',
+  (await jobOf(r13.id))?.status === 'held_by_seller' && (await ordersOf(C13)).length === 0 && (await outsCon(C13, 'transferir')) === 0);
+
+// 19d2: request pendiente de activación ANTERIOR con flag ON y SIN takeover → el mantenimiento
+// expira (higiene) pero NO manda el mensaje de vencimiento (solo 'liberado_vigente' avisa).
+const C11b = CUST(11);
+const r11b = await crearPendiente(C11b); // bajo act-e2e-resume-0003 (activo desde 19d)
+await call('chatRelease', owner, { tenantId: T, customerId: C11b }); // sin takeover
+await setCoverage({ enabled: true, expiryHours: 24, activationId: ACT }); // rota: r11b queda stale
+await db.doc(`tenants/${T}/coverageRequests/${r11b.id}`).update({ expiresAt: Timestamp.fromMillis(Date.now() - 1000) });
+await fetch(`${BASE}/devRunCoverageMaintenance`);
+await waitFor(async () => (await requestOf(C11b))?.status === 'coverage_expired');
+check('19d2. vencido de activación ANTERIOR con flag ON (sin takeover) → expira sin mensaje de vencimiento',
+  (await requestOf(C11b))?.status === 'coverage_expired' && (await outsCon(C11b, 'venció')) === 0 &&
+  ((await sessionOf(C11b))?.context?.coverage ?? null) === null,
+  `status=${(await requestOf(C11b))?.status} vencioMsgs=${await outsCon(C11b, 'venció')}`);
+
+// 19e: mantenimiento con flag OFF → expira (higiene) SIN liberar takeover ni mensaje; la purga corre igual.
+const C14 = CUST(14);
+await setCoverage({ enabled: true, expiryHours: 24, activationId: ACT });
+const r14 = await crearPendiente(C14); // deja takeover coverage_review vigente
+await setCoverage({ enabled: false });
+await db.doc(`tenants/${T}/coverageRequests/${r14.id}`).update({ expiresAt: Timestamp.fromMillis(Date.now() - 1000) });
+await fetch(`${BASE}/devRunCoverageMaintenance`);
+await waitFor(async () => (await requestOf(C14))?.status === 'coverage_expired');
+const r14b = await requestOf(C14);
+const ses14 = await sessionOf(C14);
+check('19e. mantenimiento con flag OFF → coverage_expired + purga agendada, PERO sin liberar el takeover ni mensaje',
+  r14b?.status === 'coverage_expired' && r14b?.coordinatesPurgeAt != null &&
+  ses14?.context?.humanTakeover === true && ses14?.context?.handoffReason === 'coverage_review' &&
+  (await outsCon(C14, 'venció')) === 0 && (await ordersOf(C14)).length === 0,
+  `status=${r14b?.status} takeover=${ses14?.context?.humanTakeover}`);
+await db.doc(`tenants/${T}/coverageRequests/${r14.id}`).update({ coordinatesPurgeAt: Timestamp.fromMillis(Date.now() - 1000) });
+await fetch(`${BASE}/devRunCoverageMaintenance`);
+await waitFor(async () => (await requestOf(C14))?.location?.coordinates == null);
+check('19f. la PURGA de privacidad corre igual con flag OFF (coordenadas y nombre eliminados)',
+  (await requestOf(C14))?.location?.coordinates == null && (await requestOf(C14))?.location?.name == null);
+await setCoverage({ enabled: true, expiryHours: 24, activationId: ACT });
 
 // ===== 20. Rules: outbox de mensajería backend-only; multi-tenant =====
 const obDoc = (await db.collection(`tenants/${T}/coverageMessageOutbox`).limit(1).get()).docs[0];
@@ -323,9 +438,13 @@ check('20. rules: coverageMessageOutbox invisible incluso para el owner; jobs co
 } finally {
   await db.doc(`tenants/${T}/coverageRequests/covr_flagoffTest1`).delete().catch(() => {});
   await db.doc(`tenants/${T}/coverageResumeJobs/covr_flagoffTest1`).delete().catch(() => {});
+  await db.doc(`tenants/${T}/coverageRequests/covr_staleActTest1`).delete().catch(() => {});
+  await db.doc(`tenants/${T}/coverageResumeJobs/covr_staleActTest1`).delete().catch(() => {});
+  await db.doc(`tenants/${T}/coverageRequests/covr_staleProcTest1`).delete().catch(() => {});
+  await db.doc(`tenants/${T}/coverageResumeJobs/covr_staleProcTest1`).delete().catch(() => {});
   await db.doc(`tenants/${T}/_debug/whatsappFixtures`).delete().catch(() => {});
   await db.doc(`tenants/${T}/_debug/lastWhatsappSend`).delete().catch(() => {});
-  for (let i = 1; i <= 12; i++) await call('chatRelease', owner, { tenantId: T, customerId: CUST(i) }).catch(() => {});
+  for (let i = 1; i <= 14; i++) await call('chatRelease', owner, { tenantId: T, customerId: CUST(i) }).catch(() => {});
   await limpiar();
   await db.doc(FIX).delete().catch(() => {});
   await db.doc(`tenants/${T}/metaAssets/${PNID}`).delete().catch(() => {});

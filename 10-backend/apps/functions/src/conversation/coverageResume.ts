@@ -25,9 +25,10 @@ import type {
   CoverageResumeStatus,
   Session,
 } from '@vpw/shared';
-import { newId, ID_PREFIX, newOrderId } from '@vpw/shared';
+import { newId, ID_PREFIX, newOrderId, coverageActivationOf } from '@vpw/shared';
 import { db, paths } from '../lib/firebase.js';
 import { logger } from '../lib/logger.js';
+import { recordAudit } from '../audit/audit.js';
 import { coverageSettings } from './coverage.js';
 import { getCheckoutConfig, formatTransferInstructions } from '../orders/checkoutConfig.js';
 import { createPendingOrder } from '../orders/createPendingOrder.js';
@@ -83,16 +84,27 @@ interface ClaimOk {
   job: CoverageResumeJob;
   req: CoverageRequest;
 }
-type ClaimResult = ClaimOk | { kind: 'skip'; motivo: string };
+type ClaimResult =
+  | ClaimOk
+  | { kind: 'skip'; motivo: string }
+  | { kind: 'stale'; job: CoverageResumeJob; sellerUid: string | null };
 
 /**
  * Claim transaccional del job: dos triggers concurrentes → UN solo procesador efectivo.
  * Valida job↔request (tenant, decisión, fingerprint decidido, estado terminal correcto).
  * Inconsistencias ⇒ `cancelled` (no-op seguro y auditable), jamás procesamiento a ciegas.
+ * HARDEN-1 (review): el flag/activación se leen EN ESTA transacción (sin TOCTOU flag→claim,
+ * mismo estándar que las callables). Un job de una activación ANTERIOR se marca `cancelled`
+ * — inerte permanente, sin orden/mensaje/liberación — y EN LA MISMA transacción se limpia la
+ * marca anti-doble-checkout y se espeja `resume: cancelled` (review: la limpieza best-effort
+ * fuera de la tx podía perderse y dejar el checkout congelado para siempre).
  */
 async function claimJob(tenantId: string, jobId: string): Promise<ClaimResult> {
   const now = Timestamp.now();
   return db().runTransaction(async (tx) => {
+    const cfgSnap = await tx.get(db().doc(`tenants/${tenantId}/config/checkout`));
+    const act = coverageActivationOf((cfgSnap.data() as { coverage?: unknown } | undefined)?.coverage);
+    if (!act.enabled) return { kind: 'skip' as const, motivo: 'feature off (leído en el claim)' };
     const jSnap = await tx.get(jobRef(tenantId, jobId));
     const job = jSnap.exists ? (jSnap.data() as CoverageResumeJob) : null;
     if (!job) return { kind: 'skip' as const, motivo: 'job inexistente' };
@@ -100,6 +112,21 @@ async function claimJob(tenantId: string, jobId: string): Promise<ClaimResult> {
     const lease = job.leaseUntil?.toMillis?.() ?? 0;
     const reclamable = job.status === 'pending' || (job.status === 'processing' && lease <= now.toMillis());
     if (!reclamable) return { kind: 'skip' as const, motivo: `status ${job.status}` };
+    if ((job.activationId ?? null) !== act.activationId) {
+      // Admin SDK: TODAS las lecturas antes de cualquier escritura.
+      const sesRef = db().doc(paths.session(tenantId, job.customerId));
+      const ses = (await tx.get(sesRef)).data() as Session | undefined;
+      const rSnap = await tx.get(reqRef(tenantId, job.coverageRequestId));
+      tx.update(jSnap.ref, { status: 'cancelled', leaseUntil: null, updatedAt: now });
+      if (ses?.context?.coverageResumeInProgress === job.coverageRequestId) {
+        tx.update(sesRef, { 'context.coverageResumeInProgress': null, updatedAt: now });
+      }
+      if (rSnap.exists) {
+        tx.update(rSnap.ref, { resume: { status: 'cancelled', orderId: job.orderId ?? null }, updatedAt: now });
+      }
+      const reqStale = rSnap.exists ? (rSnap.data() as CoverageRequest) : null;
+      return { kind: 'stale' as const, job, sellerUid: reqStale?.sellerUid ?? null };
+    }
     if ((job.attempts ?? 0) >= MAX_ATTEMPTS) {
       tx.update(jSnap.ref, { status: 'send_failed', leaseUntil: null, updatedAt: now });
       // Review: si la marca anti-doble-checkout quedó puesta, se limpia — sin esto el gate
@@ -133,6 +160,47 @@ async function claimJob(tenantId: string, jobId: string): Promise<ClaimResult> {
 
 const setJob = (tenantId: string, jobId: string, campos: Partial<CoverageResumeJob> & { status: CoverageResumeStatus }) =>
   jobRef(tenantId, jobId).update({ ...campos, leaseUntil: null, updatedAt: Timestamp.now() });
+
+/**
+ * HARDEN-1 (review) — Señal al equipo cuando un job quedó cancelado por cambio de activación:
+ * auditoría + campana idempotente (id determinístico por request: un solo aviso por job).
+ * Best-effort: el aviso jamás rompe la cancelación (que ya quedó persistida en el claim).
+ * Sin PII: cliente enmascarado, sin dirección/coordenadas.
+ */
+async function notificarResumeCancelado(tenantId: string, job: CoverageResumeJob, sellerUid: string | null): Promise<void> {
+  const cliente = `…${job.customerId.slice(-4)}`;
+  await recordAudit({
+    tenantId,
+    action: 'coverage.resume_cancelled',
+    actorUid: 'system',
+    actorRole: 'SYSTEM',
+    targetType: 'coverageRequest',
+    targetId: job.coverageRequestId,
+    summary: `Reanudación de cobertura cancelada por cambio de activación para el cliente ${cliente} (atención manual)`,
+  }).catch(() => {});
+  const id = `covstale-${job.customerId}-${job.coverageRequestId}`;
+  try {
+    await db().doc(`${paths.notifications(tenantId)}/${id}`).create({
+      id,
+      tenantId,
+      category: 'handoff',
+      type: 'handoff_coverage_stale',
+      title: '📍 Una decisión de cobertura necesita atención manual',
+      body: `La decisión de cobertura del cliente ${cliente} no pudo reanudarse (el flujo cambió de activación). Revisá la conversación desde Conversaciones y atendé el pedido a mano.`,
+      dedupeKey: id,
+      customerId: job.customerId,
+      ...(sellerUid ? { targetUid: sellerUid } : {}),
+      read: false,
+      readAt: null,
+      createdAt: Timestamp.now(),
+    });
+  } catch (e) {
+    const code = (e as { code?: number | string }).code;
+    if (code !== 6 && code !== 'already-exists') {
+      logger.warn('Cobertura: no se pudo avisar la cancelación por activación', { tenantId, requestId: job.coverageRequestId });
+    }
+  }
+}
 
 const setResume = (tenantId: string, requestId: string, status: CoverageResumeStatus, orderId: string | null) =>
   reqRef(tenantId, requestId).update({ resume: { status, orderId }, updatedAt: Timestamp.now() });
@@ -195,6 +263,8 @@ export async function enviarPorOutbox(input: {
   customerId: string;
   channel: CoverageOutboxMessage['channel'];
   receivedVia: string | null;
+  /** HARDEN-1: activación bajo la que se genera el mensaje (trazabilidad; el gate es del caller). */
+  activationId: string | null;
   text: string;
 }): Promise<'sent' | 'already_sent' | 'failed' | 'unknown'> {
   const { tenantId } = input;
@@ -230,6 +300,7 @@ export async function enviarPorOutbox(input: {
       customerId: input.customerId,
       channel: input.channel,
       receivedVia: input.receivedVia,
+      activationId: input.activationId,
       text: input.text,
       status: 'sending',
       providerMessageId: null,
@@ -299,6 +370,16 @@ export async function processCoverageResumeJob(tenantId: string, jobId: string):
   if (await resumePausado(tenantId)) return; // fixture de tests (solo emulador)
 
   const claim = await claimJob(tenantId, jobId);
+  if (claim.kind === 'stale') {
+    // Job de una activación ANTERIOR: quedó `cancelled` EN el claim (cero orden/mensaje/banco/
+    // liberación; marca y espejo limpiados en la misma transacción). El cliente puede haber
+    // quedado esperando en un takeover coverage_review: se audita y se AVISA al equipo por la
+    // campana (review: sin señal, el chat quedaba mudo indefinidamente y el panel decía
+    // "aprobada" como si estuviera resuelto).
+    await notificarResumeCancelado(tenantId, claim.job, claim.sellerUid);
+    logger.info('Cobertura: job de una activación anterior → cancelado sin efectos', { tenantId, jobId });
+    return;
+  }
   if (claim.kind === 'skip') {
     logger.info('Cobertura: resume no reclamado', { tenantId, jobId, motivo: claim.motivo });
     return;
@@ -323,6 +404,7 @@ export async function processCoverageResumeJob(tenantId: string, jobId: string):
         customerId,
         channel: job.channel,
         receivedVia: job.receivedVia ?? req.receivedVia ?? null,
+        activationId: job.activationId ?? null,
         text: texto,
       });
       const final = estadoPorEnvio(envio);
@@ -384,6 +466,7 @@ export async function processCoverageResumeJob(tenantId: string, jobId: string):
         customerId,
         channel: job.channel,
         receivedVia: job.receivedVia ?? req.receivedVia ?? null,
+        activationId: job.activationId ?? null,
         text: MENSAJE_CARRITO_VACIO_APROBADO,
       });
       const final = estadoPorEnvio(envio);
@@ -440,6 +523,7 @@ export async function processCoverageResumeJob(tenantId: string, jobId: string):
       customerId,
       channel: job.channel,
       receivedVia: job.receivedVia ?? req.receivedVia ?? null,
+      activationId: job.activationId ?? null,
       text: texto,
     });
     const final = estadoPorEnvio(envio);
@@ -458,6 +542,8 @@ export async function processCoverageResumeJob(tenantId: string, jobId: string):
 /**
  * ETAPA E — tras una liberación manual (chatRelease/devReleaseChat), re-encolar el job
  * `held_by_seller` del request de ESTE cliente (validando decisión vigente). Idempotente.
+ * HARDEN-1: con el flag apagado o el job de una activación anterior NO se re-encola (queda
+ * held_by_seller, inerte y preservado) — el flag se lee DENTRO de la misma transacción.
  */
 export async function reactivarResumeTrasLiberacion(tenantId: string, customerId: string): Promise<boolean> {
   try {
@@ -465,9 +551,13 @@ export async function reactivarResumeTrasLiberacion(tenantId: string, customerId
     const requestId = ses?.context?.coverage?.requestId;
     if (!requestId) return false;
     return await db().runTransaction(async (tx) => {
+      const cfgSnap = await tx.get(db().doc(`tenants/${tenantId}/config/checkout`));
+      const act = coverageActivationOf((cfgSnap.data() as { coverage?: unknown } | undefined)?.coverage);
+      if (!act.enabled) return false;
       const jSnap = await tx.get(jobRef(tenantId, requestId));
       const job = jSnap.exists ? (jSnap.data() as CoverageResumeJob) : null;
       if (!job || job.status !== 'held_by_seller' || job.customerId !== customerId || job.tenantId !== tenantId) return false;
+      if ((job.activationId ?? null) !== act.activationId) return false;
       const req = (await tx.get(reqRef(tenantId, requestId))).data() as CoverageRequest | undefined;
       const esperado = job.action === 'approved' ? 'coverage_approved' : 'coverage_rejected';
       if (!req || req.status !== esperado || req.decision?.action !== job.action) return false;
