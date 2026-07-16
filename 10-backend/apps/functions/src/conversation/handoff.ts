@@ -164,6 +164,8 @@ export async function notifyHandoffRequested(
   sourceId: string | null,
   /** Motivo del aviso (cambia tipo/título/cuerpo, misma idempotencia por sourceId). */
   motivo: 'customer_requested' | 'ai_unavailable' | 'coverage_review' = 'customer_requested',
+  /** COVERAGE-1C: uid del SELLER destinatario (server-controlled) — las rules le abren la campana. */
+  targetUid: string | null = null,
 ): Promise<boolean> {
   // Sin wamid (dev/simulador): bucket por hora — repetir en la misma hora no duplica el aviso.
   const fallback = `sin-wamid-${new Date(Timestamp.now().toMillis()).toISOString().slice(0, 13)}`;
@@ -192,6 +194,7 @@ export async function notifyHandoffRequested(
           : `El cliente ${cliente} pidió hablar con una persona. El bot quedó en pausa: respondele desde Conversaciones.`,
       dedupeKey: id,
       customerId,
+      ...(targetUid ? { targetUid } : {}),
       read: false,
       readAt: null,
       createdAt: Timestamp.now(),

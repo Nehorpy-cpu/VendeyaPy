@@ -4,19 +4,48 @@
  * frontend NUNCA crea ni borra notificaciones (las crea el backend, TN-1). `markNotificationRead` solo manda
  * `{ read, readAt }` — lo único que permiten las rules (`update: hasOnly(['read','readAt'])`).
  */
-import { collection, doc, getDocs, updateDoc, serverTimestamp } from 'firebase/firestore';
+import { collection, doc, getDocs, query, updateDoc, serverTimestamp, where } from 'firebase/firestore';
 import type { Notification } from '@vpw/shared';
 import { firebaseDb } from './firebase';
 
 const notificationsCol = (tenantId: string) => collection(firebaseDb(), 'tenants', tenantId, 'notifications');
 
+export interface NotificationsViewer {
+  role: string | null;
+  uid: string | null;
+}
+
 /**
- * Notificaciones del tenant. Solo OWNER/admin pueden leerlas (rules); para seller/manager/viewer
- * `getDocs` devuelve permission-denied → se maneja en SILENCIO (sin notificaciones, sin romper la UI).
+ * Alcance de lectura por rol (COVERAGE-1C). Las rules exigen que la QUERY ya venga acotada:
+ * owner/admin → todo; MANAGER → solo categoría handoff; SELLER → solo handoff dirigidos a su
+ * uid (targetUid, server-controlled). Cualquier otro rol no lee nada. PURA → testeable.
  */
-export async function listNotifications(tenantId: string): Promise<Notification[]> {
+export function notificationsScopeFor(viewer?: NotificationsViewer):
+  | { kind: 'all' }
+  | { kind: 'handoff' }
+  | { kind: 'handoff-target'; uid: string }
+  | { kind: 'none' } {
+  const role = viewer?.role ?? null;
+  if (role === 'TENANT_OWNER' || role === 'PLATFORM_ADMIN' || role === null) return { kind: 'all' };
+  if (role === 'TENANT_MANAGER') return { kind: 'handoff' };
+  if (role === 'SELLER') return viewer?.uid ? { kind: 'handoff-target', uid: viewer.uid } : { kind: 'none' };
+  return { kind: 'none' };
+}
+
+/**
+ * Notificaciones visibles para el usuario según su rol. Un rol sin acceso (o cualquier error de
+ * lectura) devuelve [] en SILENCIO — la campana simplemente no aparece.
+ */
+export async function listNotifications(tenantId: string, viewer?: NotificationsViewer): Promise<Notification[]> {
   try {
-    const snap = await getDocs(notificationsCol(tenantId));
+    const scope = notificationsScopeFor(viewer);
+    if (scope.kind === 'none') return [];
+    const col = notificationsCol(tenantId);
+    const q =
+      scope.kind === 'handoff' ? query(col, where('category', '==', 'handoff'))
+      : scope.kind === 'handoff-target' ? query(col, where('category', '==', 'handoff'), where('targetUid', '==', scope.uid))
+      : col;
+    const snap = await getDocs(q);
     // `id` = id del doc (fuente de verdad para markNotificationRead), no se asume que venga en el body.
     return snap.docs.map((d) => ({ ...(d.data() as Notification), id: d.id }));
   } catch {

@@ -42,7 +42,7 @@ import { veredictoOcasion, respuestaOcasionNoConviene, respuestaOcasionConviene 
 import { esPosiblePedidoHumano, procesarPedidoHumano } from './humanRequest.js';
 import { derivarPorIaNoDisponible, esConsultaDerivable } from './aiUnavailable.js';
 import { esConsultaCobertura, RESPUESTA_COBERTURA_SEGURA } from './coverageGuard.js';
-import { gateCoberturaCheckout, clasificarTextoEnEspera, manejarTurnoEnEsperaUbicacion } from './coverage.js';
+import { gateCoberturaCheckout, clasificarTextoEnEspera, manejarTurnoEnEsperaUbicacion, actualizarUbicacionEnRevision } from './coverage.js';
 import type { CoverageSessionPointer } from '@vpw/shared';
 import { createPendingOrder } from '../orders/createPendingOrder.js';
 import { resolveCheckoutReuse } from '../orders/checkoutReuse.js';
@@ -854,8 +854,19 @@ export async function handleMessage(input: ConversationInput): Promise<Conversat
   // PREVIOS conservan la prioridad (review): un pedido de humano o un reclamo que además parezca
   // dirección se trata como 'otro' — su texto real queda en el historial y su flujo responde.
   const coveragePtr: CoverageSessionPointer | null = existing?.context?.coverage ?? null;
+  // 1C: también clasificamos DURANTE la revisión (takeover coverage_review de este request):
+  // una dirección nueva se registra en el request y el historial recibe SOLO el placeholder —
+  // la dirección cruda jamás queda en messages ni llega a la IA en turnos posteriores (review).
+  // El vendedor la ve completa en la tarjeta de revisión del panel.
+  const enRevisionCobertura =
+    humanTakeover &&
+    existing?.context?.handoffReason === 'coverage_review' &&
+    coveragePtr?.status === 'pending_coverage_review' &&
+    existing?.context?.handoffSourceId === coveragePtr.requestId;
   const clasifBase =
-    !botSilent && coveragePtr?.status === 'awaiting_location' ? clasificarTextoEnEspera(text) : null;
+    (!botSilent && coveragePtr?.status === 'awaiting_location') || enRevisionCobertura
+      ? clasificarTextoEnEspera(text)
+      : null;
   const clasifCobertura: typeof clasifBase =
     clasifBase && clasifBase !== 'otro' && (esPosiblePedidoHumano(text) || tipoReclamoCarrito(text) !== null)
       ? 'otro'
@@ -879,6 +890,13 @@ export async function handleMessage(input: ConversationInput): Promise<Conversat
 
   // Atención humana: si un vendedor tomó el chat, el bot NO responde.
   if (humanTakeover) {
+    // COVERAGE-1C: en revisión de cobertura (takeover coverage_review de ESTE request), una
+    // nueva dirección escrita ACTUALIZA el request pendiente (transaccional) — el bot sigue
+    // mudo; el historial guardó el placeholder y la dirección vive SOLO en el request (el
+    // vendedor la ve en la tarjeta del panel).
+    if (enRevisionCobertura && input.simulation !== true && clasifCobertura === 'direccion') {
+      await actualizarUbicacionEnRevision(tenantId, customerId, text, input.messageId ?? null);
+    }
     await sessionRef.set({ context: { lastMessageAt: now }, updatedAt: now }, { merge: true });
     logger.info('Mensaje en modo atención humana (bot en pausa)', { tenantId, customerId });
     return { reply: '', state: existing?.state ?? 'IDLE', handledByHuman: true };

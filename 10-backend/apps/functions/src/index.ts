@@ -176,3 +176,7 @@ export { devComputeTracking } from './functions/tracking/devComputeTracking.js';
 // Asistente interno de crecimiento (AG-4): callable owner/admin que consulta agregados PRIVADOS del
 // propio tenant vía Claude Haiku (contexto internal, read-only). No cablea frontend.
 export { askInternalGrowthAssistant } from './functions/ai/internalAssistantCallable.js';
+
+// Revisión humana de cobertura (COVERAGE-1C): aprobar / rechazar / pedir más información.
+// Decisión transaccional con outbox para la reanudación (1D). Owner/manager, o SELLER asignado.
+export { coverageApprove, coverageReject, coverageRequestInfo } from './functions/coverage/coverageCallables.js';

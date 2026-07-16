@@ -263,14 +263,37 @@ service cloud.firestore {
           && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'resolvedAt']);
       }
 
-      // Notificaciones internas del free trial (TRIAL-NOTIFICATIONS-1): info de billing → solo OWNER + admin
-      // las leen (no seller/manager/viewer). Las crea Cloud Functions; el cliente NO crea/borra. El owner
-      // solo puede marcarlas leídas (read/readAt).
+      // Notificaciones internas del panel. Trial/billing → solo OWNER + admin (sin cambios).
+      // COVERAGE-1C: la categoría 'handoff' también la lee el MANAGER, y el SELLER únicamente
+      // los avisos dirigidos a su uid (targetUid, server-controlled). Nada más se amplía.
       match /notifications/{notificationId} {
-        allow read: if isTenantOwner(tenantId) || isPlatformAdmin();
-        allow create, delete: if false; // Solo Admin SDK (generateTrialNotifications)
-        allow update: if (isTenantOwner(tenantId) || isPlatformAdmin())
+        allow read: if isTenantOwner(tenantId) || isPlatformAdmin()
+          || (isTenantManager(tenantId) && resource.data.category == 'handoff')
+          || (isTenantSeller(tenantId) && resource.data.category == 'handoff'
+              && resource.data.targetUid == request.auth.uid);
+        allow create, delete: if false; // Solo Admin SDK (generateTrialNotifications / handoff)
+        // El MANAGER no marca leídos los avisos DIRIGIDOS a un seller (el doc-id es determinístico:
+        // si otro lo lee, el aviso muere para el vendedor asignado). El owner conserva el control.
+        allow update: if (isTenantOwner(tenantId) || isPlatformAdmin()
+            || (isTenantManager(tenantId) && resource.data.category == 'handoff'
+                && !('targetUid' in resource.data))
+            || (isTenantSeller(tenantId) && resource.data.category == 'handoff'
+                && resource.data.targetUid == request.auth.uid))
           && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['read', 'readAt']);
+      }
+
+      // COVERAGE-1C: solicitudes de cobertura. Contienen la UBICACIÓN del cliente (sensible):
+      // owner/manager del tenant y soporte de plataforma leen; el SELLER solo las asignadas a
+      // su uid (sellerUid, server-controlled). Escritura SIEMPRE por callables/Admin SDK.
+      match /coverageRequests/{requestId} {
+        allow read: if isTenantManager(tenantId) || isPlatformAdmin()
+          || (isTenantSeller(tenantId) && resource.data.sellerUid == request.auth.uid);
+        allow write: if false; // Solo Admin SDK (coverageApprove/Reject/RequestInfo + motor)
+      }
+
+      // COVERAGE-1C: outbox de reanudación del checkout (lo consume 1D). SOLO backend.
+      match /coverageResumeJobs/{jobId} {
+        allow read, write: if false;
       }
 
       // Uso/costo de IA (AG-3): registro por request del gateway de Claude (modelo, tokens, costo,

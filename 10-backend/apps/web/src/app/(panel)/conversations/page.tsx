@@ -19,6 +19,7 @@ import { listTenantWhatsappNumbers } from '@/lib/whatsapp-activation';
 import { getChannelConfig } from '@/lib/channels';
 import { getCustomerOpenOrder, comprobanteEstado, esMensajeImagenCliente } from '@/lib/orders';
 import { ComprobanteViewer } from '@/components/ComprobanteViewer';
+import { CoverageReviewCard } from '@/components/CoverageReviewCard';
 
 const ORDER_STATUS_LABEL: Record<string, string> = {
   PENDING_PAYMENT: 'Esperando pago',
@@ -288,6 +289,9 @@ function ConversationsInner() {
                   )}
                 </div>
               </div>
+
+              {/* COVERAGE-1C: revisión de cobertura del cliente seleccionado (roles autorizados) */}
+              {selected && tenantId && <CoverageReviewCard tenantId={tenantId} customerId={selected} />}
 
               {/* HUMAN-HANDOFF-1: pedido abierto del cliente — contexto del comprobante sin salir del chat */}
               {orderQ.data && (

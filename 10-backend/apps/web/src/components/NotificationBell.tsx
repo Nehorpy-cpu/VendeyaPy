@@ -10,6 +10,7 @@ import { useState } from 'react';
 import Link from 'next/link';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useActiveCompany } from '@/lib/active-company';
+import { useAuth } from '@/lib/auth-context';
 import { listNotifications, markNotificationRead, selectUnreadSorted } from '@/lib/notifications';
 
 function BellIcon({ className }: { className?: string }) {
@@ -23,12 +24,14 @@ function BellIcon({ className }: { className?: string }) {
 
 export function NotificationBell() {
   const { tenantId } = useActiveCompany();
+  const { user, claims } = useAuth();
   const qc = useQueryClient();
   const [open, setOpen] = useState(false);
 
+  // COVERAGE-1C: la query viene acotada por rol (rules) — el SELLER asignado ve SU campana.
   const { data } = useQuery({
-    queryKey: ['notifications', tenantId],
-    queryFn: () => listNotifications(tenantId!),
+    queryKey: ['notifications', tenantId, claims.role, user?.uid],
+    queryFn: () => listNotifications(tenantId!, { role: claims.role, uid: user?.uid ?? null }),
     enabled: !!tenantId,
   });
   const markRead = useMutation({
@@ -66,7 +69,7 @@ export function NotificationBell() {
                     {/* HANDOFF-2: el CTA depende de la categoría — un pedido de atención humana
                         lleva a Conversaciones, no a facturación. */}
                     <Link
-                      href={nf.category === 'handoff' ? '/conversations' : '/billing'}
+                      href={nf.category === 'handoff' ? `/conversations${nf.customerId ? `?c=${nf.customerId}` : ''}` : '/billing'}
                       onClick={() => setOpen(false)}
                       className="text-xs font-semibold text-mint-700 hover:text-mint-600"
                     >

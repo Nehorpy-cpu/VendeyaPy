@@ -208,7 +208,7 @@ const requestPath = (tenantId: string, requestId: string) => `tenants/${tenantId
 const TERMINALES: readonly CoverageStatus[] = ['coverage_rejected', 'coverage_expired', 'coverage_cancelled'];
 const PURGE_DAYS = 30; // retención máxima futura de coordenadas exactas (el job llega después de 1B)
 
-const purgeAtFrom = (now: Timestamp, req: Pick<CoverageRequest, 'location'>): Timestamp | null =>
+export const purgeAtFrom = (now: Timestamp, req: Pick<CoverageRequest, 'location'>): Timestamp | null =>
   req.location?.coordinates ? Timestamp.fromMillis(now.toMillis() + PURGE_DAYS * 24 * 60 * 60 * 1000) : null;
 
 const ptrOf = (req: Pick<CoverageRequest, 'id' | 'status' | 'locationFingerprint' | 'createdAt'>, now: Timestamp): CoverageSessionPointer => ({
@@ -307,7 +307,7 @@ export async function gateCoberturaCheckout(
 // ---------------------------------------------------------------------------
 
 type RegistroResultado =
-  | { kind: 'ok'; requestId: string; primeraVez: boolean; humanTakeover: boolean; handoffReason: string | null; ptr: CoverageSessionPointer }
+  | { kind: 'ok'; requestId: string; primeraVez: boolean; humanTakeover: boolean; handoffReason: string | null; ptr: CoverageSessionPointer; sellerUid: string | null; sellerName: string | null }
   | { kind: 'no_active' }
   | { kind: 'approved_activo' }
   | { kind: 'expired' };
@@ -334,6 +334,12 @@ async function registrarUbicacion(
       tx.set(sessionRef, { context: { coverage: null }, updatedAt: now }, { merge: true });
       return { kind: 'expired' as const };
     }
+    // 1C: asignación del request al SELLER del cliente (uid de Auth, server-controlled) — las
+    // rules le abren la lectura/decisión SOLO de sus requests; la campana lo apunta (targetUid).
+    const custSnap = await tx.get(db().doc(paths.customer(tenantId, customerId)));
+    const cust = custSnap.data() as { assignedSellerId?: string | null; assignedSellerName?: string | null } | undefined;
+    const sellerUid = cust?.assignedSellerId ?? req.sellerUid ?? null;
+    const sellerNameAsignado = cust?.assignedSellerName ?? req.sellerName ?? null;
     const primeraVez = req.status === 'awaiting_location';
     const locationFingerprint = locationFingerprintOf(location);
     tx.update(reqSnap.ref, {
@@ -341,6 +347,8 @@ async function registrarUbicacion(
       locationFingerprint, // una ubicación nueva antes de la decisión INVALIDA la huella anterior
       status: 'pending_coverage_review',
       sourceMessageId: wamid ?? req.sourceMessageId ?? null,
+      sellerUid,
+      sellerName: sellerNameAsignado,
       updatedAt: now,
     });
     const ptrNew: CoverageSessionPointer = { ...ptrOf({ ...req, status: 'pending_coverage_review', locationFingerprint }, now) };
@@ -352,6 +360,8 @@ async function registrarUbicacion(
       humanTakeover: ctx?.humanTakeover === true,
       handoffReason: ctx?.handoffReason ?? null,
       ptr: ptrNew,
+      sellerUid,
+      sellerName: sellerNameAsignado,
     };
   });
 }
@@ -373,17 +383,20 @@ async function derivarARevision(
   registro: Extract<RegistroResultado, { kind: 'ok' }>,
   wamid: string | null,
 ): Promise<{ reply: string; takeover: boolean }> {
-  const config = await getCheckoutConfig(tenantId);
-  const sellerName = vendedorParaCobertura(config);
+  // Vendedor del handoff: el ASIGNADO al cliente (uid real, ya persistido en el request por la
+  // transacción de registro); sin asignado, el primero activo de la config (solo display).
+  const sellerName = registro.sellerName ?? vendedorParaCobertura(await getCheckoutConfig(tenantId));
   const hr = await executeHandoff(tenantId, customerId, {
     reason: 'coverage_review',
     sellerName: sellerName ?? undefined,
+    sellerUid: registro.sellerUid ?? undefined,
     sourceId: registro.requestId,
     createSessionIfMissing: false,
   });
   // Aviso a la campana: SIEMPRE tras persistir, deduplicado por wamid (un webhook repetido no
   // duplica; una ubicación NUEVA con wamid nuevo sí avisa — el equipo ve la actualización).
-  await notifyHandoffRequested(tenantId, customerId, sellerName, wamid, 'coverage_review');
+  // targetUid (server-controlled) le abre la campana al SELLER asignado (1C).
+  await notifyHandoffRequested(tenantId, customerId, sellerName, wamid, 'coverage_review', registro.sellerUid ?? null);
   if (hr.ok && !hr.already) {
     logger.info('Cobertura: ubicación registrada → revisión humana', { tenantId, customer: `…${customerId.slice(-4)}`, requestId: registro.requestId });
     return { reply: MENSAJE_UBICACION_RECIBIDA, takeover: true };
@@ -570,5 +583,36 @@ export async function manejarTurnoEnEsperaUbicacion(
   } catch (e) {
     logger.error('Cobertura: no se pudo registrar la dirección', e, { tenantId, customer: `…${customerId.slice(-4)}` });
     return { takeover: false, reply: MENSAJE_UBICACION_FALLO };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 1C — Dirección escrita DURANTE la revisión (bot en takeover coverage_review)
+// ---------------------------------------------------------------------------
+
+/**
+ * Gap 1C: con el takeover `coverage_review` vigente, una nueva dirección escrita del cliente
+ * actualiza el request pendiente (misma transacción de registro: ubicación + fingerprint) SIN
+ * respuesta del bot — el mensaje humano queda visible para el vendedor. Devuelve true si
+ * actualizó (solo `pending_coverage_review` vigente; nunca reabre terminales/aprobados).
+ */
+export async function actualizarUbicacionEnRevision(
+  tenantId: string,
+  customerId: string,
+  text: string,
+  wamid: string | null,
+): Promise<boolean> {
+  try {
+    const cfg = coverageSettings(await getCheckoutConfig(tenantId));
+    if (!cfg.enabled) return false;
+    const addressText = text.replace(/\s+/g, ' ').trim().slice(0, 512);
+    const location: CoverageLocation = { source: 'text', addressText, name: null, coordinates: null };
+    const registro = await registrarUbicacion(tenantId, customerId, location, wamid);
+    if (registro.kind !== 'ok') return false;
+    logger.info('Cobertura: dirección actualizada durante la revisión (bot en silencio)', { tenantId, customer: `…${customerId.slice(-4)}`, requestId: registro.requestId });
+    return true;
+  } catch (e) {
+    logger.error('Cobertura: no se pudo actualizar la dirección en revisión', e, { tenantId, customer: `…${customerId.slice(-4)}` });
+    return false;
   }
 }

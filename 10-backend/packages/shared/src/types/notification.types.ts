@@ -26,4 +26,7 @@ export interface Notification {
   createdAt: Timestamp;
   /** HANDOFF-2: cliente al que refiere el aviso (para abrir /conversations). Solo category 'handoff'. */
   customerId?: string;
+  /** COVERAGE-1C: uid del SELLER destinatario (server-controlled). Las rules le permiten leer
+   * SOLO los avisos handoff dirigidos a su uid; owner/manager no lo necesitan. */
+  targetUid?: string | null;
 }

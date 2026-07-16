@@ -36,14 +36,34 @@ export interface CoverageLocation {
   coordinates: { lat: number; lng: number } | null;
 }
 
-/** Decisión humana (1C). En 1B siempre null. */
+/** Decisión humana (1C). */
 export interface CoverageDecision {
   action: 'approved' | 'rejected';
   byUid: string;
   byName: string;
   byRole: string;
   at: Timestamp;
+  /** Nota interna opcional (rechazo). JAMÁS se envía al cliente ni va a logs/auditoría. */
   note: string | null;
+  /** Huella EXACTA de la ubicación decidida (leída dentro de la transacción — auditable). */
+  locationFingerprint: string | null;
+}
+
+/**
+ * Outbox de reanudación (1C lo crea al decidir; 1D lo consume). Doc-id = coverageRequestId
+ * (determinístico: una decisión jamás encola dos jobs). Solo backend (rules deny total).
+ */
+export interface CoverageResumeJob {
+  id: string;
+  tenantId: string;
+  coverageRequestId: string;
+  customerId: string;
+  action: 'approved' | 'rejected';
+  status: 'pending' | 'done' | 'send_failed' | 'held_by_seller';
+  channel: MessageChannel;
+  receivedVia: string | null;
+  createdAt: Timestamp;
+  updatedAt: Timestamp;
 }
 
 /** Reanudación del checkout post-aprobación (1D). En 1B siempre null. */
@@ -88,6 +108,8 @@ export interface CoverageRequest {
   expiresAt: Timestamp;
   /** Purga futura de coordenadas exactas (30 días post-terminal; el job llega después de 1B). */
   coordinatesPurgeAt: Timestamp | null;
+  /** 1C: momento del último "Solicitar más información" (idempotencia de doble clic). */
+  infoRequestedAt?: Timestamp | null;
 }
 
 /**

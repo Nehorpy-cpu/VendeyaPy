@@ -9,9 +9,11 @@ build/
 out/
 *.tsbuildinfo
 
-# Coverage
+# Coverage (reportes de test-coverage)
 coverage/
 .nyc_output/
+# COVERAGE-1C: el módulo de revisión de cobertura SÍ se versiona (no es un reporte)
+!apps/functions/src/functions/coverage/
 
 # Logs
 *.log
