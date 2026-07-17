@@ -544,20 +544,57 @@ export interface UbicacionEntranteInput {
 
 /**
  * Procesa una ubicación nativa. El historial SOLO recibe el placeholder `📍 Ubicación recibida`
- * (jamás coordenadas/dirección). Devuelve la respuesta a entregar (puede ser '') y el
- * `coverageActivationId` bajo el que se generó (KILL-SWITCH-1: process.ts re-lee el flag antes
- * de mandarla — un apagado de emergencia frena la promesa de revisión aún no enviada).
+ * (jamás coordenadas/dirección) y SOLO cuando el flujo está activo. Devuelve la respuesta a
+ * entregar (puede ser '') + `coverageActivationId` (KILL-SWITCH-1: process.ts re-lee el flag
+ * antes de mandarla) + `inerte` (OFF-INERTE: con cobertura apagada la ubicación es INERTE —
+ * ni placeholder, ni reply, ni registro, ni handoff, ni uso; el inbox conserva solo la redacción).
  */
-export async function procesarUbicacionEntrante(input: UbicacionEntranteInput): Promise<{ reply: string; coverageActivationId?: string | null }> {
+export async function procesarUbicacionEntrante(input: UbicacionEntranteInput): Promise<{ reply: string; coverageActivationId?: string | null; inerte?: boolean }> {
   const { tenantId } = input;
   const customerId = input.from.replace(/[^0-9]/g, '');
-  if (!customerId) return { reply: '' };
+  if (!customerId) return { reply: '', inerte: true };
   const now = Timestamp.now();
+
+  // OFF-INERTE (H1): el gate del flag va ANTES de cualquier persistencia específica de ubicación.
+  // Con cobertura ausente/off/inválida, la ubicación nativa conserva EXACTAMENTE el comportamiento
+  // heredado (pre-Coverage): se ignora en silencio — ni placeholder, ni registro, ni handoff, ni
+  // reply, ni uso. process.ts solo conserva la redacción del inbox (payload.location=null).
+  const cfg = coverageSettings(await getCheckoutConfig(tenantId));
+  if (!cfg.enabled) return { reply: '', inerte: true };
 
   const ses = (await db().doc(paths.session(tenantId, customerId)).get()).data() as Session | undefined;
   const humanTakeover = ses?.context?.humanTakeover === true;
 
-  // Historial: SOLO el placeholder — la ubicación exacta jamás entra a messages.
+  let reply = '';
+  let enTakeover = humanTakeover;
+  // KILL-SWITCH-1: solo las respuestas que PROMETEN revisión/cobertura se gatean antes del envío
+  // (RECIBIDA, ZONA_YA_CONFIRMADA). Las neutrales (vencido/sin pedido) son honestas → no se etiquetan.
+  let coverageActivationId: string | null = null;
+  const location: CoverageLocation = {
+    source: 'whatsapp_location',
+    addressText: input.location.address,
+    name: input.location.name,
+    coordinates: { lat: input.location.latitude, lng: input.location.longitude },
+  };
+  let registro: RegistroResultado;
+  try {
+    registro = await registrarUbicacion(tenantId, customerId, location, input.messageId);
+  } catch (e) {
+    // G.10: la persistencia falló ANTES de cualquier escritura de historial — mensaje temporal
+    // honesto, sin placeholder (nada quedó registrado).
+    logger.error('Cobertura: no se pudo registrar la ubicación', e, { tenantId, customer: `…${customerId.slice(-4)}` });
+    if (!humanTakeover) {
+      await appendMessage(tenantId, customerId, { direction: 'out', author: 'bot', text: MENSAJE_UBICACION_FALLO, now: Timestamp.now(), state: ses?.state ?? null, humanTakeover, countUnread: false, channel: input.channel, receivedVia: input.receivedByPhoneNumberId ?? null });
+    }
+    return { reply: humanTakeover ? '' : MENSAJE_UBICACION_FALLO, coverageActivationId: null };
+  }
+
+  // OFF-INERTE (carrera): el flag se apagó ENTRE la lectura inicial y la transacción de registro.
+  // registrarUbicacion no persistió nada ⇒ la ubicación queda INERTE: sin placeholder ni reply.
+  if (registro.kind === 'off') return { reply: '', inerte: true };
+
+  // Flag confirmado ON dentro de la transacción de registro → recién ACÁ el placeholder redactado
+  // (jamás coordenadas/dirección) entra al historial.
   await appendMessage(tenantId, customerId, {
     direction: 'in',
     author: 'customer',
@@ -570,47 +607,20 @@ export async function procesarUbicacionEntrante(input: UbicacionEntranteInput): 
     receivedVia: input.receivedByPhoneNumberId ?? null,
   });
 
-  const cfg = coverageSettings(await getCheckoutConfig(tenantId));
-  let reply = '';
-  let enTakeover = humanTakeover;
-  // KILL-SWITCH-1: solo las respuestas que PROMETEN revisión/cobertura se gatean antes del envío
-  // (RECIBIDA, ZONA_YA_CONFIRMADA). Las neutrales (no procesable/vencido/sin pedido) son honestas
-  // aun con el flag apagado → no se etiquetan (se envían normal).
-  let coverageActivationId: string | null = null;
-  try {
-    if (!cfg.enabled) {
-      reply = humanTakeover ? '' : MENSAJE_UBICACION_NO_PROCESABLE;
-    } else {
-      const location: CoverageLocation = {
-        source: 'whatsapp_location',
-        addressText: input.location.address,
-        name: input.location.name,
-        coordinates: { lat: input.location.latitude, lng: input.location.longitude },
-      };
-      const registro = await registrarUbicacion(tenantId, customerId, location, input.messageId);
-      if (registro.kind === 'ok') {
-        const r = await derivarARevision(tenantId, customerId, registro, input.messageId);
-        reply = r.reply;
-        enTakeover = enTakeover || r.takeover;
-        // La respuesta CONFIRMA/PROMETE revisión (con o sin takeover — el borde "sesión
-        // desaparecida" devuelve la promesa sin takeover): siempre se etiqueta para gatearla.
-        if (reply.trim()) coverageActivationId = cfg.activationId;
-      } else if (registro.kind === 'off') {
-        // Kill-switch ganó dentro de la transacción: nada persistido — respuesta honesta.
-        reply = humanTakeover ? '' : MENSAJE_UBICACION_NO_PROCESABLE;
-      } else if (registro.kind === 'expired') {
-        reply = humanTakeover ? '' : MENSAJE_INTENTO_VENCIDO;
-      } else if (registro.kind === 'approved_activo') {
-        reply = humanTakeover ? '' : MENSAJE_ZONA_YA_CONFIRMADA;
-        coverageActivationId = cfg.activationId; // referencia cobertura confirmada → gatear
-      } else {
-        reply = humanTakeover ? '' : MENSAJE_UBICACION_SIN_PEDIDO;
-      }
-    }
-  } catch (e) {
-    // G.10: si la persistencia falló, NO se confirma recepción ni pase — mensaje temporal honesto.
-    logger.error('Cobertura: no se pudo registrar la ubicación', e, { tenantId, customer: `…${customerId.slice(-4)}` });
-    reply = humanTakeover ? '' : MENSAJE_UBICACION_FALLO;
+  if (registro.kind === 'ok') {
+    const r = await derivarARevision(tenantId, customerId, registro, input.messageId);
+    reply = r.reply;
+    enTakeover = enTakeover || r.takeover;
+    // La respuesta CONFIRMA/PROMETE revisión (con o sin takeover — el borde "sesión desaparecida"
+    // devuelve la promesa sin takeover): siempre se etiqueta para gatearla antes de Meta.
+    if (reply.trim()) coverageActivationId = cfg.activationId;
+  } else if (registro.kind === 'expired') {
+    reply = humanTakeover ? '' : MENSAJE_INTENTO_VENCIDO;
+  } else if (registro.kind === 'approved_activo') {
+    reply = humanTakeover ? '' : MENSAJE_ZONA_YA_CONFIRMADA;
+    coverageActivationId = cfg.activationId; // referencia cobertura confirmada → gatear
+  } else {
+    reply = humanTakeover ? '' : MENSAJE_UBICACION_SIN_PEDIDO;
   }
 
   if (reply.trim()) {

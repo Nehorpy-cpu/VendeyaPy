@@ -98,6 +98,31 @@ const ai0 = await aiCount();
 
 const CUST = (n) => `59599400${String(n).padStart(4, '0')}`;
 
+// Inbox helpers (OFF-INERTE): el evento se conserva 'ignored' con payload.location=null (redacción).
+const inboxIdDe = (wamid) => ('whatsapp_' + wamid).replace(new RegExp('[^A-Za-z0-9_.:=+-]', 'g'), '_').slice(0, 256);
+const inboxDe = async (wamid) => (await db.doc(`metaWebhookInbox/${inboxIdDe(wamid)}`).get()).data() ?? {};
+const esperarInbox = (wamid) => waitFor(async () => { const d = await inboxDe(wamid); return !!d.processingStatus && d.processingStatus !== 'received' && d.processingStatus !== 'processing'; }, 12000);
+// OFF-INERTE (H1): con cobertura apagada, una ubicación nativa espontánea NO produce NADA nuevo —
+// ni placeholder, ni reply, ni request, ni coords; el inbox queda 'ignored' con la ubicación redactada.
+const ubicacionNativaInerte = async (etiqueta, cust) => {
+  await postText(cust, 'hola');
+  await waitFor(async () => (await outsCount(cust)) > 0);
+  const outsAntes = await outsCount(cust);
+  const msgsAntes = (await msgsOf(cust)).length;
+  const w = `wamid.COVOFF-${cust}-${Date.now()}`;
+  await postLocation(cust, { latitude: LAT, longitude: LNG, name: 'Casa OFF', address: 'Av. Secreta 999' }, w);
+  await esperarInbox(w);
+  await sleep(1200);
+  const msgs = await msgsOf(cust);
+  const inbox = await inboxDe(w);
+  check(etiqueta,
+    (await outsCount(cust)) === outsAntes && msgs.length === msgsAntes && // cero mensajes nuevos (ni placeholder ni reply)
+    !msgs.some((m) => m.text === '📍 Ubicación recibida') && (await requestsOf(cust)).length === 0 &&
+    !msgs.some((m) => /25\.28|57\.64|Secreta|Casa OFF/.test(m.text ?? '')) &&
+    inbox.processingStatus === 'ignored' && (inbox.payload?.location ?? null) === null,
+    `outs=${outsAntes}→${await outsCount(cust)} msgs=${msgsAntes}→${msgs.length} inbox=${inbox.processingStatus} loc=${JSON.stringify(inbox.payload?.location ?? null)}`);
+};
+
 // ===== 1. FLAG OFF: checkout intacto (orden + banco) y cero coverageRequests =====
 await setCoverage(undefined);
 const A = CUST(1);
@@ -107,20 +132,10 @@ check('1. flag OFF → "pagar" crea orden y muestra banco (checkout intacto), ce
   (rA ?? '').includes('transferir') && (await ordersOf(A)) === 1 && (await requestsOf(A)).length === 0,
   `orders=${await ordersOf(A)} reqs=${(await requestsOf(A)).length}`);
 
-// ===== 2. FLAG OFF: ubicación entrante → respuesta honesta, sin request, sin coords =====
-const A2 = CUST(2);
-await postText(A2, 'hola');
-await waitFor(async () => (await outsCount(A2)) > 0);
-await postLocation(A2, { latitude: LAT, longitude: LNG });
-await waitFor(async () => (await outsCount(A2)) > 1);
-const rA2 = await lastOut(A2);
-const msgsA2 = await msgsOf(A2);
-check('2. flag OFF → ubicación: respuesta honesta, sin request, placeholder sin coordenadas',
-  (rA2 ?? '').includes('no puedo procesarla') && (await requestsOf(A2)).length === 0 &&
-  msgsA2.some((m) => m.text === '📍 Ubicación recibida') && !msgsA2.some((m) => /25\.28|57\.64/.test(m.text ?? '')),
-  JSON.stringify((rA2 ?? '').slice(0, 50)));
+// ===== 2. FLAG OFF (config AUSENTE): ubicación nativa INERTE (comportamiento heredado pre-Coverage) =====
+await ubicacionNativaInerte('2. config ausente → ubicación nativa INERTE: sin placeholder/reply/request/coords; inbox ignored+redactado', CUST(2));
 
-// ===== 2b. HARDEN-1: enabled SIN activationId → fail-closed (checkout intacto) =====
+// ===== 2b. HARDEN-1: enabled SIN activationId → fail-closed (checkout intacto) + ubicación inerte =====
 await setCoverage({ enabled: true, expiryHours: 24 }); // sin activationId: contrato ⇒ OFF
 const A3 = CUST(14);
 await armarCarrito(A3);
@@ -128,6 +143,17 @@ const rA3 = await sendAndWait(A3, 'quiero pagar');
 check('2b. enabled:true SIN activationId → fail-closed: checkout normal (orden+banco), cero requests',
   (rA3 ?? '').includes('transferir') && (await ordersOf(A3)) === 1 && (await requestsOf(A3)).length === 0,
   `orders=${await ordersOf(A3)} reqs=${(await requestsOf(A3)).length}`);
+await ubicacionNativaInerte('2c. enabled:true SIN activationId → ubicación nativa INERTE', CUST(15));
+
+// ===== 2d. enabled:false CON activationId → ubicación nativa inerte =====
+await setCoverage({ enabled: false, activationId: 'act-cov-state-off1' });
+await ubicacionNativaInerte('2d. enabled:false con activationId → ubicación nativa INERTE', CUST(16));
+
+// ===== 2e. Aislamiento cross-tenant: OTRO tenant activo NO habilita este tenant (OFF) =====
+await db.doc('tenants/otro-tenant/config/checkout').set({ coverage: { enabled: true, expiryHours: 24, activationId: 'act-otro-tenant-01' } });
+await setCoverage(undefined); // perfumeria: cobertura ausente
+await ubicacionNativaInerte('2e. cross-tenant: otro tenant activo NO habilita la ubicación de este tenant (inerte)', CUST(17));
+await db.doc('tenants/otro-tenant/config/checkout').delete().catch(() => {});
 
 // ===== FLAG ON de acá en adelante (activación válida) =====
 await setCoverage({ enabled: true, expiryHours: 24, activationId: ACT });

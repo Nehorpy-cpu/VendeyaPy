@@ -169,23 +169,33 @@ check('1b. reply de cobertura: kill-switch antes del envío → NO se manda el l
 await clearHold();
 await prender();
 
-// ===== 2. ubicacion_pre_tx: OFF antes de la transacción de registro → nada sensible persiste =====
+// ===== 2. ubicacion_pre_tx: OFF entre la lectura inicial y la tx de registro → ubicación INERTE
+// (sin placeholder, sin reply, sin persistencia — H1/OFF-INERTE también en la carrera) =====
 const C2 = CUST(2);
 await armarCarrito(C2);
 await sendAndWait(C2, 'quiero pagar'); // awaiting_location bajo ACT
+const outsAntes2 = await outsCount(C2);
+const msgsAntes2 = (await msgsOf(C2)).length;
+const W2 = `wamid.KSLOC-C2-${Date.now()}`;
 await setHold('ubicacion_pre_tx');
-postLocation(C2, { latitude: LAT, longitude: LNG, address: 'Av. Privadísima 999' });
+postLocation(C2, { latitude: LAT, longitude: LNG, address: 'Av. Privadísima 999' }, W2);
 check('2a. el flujo llegó al checkpoint de registro (hold alcanzado)', await waitHold('ubicacion_pre_tx'));
 await apagar();
 await release();
-await waitFor(async () => ((await lastOut(C2)) ?? '').includes('no puedo procesarla'));
+// esperar a que el evento del inbox llegue a terminal (ignored), sin depender de un reply
+const inboxId2 = ('whatsapp_' + W2).replace(new RegExp('[^A-Za-z0-9_.:=+-]', 'g'), '_').slice(0, 256);
+await waitFor(async () => { const d = (await db.doc(`metaWebhookInbox/${inboxId2}`).get()).data(); return !!d?.processingStatus && d.processingStatus !== 'received' && d.processingStatus !== 'processing'; }, 12000);
+await sleep(1200);
 const r2 = await requestOf(C2);
-check('2. ubicación: kill-switch en la transacción → sin dirección/coords/fingerprint/seller; sin handoff ni campana; respuesta honesta',
+const inbox2 = (await db.doc(`metaWebhookInbox/${inboxId2}`).get()).data() ?? {};
+check('2. ubicación con carrera OFF → INERTE: request awaiting sin coords/fingerprint/seller; sin placeholder, sin reply, sin handoff; inbox ignored+redactado',
   r2?.status === 'awaiting_location' && r2?.location === null && r2?.locationFingerprint === null && (r2?.sellerUid ?? null) === null &&
   (await sessionOf(C2))?.context?.humanTakeover !== true && (await notifsDe(C2)).length === 0 &&
-  (await outsCon(C2, 'no puedo procesarla')) >= 1 && // respuesta honesta REALMENTE entregada
+  (await outsCount(C2)) === outsAntes2 && (await msgsOf(C2)).length === msgsAntes2 && // cero mensajes nuevos
+  !(await msgsOf(C2)).some((m) => m.text === '📍 Ubicación recibida') && (await outsCon(C2, 'no puedo procesarla')) === 0 &&
+  inbox2.processingStatus === 'ignored' && (inbox2.payload?.location ?? null) === null &&
   !(await msgsOf(C2)).some((m) => /Privadísima|25\.32|57\.62/.test(m.text ?? '')),
-  `status=${r2?.status} loc=${JSON.stringify(r2?.location)}`);
+  `status=${r2?.status} outs=${outsAntes2}→${await outsCount(C2)} inbox=${inbox2.processingStatus}`);
 await clearHold();
 await prender();
 

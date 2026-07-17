@@ -81,6 +81,14 @@ export async function processWebhookEvent(eventId: string): Promise<void> {
         receivedByPhoneNumberId: receivedBy,
         channel: platform,
       });
+      // OFF-INERTE (H1): con cobertura apagada la ubicación nativa es INERTE — comportamiento
+      // heredado pre-Coverage: se IGNORA en silencio, SIN incrementMessageUsage ni reply. El inbox
+      // solo conserva la redacción diseñada (payload.location=null; rawMessage ya redactado).
+      if (resultado.inerte) {
+        await ref.update({ processingStatus: 'ignored', tenantId, errorMessage: 'ubicación sin cobertura activa', processedAt: Timestamp.now(), 'payload.location': null });
+        logger.info('Webhook ignorado (ubicación, cobertura off)', { eventId, tenantId });
+        return;
+      }
       await incrementMessageUsage(tenantId).catch(() => { /* métrica de uso, no crítica */ });
       if (resultado.reply.trim()) {
         try {
