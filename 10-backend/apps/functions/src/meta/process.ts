@@ -10,7 +10,8 @@ import { Timestamp } from 'firebase-admin/firestore';
 import type { WebhookInboxEvent, MetaExternalIndexEntry, MessageChannel } from '@vpw/shared';
 import { db, paths } from '../lib/firebase.js';
 import { handleMessage } from '../conversation/engine.js';
-import { procesarUbicacionEntrante } from '../conversation/coverage.js';
+import { procesarUbicacionEntrante, coberturaVigente } from '../conversation/coverage.js';
+import { coverageHold } from '../conversation/coverageTestHooks.js';
 import { processComprobanteImage } from '../orders/comprobanteImage.js';
 import { getWhatsAppClient } from '../messaging/whatsappClient.js';
 import { checkTenantInboundGate, incrementMessageUsage } from '../tenants/lifecycle.js';
@@ -83,8 +84,16 @@ export async function processWebhookEvent(eventId: string): Promise<void> {
       await incrementMessageUsage(tenantId).catch(() => { /* métrica de uso, no crítica */ });
       if (resultado.reply.trim()) {
         try {
+          // KILL-SWITCH-1: el cliente (resolución de credenciales) se construye ANTES del
+          // re-chequeo para que coberturaVigente sea la ÚLTIMA operación antes de sendText —
+          // sin E/S en el medio que reabra la ventana (mismo patrón que enviarPorOutbox).
           const client = await getWhatsAppClient(tenantId, undefined, receivedBy);
-          await client.sendText(payload.from, resultado.reply, { tenantId, channel: platform });
+          await coverageHold(tenantId, 'reply_pre_send');
+          if (await coberturaVigente(tenantId, resultado.coverageActivationId ?? null)) {
+            await client.sendText(payload.from, resultado.reply, { tenantId, channel: platform });
+          } else {
+            logger.info('Cobertura: respuesta de ubicación NO enviada (kill-switch antes del envío)', { tenantId });
+          }
         } catch (e) {
           logger.error('No se pudo entregar la respuesta de cobertura', e, { tenantId });
         }
@@ -150,11 +159,22 @@ export async function processWebhookEvent(eventId: string): Promise<void> {
     // Entregar la respuesta por el MISMO número que recibió (multi-número); mock/live intactos.
     if (result.reply && result.reply.trim() && !result.handledByHuman) {
       try {
+        // El cliente se construye ANTES del gate de cobertura para que, cuando el reply es de
+        // cobertura, coberturaVigente sea la ÚLTIMA operación antes del envío físico — sin E/S
+        // (resolución de credenciales) en el medio que reabra la ventana (mismo patrón que el outbox).
         const client = await getWhatsAppClient(tenantId, undefined, receivedBy);
-        // COVERAGE-1B: si el turno pide ubicación, se intenta el botón nativo
-        // (location_request_message). Si el canal no es WhatsApp o el interactivo falla,
-        // FALLBACK TEXTUAL UNA SOLA VEZ (el mismo texto ya incluye la alternativa escrita).
-        if (result.locationRequest && platform === 'whatsapp') {
+        // KILL-SWITCH-1: si el reply es de cobertura (coverageActivationId presente), se re-lee el
+        // flag JUSTO antes del envío — un apagado de emergencia frena la solicitud de ubicación /
+        // la promesa de revisión aún no enviadas. Los replies no-cobertura (id null) no se gatean.
+        const esCobertura = result.coverageActivationId != null;
+        if (esCobertura) await coverageHold(tenantId, 'reply_pre_send');
+        const vigente = !esCobertura || (await coberturaVigente(tenantId, result.coverageActivationId ?? null));
+        if (!vigente) {
+          logger.info('Cobertura: respuesta NO enviada (kill-switch antes del envío)', { tenantId });
+        } else if (result.locationRequest && platform === 'whatsapp') {
+          // COVERAGE-1B: se intenta el botón nativo (location_request_message). Si el canal no es
+          // WhatsApp o el interactivo falla, FALLBACK TEXTUAL UNA SOLA VEZ (el texto ya incluye la
+          // alternativa escrita).
           const lr = await client.sendLocationRequest(payload.from, result.reply, { tenantId, channel: platform });
           if (!lr.ok) {
             logger.info('Cobertura: location request falló, fallback textual', { tenantId, reason: lr.reason });

@@ -21,6 +21,7 @@ import { coverageActivationOf } from '@vpw/shared';
 import { db, paths } from '../../lib/firebase.js';
 import { logger } from '../../lib/logger.js';
 import { coverageSettings, purgeAtFrom } from '../../conversation/coverage.js';
+import { coverageHold } from '../../conversation/coverageTestHooks.js';
 import { enviarPorOutbox, processCoverageResumeJob, MENSAJE_COBERTURA_VENCIDA } from '../../conversation/coverageResume.js';
 import { getCheckoutConfig } from '../../orders/checkoutConfig.js';
 
@@ -128,6 +129,10 @@ export async function runCoverageMaintenance(): Promise<void> {
       //    3c/3d re-drivean también los jobs de la activación anterior: el claim del consumidor
       //    los deja `cancelled` (terminal, sin efectos) — convergencia garantizada.
       if (!cfg.enabled) continue;
+      await coverageHold(tenantId, 'mant_pre_reencolar'); // solo-emulador: test del kill-switch
+      // KILL-SWITCH-1: cada transacción de re-encolado RE-LEE la config (el snapshot del inicio
+      // del loop puede tener minutos): un apagado a mitad de corrida frena los re-drives.
+      const cfgRef = db().doc(`tenants/${tenantId}/config/checkout`);
       const held = await db().collection(`tenants/${tenantId}/coverageResumeJobs`).where('status', '==', 'held_by_seller').limit(LOTE).get();
       for (const d of held.docs) {
         const job = d.data() as CoverageResumeJob;
@@ -135,7 +140,9 @@ export async function runCoverageMaintenance(): Promise<void> {
         const ses = (await db().doc(paths.session(tenantId, job.customerId)).get()).data() as Session | undefined;
         if (ses?.context?.humanTakeover === true) continue; // el humano sigue: no tocar
         await db().runTransaction(async (tx) => {
+          const act = coverageActivationOf(((await tx.get(cfgRef)).data() as { coverage?: unknown } | undefined)?.coverage);
           const fresh = (await tx.get(d.ref)).data() as CoverageResumeJob | undefined;
+          if (!act.enabled || (fresh?.activationId ?? null) !== act.activationId) return; // kill-switch en la tx
           if (fresh?.status !== 'held_by_seller') return;
           tx.update(d.ref, { status: 'pending', leaseUntil: null, updatedAt: now });
         });
@@ -146,7 +153,9 @@ export async function runCoverageMaintenance(): Promise<void> {
         if ((job.activationId ?? null) !== cfg.activationId) continue; // HARDEN-1: activación anterior → inerte
         if ((job.attempts ?? 0) >= MAX_ATTEMPTS) continue; // tope duro: intervención manual
         await db().runTransaction(async (tx) => {
+          const act = coverageActivationOf(((await tx.get(cfgRef)).data() as { coverage?: unknown } | undefined)?.coverage);
           const fresh = (await tx.get(d.ref)).data() as CoverageResumeJob | undefined;
+          if (!act.enabled || (fresh?.activationId ?? null) !== act.activationId) return; // kill-switch en la tx
           if (fresh?.status !== 'send_failed' || (fresh.attempts ?? 0) >= MAX_ATTEMPTS) return;
           tx.update(d.ref, { status: 'pending', leaseUntil: null, updatedAt: now });
         });
@@ -162,6 +171,10 @@ export async function runCoverageMaintenance(): Promise<void> {
         const job = d.data() as CoverageResumeJob;
         if ((job.leaseUntil?.toMillis?.() ?? 0) > now.toMillis()) continue; // worker vivo
         await db().runTransaction(async (tx) => {
+          // Kill-switch en la tx: apagado ⇒ no re-encolar (los stale SÍ se re-encolan con el
+          // flag activo — el claim los cancela con limpieza; ver comentario de 3c).
+          const act = coverageActivationOf(((await tx.get(cfgRef)).data() as { coverage?: unknown } | undefined)?.coverage);
+          if (!act.enabled) return;
           const fresh = (await tx.get(d.ref)).data() as CoverageResumeJob | undefined;
           if (fresh?.status !== 'processing' || (fresh.leaseUntil?.toMillis?.() ?? 0) > now.toMillis()) return;
           tx.update(d.ref, { status: 'pending', leaseUntil: null, updatedAt: now });

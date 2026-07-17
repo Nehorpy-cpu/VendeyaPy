@@ -33,6 +33,7 @@ import { logger } from '../lib/logger.js';
 import { getCheckoutConfig, pickSeller } from '../orders/checkoutConfig.js';
 import { executeHandoff, notifyHandoffRequested } from './handoff.js';
 import { esConsultaCobertura } from './coverageGuard.js';
+import { coverageHold } from './coverageTestHooks.js';
 import { appendMessage } from './messages.js';
 import type { InboundLocation } from '../meta/parseWebhook.js';
 
@@ -102,6 +103,17 @@ export function solicitudPara(cfg: ResolvedCoverageConfig, channel?: MessageChan
   if (channel && channel !== 'whatsapp') return MENSAJE_SOLICITUD_UBICACION_TEXTUAL;
   return cfg.requestMessage;
 }
+
+/**
+ * KILL-SWITCH-1: resuelve la config desde los DATOS CRUDOS de un snapshot leído dentro de una
+ * transacción (`tx.get(config/checkout)`), para validar flag/activación de forma atómica con
+ * las escrituras que gatea. Misma validación fail-closed que coverageSettings.
+ */
+export function coverageSettingsDeSnapshot(data: unknown): ResolvedCoverageConfig {
+  return coverageSettings({ bankAccounts: [], sellers: [], coverage: (data as { coverage?: unknown } | undefined)?.coverage } as unknown as CheckoutConfig);
+}
+
+const configRefDe = (tenantId: string) => db().doc(`tenants/${tenantId}/config/checkout`);
 
 /**
  * Valida la config cruda del tenant. Cualquier cosa rara ⇒ `enabled:false` (fail-safe).
@@ -234,12 +246,30 @@ export interface CoverageGateResult {
   locationRequest?: boolean;
   /** Puntero para que el tail del engine lo persista (tri-estado: undefined = conservar). */
   coverage?: CoverageSessionPointer | null;
+  /**
+   * KILL-SWITCH-1: activación bajo la que se generó este reply de cobertura. process.ts re-lee el
+   * flag JUSTO antes del envío físico y NO manda el mensaje si el flujo se apagó/rotó en el medio
+   * (un apagado de emergencia frena también la solicitud de ubicación y la promesa de revisión).
+   */
+  coverageActivationId?: string | null;
+}
+
+/**
+ * KILL-SWITCH-1: ¿el flujo sigue vigente para ESTA activación? Lectura FRESCA de config, para
+ * gatear el envío físico de un reply de cobertura inmediatamente antes de llamar a Meta.
+ */
+export async function coberturaVigente(tenantId: string, activationId: string | null): Promise<boolean> {
+  if (activationId == null) return true; // reply no-cobertura (o neutral): no se gatea
+  const act = coverageSettingsDeSnapshot((await configRefDe(tenantId).get()).data());
+  return act.enabled && act.activationId === activationId;
 }
 
 /**
  * ETAPA C — Gate del checkout. null ⇒ el checkout sigue su camino normal (flag off, o
  * aprobación VIGENTE para la ubicación). Si intercepta: crea/reusa el request en una
  * transacción sobre la sesión (dos "pagar" concurrentes → un solo request) y pide la ubicación.
+ * KILL-SWITCH-1: el flag/activación se re-leen DENTRO de esa transacción — un apagado que
+ * commitea antes del claim gana SIEMPRE: cero escrituras de cobertura y checkout tradicional.
  */
 export async function gateCoberturaCheckout(
   tenantId: string,
@@ -248,21 +278,26 @@ export async function gateCoberturaCheckout(
   opts: { messageId?: string | null; simulation?: boolean; channel?: MessageChannel; receivedVia?: string | null },
 ): Promise<CoverageGateResult | null> {
   const cfg = coverageSettings(await getCheckoutConfig(tenantId));
-  if (!cfg.enabled) return null;
+  if (!cfg.enabled) return null; // fast-path (la autoridad es la RE-lectura en la transacción)
 
   // Simulación (chat de prueba / test cases): mismo texto, CERO efectos operativos.
   if (opts.simulation === true) {
     return { reply: solicitudPara(cfg, opts.channel), locationRequest: true };
   }
 
+  await coverageHold(tenantId, 'gate_pre_tx'); // solo-emulador: test del kill-switch
+
   const sessionRef = db().doc(paths.session(tenantId, customerId));
   const now = Timestamp.now();
   const out = await db().runTransaction(async (tx) => {
+    const cfgTx = coverageSettingsDeSnapshot((await tx.get(configRefDe(tenantId))).data());
+    if (!cfgTx.enabled) return { kind: 'off' as const };
+    const actId = cfgTx.activationId;
     const ses = await tx.get(sessionRef);
     const ctxSes = (ses.data() as Session | undefined)?.context;
     // 1D: hay una reanudación EN CURSO (el worker está creando la orden): un "pagar" concurrente
     // no dispara OTRO checkout — se le pide un momento al cliente.
-    if (ctxSes?.coverageResumeInProgress) return { kind: 'resuming' as const };
+    if (ctxSes?.coverageResumeInProgress) return { kind: 'resuming' as const, activationId: actId };
     const ptr = ctxSes?.coverage ?? null;
     if (ptr) {
       const reqSnap = await tx.get(db().doc(requestPath(tenantId, ptr.requestId)));
@@ -272,15 +307,15 @@ export async function gateCoberturaCheckout(
         // HARDEN-1: un request de una activación ANTERIOR es indecidible (las callables lo
         // rechazan) — se expira acá mismo para que el checkout no quede congelado, y se crea
         // uno nuevo bajo la activación vigente. El dato histórico queda, jamás se borra.
-        const activacionVigente = (req.activationId ?? null) === cfg.activationId;
+        const activacionVigente = (req.activationId ?? null) === cfgTx.activationId;
         if (!vencido && activacionVigente) {
-          if (req.status === 'awaiting_location') return { kind: 'ask' as const, ptr: ptrOf(req, now) };
-          if (req.status === 'pending_coverage_review') return { kind: 'pending' as const, ptr: ptrOf(req, now) };
+          if (req.status === 'awaiting_location') return { kind: 'ask' as const, ptr: ptrOf(req, now), activationId: actId };
+          if (req.status === 'pending_coverage_review') return { kind: 'pending' as const, ptr: ptrOf(req, now), activationId: actId };
           // coverage_approved con reanudación AÚN NO COMPLETADA (1D): un "pagar" en la ventana
           // decisión→worker NO dispara el checkout normal — habría DOS órdenes (review).
           const resume = req.resume?.status;
           if (resume === 'pending' || resume === 'processing' || resume === 'held_by_seller') {
-            return { kind: 'resuming' as const };
+            return { kind: 'resuming' as const, activationId: actId };
           }
           // coverage_approved VIGENTE: la aprobación vale para la ubicación aunque el carrito
           // haya cambiado (decisión de producto) → el checkout continúa por el camino normal.
@@ -297,7 +332,7 @@ export async function gateCoberturaCheckout(
       customerId,
       channel: opts.channel ?? 'whatsapp',
       receivedVia: opts.receivedVia ?? null,
-      activationId: cfg.activationId,
+      activationId: cfgTx.activationId,
       status: 'awaiting_location',
       location: null,
       locationFingerprint: null,
@@ -311,20 +346,23 @@ export async function gateCoberturaCheckout(
       resume: null,
       createdAt: now,
       updatedAt: now,
-      expiresAt: Timestamp.fromMillis(now.toMillis() + cfg.expiryHours * 60 * 60 * 1000),
+      expiresAt: Timestamp.fromMillis(now.toMillis() + cfgTx.expiryHours * 60 * 60 * 1000),
       coordinatesPurgeAt: null,
     };
     tx.create(db().doc(requestPath(tenantId, id)), nuevo);
     const ptrNew = ptrOf(nuevo, now);
     tx.set(sessionRef, { context: { coverage: ptrNew }, updatedAt: now }, { merge: true });
-    return { kind: 'ask' as const, ptr: ptrNew };
+    return { kind: 'ask' as const, ptr: ptrNew, activationId: actId };
   });
 
+  // Kill-switch ganó DENTRO de la transacción: cero escrituras → checkout tradicional.
+  if (out.kind === 'off') return null;
   if (out.kind === 'approved') return null;
-  if (out.kind === 'resuming') return { reply: MENSAJE_RESUME_EN_CURSO };
-  if (out.kind === 'pending') return { reply: MENSAJE_UBICACION_EN_REVISION, coverage: out.ptr };
+  const act = out.activationId;
+  if (out.kind === 'resuming') return { reply: MENSAJE_RESUME_EN_CURSO, coverageActivationId: act };
+  if (out.kind === 'pending') return { reply: MENSAJE_UBICACION_EN_REVISION, coverage: out.ptr, coverageActivationId: act };
   logger.info('Cobertura: checkout en espera de ubicación', { tenantId, customer: `…${customerId.slice(-4)}`, requestId: out.ptr.requestId });
-  return { reply: solicitudPara(cfg, opts.channel), locationRequest: true, coverage: out.ptr };
+  return { reply: solicitudPara(cfg, opts.channel), locationRequest: true, coverage: out.ptr, coverageActivationId: act };
 }
 
 // ---------------------------------------------------------------------------
@@ -335,18 +373,26 @@ type RegistroResultado =
   | { kind: 'ok'; requestId: string; primeraVez: boolean; humanTakeover: boolean; handoffReason: string | null; ptr: CoverageSessionPointer; sellerUid: string | null; sellerName: string | null }
   | { kind: 'no_active' }
   | { kind: 'approved_activo' }
-  | { kind: 'expired' };
+  | { kind: 'expired' }
+  | { kind: 'off' };
 
+/**
+ * KILL-SWITCH-1: el flag/activación se leen DENTRO de esta transacción (no se confía en ninguna
+ * lectura previa del caller). Con OFF que commiteó antes: CERO escrituras — ni dirección, ni
+ * coordenadas, ni fingerprint, ni asignación de seller.
+ */
 async function registrarUbicacion(
   tenantId: string,
   customerId: string,
   location: CoverageLocation,
   wamid: string | null,
-  activationId: string | null,
 ): Promise<RegistroResultado> {
+  await coverageHold(tenantId, 'ubicacion_pre_tx'); // solo-emulador: test del kill-switch
   const sessionRef = db().doc(paths.session(tenantId, customerId));
   const now = Timestamp.now();
   return db().runTransaction(async (tx) => {
+    const act = coverageSettingsDeSnapshot((await tx.get(configRefDe(tenantId))).data());
+    if (!act.enabled) return { kind: 'off' as const };
     const ses = await tx.get(sessionRef);
     const ctx = (ses.data() as Session | undefined)?.context;
     const ptr = ctx?.coverage ?? null;
@@ -356,7 +402,7 @@ async function registrarUbicacion(
     if (!req || req.customerId !== customerId || TERMINALES.includes(req.status)) return { kind: 'no_active' as const };
     // HARDEN-1: request de una activación ANTERIOR (incluso aprobado) — nadie puede decidirlo
     // ni reanudarlo: se expira acá y el cliente retoma con *pagar* bajo la activación vigente.
-    if ((req.activationId ?? null) !== activationId) {
+    if ((req.activationId ?? null) !== act.activationId) {
       tx.update(reqSnap.ref, { status: 'coverage_expired', updatedAt: now, coordinatesPurgeAt: purgeAtFrom(now, req) });
       tx.set(sessionRef, { context: { coverage: null }, updatedAt: now }, { merge: true });
       return { kind: 'expired' as const };
@@ -409,6 +455,9 @@ function vendedorParaCobertura(config: CheckoutConfig): string | null {
  * Post-persistencia: handoff canónico `coverage_review` (sourceId = requestId — NO el wamid) +
  * notificación `handoff_coverage_review` idempotente POR WAMID + respuesta al cliente.
  * La confirmación al cliente sale SOLO si la persistencia ya quedó firme.
+ * KILL-SWITCH-1: el takeover se toma con un GUARD dentro de la transacción del handoff — flag
+ * vigente + misma activación + request todavía pendiente del MISMO tenant/cliente. Si el flag
+ * cambió después de persistir la ubicación, NO se toma el chat NI se notifica.
  */
 async function derivarARevision(
   tenantId: string,
@@ -416,6 +465,7 @@ async function derivarARevision(
   registro: Extract<RegistroResultado, { kind: 'ok' }>,
   wamid: string | null,
 ): Promise<{ reply: string; takeover: boolean }> {
+  await coverageHold(tenantId, 'pre_handoff'); // solo-emulador: test del kill-switch
   // Vendedor del handoff: el ASIGNADO al cliente (uid real, ya persistido en el request por la
   // transacción de registro); sin asignado, el primero activo de la config (solo display).
   const sellerName = registro.sellerName ?? vendedorParaCobertura(await getCheckoutConfig(tenantId));
@@ -425,10 +475,32 @@ async function derivarARevision(
     sellerUid: registro.sellerUid ?? undefined,
     sourceId: registro.requestId,
     createSessionIfMissing: false,
+    guard: async (tx) => {
+      const [cfgSnap, reqSnap] = await Promise.all([
+        tx.get(configRefDe(tenantId)),
+        tx.get(db().doc(requestPath(tenantId, registro.requestId))),
+      ]);
+      const act = coverageSettingsDeSnapshot(cfgSnap.data());
+      const req = reqSnap.exists ? (reqSnap.data() as CoverageRequest) : null;
+      return (
+        act.enabled &&
+        req !== null &&
+        (req.activationId ?? null) === act.activationId &&
+        req.status === 'pending_coverage_review' &&
+        req.tenantId === tenantId &&
+        req.customerId === customerId
+      );
+    },
   });
-  // Aviso a la campana: SIEMPRE tras persistir, deduplicado por wamid (un webhook repetido no
-  // duplica; una ubicación NUEVA con wamid nuevo sí avisa — el equipo ve la actualización).
-  // targetUid (server-controlled) le abre la campana al SELLER asignado (1C).
+  if (hr.blocked) {
+    // El flujo se apagó (o el request dejó de estar pendiente) entre la persistencia y el
+    // handoff: sin takeover, sin campana, sin promesa de revisión — respuesta honesta neutra.
+    logger.info('Cobertura: handoff bloqueado por kill-switch tras registrar la ubicación', { tenantId, customer: `…${customerId.slice(-4)}`, requestId: registro.requestId });
+    return { reply: registro.humanTakeover ? '' : MENSAJE_UBICACION_NO_PROCESABLE, takeover: false };
+  }
+  // Aviso a la campana: SIEMPRE tras persistir (salvo bloqueo), deduplicado por wamid (un webhook
+  // repetido no duplica; una ubicación NUEVA con wamid nuevo sí avisa — el equipo ve la
+  // actualización). targetUid (server-controlled) le abre la campana al SELLER asignado (1C).
   await notifyHandoffRequested(tenantId, customerId, sellerName, wamid, 'coverage_review', registro.sellerUid ?? null);
   if (hr.ok && !hr.already) {
     logger.info('Cobertura: ubicación registrada → revisión humana', { tenantId, customer: `…${customerId.slice(-4)}`, requestId: registro.requestId });
@@ -472,9 +544,11 @@ export interface UbicacionEntranteInput {
 
 /**
  * Procesa una ubicación nativa. El historial SOLO recibe el placeholder `📍 Ubicación recibida`
- * (jamás coordenadas/dirección). Devuelve la respuesta a entregar (puede ser '').
+ * (jamás coordenadas/dirección). Devuelve la respuesta a entregar (puede ser '') y el
+ * `coverageActivationId` bajo el que se generó (KILL-SWITCH-1: process.ts re-lee el flag antes
+ * de mandarla — un apagado de emergencia frena la promesa de revisión aún no enviada).
  */
-export async function procesarUbicacionEntrante(input: UbicacionEntranteInput): Promise<{ reply: string }> {
+export async function procesarUbicacionEntrante(input: UbicacionEntranteInput): Promise<{ reply: string; coverageActivationId?: string | null }> {
   const { tenantId } = input;
   const customerId = input.from.replace(/[^0-9]/g, '');
   if (!customerId) return { reply: '' };
@@ -499,6 +573,10 @@ export async function procesarUbicacionEntrante(input: UbicacionEntranteInput): 
   const cfg = coverageSettings(await getCheckoutConfig(tenantId));
   let reply = '';
   let enTakeover = humanTakeover;
+  // KILL-SWITCH-1: solo las respuestas que PROMETEN revisión/cobertura se gatean antes del envío
+  // (RECIBIDA, ZONA_YA_CONFIRMADA). Las neutrales (no procesable/vencido/sin pedido) son honestas
+  // aun con el flag apagado → no se etiquetan (se envían normal).
+  let coverageActivationId: string | null = null;
   try {
     if (!cfg.enabled) {
       reply = humanTakeover ? '' : MENSAJE_UBICACION_NO_PROCESABLE;
@@ -509,15 +587,22 @@ export async function procesarUbicacionEntrante(input: UbicacionEntranteInput): 
         name: input.location.name,
         coordinates: { lat: input.location.latitude, lng: input.location.longitude },
       };
-      const registro = await registrarUbicacion(tenantId, customerId, location, input.messageId, cfg.activationId);
+      const registro = await registrarUbicacion(tenantId, customerId, location, input.messageId);
       if (registro.kind === 'ok') {
         const r = await derivarARevision(tenantId, customerId, registro, input.messageId);
         reply = r.reply;
         enTakeover = enTakeover || r.takeover;
+        // La respuesta CONFIRMA/PROMETE revisión (con o sin takeover — el borde "sesión
+        // desaparecida" devuelve la promesa sin takeover): siempre se etiqueta para gatearla.
+        if (reply.trim()) coverageActivationId = cfg.activationId;
+      } else if (registro.kind === 'off') {
+        // Kill-switch ganó dentro de la transacción: nada persistido — respuesta honesta.
+        reply = humanTakeover ? '' : MENSAJE_UBICACION_NO_PROCESABLE;
       } else if (registro.kind === 'expired') {
         reply = humanTakeover ? '' : MENSAJE_INTENTO_VENCIDO;
       } else if (registro.kind === 'approved_activo') {
         reply = humanTakeover ? '' : MENSAJE_ZONA_YA_CONFIRMADA;
+        coverageActivationId = cfg.activationId; // referencia cobertura confirmada → gatear
       } else {
         reply = humanTakeover ? '' : MENSAJE_UBICACION_SIN_PEDIDO;
       }
@@ -541,7 +626,7 @@ export async function procesarUbicacionEntrante(input: UbicacionEntranteInput): 
       receivedVia: input.receivedByPhoneNumberId ?? null,
     });
   }
-  return { reply };
+  return { reply, coverageActivationId };
 }
 
 // ---------------------------------------------------------------------------
@@ -556,6 +641,8 @@ export interface TurnoEsperaResultado {
   coverage?: CoverageSessionPointer | null;
   /** true ⇒ re-intentar el botón nativo (la respuesta vuelve a pedir la ubicación). */
   locationRequest?: boolean;
+  /** KILL-SWITCH-1: activación del reply — process.ts re-lee el flag antes del envío físico. */
+  coverageActivationId?: string | null;
 }
 
 /**
@@ -572,6 +659,7 @@ export async function manejarTurnoEnEsperaUbicacion(
   const cfg = coverageSettings(await getCheckoutConfig(tenantId));
   if (!cfg.enabled) return null;
   const ask = solicitudPara(cfg, opts.channel);
+  const act = cfg.activationId; // etiqueta para el gateo del envío en process.ts
 
   if (opts.simulation === true) {
     // Simuladores: representar el texto sin efectos operativos.
@@ -584,35 +672,41 @@ export async function manejarTurnoEnEsperaUbicacion(
   }
 
   try {
-    if (clasificacion === 'como_compartir') return { takeover: false, reply: ask, locationRequest: true };
-    if (clasificacion === 'ambiguo') return { takeover: false, reply: MENSAJE_DIRECCION_AMBIGUA };
+    if (clasificacion === 'como_compartir') return { takeover: false, reply: ask, locationRequest: true, coverageActivationId: act };
+    if (clasificacion === 'ambiguo') return { takeover: false, reply: MENSAJE_DIRECCION_AMBIGUA, coverageActivationId: act };
 
     if (clasificacion === 'cancelacion') {
       const now = Timestamp.now();
       const cancelado = await db().runTransaction(async (tx) => {
+        // KILL-SWITCH-1: el flag se re-lee EN esta transacción — un apagado que commiteó antes
+        // gana: ni se marca coverage_cancelled ni sale mensaje (el flujo normal atiende el turno).
+        const actTx = coverageSettingsDeSnapshot((await tx.get(configRefDe(tenantId))).data());
+        if (!actTx.enabled) return false;
         const sesRef = db().doc(paths.session(tenantId, customerId));
         const ptr = ((await tx.get(sesRef)).data() as Session | undefined)?.context?.coverage ?? null;
         if (!ptr) return false;
         const reqSnap = await tx.get(db().doc(requestPath(tenantId, ptr.requestId)));
         const req = reqSnap.exists ? (reqSnap.data() as CoverageRequest) : null;
         if (!req || req.customerId !== customerId || TERMINALES.includes(req.status) || req.status === 'coverage_approved') return false;
+        if ((req.activationId ?? null) !== actTx.activationId) return false; // request de otra activación
         tx.update(reqSnap.ref, { status: 'coverage_cancelled', updatedAt: now, coordinatesPurgeAt: purgeAtFrom(now, req) });
         tx.set(sesRef, { context: { coverage: null }, updatedAt: now }, { merge: true });
         return true;
       });
-      return cancelado ? { takeover: false, reply: MENSAJE_COBERTURA_CANCELADA, coverage: null } : null;
+      return cancelado ? { takeover: false, reply: MENSAJE_COBERTURA_CANCELADA, coverage: null, coverageActivationId: act } : null;
     }
 
     // 'direccion': saneada, con tope, registrada SIN pasar por la IA. El inbound ya se persistió
     // como placeholder (el engine lo reemplaza ANTES de escribir el historial).
     const addressText = text.replace(/\s+/g, ' ').trim().slice(0, 512);
     const location: CoverageLocation = { source: 'text', addressText, name: null, coordinates: null };
-    const registro = await registrarUbicacion(tenantId, customerId, location, opts.messageId ?? null, cfg.activationId);
+    const registro = await registrarUbicacion(tenantId, customerId, location, opts.messageId ?? null);
+    if (registro.kind === 'off') return null; // kill-switch en la transacción: el flujo normal atiende
     if (registro.kind === 'expired') return { takeover: false, reply: MENSAJE_INTENTO_VENCIDO, coverage: null };
-    if (registro.kind === 'approved_activo') return { takeover: false, reply: MENSAJE_ZONA_YA_CONFIRMADA };
+    if (registro.kind === 'approved_activo') return { takeover: false, reply: MENSAJE_ZONA_YA_CONFIRMADA, coverageActivationId: act };
     if (registro.kind === 'no_active') return null; // el flujo normal atiende el turno
     const r = await derivarARevision(tenantId, customerId, registro, opts.messageId ?? null);
-    return { takeover: r.takeover, reply: r.reply, ...(r.takeover ? {} : { coverage: registro.ptr }) };
+    return { takeover: r.takeover, reply: r.reply, coverageActivationId: act, ...(r.takeover ? {} : { coverage: registro.ptr }) };
   } catch (e) {
     logger.error('Cobertura: no se pudo registrar la dirección', e, { tenantId, customer: `…${customerId.slice(-4)}` });
     return { takeover: false, reply: MENSAJE_UBICACION_FALLO };
@@ -640,7 +734,7 @@ export async function actualizarUbicacionEnRevision(
     if (!cfg.enabled) return false;
     const addressText = text.replace(/\s+/g, ' ').trim().slice(0, 512);
     const location: CoverageLocation = { source: 'text', addressText, name: null, coordinates: null };
-    const registro = await registrarUbicacion(tenantId, customerId, location, wamid, cfg.activationId);
+    const registro = await registrarUbicacion(tenantId, customerId, location, wamid);
     if (registro.kind !== 'ok') return false;
     logger.info('Cobertura: dirección actualizada durante la revisión (bot en silencio)', { tenantId, customer: `…${customerId.slice(-4)}`, requestId: registro.requestId });
     return true;

@@ -76,6 +76,11 @@ export interface ConversationResult {
   handledByHuman?: boolean;
   /** COVERAGE-1B: el turno pide ubicación → el caller intenta el botón nativo (fallback textual). */
   locationRequest?: boolean;
+  /**
+   * KILL-SWITCH-1: activación bajo la que se generó un reply de cobertura. process.ts re-lee el
+   * flag JUSTO antes del envío físico y NO manda el mensaje si el flujo se apagó/rotó en el medio.
+   */
+  coverageActivationId?: string | null;
 }
 
 /** El teléfono (solo dígitos) sirve de id de cliente. */
@@ -359,6 +364,8 @@ export async function decidirRespuesta(
   coverage?: CoverageSessionPointer | null;
   /** COVERAGE-1B: el turno pide ubicación → intentar el botón nativo con fallback textual. */
   locationRequest?: boolean;
+  /** KILL-SWITCH-1: activación del reply de cobertura (process.ts re-lee el flag antes de enviar). */
+  coverageActivationId?: string | null;
 }> {
   const t = text.toLowerCase();
 
@@ -412,6 +419,7 @@ export async function decidirRespuesta(
         pendingCart: null, // el checkout congela el contexto de oferta (mismo criterio que pagar)
         ...(gate.coverage !== undefined ? { coverage: gate.coverage } : {}),
         ...(gate.locationRequest ? { locationRequest: true } : {}),
+        ...(gate.coverageActivationId !== undefined ? { coverageActivationId: gate.coverageActivationId } : {}),
       };
     }
 
@@ -1054,7 +1062,8 @@ export async function handleMessage(input: ConversationInput): Promise<Conversat
           channel,
           receivedVia: input.receivedByPhoneNumberId ?? null,
         });
-        return { reply: replyCe, state: existing?.state ?? 'IDLE' };
+        // KILL-SWITCH-1: la confirmación de revisión se etiqueta — process.ts re-lee el flag antes de mandarla.
+        return { reply: replyCe, state: existing?.state ?? 'IDLE', ...(ce.coverageActivationId !== undefined ? { coverageActivationId: ce.coverageActivationId } : {}) };
       }
       return { reply: '', state: existing?.state ?? 'IDLE', handledByHuman: true };
     }
@@ -1064,6 +1073,7 @@ export async function handleMessage(input: ConversationInput): Promise<Conversat
         nextState: existing?.state ?? 'CART',
         ...(ce.coverage !== undefined ? { coverage: ce.coverage } : {}),
         ...(ce.locationRequest ? { locationRequest: true } : {}),
+        ...(ce.coverageActivationId !== undefined ? { coverageActivationId: ce.coverageActivationId } : {}),
       };
     } else if (clasifCobertura === 'direccion') {
       // El texto ES una dirección pero el flujo ya no aplica (flag apagado a mitad / request
@@ -1293,5 +1303,10 @@ export async function handleMessage(input: ConversationInput): Promise<Conversat
   }
 
   logger.info('Mensaje procesado', { tenantId, customerId, state: nextState });
-  return { reply, state: nextState, ...(result.locationRequest ? { locationRequest: true } : {}) };
+  return {
+    reply,
+    state: nextState,
+    ...(result.locationRequest ? { locationRequest: true } : {}),
+    ...(result.coverageActivationId !== undefined ? { coverageActivationId: result.coverageActivationId } : {}),
+  };
 }

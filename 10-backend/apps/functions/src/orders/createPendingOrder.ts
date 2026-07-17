@@ -8,7 +8,7 @@
  * backend: persistir antes de operaciones importantes).
  */
 
-import { Timestamp } from 'firebase-admin/firestore';
+import { Timestamp, type Transaction } from 'firebase-admin/firestore';
 import { newOrderId, newOrderItemId } from '@vpw/shared';
 import type { Cart, Order, OrderItem, OrderFinancials, OrderFinancialsItem, Address } from '@vpw/shared';
 import { db, paths } from '../lib/firebase.js';
@@ -35,14 +35,32 @@ export interface CreatePendingOrderOpts {
   coverage?: { requestId: string; locationFingerprint: string | null };
   /** Dirección TEXTUAL del cliente (la exacta con coordenadas vive solo en coverageRequests). */
   deliveryAddress?: Address;
+  /**
+   * KILL-SWITCH-1 (cobertura): precondición evaluada DENTRO de la transacción que crea la orden
+   * (lecturas antes de escrituras — misma creación idempotente, ahora atómica con el guard).
+   * false ⇒ NO se crea nada (ni orden ni finanzas) y se devuelve null.
+   */
+  guard?: (tx: Transaction) => Promise<boolean>;
 }
 
 export async function createPendingOrder(
   tenantId: string,
   customerId: string,
   cart: Cart,
+  opts?: CreatePendingOrderOpts & { guard?: undefined },
+): Promise<Order>;
+export async function createPendingOrder(
+  tenantId: string,
+  customerId: string,
+  cart: Cart,
+  opts: CreatePendingOrderOpts & { guard: NonNullable<CreatePendingOrderOpts['guard']> },
+): Promise<Order | null>;
+export async function createPendingOrder(
+  tenantId: string,
+  customerId: string,
+  cart: Cart,
   opts: CreatePendingOrderOpts = {},
-): Promise<Order> {
+): Promise<Order | null> {
   const now = Timestamp.now();
   const orderId = opts.orderId ?? newOrderId();
 
@@ -121,6 +139,21 @@ export async function createPendingOrder(
     createdAt: now,
     updatedAt: now,
   };
+
+  // KILL-SWITCH-1: con guard, la precondición y la creación idempotente van en UNA transacción
+  // (lecturas primero): si el guard da false, no se escribe NADA — ni orden ni finanzas.
+  if (opts.guard) {
+    const creado = await db().runTransaction(async (tx) => {
+      const oSnap = await tx.get(db().doc(paths.order(tenantId, orderId)));
+      if (oSnap.exists) return oSnap.data() as Order; // reserva 1D: la orden existente se reusa intacta
+      if (!(await opts.guard!(tx))) return null;
+      tx.set(db().doc(paths.orderFinancial(tenantId, orderId)), orderFinancials);
+      tx.create(db().doc(paths.order(tenantId, orderId)), order);
+      return order;
+    });
+    if (creado) logger.info('Pre-orden creada', { tenantId, customerId, orderId });
+    return creado;
+  }
 
   // Finanzas privadas PRIMERO: así el trigger de stats (que escucha la orden) ya las encuentra.
   // Un orphan de orderFinancials (si fallara el 2º write) es inofensivo: no hay orden visible.

@@ -7,7 +7,7 @@
  * mensajes 'system' para que se vean en la conversación.
  */
 
-import { Timestamp } from 'firebase-admin/firestore';
+import { Timestamp, type Transaction } from 'firebase-admin/firestore';
 import type { Session } from '@vpw/shared';
 import { db, paths } from '../lib/firebase.js';
 import { logger } from '../lib/logger.js';
@@ -39,6 +39,12 @@ export interface ExecuteHandoffOptions {
    * histórico de takeoverChat). Los handoffs automáticos NO reasignan (idempotencia estricta).
    */
   reassignIfTaken?: boolean;
+  /**
+   * KILL-SWITCH-1 (cobertura): precondición evaluada DENTRO de la transacción del handoff —
+   * sus lecturas (tx.get) corren ANTES de cualquier escritura, así el takeover queda serializado
+   * con lo que el guard lee (p.ej. el flag). false ⇒ no se toma el chat (blocked: true).
+   */
+  guard?: (tx: Transaction) => Promise<boolean>;
 }
 export interface ExecuteHandoffResult {
   ok: boolean;
@@ -46,6 +52,8 @@ export interface ExecuteHandoffResult {
   already: boolean;
   /** true = estaba tomada y se REASIGNÓ al nuevo vendedor (solo con reassignIfTaken). */
   reassigned?: boolean;
+  /** true = el guard transaccional lo frenó: cero escrituras (KILL-SWITCH-1). */
+  blocked?: boolean;
 }
 
 /**
@@ -64,6 +72,8 @@ export async function executeHandoff(
   const now = Timestamp.now();
   const result = await db().runTransaction(async (tx) => {
     const snap = await tx.get(ref);
+    // KILL-SWITCH-1: el guard lee (tx.get) ANTES de cualquier escritura de esta transacción.
+    if (opts.guard && !(await opts.guard(tx))) return { ok: false, already: false, blocked: true };
     if (!snap.exists && !opts.createSessionIfMissing) return { ok: false, already: false };
     const ctx = (snap.data()?.context ?? {}) as { humanTakeover?: boolean; handoffReason?: string | null };
     if (snap.exists && ctx.humanTakeover === true) {
