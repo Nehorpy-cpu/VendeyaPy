@@ -9,4 +9,6 @@ export * from './enums.js';
 export * from './ids.js';
 export * from './aiFicha.js';
 export * from './coverageActivation.js';
+export * from './shippingCostParser.js';
+export * from './orderTotals.js';
 export * from './types/index.js';

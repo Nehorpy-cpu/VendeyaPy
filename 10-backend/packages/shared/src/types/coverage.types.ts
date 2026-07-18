@@ -36,6 +36,34 @@ export interface CoverageLocation {
   coordinates: { lat: number; lng: number } | null;
 }
 
+/**
+ * SHIPPING-CHAT (ADR-0011) — Costo de envío confirmado por el vendedor durante la revisión.
+ * El monto ESTRUCTURADO (`chargeGs`, entero PYG) es la autoridad financiera — NUNCA el texto libre
+ * ni una respuesta de IA. Detectado por el parser determinístico compartido, confirmado por un
+ * humano y re-parseado server-side. Sin PII: jamás lleva dirección ni coordenadas.
+ */
+export interface CoverageShippingQuote {
+  /** Cargo de envío al cliente, entero en guaraníes (0 solo con frase inequívoca de gratuidad). */
+  chargeGs: number;
+  currency: 'PYG';
+  /** Origen del quote (por ahora solo el chat del vendedor). */
+  source: 'seller_chat';
+  /** Id del outbox del mensaje canónico del vendedor (idempotencia de la saga; SHIPPING-CHAT-3). */
+  sourceOutboxId: string;
+  /** wamid de Meta si el envío del mensaje del vendedor fue live y se confirmó. */
+  providerMessageId?: string | null;
+  /** La cotización vale para ESTA ubicación (cambiar ubicación la invalida). */
+  locationFingerprint: string;
+  /** La cotización vale para ESTE carrito (cambiar el carrito invalida el precio de envío). */
+  cartFingerprint: string;
+  quotedByUid: string;
+  quotedByName: string;
+  quotedByRole: string;
+  quotedAt: Timestamp;
+  /** Versión del parser que produjo el monto (auditabilidad; ver PARSER_VERSION). */
+  parserVersion: string;
+}
+
 /** Decisión humana (1C). */
 export interface CoverageDecision {
   action: 'approved' | 'rejected';
@@ -153,6 +181,11 @@ export interface CoverageRequest {
   sellerUid?: string | null;
   sellerName?: string | null;
   decision: CoverageDecision | null;
+  /**
+   * SHIPPING-CHAT (ADR-0011): costo de envío confirmado por el vendedor para esta revisión.
+   * Ausente/null = sin cotización todavía. Lo persiste `coverageQuoteAndApprove` (SHIPPING-CHAT-3).
+   */
+  shippingQuote?: CoverageShippingQuote | null;
   resume: CoverageResume | null;
   createdAt: Timestamp;
   updatedAt: Timestamp;
@@ -190,4 +223,35 @@ export interface CoverageConfig {
   expiryHours: number; // default 24
   requestMessage?: string;
   rejectedMessage?: string;
+  /**
+   * SHIPPING-CHAT (ADR-0011): cotización de envío obligatoria en la aprobación.
+   * Ausente ⇒ deshabilitado (comportamiento actual). La activación futura de Arfagi deberá escribir
+   * `required=true` explícitamente. Con `required=true`, el `coverageApprove` viejo rechazará
+   * aprobaciones sin quote y solo `coverageQuoteAndApprove` podrá aprobar (SHIPPING-CHAT-3).
+   */
+  shippingQuote?: {
+    required: boolean;
+    /** Tope defensivo del cargo de envío (guaraníes enteros). Default de diseño ₲5.000.000. */
+    maxChargeGs: number;
+  };
+}
+
+/**
+ * SHIPPING-CHAT (ADR-0011) — Contrato compartido de entrada de la callable `coverageQuoteAndApprove`
+ * (la callable se implementa en SHIPPING-CHAT-3; acá solo el tipo). El backend resuelve el tenant y
+ * el actor desde los claims: JAMÁS se aceptan `customerId`, actor, nombre, rol, subtotal ni total
+ * desde el cliente. El servidor re-parsea `sellerDraft` y exige `parsed === confirmedShippingGs`.
+ */
+export interface CoverageQuoteAndApproveInput {
+  /** Solo para coincidir con los claims (el backend usa el de los claims). */
+  tenantId?: string;
+  requestId: string;
+  /** Borrador natural que escribió el vendedor (se re-parsea server-side; nunca se loguea). */
+  sellerDraft: string;
+  /** Huella de la ubicación mostrada al vendedor (si cambió, la decisión no aplica). */
+  expectedLocationFingerprint: string;
+  /** Huella del carrito mostrado (si cambió, hay que recotizar el envío). */
+  expectedCartFingerprint: string;
+  /** Monto de envío confirmado en el preview; debe coincidir con el re-parseo del servidor. */
+  confirmedShippingGs: number;
 }

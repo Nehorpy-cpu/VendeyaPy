@@ -20,6 +20,13 @@ export interface OrderItem {
 export interface OrderTotals {
   subtotal: number;
   discount: number;
+  /**
+   * SHIPPING-CHAT (ADR-0011): cargo de envío. **Opcional SOLO por compatibilidad de LECTURA** de
+   * órdenes viejas (ausente ⇒ 0; usar `normalizeOrderTotals`). Cuando se implemente SHIPPING-CHAT-4,
+   * todos los pedidos NUEVOS deberán persistirlo. Nunca se suma a `subtotal` ni a
+   * `orderFinancials.subtotal` (la ganancia de productos no se infla). `total = subtotal - discount + shipping`.
+   */
+  shipping?: number;
   total: number;
   currency: Currency;
   // El costo total y la ganancia se movieron a `orderFinancials/{orderId}` (privado). Ver ADR-0008.

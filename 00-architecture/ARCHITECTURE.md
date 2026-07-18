@@ -524,9 +524,10 @@ Una sesión activa representa la conversación en curso. Solo existe una sesión
   }>;
   
   totals: {
-    subtotal: number;
-    discount: number;
-    total: number;
+    subtotal: number;   // precio BRUTO de productos (nunca incluye envío)
+    discount: number;   // descuento sobre productos
+    shipping: number;   // cargo de envío (SHIPPING-CHAT; costo confirmado desde el chat del vendedor)
+    total: number;      // = subtotal - discount + shipping
     currency: string;
   };
   
@@ -558,6 +559,18 @@ Una sesión activa representa la conversación en curso. Solo existe una sesión
   updatedAt: Timestamp;
 }
 ```
+
+**Totales y costo de envío (SHIPPING-CHAT — ver ADR-0011):**
+- `subtotal` = precio bruto de productos; `discount` = descuento sobre productos; `shipping` = cargo de envío;
+  **`total = subtotal - discount + shipping`**.
+- **Órdenes antiguas sin `shipping` se interpretan como `shipping = 0`** (compatibilidad de lectura; usar el
+  helper `normalizeOrderTotals` de `@vpw/shared`).
+- El `shipping` **nunca** se suma a `subtotal` ni a `orderFinancials.subtotal` → la ganancia de productos
+  (`grossProfit = subtotal - costo`, privada, ADR-0008) **no se infla** con el envío (pass-through).
+- **La ubicación exacta (dirección/coordenadas) vive ÚNICAMENTE en `coverageRequests/{id}`.** La orden solo
+  referencia `coverage.requestId` (auditoría); **no duplica dirección ni coordenadas**.
+- **Autoridad financiera = el monto ESTRUCTURADO** (`totals.shipping`, entero PYG), nunca el texto del vendedor
+  ni una respuesta de IA. El monto se detecta con un parser determinístico y lo **confirma un humano** (ver ADR-0011).
 
 ### 4.7 Esquema: `tenants/{tenantId}/deliveries/{deliveryId}`
 
