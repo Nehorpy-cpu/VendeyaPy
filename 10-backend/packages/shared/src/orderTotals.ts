@@ -41,11 +41,16 @@ export function computeOrderTotals(input: { subtotalGs: number; discountGs: numb
   if (discountGs > subtotalGs) {
     throw new Error('computeOrderTotals: el descuento no puede superar al subtotal');
   }
+  const total = subtotalGs - discountGs + shippingGs;
+  // HARDEN-1: aunque cada entrada sea válida, la SUMA puede salirse del rango entero seguro.
+  if (!Number.isSafeInteger(total)) {
+    throw new Error('computeOrderTotals: el total excede el rango entero seguro');
+  }
   return {
     subtotal: subtotalGs,
     discount: discountGs,
     shipping: shippingGs,
-    total: subtotalGs - discountGs + shippingGs,
+    total,
     currency: 'PYG',
   };
 }

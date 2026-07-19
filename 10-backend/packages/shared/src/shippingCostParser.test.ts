@@ -110,7 +110,7 @@ describe('parseShippingCost — gratuidad (₲0)', () => {
   it('gratuidad negada ("no es gratis") con monto ⇒ toma el monto', () =>
     expectMatched('no es gratis el envío ₲30.000', 30000));
   it('promo condicional "gratis desde ₲X" ⇒ none (NO cobra el umbral de compra)', () =>
-    expectNone('Envío gratis desde ₲150.000', 'gratis_con_monto'));
+    expectNone('Envío gratis desde ₲150.000', 'gratuidad_condicional'));
 });
 
 describe('parseShippingCost — seguridad: montos inválidos ⇒ none', () => {
@@ -143,8 +143,6 @@ describe('parseShippingCost — límite máximo', () => {
     expectNone('el envío ₲30.000', 'excede_maximo', { maxChargeGs: 20000 }));
   it('dentro de un maxChargeGs custom ⇒ matched', () =>
     expectMatched('el envío ₲30.000', 30000, { maxChargeGs: 50000 }));
-  it('maxChargeGs inválido cae al default', () =>
-    expectMatched('el envío ₲30.000', 30000, { maxChargeGs: -1 as unknown as number }));
   it('DEFAULT_MAX_SHIPPING_GS es 5.000.000', () => expect(DEFAULT_MAX_SHIPPING_GS).toBe(5_000_000));
 });
 
@@ -159,7 +157,7 @@ describe('parseShippingCost — entradas inválidas / sin contexto', () => {
 });
 
 describe('parseShippingCost — estabilidad de PARSER_VERSION', () => {
-  it('valor estable esperado', () => expect(PARSER_VERSION).toBe('shipping-parser-1'));
+  it('valor estable esperado', () => expect(PARSER_VERSION).toBe('shipping-parser-2'));
   it('presente en matched', () => {
     const r = parseShippingCost('el envío ₲30.000');
     expect(r.parserVersion).toBe(PARSER_VERSION);
@@ -185,4 +183,169 @@ describe('parseShippingCost — pureza (no muta ni depende de estado)', () => {
     expectNone('el envío ₲30.000 o ₲40.000', 'monto_ambiguo');
     expectMatched('el envío ₲30.000', 30000);
   });
+});
+
+describe('parseShippingCost — HARDEN-1: negaciones, umbrales y aproximaciones', () => {
+  it('1. "no cuesta ₲30.000" ⇒ nunca matched/free (monto_negado)', () =>
+    expectNone('El envío no cuesta ₲30.000', 'monto_negado'));
+  it('2. "cuesta menos de ₲30.000" ⇒ monto_no_exacto', () =>
+    expectNone('El envío cuesta menos de ₲30.000', 'monto_no_exacto'));
+  it('3. "cuesta hasta ₲30.000" ⇒ monto_no_exacto', () =>
+    expectNone('El envío cuesta hasta ₲30.000', 'monto_no_exacto'));
+  it('4. "cuesta desde ₲30.000" ⇒ monto_no_exacto', () =>
+    expectNone('El envío cuesta desde ₲30.000', 'monto_no_exacto'));
+  it('5. "cuesta aproximadamente ₲30.000" ⇒ monto_no_exacto', () =>
+    expectNone('El envío cuesta aproximadamente ₲30.000', 'monto_no_exacto'));
+  it('6. "aprox ₲30.000" ⇒ monto_no_exacto', () =>
+    expectNone('El envío aprox ₲30.000', 'monto_no_exacto'));
+  it('7. "- ₲30.000" ⇒ monto_invalido', () =>
+    expectNone('El envío - ₲30.000', 'monto_invalido'));
+  it('8. "gratis no aplica" ⇒ nunca free (gratuidad_negada)', () =>
+    expectNone('El envío es gratis no aplica', 'gratuidad_negada'));
+  it('9. "gratis no está disponible" ⇒ nunca free (gratuidad_negada)', () =>
+    expectNone('El envío gratis no está disponible', 'gratuidad_negada'));
+  it('10. "gratis desde compras superiores" ⇒ gratuidad_condicional (no free)', () =>
+    expectNone('El envío gratis desde compras superiores', 'gratuidad_condicional'));
+  it('11. "El envío gratis" ⇒ sigue free', () =>
+    expect(parseShippingCost('El envío gratis').kind).toBe('free'));
+  it('12. "No es gratis, el envío cuesta ₲30.000" ⇒ sigue matched(30000)', () =>
+    expectMatched('No es gratis, el envío cuesta ₲30.000', 30000));
+  // Modificador NO debe dispararse cuando la palabra es destino, no umbral:
+  it('"hasta tu casa ... cuesta ₲30.000" (destino) ⇒ matched(30000)', () =>
+    expectMatched('hasta tu casa el envío cuesta ₲30.000', 30000));
+});
+
+describe('parseShippingCost — HARDEN-1: negativos con espacio/símbolo (B.1)', () => {
+  it('-₲30.000 (pegado) ⇒ monto_invalido', () => expectNone('el envío -₲30.000', 'monto_invalido'));
+  it('- ₲30.000 (espacio) ⇒ monto_invalido', () => expectNone('el envío - ₲30.000', 'monto_invalido'));
+  it('− ₲30.000 (signo menos U+2212) ⇒ monto_invalido', () => expectNone('el envío − ₲30.000', 'monto_invalido'));
+});
+
+describe('parseShippingCost — HARDEN-1: maxChargeGs inválido ⇒ limite_invalido (jamás amplía)', () => {
+  const malos: Array<[string, number]> = [
+    ['cero', 0],
+    ['negativo', -1],
+    ['decimal', 1.5],
+    ['Infinity', Infinity],
+    ['MAX_SAFE+1', Number.MAX_SAFE_INTEGER + 1],
+  ];
+  for (const [nombre, bad] of malos) {
+    it(`maxChargeGs=${nombre} ⇒ none limite_invalido`, () =>
+      expectNone('el envío ₲30.000', 'limite_invalido', { maxChargeGs: bad }));
+  }
+  it('maxChargeGs válido chico se respeta (₲30.000 > 20.000 ⇒ excede_maximo)', () =>
+    expectNone('el envío ₲30.000', 'excede_maximo', { maxChargeGs: 20000 }));
+  it('maxChargeGs ausente usa el default', () => expectMatched('el envío ₲30.000', 30000));
+});
+
+describe('parseShippingCost — HARDEN-1b: gratuidad lejos del contexto (>40 chars entre "envío" y "gratis")', () => {
+  it('A1 "...es gratis pero no aplica actualmente" ⇒ NO free (gratuidad_negada)', () => {
+    const r = parseShippingCost('El envío para esta zona, según la información que tenemos, es gratis pero no aplica actualmente.');
+    expect(r.kind).toBe('none');
+    if (r.kind === 'none') expect(r.reason).toBe('gratuidad_negada');
+  });
+  it('A2 "...gratis solo para compras superiores" ⇒ NO free (gratuidad_condicional)', () => {
+    const r = parseShippingCost('El envío para esta ubicación que nos compartiste figura como gratis solo para compras superiores.');
+    expect(r.kind).toBe('none');
+    if (r.kind === 'none') expect(r.reason).toBe('gratuidad_condicional');
+  });
+  it('A3 "...gratis excepto durante fines de semana" ⇒ NO free (gratuidad_condicional)', () => {
+    const r = parseShippingCost('El envío hasta esa parte del país podría aparecer gratis excepto durante fines de semana.');
+    expect(r.kind).toBe('none');
+    if (r.kind === 'none') expect(r.reason).toBe('gratuidad_condicional');
+  });
+  it('A4 "...después de revisar la ruta, es gratis." ⇒ SÍ free', () => {
+    expect(parseShippingCost('El envío para tu ubicación, después de revisar la ruta, es gratis.').kind).toBe('free');
+  });
+});
+
+describe('parseShippingCost — HARDEN-1b: negaciones/cotas/rangos/aprox (review)', () => {
+  it('"no te cuesta ₲30.000" (pronombre) ⇒ monto_negado', () =>
+    expectNone('el envío no te cuesta ₲30.000', 'monto_negado'));
+  it('"no cuesta ni ₲30.000" ⇒ monto_negado', () =>
+    expectNone('el envío no cuesta ni ₲30.000', 'monto_negado'));
+  it('"no supera los ₲30.000" (cota) ⇒ monto_no_exacto', () =>
+    expectNone('el envío no supera los ₲30.000', 'monto_no_exacto'));
+  it('rango "entre ₲30.000 y ₲40.000 el envío" ⇒ monto_no_exacto', () =>
+    expectNone('entre ₲30.000 y ₲40.000 el envío', 'monto_no_exacto'));
+  it('"más o menos ₲30.000" ⇒ monto_no_exacto', () =>
+    expectNone('el envío más o menos ₲30.000', 'monto_no_exacto'));
+  it('"cuesta cerca de ₲30.000" ⇒ monto_no_exacto', () =>
+    expectNone('el envío cuesta cerca de ₲30.000', 'monto_no_exacto'));
+  it('"gratis ya no aplica" ⇒ gratuidad_negada', () =>
+    expectNone('el envío gratis ya no aplica', 'gratuidad_negada'));
+  it('"entre [lugar]" (Entre Ríos) NO es rango de dinero ⇒ matched(30000)', () =>
+    expectMatched('el envío a la zona entre ríos cuesta ₲30.000', 30000));
+});
+
+describe('parseShippingCost — HARDEN-1b: negativos con espacios exóticos y guiones no-signo (review)', () => {
+  it('NBSP (U+00A0) entre "-" y ₲ ⇒ monto_invalido', () =>
+    expectNone('el envío -' + String.fromCharCode(0xa0) + '₲30.000', 'monto_invalido'));
+  it('varios espacios ASCII entre "-" y ₲ ⇒ monto_invalido', () =>
+    expectNone('el envío -    ₲30.000', 'monto_invalido'));
+  it('guion de token NO-signo ("express-24") NO mata el monto ⇒ matched(30000)', () =>
+    expectMatched('el envío express-24 ₲30.000', 30000));
+});
+
+describe('parseShippingCost — HARDEN-1c: gratuidad negada/condicionada con palabras intermedias (review local)', () => {
+  it('"no tenemos envío gratis" ⇒ gratuidad_negada', () =>
+    expectNone('perdón pero no tenemos envío gratis', 'gratuidad_negada'));
+  it('"por el momento no contamos con envío gratis" ⇒ gratuidad_negada', () =>
+    expectNone('por el momento no contamos con envío gratis', 'gratuidad_negada'));
+  it('"ya no hacemos envío gratis" ⇒ gratuidad_negada', () =>
+    expectNone('ya no hacemos envío gratis', 'gratuidad_negada'));
+  it('"gratis pero ahora se cobra" ⇒ gratuidad_negada', () =>
+    expectNone('antes el envío era gratis pero ahora se cobra', 'gratuidad_negada'));
+  it('"gratis para la primera compra" ⇒ gratuidad_condicional', () =>
+    expectNone('Envío gratis para la primera compra', 'gratuidad_condicional'));
+  it('"gratis para nuevos clientes" ⇒ gratuidad_condicional', () =>
+    expectNone('Envío gratis para nuevos clientes', 'gratuidad_condicional'));
+  it('"gratis abonando en efectivo" ⇒ gratuidad_condicional', () =>
+    expectNone('El envío es gratis abonando en efectivo', 'gratuidad_condicional'));
+  it('"gratis dentro de Asunción" ⇒ gratuidad_condicional', () =>
+    expectNone('envío gratis dentro de Asunción', 'gratuidad_condicional'));
+  it('"gratis en todos los pedidos superiores a ₲150.000" ⇒ gratuidad_condicional', () =>
+    expectNone('Envío gratis en todos los pedidos superiores a ₲150.000', 'gratuidad_condicional'));
+  // Debe seguir siendo free (no sobre-bloquear):
+  it('"el envío es totalmente gratis" ⇒ free', () =>
+    expect(parseShippingCost('el envío es totalmente gratis').kind).toBe('free'));
+  it('"envío gratis para tu ubicación" (destino, no condición) ⇒ free', () =>
+    expect(parseShippingCost('el envío es gratis para tu ubicación').kind).toBe('free'));
+});
+
+describe('parseShippingCost — HARDEN-1c: negaciones de importe, rangos y cuantificadores (review local)', () => {
+  it('"tampoco cuesta ₲30.000" ⇒ monto_negado', () =>
+    expectNone('el envío tampoco cuesta ₲30.000', 'monto_negado'));
+  it('"nunca cuesta ₲30.000" ⇒ monto_negado', () =>
+    expectNone('el envío nunca cuesta ₲30.000', 'monto_negado'));
+  it('"no siempre cuesta ₲30.000" ⇒ monto_negado', () =>
+    expectNone('el envío no siempre cuesta ₲30.000', 'monto_negado'));
+  it('"no llega a costar ₲30.000" ⇒ monto_no_exacto', () =>
+    expectNone('el envío no llega a costar ₲30.000', 'monto_no_exacto'));
+  it('rango "de ₲30.000 a ₲40.000 el envío" ⇒ monto_no_exacto', () =>
+    expectNone('de ₲30.000 a ₲40.000 el envío', 'monto_no_exacto'));
+  it('rango "de 30 a 40 mil" ⇒ NO matched(40000)', () => {
+    const r = parseShippingCost('el envío de 30 a 40 mil');
+    expect(r.kind).not.toBe('matched');
+  });
+  it('cuantificador "unos ₲30.000" ⇒ monto_no_exacto', () =>
+    expectNone('el envío es de unos ₲30.000', 'monto_no_exacto'));
+  it('cota "por lo menos ₲30.000" ⇒ monto_no_exacto', () =>
+    expectNone('el envío es por lo menos ₲30.000', 'monto_no_exacto'));
+  it('cota "mínimo ₲30.000" ⇒ monto_no_exacto', () =>
+    expectNone('el envío es minimo ₲30.000', 'monto_no_exacto'));
+  it('"ronda los ₲30.000" ⇒ monto_no_exacto', () =>
+    expectNone('el envío ronda los ₲30.000', 'monto_no_exacto'));
+  // Debe seguir matched (no sobre-bloquear con rangos de LUGAR/TIEMPO ni "de X"):
+  it('"a Entre Ríos es ₲30.000" (lugar) ⇒ matched(30000)', () =>
+    expectMatched('el envío a Entre Ríos es ₲30.000', 30000));
+  it('"es de ₲30.000" (no rango) ⇒ matched(30000)', () =>
+    expectMatched('el envío es de ₲30.000', 30000));
+  // Sobre-bloqueo (2ª pasada): un rango de UMBRAL/HORARIO en la misma oración NO debe tumbar el envío único.
+  it('envío único + rango de umbral de compra en misma oración ⇒ matched(30000)', () =>
+    expectMatched('el envío es ₲30.000, para compras de ₲100.000 a ₲200.000 hacemos descuento', 30000));
+  it('envío único + rango de horario en misma oración ⇒ matched(30000)', () =>
+    expectMatched('el envío es ₲30.000 y atendemos de 800 a 1800', 30000));
+  it('envío único + "entre" umbral en misma oración ⇒ matched(30000)', () =>
+    expectMatched('el envío ₲30.000, entre ₲100.000 y ₲200.000 hay promo', 30000));
 });

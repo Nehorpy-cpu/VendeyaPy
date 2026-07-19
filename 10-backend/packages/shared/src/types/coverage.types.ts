@@ -7,8 +7,10 @@
  * UBICACIÓN (locationFingerprint) durante su vigencia — cambiar el carrito no re-abre la revisión.
  *
  * Colección: `tenants/{tenantId}/coverageRequests/{requestId}` (id `covr_{nanoid12}`, inmutable).
- * PRIVACIDAD: la ubicación exacta (coordenadas / dirección) vive SOLO acá — jamás en mensajes,
- * logs, prompts de IA ni notificaciones. La sesión guarda apenas un puntero sin PII.
+ * PRIVACIDAD: las coordenadas exactas y el `name` del lugar viven SOLO acá — ninguna orden los copia.
+ * La dirección TEXTUAL saneada (`location.addressText`) SÍ se copia a `Order.delivery.address` tras la
+ * aprobación (necesaria para cumplir el envío; ver ADR-0011). Jamás en mensajes al cliente, quote de
+ * envío, outbox, logs, prompts de IA ni notificaciones. La sesión guarda apenas un puntero sin PII.
  * Escritura solo por Admin SDK/callables (rules default-deny para clientes).
  */
 import type { Timestamp } from './common.types.js';

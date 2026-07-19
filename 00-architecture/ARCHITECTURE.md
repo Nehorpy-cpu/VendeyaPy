@@ -566,9 +566,14 @@ Una sesión activa representa la conversación en curso. Solo existe una sesión
 - **Órdenes antiguas sin `shipping` se interpretan como `shipping = 0`** (compatibilidad de lectura; usar el
   helper `normalizeOrderTotals` de `@vpw/shared`).
 - El `shipping` **nunca** se suma a `subtotal` ni a `orderFinancials.subtotal` → la ganancia de productos
-  (`grossProfit = subtotal - costo`, privada, ADR-0008) **no se infla** con el envío (pass-through).
-- **La ubicación exacta (dirección/coordenadas) vive ÚNICAMENTE en `coverageRequests/{id}`.** La orden solo
-  referencia `coverage.requestId` (auditoría); **no duplica dirección ni coordenadas**.
+  (`grossProfit = productNetRevenue - productCost`, con `productNetRevenue = subtotal - discount`; privada,
+  ADR-0008) **no se infla** con el envío (pass-through).
+- **Ubicación y privacidad (runtime real):** las **coordenadas exactas** y el `name` del lugar viven
+  ÚNICAMENTE en `coverageRequests/{id}` — la orden **nunca** los copia. La **dirección textual saneada**
+  (`location.addressText`) **sí** se copia a `Order.delivery.address.street` tras la aprobación
+  (`coverageResume.direccionTextualDe` → `createPendingOrder`), porque es necesaria para **cumplir el envío**.
+  El quote de envío, el outbox, los mensajes al cliente, logs, prompts de IA y notificaciones **no** copian la
+  dirección. `Order.coverage.requestId` mantiene la referencia **auditable** al request.
 - **Autoridad financiera = el monto ESTRUCTURADO** (`totals.shipping`, entero PYG), nunca el texto del vendedor
   ni una respuesta de IA. El monto se detecta con un parser determinístico y lo **confirma un humano** (ver ADR-0011).
 

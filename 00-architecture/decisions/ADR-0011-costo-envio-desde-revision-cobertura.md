@@ -36,6 +36,15 @@ Contexto ya verificado (COVERAGE-SHIPPING-CHAT-COST-AUDIT-DESIGN-1):
 6. **La IA nunca determina ni modifica dinero.** Puede, a lo sumo, proponerse como sugerencia para lenguaje
    ambiguo en el frontend, pero jamás guardar/aprobar un monto sin confirmación humana.
 
+### Privacidad de la ubicación (runtime real)
+- Las **coordenadas exactas** (`location.coordinates`) y el `name` del lugar viven **únicamente** en
+  `coverageRequests/{id}`; **ninguna orden las copia**.
+- La **dirección textual saneada** (`location.addressText`) **sí** se copia a `Order.delivery.address.street`
+  luego de la aprobación (`coverageResume.direccionTextualDe` → `createPendingOrder`), porque es **necesaria
+  para cumplir el envío**. No es una fuga: es el dato mínimo de entrega.
+- El `CoverageShippingQuote`, el outbox, el mensaje canónico, los logs, los prompts de IA y las notificaciones
+  **no** copian la dirección ni las coordenadas. `Order.coverage.requestId` conserva la referencia **auditable**.
+
 ### Saga/outbox idempotente (para la implementación futura, SHIPPING-CHAT-3)
 - Reservar el **intento** y el **mensaje** con un **ID determinístico** (por `requestId`/`checkoutAttemptId`).
 - Enviar el mensaje canónico del vendedor.
@@ -74,9 +83,10 @@ deberá escribir `required=true` explícitamente.
 
 ## Consecuencias
 
-**Positivas:** el dinero de envío queda estructurado y auditable; la ganancia de productos no se contamina; la
-ubicación exacta sigue confinada a `coverageRequests`; una sola lógica de parseo compartida entre web y backend
-evita divergencias; la aprobación con quote obligatorio cierra el bypass del botón viejo.
+**Positivas:** el dinero de envío queda estructurado y auditable; la ganancia de productos no se contamina; las
+**coordenadas exactas** siguen confinadas a `coverageRequests` (la dirección textual saneada se copia a la orden
+solo para cumplir el envío, ver "Privacidad de la ubicación"); una sola lógica de parseo compartida entre web y
+backend evita divergencias; la aprobación con quote obligatorio cierra el bypass del botón viejo.
 **Negativas / a resolver en fases siguientes:** múltiples consumidores de `totals.total` deben distinguir
 producto vs. cobrado (SHIPPING-CHAT-4, requiere aprobación del owner de las 4 rutas financieras); un campo extra
 en `OrderTotals`; compatibilidad de lectura de órdenes viejas (helper `normalizeOrderTotals`). Ver ADR-0008

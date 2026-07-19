@@ -70,6 +70,15 @@ describe('computeOrderTotals — fórmula y validaciones', () => {
   it('rechaza entero fuera de rango seguro', () => {
     expect(() => computeOrderTotals({ subtotalGs: Number.MAX_SAFE_INTEGER + 1, discountGs: 0, shippingGs: 0 })).toThrow();
   });
+
+  // HARDEN-1: overflow del RESULTADO (entradas válidas, total fuera de rango seguro).
+  it('overflow por suma de shipping (subtotal=MAX_SAFE, shipping=1) ⇒ throw', () => {
+    expect(() => computeOrderTotals({ subtotalGs: Number.MAX_SAFE_INTEGER, discountGs: 0, shippingGs: 1 })).toThrow();
+  });
+  it('límite válido: total exactamente MAX_SAFE_INTEGER ⇒ ok', () => {
+    const t = computeOrderTotals({ subtotalGs: Number.MAX_SAFE_INTEGER - 1, discountGs: 0, shippingGs: 1 });
+    expect(t.total).toBe(Number.MAX_SAFE_INTEGER);
+  });
 });
 
 describe('normalizeOrderTotals — compatibilidad de órdenes viejas', () => {
