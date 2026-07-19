@@ -157,7 +157,7 @@ describe('parseShippingCost — entradas inválidas / sin contexto', () => {
 });
 
 describe('parseShippingCost — estabilidad de PARSER_VERSION', () => {
-  it('valor estable esperado', () => expect(PARSER_VERSION).toBe('shipping-parser-2'));
+  it('valor estable esperado', () => expect(PARSER_VERSION).toBe('shipping-parser-3'));
   it('presente en matched', () => {
     const r = parseShippingCost('el envío ₲30.000');
     expect(r.parserVersion).toBe(PARSER_VERSION);
@@ -348,4 +348,26 @@ describe('parseShippingCost — HARDEN-1c: negaciones de importe, rangos y cuant
     expectMatched('el envío es ₲30.000 y atendemos de 800 a 1800', 30000));
   it('envío único + "entre" umbral en misma oración ⇒ matched(30000)', () =>
     expectMatched('el envío ₲30.000, entre ₲100.000 y ₲200.000 hay promo', 30000));
+});
+
+describe('parseShippingCost — HARDEN-2: negaciones comunes del importe (negador genérico en la cláusula)', () => {
+  it('"no tiene un costo de ₲30.000" ⇒ monto_negado', () =>
+    expectNone('El envío no tiene un costo de ₲30.000', 'monto_negado'));
+  it('"no es de ₲30.000" ⇒ monto_negado', () =>
+    expectNone('El envío no es de ₲30.000', 'monto_negado'));
+  it('"tampoco tiene un costo de ₲30.000" ⇒ monto_negado', () =>
+    expectNone('El envío tampoco tiene un costo de ₲30.000', 'monto_negado'));
+  it('"nunca tuvo un costo de ₲30.000" ⇒ monto_negado', () =>
+    expectNone('El envío nunca tuvo un costo de ₲30.000', 'monto_negado'));
+  it('"jamás fue de ₲30.000" ⇒ monto_negado', () =>
+    expectNone('El envío jamás fue de ₲30.000', 'monto_negado'));
+  // Must-keep (no sobre-bloquear):
+  it('"No es gratis, el envío cuesta ₲30.000" ⇒ matched(30000)', () =>
+    expectMatched('No es gratis, el envío cuesta ₲30.000', 30000));
+  it('"no es gratis el envío ₲30.000" (sin coma, "no" niega la gratuidad) ⇒ matched(30000)', () =>
+    expectMatched('no es gratis el envío ₲30.000', 30000));
+  it('"El envío cuesta ₲30.000" ⇒ matched(30000)', () =>
+    expectMatched('El envío cuesta ₲30.000', 30000));
+  it('"El envío no supera ₲30.000" (cota) ⇒ monto_no_exacto', () =>
+    expectNone('El envío no supera ₲30.000', 'monto_no_exacto'));
 });

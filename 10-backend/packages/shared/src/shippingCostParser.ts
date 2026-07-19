@@ -16,8 +16,8 @@
  * PRIVACIDAD: función PURA, sin logging. Los callers NUNCA deben loguear el texto del vendedor.
  */
 
-/** HARDEN-1: subió a 2 porque cambia el comportamiento publicado (negaciones/umbrales/gratuidad/límite). */
-export const PARSER_VERSION = 'shipping-parser-2';
+/** HARDEN-2: subió a 3 porque cambia el comportamiento publicado (negador genérico del importe). */
+export const PARSER_VERSION = 'shipping-parser-3';
 
 /** Tope defensivo por defecto (guaraníes). Configurable por tenant vía coverage.shippingQuote.maxChargeGs. */
 export const DEFAULT_MAX_SHIPPING_GS = 5_000_000;
@@ -91,6 +91,15 @@ const RELLENO_ANTES = /^(?:\s|de|del|el|la|los|las|un|una|por|para|:|=|es|son|cu
  */
 const MOD_NEGADO_END =
   /\b(?:no|tampoco|nunca|jamas)\s+(?:(?:te|le|me|nos|se|siempre|ni)\s+){0,2}(?:cuesta|cuestan|sale|salen|vale|valen|es|son)\b(?:\s+ni)?\s*$/;
+/**
+ * HARDEN-2: negador GENÉRICO en la cláusula acotada del monto. Cualquier "no|tampoco|nunca|jamás"
+ * anterior al importe lo invalida como monto_negado, SIN depender de una lista cerrada de verbos
+ * ("no tiene un costo de", "no es de", "nunca tuvo un costo de", "jamás fue de"). Se evalúa DESPUÉS de las
+ * cotas (para que "no supera" siga siendo monto_no_exacto) y NO se dispara si la cláusula niega una
+ * GRATUIDAD ("no es gratis el envío ₲30.000" ⇒ el "no" niega la gratuidad, no el monto).
+ */
+const NEGADOR_RE = /\b(?:no|tampoco|nunca|jamas)\b/;
+const GRATIS_CLAUSULA_RE = /\b(?:gratis|gratuito|sin\s+(?:costo|cargo)|bonificad[oa])\b/;
 /**
  * Modificador de INEXACTITUD (umbral/cota/rango/aprox) pegado antes del importe ("... menos de ₲X").
  * Cubre cotas ("no supera/no pasa de/no llega a/por lo menos/al menos/arriba de/minimo/maximo"),
@@ -285,6 +294,8 @@ function modificadorDe(n: string, t: MoneyToken): 'negado' | 'no_exacto' | null 
   if (MOD_NO_EXACTO_END.test(pre)) return 'no_exacto';
   // Rangos "entre ₲X y ₲Y" / "de ₲X a ₲Y": el token es un extremo (anclado, no por oración completa).
   if (esExtremoDeRango(n, t)) return 'no_exacto';
+  // HARDEN-2: negador genérico en la cláusula (salvo que niegue una gratuidad) ⇒ monto_negado.
+  if (NEGADOR_RE.test(pre) && !GRATIS_CLAUSULA_RE.test(pre)) return 'negado';
   if (MOD_NO_EXACTO_POST.test(n.slice(t.end))) return 'no_exacto';
   return null;
 }
