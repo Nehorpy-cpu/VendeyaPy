@@ -66,6 +66,26 @@ export interface CoverageShippingQuote {
   parserVersion: string;
 }
 
+/**
+ * SHIPPING-CHAT-3B (diseño 3A-HARDEN) — Pointer del INTENTO de cotización en curso.
+ * TIPO PREPARATORIO: el writer llega recién en SHIPPING-CHAT-3C (la saga). Sin estado, lease
+ * ni attempts A PROPÓSITO: la ÚNICA fuente de verdad del envío es el outbox — este pointer
+ * solo identifica el intento y congela el actor original (una recuperación por otro
+ * OWNER/MANAGER completa la saga pero jamás reemplaza a `quotedBy*`).
+ */
+export interface ShippingQuotePending {
+  /** Nonce del intento: `qat_[0-9A-Za-z]{12}` (ID_PREFIX nuevo en 3C; jamás reusa checkoutAttemptId). */
+  quoteAttemptId: string;
+  /** Monto del intento (para que el panel ofrezca "completar la cotización de ₲X"). */
+  chargeGs: number;
+  locationFingerprint: string;
+  cartFingerprint: string;
+  quotedByUid: string;
+  quotedByName: string;
+  quotedByRole: string;
+  createdAt: Timestamp;
+}
+
 /** Decisión humana (1C). */
 export interface CoverageDecision {
   action: 'approved' | 'rejected';
@@ -188,6 +208,11 @@ export interface CoverageRequest {
    * Ausente/null = sin cotización todavía. Lo persiste `coverageQuoteAndApprove` (SHIPPING-CHAT-3).
    */
   shippingQuote?: CoverageShippingQuote | null;
+  /**
+   * SHIPPING-CHAT-3B: intento de cotización EN CURSO (tipo preparatorio; el writer es la saga
+   * de 3C). Ausente/null = sin intento activo. Legible por el seller asignado (sin PII).
+   */
+  shippingQuotePending?: ShippingQuotePending | null;
   resume: CoverageResume | null;
   createdAt: Timestamp;
   updatedAt: Timestamp;

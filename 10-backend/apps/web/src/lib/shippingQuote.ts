@@ -1,16 +1,22 @@
 /**
- * lib/shippingQuote.ts — SHIPPING-CHAT-2B
+ * lib/shippingQuote.ts — SHIPPING-CHAT-2B (+3B: clasificación consolidada en @vpw/shared)
  * Derivación PURA del preview de costo de envío (sin React, sin Firebase, sin efectos).
- * Reutiliza EXCLUSIVAMENTE la lógica compartida de `@vpw/shared` (parser + helpers): no duplica
- * regex, parseo, formato de dinero ni cálculo financiero.
+ * Reutiliza EXCLUSIVAMENTE la lógica compartida de `@vpw/shared` (parser + helpers + gate):
+ * no duplica regex, parseo, formato de dinero, cálculo financiero ni clasificación de bloqueo.
  *
- * IMPORTANTE (SHIPPING-CHAT-3): `blocksManualSend` es SOLO ayuda de UI. La autoridad es el backend:
- * SHIPPING-CHAT-3 debe aplicar un gate equivalente server-side sobre `conversationSendManualMessage`
- * (rechazar un texto con costo detectado en modo quote obligatorio) — la protección de frontend NO
- * es autoridad y puede evitarse.
+ * IMPORTANTE: `blocksManualSend` acá es SOLO ayuda de UI. La AUTORIDAD es el gate server-side
+ * de `sendManualMessage` (SHIPPING-CHAT-3B) — ambos usan la MISMA clasificación compartida
+ * (`blocksByParseResult` / `blocksManualShippingSend` de @vpw/shared): una sola fuente.
  */
-import { parseShippingCost, computeOrderTotals, formatGuaranies, formatCanonicalShippingMessage, DEFAULT_MAX_SHIPPING_GS } from '@vpw/shared';
-import type { ShippingParseReason, ShippingParseResult, CoverageQuoteAndApproveInput, CoverageStatus } from '@vpw/shared';
+import {
+  parseShippingCost,
+  computeOrderTotals,
+  formatGuaranies,
+  formatCanonicalShippingMessage,
+  blocksByParseResult,
+  blocksManualShippingSend,
+} from '@vpw/shared';
+import type { ShippingParseReason, ShippingParseResult, CoverageQuoteAndApproveInput, CoverageStatus, ShippingQuotePolicy } from '@vpw/shared';
 
 /** Contexto SANEADO que recibe el componente. Sin PII: nunca dirección, coordenadas ni datos bancarios. */
 export interface ShippingDraftContext {
@@ -37,29 +43,14 @@ export type DraftClass = 'idle_unrelated' | 'valid_amount' | 'valid_free' | 'inv
 /** Payload de confirmación: exactamente el contrato compartido SIN tenantId (el backend usa claims). */
 export type ShippingConfirmPayload = Omit<CoverageQuoteAndApproveInput, 'tenantId'>;
 
-/** Motivos `none` que INDICAN intención de informar un costo ⇒ bloquean el envío manual crudo. */
-const BLOCKING_NONE_REASONS: ReadonlySet<ShippingParseReason> = new Set<ShippingParseReason>([
-  'monto_ambiguo',
-  'monto_invalido',
-  'monto_no_exacto',
-  'monto_negado',
-  'excede_maximo',
-  'cero_sin_gratuidad',
-  'gratis_con_monto',
-  'gratuidad_negada',
-  'gratuidad_condicional',
-]);
-
 /**
- * ¿El texto NO debe poder enviarse como mensaje manual crudo (mostraría al cliente un precio que no
- * llegaría al pedido)? true para un costo detectado (matched/free) o un intento de costo no-limpio.
- * false para texto común sin intención de costo (vacio/sin_contexto_envio/sin_monto) y para
- * `limite_invalido` (error de CONFIG, no del vendedor: no debe bloquear mensajes comunes).
+ * ¿El texto NO debe poder enviarse como mensaje manual crudo? — SHIPPING-CHAT-3B: delega en la
+ * clasificación COMPARTIDA de @vpw/shared (misma función que usa el gate server-side; paridad
+ * por identidad, no por copia). true para matched/free e intentos no-limpios; false para texto
+ * común y para `limite_invalido` (error de CONFIG — la re-clasificación de intención la hace
+ * `blocksManualShippingSend` con la política).
  */
-export function blocksManualSend(r: ShippingParseResult): boolean {
-  if (r.kind === 'matched' || r.kind === 'free') return true;
-  return BLOCKING_NONE_REASONS.has(r.reason);
-}
+export const blocksManualSend: (r: ShippingParseResult) => boolean = blocksByParseResult;
 
 /** Clasifica el borrador (decisión 5). */
 export function classifyDraft(r: ShippingParseResult): DraftClass {
@@ -196,14 +187,16 @@ export function deriveShippingQuote(ctx: ShippingDraftContext): ShippingQuoteVM 
   if (!usable) return hidden;
 
   const parse = parseShippingCost(ctx.draft, { maxChargeGs: ctx.maxChargeGs });
-  // HARDEN-1: si la CONFIG del máximo es inválida, el parse principal enmascara la intención con
-  // `limite_invalido` para CUALQUIER texto. Re-clasificamos SOLO la intención con un límite defensivo
-  // válido (el default compartido) para decidir `blocksManualSend` — JAMÁS para aprobar ni reemplazar
-  // la config del tenant (canApprove/payload siguen dependiendo del parse principal, que es `none`).
-  const configInvalida = parse.kind === 'none' && parse.reason === 'limite_invalido';
-  const intento = configInvalida ? parseShippingCost(ctx.draft, { maxChargeGs: DEFAULT_MAX_SHIPPING_GS }) : parse;
+  // SHIPPING-CHAT-3B: el bloqueo de envío manual usa la MISMA función compartida que el gate
+  // server-side (`blocksManualShippingSend`): con max válido ⇒ política required; inválido ⇒
+  // política invalid (re-clasifica SOLO la intención con el default compartido — jamás aprueba
+  // ni reemplaza la config del tenant: canApprove/payload siguen dependiendo del parse principal).
+  const policy: ShippingQuotePolicy =
+    Number.isSafeInteger(ctx.maxChargeGs) && ctx.maxChargeGs > 0
+      ? { status: 'required', maxChargeGs: ctx.maxChargeGs }
+      : { status: 'invalid' };
   const draftClass = classifyDraft(parse);
-  const blocks = blocksManualSend(intento);
+  const blocks = blocksManualShippingSend(ctx.draft, policy);
   const reason = parse.kind === 'none' ? parse.reason : null;
   const subtotalText = fmt(ctx.subtotalGs);
 

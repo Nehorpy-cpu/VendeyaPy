@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { blocksByParseResult } from '@vpw/shared';
 import type { ShippingParseReason, ShippingParseResult } from '@vpw/shared';
 import {
   blocksManualSend,
@@ -31,6 +32,9 @@ const baseCtx = (over: Partial<ShippingDraftContext> = {}): ShippingDraftContext
 });
 
 describe('blocksManualSend — clasificación completa (decisión 6)', () => {
+  it('SHIPPING-CHAT-3B: paridad web/backend por IDENTIDAD — es la MISMA función compartida', () => {
+    expect(blocksManualSend).toBe(blocksByParseResult);
+  });
   it('true para costo detectado', () => {
     expect(blocksManualSend(matched(30000))).toBe(true);
     expect(blocksManualSend(free())).toBe(true);

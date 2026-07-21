@@ -10,5 +10,8 @@ export * from './ids.js';
 export * from './aiFicha.js';
 export * from './coverageActivation.js';
 export * from './shippingCostParser.js';
+export * from './shippingQuotePolicy.js';
+export * from './shippingManualGate.js';
 export * from './orderTotals.js';
+export * from './privacy.js';
 export * from './types/index.js';

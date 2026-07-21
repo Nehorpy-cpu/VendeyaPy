@@ -5,12 +5,17 @@ import type { Customer } from '@vpw/shared';
 // HUMAN-HANDOFF-1 requisito "no llama IA": si alguien cablea la IA acá, este mock lo delata.
 vi.mock('../ai/salesAgent.js', () => ({ runSalesAgent: vi.fn() }));
 import { runSalesAgent } from '../ai/salesAgent.js';
+// SHIPPING-CHAT-3B: logger espiado para verificar el ENMASCARADO de teléfonos en logs.
+vi.mock('../lib/logger.js', () => ({ logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() } }));
+import { logger } from '../lib/logger.js';
 
 import {
   sendManualMessage,
   MANUAL_MESSAGE_MAX_CHARS,
   type ManualMessageDeps,
+  type ManualGateContext,
 } from './manualMessage.js';
+import { MENSAJE_MAS_INFORMACION } from '../functions/coverage/coverageCallables.js';
 import { assertStaffAccess } from '../functions/conversation/staffAuth.js';
 
 const PNID = '1251346811387904';
@@ -24,13 +29,32 @@ const customer = (over: Partial<Record<string, unknown>> = {}): Customer =>
     ...over,
   }) as unknown as Customer;
 
+/** Contexto del gate por defecto: handoff activo, SIN cobertura (comportamiento pre-3B). */
+const gateCtx = (over: Partial<ManualGateContext> = {}): ManualGateContext => ({
+  humanTakeover: true,
+  coveragePointer: null,
+  activation: null,
+  shippingQuote: null,
+  resumeDone: null,
+  ...over,
+});
+
+/** Contexto con cobertura ACTIVA en revisión + cotización obligatoria (max ₲5.000.000). */
+const gateCoverage = (over: Partial<ManualGateContext> = {}): ManualGateContext =>
+  gateCtx({
+    coveragePointer: { requestId: 'covr_abc123DEF456', status: 'pending_coverage_review' },
+    activation: { enabled: true, activationId: 'act-test-000001' },
+    shippingQuote: { status: 'required', maxChargeGs: 5_000_000 },
+    ...over,
+  });
+
 function makeDeps(over: Partial<ManualMessageDeps> = {}) {
-  const sendText = vi.fn(async () => ({ ok: true as const, id: 'wamid.MANUAL-1' }));
+  const sendText = vi.fn(async () => ({ ok: true as const, outcome: 'accepted' as const, id: 'wamid.MANUAL-1', viaMock: false as const }));
   const append = vi.fn(async () => ({}) as never);
   const getClient = vi.fn(async () => ({ sendText }));
   const deps: ManualMessageDeps = {
     getCustomer: async () => customer(),
-    getTakeover: async () => true, // sesión con handoff activo (default de los tests)
+    getGateContext: async () => gateCtx(), // sesión con handoff activo (default de los tests)
     getClient: getClient as unknown as ManualMessageDeps['getClient'],
     append: append as unknown as ManualMessageDeps['append'],
     ...over,
@@ -86,7 +110,7 @@ describe('conversation/manualMessage sendManualMessage', () => {
 
   it('7a. SELLER sin handoff activo → failed-precondition (primero tiene que tomar el chat)', async () => {
     const { deps, sendText } = makeDeps({
-      getTakeover: async () => false,
+      getGateContext: async () => gateCtx({ humanTakeover: false }),
       getCustomer: async () => customer({ conversation: { humanTakeover: false, receivedVia: PNID } }),
     });
     await expect(sendManualMessage({ tenantId: 'arfagi', customerId: 'c', text: 'hola' }, SELLER, deps)).rejects.toThrow(/Tomar conversación/);
@@ -96,7 +120,7 @@ describe('conversation/manualMessage sendManualMessage', () => {
   it('7b. OWNER/MANAGER/ADMIN pueden escribir sin handoff (override manual)', async () => {
     for (const role of ['TENANT_OWNER', 'TENANT_MANAGER', 'PLATFORM_ADMIN']) {
       const { deps, append } = makeDeps({
-        getTakeover: async () => false,
+        getGateContext: async () => gateCtx({ humanTakeover: false }),
         getCustomer: async () => customer({ conversation: { humanTakeover: false, receivedVia: PNID } }),
       });
       const r = await sendManualMessage({ tenantId: 'arfagi', customerId: 'c', text: 'hola' }, { uid: 'u', role }, deps);
@@ -108,7 +132,7 @@ describe('conversation/manualMessage sendManualMessage', () => {
   it('7c. BUG REAL: la SESIÓN manda — resumen desfasado (false) pero sesión en handoff → el seller SÍ puede', async () => {
     // submitComprobante solo actualiza la sesión; el resumen queda viejo hasta el próximo append.
     const { deps, append } = makeDeps({
-      getTakeover: async () => true, // sesión: handoff activo (fuente de verdad)
+      getGateContext: async () => gateCtx({ humanTakeover: true }), // sesión: handoff activo (fuente de verdad)
       getCustomer: async () => customer({ conversation: { humanTakeover: false, receivedVia: PNID } }), // resumen viejo
     });
     const r = await sendManualMessage({ tenantId: 'arfagi', customerId: 'c', text: 'hola' }, SELLER, deps);
@@ -118,7 +142,7 @@ describe('conversation/manualMessage sendManualMessage', () => {
 
   it('7d. sin sesión (conversación vieja) → decide el resumen del customer', async () => {
     const { deps } = makeDeps({
-      getTakeover: async () => null,
+      getGateContext: async () => gateCtx({ humanTakeover: null }),
       getCustomer: async () => customer({ conversation: { humanTakeover: false, receivedVia: PNID } }),
     });
     await expect(sendManualMessage({ tenantId: 'arfagi', customerId: 'c', text: 'hola' }, SELLER, deps)).rejects.toThrow(/Tomar conversación/);
@@ -130,7 +154,7 @@ describe('conversation/manualMessage sendManualMessage', () => {
   });
 
   it('9. Meta rechaza el envío (live) → unavailable y NADA se persiste (el historial no miente)', async () => {
-    const sendText = vi.fn(async () => ({ ok: false as const, error: 'error 131047' }));
+    const sendText = vi.fn(async () => ({ ok: false as const, outcome: 'rejected' as const, providerCode: 131047 }));
     const { deps, append } = makeDeps({ getClient: async () => ({ sendText }) as never });
     await expect(sendManualMessage({ tenantId: 'arfagi', customerId: 'c', text: 'hola' }, SELLER, deps)).rejects.toThrow(/no aceptó/);
     expect(append).not.toHaveBeenCalled();
@@ -140,6 +164,115 @@ describe('conversation/manualMessage sendManualMessage', () => {
     const { deps, getClient } = makeDeps({ getCustomer: async () => customer({ conversation: { humanTakeover: true } }) });
     await sendManualMessage({ tenantId: 'arfagi', customerId: 'c', text: 'hola' }, SELLER, deps);
     expect(getClient).toHaveBeenCalledWith('arfagi', null);
+  });
+
+  it('11. LOGS: el customerId (teléfono) va ENMASCARADO en el log de éxito', async () => {
+    const { deps } = makeDeps();
+    await sendManualMessage({ tenantId: 'arfagi', customerId: '595994893000', text: 'hola' }, SELLER, deps);
+    expect(vi.mocked(logger.info)).toHaveBeenCalledWith('Mensaje manual enviado', expect.objectContaining({ customerId: '…3000' }));
+    // Jamás el teléfono completo en NINGÚN log de este camino.
+    for (const call of vi.mocked(logger.info).mock.calls) {
+      expect(JSON.stringify(call)).not.toContain('595994893000');
+    }
+  });
+});
+
+describe('SHIPPING-CHAT-3B — gate server-side del mensaje manual', () => {
+  const COSTO = 'el costo de envío para tu ubicación es ₲30.000';
+
+  it('G1. cobertura en revisión + policy required + texto con costo → failed-precondition kind shipping_quote_required; NADA se envía/persiste', async () => {
+    const { deps, sendText, append, getClient } = makeDeps({ getGateContext: async () => gateCoverage() });
+    try {
+      await sendManualMessage({ tenantId: 'arfagi', customerId: 'c', text: COSTO }, SELLER, deps);
+      expect.unreachable('debió bloquear');
+    } catch (e) {
+      expect(e).toBeInstanceOf(HttpsError);
+      expect((e as HttpsError).message).toMatch(/costo de envío/);
+      expect(((e as HttpsError).details as { kind?: string })?.kind).toBe('shipping_quote_required');
+    }
+    expect(getClient).not.toHaveBeenCalled();
+    expect(sendText).not.toHaveBeenCalled();
+    expect(append).not.toHaveBeenCalled();
+  });
+
+  it('G2. el gate aplica a TODOS los roles por igual (incl. PLATFORM_ADMIN y OWNER)', async () => {
+    for (const role of ['TENANT_OWNER', 'TENANT_MANAGER', 'PLATFORM_ADMIN']) {
+      const { deps, sendText } = makeDeps({ getGateContext: async () => gateCoverage() });
+      await expect(sendManualMessage({ tenantId: 'arfagi', customerId: 'c', text: COSTO }, { uid: 'u', role }, deps)).rejects.toThrow(/costo de envío/);
+      expect(sendText).not.toHaveBeenCalled();
+    }
+  });
+
+  it('G3. texto común sobre envío SIN importe → permitido (no sobre-bloquear)', async () => {
+    const { deps, append } = makeDeps({ getGateContext: async () => gateCoverage() });
+    const r = await sendManualMessage({ tenantId: 'arfagi', customerId: 'c', text: 'ya te confirmo el envío en un rato' }, SELLER, deps);
+    expect(r.ok).toBe(true);
+    expect(append).toHaveBeenCalled();
+  });
+
+  it('G4. MENSAJE_MAS_INFORMACION (coverageRequestInfo) pasa el gate (sin monto)', async () => {
+    const { deps, append } = makeDeps({ getGateContext: async () => gateCoverage() });
+    const r = await sendManualMessage({ tenantId: 'arfagi', customerId: 'c', text: MENSAJE_MAS_INFORMACION }, SELLER, deps);
+    expect(r.ok).toBe(true);
+    expect(append).toHaveBeenCalled();
+  });
+
+  it('G5. detección ENDURECIDA: monto en otra línea/cláusula también se bloquea', async () => {
+    const { deps, sendText } = makeDeps({ getGateContext: async () => gateCoverage() });
+    await expect(
+      sendManualMessage({ tenantId: 'arfagi', customerId: 'c', text: 'el costo de envío es:\n₲25.000' }, SELLER, deps),
+    ).rejects.toThrow(/costo de envío/);
+    expect(sendText).not.toHaveBeenCalled();
+  });
+
+  it('G6. policy INVALID → re-clasifica intención (bloquea costo, permite texto común)', async () => {
+    const invalid = () => gateCoverage({ shippingQuote: { status: 'invalid' } });
+    const bloqueado = makeDeps({ getGateContext: async () => invalid() });
+    await expect(sendManualMessage({ tenantId: 'arfagi', customerId: 'c', text: COSTO }, SELLER, bloqueado.deps)).rejects.toThrow(/costo de envío/);
+    const permitido = makeDeps({ getGateContext: async () => invalid() });
+    const r = await sendManualMessage({ tenantId: 'arfagi', customerId: 'c', text: 'hola, ¿cómo estás?' }, SELLER, permitido.deps);
+    expect(r.ok).toBe(true);
+  });
+
+  it('G7. awaiting_location también está gateado; approved con resume TERMINADO no', async () => {
+    const awaiting = makeDeps({
+      getGateContext: async () => gateCoverage({ coveragePointer: { requestId: 'covr_abc123DEF456', status: 'awaiting_location' } }),
+    });
+    await expect(sendManualMessage({ tenantId: 'arfagi', customerId: 'c', text: COSTO }, SELLER, awaiting.deps)).rejects.toThrow(/costo de envío/);
+    const done = makeDeps({
+      getGateContext: async () => gateCoverage({ coveragePointer: { requestId: 'covr_abc123DEF456', status: 'coverage_approved' }, resumeDone: true }),
+    });
+    const r = await sendManualMessage({ tenantId: 'arfagi', customerId: 'c', text: COSTO }, SELLER, done.deps);
+    expect(r.ok).toBe(true); // reanudación terminada ⇒ chat normal
+  });
+
+  it('G8. approved con resume NO terminado → gateado (el canónico sigue en juego)', async () => {
+    const { deps } = makeDeps({
+      getGateContext: async () => gateCoverage({ coveragePointer: { requestId: 'covr_abc123DEF456', status: 'coverage_approved' }, resumeDone: false }),
+    });
+    await expect(sendManualMessage({ tenantId: 'arfagi', customerId: 'c', text: COSTO }, SELLER, deps)).rejects.toThrow(/costo de envío/);
+  });
+
+  it('G9. policy OFF o Coverage apagado o sin pointer → comportamiento actual (sin gate)', async () => {
+    const casos: ManualGateContext[] = [
+      gateCoverage({ shippingQuote: { status: 'off' } }),
+      gateCoverage({ activation: { enabled: false, activationId: null } }),
+      gateCtx(), // sin pointer de cobertura
+    ];
+    for (const g of casos) {
+      const { deps, append } = makeDeps({ getGateContext: async () => g });
+      const r = await sendManualMessage({ tenantId: 'arfagi', customerId: 'c', text: COSTO }, SELLER, deps);
+      expect(r.ok).toBe(true);
+      expect(append).toHaveBeenCalled();
+    }
+  });
+
+  it('G10. el texto/monto bloqueado JAMÁS aparece en logs', async () => {
+    const { deps } = makeDeps({ getGateContext: async () => gateCoverage() });
+    await expect(sendManualMessage({ tenantId: 'arfagi', customerId: 'c', text: COSTO }, SELLER, deps)).rejects.toThrow();
+    const todo = JSON.stringify([vi.mocked(logger.info).mock.calls, vi.mocked(logger.warn).mock.calls, vi.mocked(logger.error).mock.calls]);
+    expect(todo).not.toContain('30.000');
+    expect(todo).not.toContain(COSTO);
   });
 });
 

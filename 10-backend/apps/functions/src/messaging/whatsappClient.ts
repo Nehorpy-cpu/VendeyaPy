@@ -17,16 +17,35 @@ import axios from 'axios';
 import { Timestamp } from 'firebase-admin/firestore';
 import { logger } from '../lib/logger.js';
 import { db } from '../lib/firebase.js';
+import { maskPhone } from '@vpw/shared';
 import type { MessageChannel, WhatsappSendMode } from '@vpw/shared';
 import { getChannelConfig } from './channelConfig.js';
 import { resolveTenantWhatsappCreds, resolveTenantWhatsappCredsFor, type WhatsappCredsResult } from './resolveWhatsappCreds.js';
 
-export interface SendResult {
-  ok: boolean;
-  id?: string;
-  error?: string;
-  viaMock?: boolean;
-}
+/**
+ * SHIPPING-CHAT-3B — Resultado DISCRIMINADO del envío (imposible de construir inconsistente).
+ *  - 'accepted': la Cloud API ACEPTÓ el mensaje y devolvió un wamid (NO significa entregado
+ *    al teléfono — solo aceptado por la API). 2xx SIN wamid ⇒ 'unknown'.
+ *  - 'mock': no salió a Meta (emulador / modo mock / no-conectado); id determinístico.
+ *  - 'rejected': rechazo CONFIRMADO (HTTP 4xx de Graph); `providerCode` numérico saneado o null.
+ *  - 'unknown': 5xx, timeout, reset, sin respuesta o excepción ambigua — el mensaje PUDO salir.
+ * Nada de regex sobre strings ni payload crudo de Meta en el resultado o los logs.
+ */
+export type SendResult =
+  | { ok: true; outcome: 'accepted'; id: string; viaMock: false }
+  | { ok: true; outcome: 'mock'; id: string; viaMock: true }
+  | { ok: false; outcome: 'rejected'; providerCode: number | null }
+  | { ok: false; outcome: 'unknown' };
+
+/**
+ * SHIPPING-CHAT-3B — Metadata NO sensible del transporte (jamás el token). La futura saga de
+ * cotización (3C) la usa para distinguir: live con credenciales del PROPIO tenant (único caso
+ * que podrá aprobar una cotización financiera en producción) · global fallback (live pero con
+ * credenciales ajenas al tenant ⇒ NO apto para dinero) · mock (modo/credenciales no resueltas).
+ */
+export type WhatsappTransportInfo =
+  | { transport: 'live'; credentials: 'tenant' | 'global_fallback' }
+  | { transport: 'mock'; mode: WhatsappSendMode | null; reason: string | null; tokenPresent: boolean };
 
 export interface SendContext {
   tenantId?: string;
@@ -42,9 +61,32 @@ export type LocationRequestResult =
   | { ok: false; reason: 'unsupported_channel' | 'send_error' };
 
 export interface WhatsAppClient {
+  /** SHIPPING-CHAT-3B: metadata no sensible del transporte (ver WhatsappTransportInfo). */
+  readonly transportInfo: WhatsappTransportInfo;
   sendText(to: string, text: string, ctx?: SendContext): Promise<SendResult>;
   /** COVERAGE-1B: interactive `location_request_message` (botón nativo "Enviar ubicación"). */
   sendLocationRequest(to: string, bodyText: string, ctx?: SendContext): Promise<LocationRequestResult>;
+}
+
+/**
+ * SHIPPING-CHAT-3B — Clasificación PURA del error de la Cloud API (testeable, sin regex):
+ *  - AxiosError con `response.status` 4xx ⇒ 'rejected' SIEMPRE (Graph recibió y negó);
+ *    `providerCode` = `body.error.code` solo si es entero seguro, si no null. El payload
+ *    crudo jamás se propaga.
+ *  - Cualquier otra cosa (5xx, timeout, reset, sin respuesta, excepción rara) ⇒ 'unknown'.
+ */
+export function classifyCloudSendError(e: unknown): Extract<SendResult, { ok: false }> {
+  if (axios.isAxiosError(e) && typeof e.response?.status === 'number' && e.response.status >= 400 && e.response.status < 500) {
+    const code = (e.response.data as { error?: { code?: unknown } } | undefined)?.error?.code;
+    return { ok: false, outcome: 'rejected', providerCode: typeof code === 'number' && Number.isSafeInteger(code) ? code : null };
+  }
+  return { ok: false, outcome: 'unknown' };
+}
+
+/** SHIPPING-CHAT-3B — 2xx de la Cloud API SOLO es 'accepted' con wamid string no vacío. */
+export function sendResultFromCloudResponse(id: unknown): SendResult {
+  if (typeof id === 'string' && id.length > 0) return { ok: true, outcome: 'accepted', id, viaMock: false };
+  return { ok: false, outcome: 'unknown' };
 }
 
 const GRAPH_VERSION = 'v19.0';
@@ -97,14 +139,24 @@ export interface MockResolution {
 export class MockWhatsAppClient implements WhatsAppClient {
   constructor(public readonly resolution?: MockResolution) {}
 
+  get transportInfo(): WhatsappTransportInfo {
+    return {
+      transport: 'mock',
+      mode: this.resolution?.mode ?? null,
+      reason: this.resolution?.reason ?? null,
+      tokenPresent: !!this.resolution?.tokenPresent,
+    };
+  }
+
   async sendText(to: string, text: string, ctx?: SendContext): Promise<SendResult> {
-    // Fixture SOLO-emulador (COVERAGE-1D): simular fallo confirmado ('error') o resultado
-    // ambiguo ('timeout') del proveedor — para testear los estados failed/unknown del outbox.
+    // Fixture SOLO-emulador (COVERAGE-1D / 3B): outcomes TIPADOS — rechazo confirmado
+    // ('error' ⇒ rejected code 100) o resultado ambiguo ('timeout' ⇒ unknown), para testear
+    // los estados failed/unknown del outbox sin regex sobre strings.
     if (isEmulator() && ctx?.tenantId) {
       try {
         const fx = (await db().doc(`tenants/${ctx.tenantId}/_debug/whatsappFixtures`).get()).data();
-        if (fx?.failSendText === 'error') return { ok: false, error: 'fixture: {"code":100} fallo confirmado' };
-        if (fx?.failSendText === 'timeout') return { ok: false, error: 'fixture: timeout of 10000ms exceeded' };
+        if (fx?.failSendText === 'error') return { ok: false, outcome: 'rejected', providerCode: 100 };
+        if (fx?.failSendText === 'timeout') return { ok: false, outcome: 'unknown' };
       } catch {
         /* sin fixture → camino normal */
       }
@@ -112,7 +164,7 @@ export class MockWhatsAppClient implements WhatsAppClient {
     logger.info('WhatsApp (mock): respuesta NO enviada a Meta', {
       tenantId: ctx?.tenantId,
       channel: ctx?.channel,
-      to,
+      to: maskPhone(to),
       chars: text.length,
       mode: this.resolution?.mode,
       reason: this.resolution?.reason,
@@ -136,7 +188,7 @@ export class MockWhatsAppClient implements WhatsAppClient {
     }
     // COVERAGE-1D: id determinístico por (to, texto) — el outbox de mensajería lo persiste como
     // providerMessageId y una re-ejecución con el mismo contenido produce el mismo id (testeable).
-    return { ok: true, viaMock: true, id: `mock-${simpleHash(`${to}|${text}`)}` };
+    return { ok: true, outcome: 'mock', viaMock: true, id: `mock-${simpleHash(`${to}|${text}`)}` };
   }
 
   /** Mock del location_request_message: no llama a Meta; traza inspeccionable en emulador. */
@@ -182,7 +234,13 @@ export class CloudAPIClient implements WhatsAppClient {
   constructor(
     private readonly phoneNumberId: string,
     private readonly accessToken: string,
+    /** SHIPPING-CHAT-3B: 'tenant' = credenciales propias; 'global_fallback' = env deprecated. */
+    private readonly credentials: 'tenant' | 'global_fallback' = 'tenant',
   ) {}
+
+  get transportInfo(): WhatsappTransportInfo {
+    return { transport: 'live', credentials: this.credentials };
+  }
 
   async sendText(to: string, text: string, ctx?: SendContext): Promise<SendResult> {
     try {
@@ -191,18 +249,19 @@ export class CloudAPIClient implements WhatsAppClient {
         headers: { Authorization: `Bearer ${this.accessToken}`, 'Content-Type': 'application/json' },
         timeout: 10_000,
       });
-      const id = res.data?.messages?.[0]?.id as string | undefined;
-      return { ok: true, id };
+      // 2xx SOLO es accepted con wamid string no vacío; 2xx sin id ⇒ unknown (SHIPPING-CHAT-3B).
+      return sendResultFromCloudResponse(res.data?.messages?.[0]?.id);
     } catch (e) {
-      // No exponer el token. Loguear solo el cuerpo del error de Meta (códigos: 190 token,
+      // Clasificación tipada, sin regex ni payload crudo (códigos Meta de referencia: 190 token,
       // 131047 ventana 24h, 131030 destinatario no permitido, 131056/80007 rate limit).
-      const error = axios.isAxiosError(e)
-        ? e.response?.data
-          ? JSON.stringify(e.response.data)
-          : e.message
-        : String(e);
-      logger.error('WhatsApp Cloud API: error al enviar', e, { tenantId: ctx?.tenantId, to });
-      return { ok: false, error };
+      const result = classifyCloudSendError(e);
+      logger.error('WhatsApp Cloud API: error al enviar', e, {
+        tenantId: ctx?.tenantId,
+        to: maskPhone(to),
+        outcome: result.outcome,
+        providerCode: result.outcome === 'rejected' ? result.providerCode : null,
+      });
+      return result;
     }
   }
 
@@ -224,7 +283,10 @@ export class CloudAPIClient implements WhatsAppClient {
   }
 }
 
-// ---- Caché de clientes Cloud por tenant: TTL corto y acotado a tokenExpiresAt ----
+// ---- Caché de clientes Cloud: TTL corto y acotado a tokenExpiresAt ----
+// SHIPPING-CHAT-3B: keyeada por tenant + phone_number_id EFECTIVO (bug preexistente: con la
+// clave solo-tenant, en multi-número dos envíos por números distintos dentro del TTL podían
+// reusar el cliente del OTRO número — el mensaje salía por el número equivocado).
 interface CacheEntry {
   client: CloudAPIClient;
   expiresAtMs: number;
@@ -239,11 +301,12 @@ export function clearWhatsappClientCache(): void {
 
 function cloudClientFor(tenantId: string, creds: Extract<WhatsappCredsResult, { ok: true }>): CloudAPIClient {
   const now = Date.now();
-  const hit = clientCache.get(tenantId);
+  const key = `${tenantId}:${creds.phoneNumberId}`;
+  const hit = clientCache.get(key);
   if (hit && hit.expiresAtMs > now) return hit.client;
-  const client = new CloudAPIClient(creds.phoneNumberId, creds.accessToken);
+  const client = new CloudAPIClient(creds.phoneNumberId, creds.accessToken, 'tenant');
   const expiresAtMs = Math.min(now + CACHE_TTL_MS, creds.tokenExpiresAtMs ?? Number.POSITIVE_INFINITY);
-  clientCache.set(tenantId, { client, expiresAtMs });
+  clientCache.set(key, { client, expiresAtMs });
   return client;
 }
 
@@ -304,13 +367,30 @@ export async function getWhatsAppClient(
   if (creds.ok && tenantId) return cloudClientFor(tenantId, creds);
 
   // Fallback global (DEPRECATED): solo si está habilitado explícitamente y hay env globales.
+  // SHIPPING-CHAT-3B: marcado 'global_fallback' en transportInfo — es live pero con credenciales
+  // AJENAS al tenant: la futura saga de cotización (3C) lo tratará como channel_unavailable.
   if (globalFallbackAllowed()) {
     const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
     const accessToken = process.env.WHATSAPP_ACCESS_TOKEN;
     if (phoneNumberId && accessToken) {
       logger.warn('WhatsApp: usando credenciales GLOBALES (ALLOW_GLOBAL_WHATSAPP_FALLBACK, deprecated)', { tenantId });
-      return new CloudAPIClient(phoneNumberId, accessToken);
+      return new CloudAPIClient(phoneNumberId, accessToken, 'global_fallback');
     }
   }
   return new MockWhatsAppClient({ mode, reason: creds.ok ? 'no_tenant' : creds.reason });
 }
+
+/*
+ * ============================== REGLAS NORMATIVAS PARA SHIPPING-CHAT-3C ==============================
+ * (diseño 3A-HARDEN aprobado — registradas acá porque la saga consumirá este módulo):
+ *  1. La recuperación de un outbox de cotización ya 'sent' se ejecuta ANTES de resolver el
+ *     transporte (no re-resolver credenciales para un mensaje que ya salió).
+ *  2. HTTP aceptado SIN wamid = 'unknown' (ya implementado en sendResultFromCloudResponse).
+ *  3. En producción, la cotización financiera solo acepta transportInfo
+ *     {transport:'live', credentials:'tenant'}; 'global_fallback' y 'mock' ⇒ channel_unavailable
+ *     (jamás aprueban). En emulador se permite mock ÚNICAMENTE con una resolución que habría
+ *     sido live válida (mode 'live' + tokenPresent).
+ *  4. TX-A creará el outbox de cotización en 'prepared', NUNCA en 'sending' (el claim
+ *     prepared→sending ocurre inmediatamente antes de Meta).
+ * =====================================================================================================
+ */

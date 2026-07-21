@@ -1,5 +1,12 @@
 import { describe, it, expect } from 'vitest';
-import { assertCoverageActor, resolveTenant, validarInput, MENSAJE_MAS_INFORMACION } from './coverageCallables.js';
+import { HttpsError } from 'firebase-functions/v2/https';
+import {
+  assertCoverageActor,
+  resolveTenant,
+  validarInput,
+  MENSAJE_MAS_INFORMACION,
+  assertShippingPolicyPermitsApprove,
+} from './coverageCallables.js';
 
 /**
  * COVERAGE-1C: helpers PUROS de autorización/validación de las callables de revisión.
@@ -57,5 +64,31 @@ describe('coverage MENSAJE_MAS_INFORMACION — determinístico y seguro', () => 
   it('pide ciudad/barrio/calle/referencia sin prometer nada', () => {
     expect(MENSAJE_MAS_INFORMACION).toMatch(/ciudad, barrio, calle y una referencia/);
     expect(MENSAJE_MAS_INFORMACION).not.toMatch(/llegamos|cobertura confirmada|te paso/i);
+  });
+});
+
+describe('SHIPPING-CHAT-3B — assertShippingPolicyPermitsApprove (gate del approve VIEJO)', () => {
+  it('policy off ⇒ comportamiento actual (no lanza)', () => {
+    expect(() => assertShippingPolicyPermitsApprove({ status: 'off' })).not.toThrow();
+  });
+  it('policy required ⇒ rechaza con details.kind shipping_quote_required (sin datos sensibles)', () => {
+    try {
+      assertShippingPolicyPermitsApprove({ status: 'required', maxChargeGs: 5_000_000 });
+      expect.unreachable('debió lanzar');
+    } catch (e) {
+      expect(e).toBeInstanceOf(HttpsError);
+      expect((e as HttpsError).code).toBe('failed-precondition');
+      expect(((e as HttpsError).details as { kind?: string })?.kind).toBe('shipping_quote_required');
+      expect((e as HttpsError).message).not.toMatch(/5000000|5\.000\.000/); // sin config en el mensaje
+    }
+  });
+  it('policy invalid ⇒ rechaza fail-closed con kind shipping_quote_config_invalid (jamás degrada a off)', () => {
+    try {
+      assertShippingPolicyPermitsApprove({ status: 'invalid' });
+      expect.unreachable('debió lanzar');
+    } catch (e) {
+      expect(e).toBeInstanceOf(HttpsError);
+      expect(((e as HttpsError).details as { kind?: string })?.kind).toBe('shipping_quote_config_invalid');
+    }
   });
 });

@@ -15,6 +15,19 @@
  * outbox propio (`prepared→sending→sent|failed|unknown`): un ACK perdido queda `unknown` y JAMÁS
  * se reenvía solo. Ante cualquier duda se degrada a estado recuperable: nunca segunda orden,
  * nunca pago automático.
+ *
+ * ======================= REGLAS NORMATIVAS PARA SHIPPING-CHAT-3C (diseño 3A-HARDEN) =======================
+ *  1. NO cancelar automáticamente jobs `send_unknown`/`send_failed`/`held_by_seller` para iniciar
+ *     otro checkout: un pipeline anterior debe quedar TERMINAL (`done`/`cancelled`) o reconciliado
+ *     ANTES de crear un coverageRequest nuevo (la tx que crea el request nuevo lo verifica/cancela).
+ *  2. La saga de cotización creará su outbox en 'prepared' (TX-A), NUNCA en 'sending'; el claim
+ *     prepared→sending ocurre inmediatamente antes de Meta. Un crash post-TX-A queda 'prepared'
+ *     recuperable — jamás se clasifica unknown sin haber claimeado.
+ *  3. TX-C (aprobación) conserva el pointer ante fallos TRANSITORIOS (la re-invocación recupera
+ *     sin reenviar); solo un mismatch DETERMINÍSTICO post-send commitea `sent_not_applied`.
+ *  4. El OUTBOX es la única fuente de verdad del estado del envío; el pointer del request no
+ *     duplica estado/lease/attempts.
+ * ==========================================================================================================
  */
 import { Timestamp } from 'firebase-admin/firestore';
 import type {
@@ -404,10 +417,11 @@ export async function enviarPorOutbox(input: {
       }
       return 'sent';
     }
-    // Falla devuelta por el cliente. Con instrucciones bancarias en juego, SOLO se clasifica
-    // `failed` (reintenta) ante un RECHAZO CONFIRMADO de Meta (códigos de error definidos);
-    // cualquier ambigüedad de red (timeout, reset, 5xx sin cuerpo) queda `unknown` (review).
-    const confirmada = /"code":\s*\d+/.test(r.error ?? '');
+    // Falla devuelta por el cliente (SHIPPING-CHAT-3B: SendResult DISCRIMINADO, sin regex).
+    // Con instrucciones bancarias en juego, SOLO 'rejected' (rechazo CONFIRMADO de Meta,
+    // HTTP 4xx tipado) reintenta como `failed`; cualquier ambigüedad ('unknown': 5xx,
+    // timeout, reset, 2xx sin wamid) queda `unknown` y JAMÁS se reenvía sola.
+    const confirmada = r.outcome === 'rejected';
     await ref.update({ status: confirmada ? 'failed' : 'unknown', leaseUntil: null, updatedAt: Timestamp.now() });
     return confirmada ? 'failed' : 'unknown';
   } catch (e) {

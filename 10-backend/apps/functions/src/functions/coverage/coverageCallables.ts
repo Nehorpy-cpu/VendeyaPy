@@ -21,8 +21,8 @@
  */
 import { onCall, HttpsError } from 'firebase-functions/v2/https';
 import { Timestamp } from 'firebase-admin/firestore';
-import type { CoverageRequest, CoverageResumeJob, CoverageSessionPointer } from '@vpw/shared';
-import { coverageActivationOf, type CoverageActivation } from '@vpw/shared';
+import type { CoverageRequest, CoverageResumeJob, CoverageSessionPointer, CoverageFlowState, ShippingQuotePolicy } from '@vpw/shared';
+import { coverageActivationOf, shippingQuotePolicyOf, type CoverageActivation } from '@vpw/shared';
 import { db, paths } from '../../lib/firebase.js';
 import { logger } from '../../lib/logger.js';
 import { recordAudit } from '../../audit/audit.js';
@@ -113,6 +113,30 @@ function assertFlujoVigente(act: CoverageActivation, req: Pick<CoverageRequest, 
   if ((req.activationId ?? null) !== act.activationId) throw new HttpsError('failed-precondition', MENSAJE_ACTIVACION_ANTERIOR);
 }
 
+export const MENSAJE_QUOTE_REQUERIDO =
+  'Esta aprobación requiere informar el costo de envío desde el chat (cotización obligatoria).';
+export const MENSAJE_QUOTE_CONFIG_INVALIDA =
+  'La configuración de cotización de envío del negocio no es válida: avisá al administrador antes de aprobar.';
+
+/**
+ * SHIPPING-CHAT-3B — Gate del APPROVE VIEJO según la política de cotización (fail-closed).
+ * Se evalúa sobre el MISMO snapshot de config que el flag (dentro de la transacción — sin
+ * TOCTOU ni doble fuente). PURO → testeable:
+ *  - off      ⇒ comportamiento actual (approve permitido).
+ *  - required ⇒ el approve viejo se RECHAZA SIEMPRE (aunque exista un quote preexistente:
+ *               la única vía de aprobación será coverageQuoteAndApprove, 3C).
+ *  - invalid  ⇒ rechazo fail-closed (lockout hasta corregir la config; jamás degrada a off).
+ * `coverageReject` NO pasa por acá (rechazar sigue permitido).
+ */
+export function assertShippingPolicyPermitsApprove(policy: ShippingQuotePolicy): void {
+  if (policy.status === 'required') {
+    throw new HttpsError('failed-precondition', MENSAJE_QUOTE_REQUERIDO, { kind: 'shipping_quote_required' });
+  }
+  if (policy.status === 'invalid') {
+    throw new HttpsError('failed-precondition', MENSAJE_QUOTE_CONFIG_INVALIDA, { kind: 'shipping_quote_config_invalid' });
+  }
+}
+
 /**
  * Núcleo transaccional de la decisión. Devuelve el request YA decidido.
  * Todos los caminos de error usan mensajes seguros (jamás filtran datos de otro tenant:
@@ -153,6 +177,11 @@ async function decidirCobertura(
       // El cliente actualizó su ubicación mientras se revisaba: NUNCA decidir sobre la vieja.
       throw new HttpsError('failed-precondition', 'El cliente actualizó su ubicación: revisá la versión más reciente antes de decidir.');
     }
+    // SHIPPING-CHAT-3B: con política required/invalid, el approve VIEJO se rechaza fail-closed
+    // (mismo cfgSnap que el flag — un solo snapshot, sin TOCTOU). Va DESPUÉS del bloque de
+    // expiración (review 3B): un request vencido debe commitear su transición a expirado aunque
+    // la política bloquee el approve. Rechazar sigue permitido.
+    if (action === 'approved') assertShippingPolicyPermitsApprove(shippingQuotePolicyOf((cfgSnap.data() as { coverage?: unknown } | undefined)?.coverage));
     const decision = {
       action,
       byUid: actor.uid,
@@ -236,7 +265,15 @@ export const coverageFlowState = onCall<{ tenantId?: string }>({ region: REGION 
     tenantId = resolveTenant(auth, req.data?.tenantId);
   }
   const snap = await configRef(tenantId).get();
-  return coverageActivationOf((snap.data() as { coverage?: unknown } | undefined)?.coverage);
+  const rawCoverage = (snap.data() as { coverage?: unknown } | undefined)?.coverage;
+  // SHIPPING-CHAT-3B: respuesta SANEADA {enabled, activationId, shippingQuote} — jamás el doc
+  // completo ni cuentas bancarias. El panel normaliza la ausencia del campo (deploy skew) con
+  // shippingQuoteOfFlowState (⇒ off).
+  const estado: CoverageFlowState = {
+    ...coverageActivationOf(rawCoverage),
+    shippingQuote: shippingQuotePolicyOf(rawCoverage),
+  };
+  return estado;
 });
 
 export const coverageApprove = onCall<DecisionInput>({ region: REGION }, async (req) => {
