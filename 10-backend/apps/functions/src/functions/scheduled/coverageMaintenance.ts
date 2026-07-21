@@ -16,7 +16,7 @@
  */
 import { onSchedule } from 'firebase-functions/v2/scheduler';
 import { Timestamp } from 'firebase-admin/firestore';
-import type { CoverageRequest, CoverageResumeJob, Session } from '@vpw/shared';
+import type { CoverageOutboxMessage, CoverageRequest, CoverageResumeJob, Session } from '@vpw/shared';
 import { coverageActivationOf } from '@vpw/shared';
 import { db, paths } from '../../lib/firebase.js';
 import { logger } from '../../lib/logger.js';
@@ -27,6 +27,12 @@ import { getCheckoutConfig } from '../../orders/checkoutConfig.js';
 
 const MAX_ATTEMPTS = 5;
 const LOTE = 50; // tope por corrida y por tenant: costo acotado; lo que quede sale mañana
+/**
+ * SHIPPING-CHAT-3C-HARDEN-1: umbral de "intento de cotización abandonado". 1 h — un intento
+ * interactivo se completa en minutos; pasada la hora es señal humana (diseño 3A: prepared/sent
+ * atascados y unknown sin reconciliar requieren a una persona; JAMÁS re-drive automático).
+ */
+const QUOTE_ATASCADO_MS = 60 * 60 * 1000;
 
 export async function runCoverageMaintenance(): Promise<void> {
   const now = Timestamp.now();
@@ -189,6 +195,49 @@ export async function runCoverageMaintenance(): Promise<void> {
         const job = d.data() as CoverageResumeJob;
         if (now.toMillis() - (job.updatedAt?.toMillis?.() ?? 0) < 10 * 60 * 1000) continue;
         await processCoverageResumeJob(tenantId, d.id);
+      }
+
+      // 4) SHIPPING-CHAT-3C-HARDEN-1: intentos de COTIZACIÓN abandonados. Un outbox quote que
+      //    sigue `prepared` (nunca salió), `sent` (salió y nadie aplicó la aprobación) o
+      //    `unknown` (sin reconciliar) más allá del umbral ⇒ SOLO una campana idempotente al
+      //    equipo. CERO re-drive automático, CERO Meta, CERO aprobación/orden/PAID: un humano
+      //    decide desde el panel (completar, recotizar o resolver el unknown). La señal aplica
+      //    únicamente al intento VIGENTE (pointer del request) de la activación vigente.
+      const atascados = await db()
+        .collection(`tenants/${tenantId}/coverageMessageOutbox`)
+        .where('action', '==', 'quote')
+        .where('status', 'in', ['prepared', 'sent', 'unknown'])
+        .where('updatedAt', '<=', Timestamp.fromMillis(now.toMillis() - QUOTE_ATASCADO_MS))
+        .limit(LOTE)
+        .get();
+      for (const d of atascados.docs) {
+        const ob = d.data() as CoverageOutboxMessage;
+        if (ob.action !== 'quote') continue; // narrow de la unión (la query ya filtra)
+        if ((ob.activationId ?? null) !== cfg.activationId) continue; // activación anterior: inerte
+        const req = (await db().doc(`tenants/${tenantId}/coverageRequests/${ob.coverageRequestId}`).get()).data() as CoverageRequest | undefined;
+        if (!req || req.shippingQuotePending?.quoteAttemptId !== ob.quote.quoteAttemptId) continue; // reemplazado/cerrado: sin ruido
+        const notifId = `covstuck-${ob.coverageRequestId}-${ob.quote.quoteAttemptId}`;
+        try {
+          await db().doc(`${paths.notifications(tenantId)}/${notifId}`).create({
+            id: notifId,
+            tenantId,
+            category: 'handoff',
+            type: 'handoff_coverage_stale',
+            title: '📦 Una cotización de envío quedó a medio camino',
+            body: `Un intento de cotización del cliente …${ob.customerId.slice(-4)} lleva demasiado tiempo sin completarse. Revisalo desde Conversaciones: puede requerir completar el envío, recotizar o resolver un envío sin confirmar.`,
+            dedupeKey: notifId,
+            customerId: ob.customerId,
+            ...(req.sellerUid ? { targetUid: req.sellerUid } : {}),
+            read: false,
+            readAt: null,
+            createdAt: Timestamp.now(),
+          });
+        } catch (e) {
+          const code = (e as { code?: number | string }).code;
+          if (code !== 6 && code !== 'already-exists') {
+            logger.warn('Cobertura: no se pudo avisar el intento de cotización atascado', { tenantId, requestId: ob.coverageRequestId });
+          }
+        }
       }
     } catch (e) {
       logger.error('Cobertura: mantenimiento falló para un tenant', e, { tenantId });

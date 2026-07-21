@@ -97,6 +97,14 @@ const requestRef = (tenantId: string, requestId: string) => db().doc(`tenants/${
 const jobRef = (tenantId: string, requestId: string) => db().doc(`tenants/${tenantId}/coverageResumeJobs/${requestId}`);
 const configRef = (tenantId: string) => db().doc(`tenants/${tenantId}/config/checkout`);
 
+/**
+ * SHIPPING-CHAT-3C — Id determinístico del outbox de cotización (`{requestId}_quote_{qat}`; jamás
+ * colisiona con los legacy `{requestId}_{action}[_{atm}]`). Vive ACÁ (y coverageQuote lo
+ * re-exporta) porque la decisión humana también necesita leer el outbox del intento — la saga ya
+ * importa de este módulo y la dirección inversa crearía un ciclo.
+ */
+export const outboxIdDeQuote = (requestId: string, quoteAttemptId: string) => `${requestId}_quote_${quoteAttemptId}`;
+
 export const MENSAJE_FLUJO_DESHABILITADO =
   'El flujo de cobertura está deshabilitado: no se pueden tomar acciones sobre esta solicitud.';
 export const MENSAJE_ACTIVACION_ANTERIOR =
@@ -161,6 +169,13 @@ async function decidirCobertura(
     if (actor.role === 'SELLER' && req.sellerUid !== actor.uid) {
       throw new HttpsError('permission-denied', 'Esta revisión está asignada a otra persona del equipo.');
     }
+    // SHIPPING-CHAT-3C-HARDEN-1 (C/review): el outbox del intento de cotización se lee ACÁ
+    // (todas las lecturas antes de cualquier escritura de la tx) para el gate de más abajo.
+    const pendingQuote = req.shippingQuotePending ?? null;
+    const obQuoteSnap = pendingQuote
+      ? await tx.get(db().doc(`tenants/${tenantId}/coverageMessageOutbox/${outboxIdDeQuote(input.requestId, pendingQuote.quoteAttemptId)}`))
+      : null;
+    const obQuoteStatus = obQuoteSnap?.exists ? ((obQuoteSnap.data() as { status?: string }).status ?? null) : null;
     if (req.status !== 'pending_coverage_review') {
       const por = req.decision?.byName ? ` por ${req.decision.byName}` : '';
       throw new HttpsError('failed-precondition', req.decision ? `Esta solicitud ya fue decidida${por}.` : 'Esta solicitud no está pendiente de revisión.');
@@ -172,6 +187,22 @@ async function decidirCobertura(
       tx.update(snap.ref, { status: 'coverage_expired', updatedAt: now, coordinatesPurgeAt: purgeAtFrom(now, req) });
       tx.set(db().doc(paths.session(tenantId, req.customerId)), { context: { coverage: null }, updatedAt: now }, { merge: true });
       return { kind: 'expirado' as const };
+    }
+    // SHIPPING-CHAT-3C-HARDEN-1 (C + review): con un intento de cotización EN CURSO, la decisión
+    // vieja no procede — decidir por conveniencia escondería un mensaje financiero que pudo salir
+    // al cliente. Reglas:
+    //  - REJECT: bloqueado con CUALQUIER pointer vivo (el intento se resuelve por la saga —
+    //    reemplazo, reconciliación manual o cierre — y recién entonces se puede rechazar).
+    //  - APPROVE viejo: la política required/invalid ya lo bloquea; con política OFF solo se
+    //    bloquea si el intento está en fase IRREVERSIBLE (sent/sending/unknown — el cliente pudo
+    //    recibir un costo): un 'prepared' que jamás salió no impide aprobar (y el retry de la
+    //    saga lo cierra terminal sobre el request decidido).
+    // Sin escrituras: nada se limpia ni se cancela automáticamente.
+    if (pendingQuote) {
+      const irreversible = obQuoteStatus === 'sent' || obQuoteStatus === 'sending' || obQuoteStatus === 'unknown';
+      if (action === 'rejected' || irreversible) {
+        throw new HttpsError('failed-precondition', 'Hay una cotización de envío en curso para esta solicitud: resolvela antes de decidir.', { kind: 'quote_en_curso' });
+      }
     }
     if ((req.locationFingerprint ?? '') !== input.expectedFingerprint) {
       // El cliente actualizó su ubicación mientras se revisaba: NUNCA decidir sobre la vieja.

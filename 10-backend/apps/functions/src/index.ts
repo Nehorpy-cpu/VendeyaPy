@@ -181,7 +181,7 @@ export { askInternalGrowthAssistant } from './functions/ai/internalAssistantCall
 // Decisión transaccional con outbox para la reanudación (1D). Owner/manager, o SELLER asignado.
 export { coverageApprove, coverageReject, coverageRequestInfo, coverageFlowState } from './functions/coverage/coverageCallables.js';
 // SHIPPING-CHAT-3C: saga de cotización de envío (aprobación SOLO tras el ACK de Meta) + resolución manual.
-export { coverageQuoteAndApprove, coverageQuoteResolveUnknown } from './functions/coverage/coverageQuote.js';
+export { coverageQuoteAndApprove, coverageQuoteResolveUnknown, coverageQuoteAttemptState } from './functions/coverage/coverageQuote.js';
 
 // Reanudación del checkout tras la decisión (COVERAGE-1D): consumidor idempotente del outbox
 // (orden única + instrucciones por el mismo número) + mantenimiento diario (expiración + purga

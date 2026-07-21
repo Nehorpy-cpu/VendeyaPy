@@ -36,6 +36,7 @@ import type {
   Address,
   CoverageCartItem,
   CoverageOutboxMessage,
+  CoverageOutboxLegacyMessage,
   CoverageRequest,
   CoverageResumeJob,
   CoverageResumeStatus,
@@ -311,10 +312,11 @@ async function pausarJobPorApagado(tenantId: string, jobId: string, requestId: s
 export async function enviarPorOutbox(input: {
   tenantId: string;
   coverageRequestId: string;
-  action: CoverageOutboxMessage['action'];
+  /** HARDEN-1 (unión discriminada): este writer es SOLO legacy — 'quote' tiene su propia saga. */
+  action: CoverageOutboxLegacyMessage['action'];
   checkoutAttemptId: string | null;
   customerId: string;
-  channel: CoverageOutboxMessage['channel'];
+  channel: CoverageOutboxLegacyMessage['channel'];
   receivedVia: string | null;
   /**
    * KILL-SWITCH-1: activación bajo la que se genera el mensaje — se RE-VALIDA dentro del claim
@@ -353,7 +355,7 @@ export async function enviarPorOutbox(input: {
       tx.update(ref, { status: 'sending', leaseUntil: Timestamp.fromMillis(now.toMillis() + LEASE_MS), attempts: msg.attempts + 1, updatedAt: now });
       return 'go' as const;
     }
-    const nuevo: CoverageOutboxMessage = {
+    const nuevo: CoverageOutboxLegacyMessage = {
       id,
       tenantId,
       coverageRequestId: input.coverageRequestId,
@@ -470,6 +472,13 @@ export function orderCartInputFromSnapshot(
  * SHIPPING-CHAT-3C — Guard mecánico: un job de quote inconsistente (snapshot corrupto, monto
  * inválido, o aprobación sin quote bajo política required) se CANCELA con campana — jamás una
  * orden ni instrucciones bancarias con dinero inválido. Auditado, sin PII.
+ *
+ * HARDEN-1 (H): TODAS las mutaciones críticas van en UNA transacción — job → cancelled,
+ * `request.resume` → cancelled, la marca anti-doble-checkout SOLO si todavía pertenece a ESTE
+ * request (jamás se pisa la marca de una reanudación más nueva) y la campana idempotente
+ * (id determinístico + guard de existencia). Un crash a mitad no deja estados parciales y un
+ * reintento converge sin duplicar la campana. El audit (best-effort por diseño) sale post-commit
+ * y solo cuando la transición realmente ocurrió.
  */
 async function cancelarJobPorQuoteInconsistente(
   tenantId: string,
@@ -479,9 +488,42 @@ async function cancelarJobPorQuoteInconsistente(
   motivo: string,
 ): Promise<void> {
   const now = Timestamp.now();
-  await db().doc(paths.session(tenantId, customerId)).set({ context: { coverageResumeInProgress: null }, updatedAt: now }, { merge: true }).catch(() => {});
-  await setJob(tenantId, jobId, { status: 'cancelled' });
-  await setResume(tenantId, requestId, 'cancelled', null);
+  const notifId = `covquote-${customerId}-${requestId}`;
+  const notifRef = db().doc(`${paths.notifications(tenantId)}/${notifId}`);
+  const transiciono = await db().runTransaction(async (tx) => {
+    // Admin SDK: TODAS las lecturas antes de cualquier escritura.
+    const jSnap = await tx.get(jobRef(tenantId, jobId));
+    const job = jSnap.exists ? (jSnap.data() as CoverageResumeJob) : null;
+    const rSnap = await tx.get(reqRef(tenantId, requestId));
+    const sesRef = db().doc(paths.session(tenantId, customerId));
+    const ses = (await tx.get(sesRef)).data() as Session | undefined;
+    const notifSnap = await tx.get(notifRef);
+    // Solo se cancela NUESTRO claim en vuelo ('processing'): un estado terminal de otro worker
+    // jamás se pisa (idempotencia del reintento — la campana de aquella corrida ya existe).
+    if (job?.status !== 'processing') return false;
+    tx.update(jSnap.ref, { status: 'cancelled', leaseUntil: null, updatedAt: now });
+    if (rSnap.exists) tx.update(rSnap.ref, { resume: { status: 'cancelled', orderId: null }, updatedAt: now });
+    if (ses?.context?.coverageResumeInProgress === requestId) {
+      tx.update(sesRef, { 'context.coverageResumeInProgress': null, updatedAt: now });
+    }
+    if (!notifSnap.exists) {
+      tx.create(notifRef, {
+        id: notifId,
+        tenantId,
+        category: 'handoff',
+        type: 'handoff_coverage_stale',
+        title: '📦 Una cotización de envío necesita atención manual',
+        body: `La reanudación con cotización del cliente …${customerId.slice(-4)} se canceló por un control de consistencia. Revisá la conversación desde Conversaciones y atendé el pedido a mano.`,
+        dedupeKey: notifId,
+        customerId,
+        read: false,
+        readAt: null,
+        createdAt: now,
+      });
+    }
+    return true;
+  });
+  if (!transiciono) return;
   logger.warn('Cobertura: job de quote cancelado por inconsistencia (guard mecánico)', { tenantId, jobId, motivo });
   await recordAudit({
     tenantId,
@@ -492,28 +534,6 @@ async function cancelarJobPorQuoteInconsistente(
     targetId: requestId,
     summary: `Reanudación con cotización cancelada (${motivo}) para el cliente ${maskPhone(customerId)}`,
   }).catch(() => {});
-  try {
-    await db()
-      .collection(paths.notifications(tenantId))
-      .doc(`covquote-${customerId}-${requestId}`)
-      .create({
-        id: `covquote-${customerId}-${requestId}`,
-        tenantId,
-        category: 'handoff',
-        type: 'handoff_coverage_stale',
-        title: '📦 Una cotización de envío necesita atención manual',
-        body: `La reanudación con cotización del cliente …${customerId.slice(-4)} se canceló por un control de consistencia. Revisá la conversación desde Conversaciones y atendé el pedido a mano.`,
-        dedupeKey: `covquote-${customerId}-${requestId}`,
-        customerId,
-        read: false,
-        readAt: null,
-        createdAt: now,
-      });
-  } catch (e) {
-    if ((e as { code?: number | string }).code !== 6 && (e as { code?: string }).code !== 'already-exists') {
-      logger.warn('Cobertura: no se pudo notificar la cancelación del job de quote', { tenantId, requestId });
-    }
-  }
 }
 
 /** Procesa un job del outbox de reanudación. Idempotente y re-ejecutable. */

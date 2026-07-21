@@ -68,10 +68,10 @@ export interface CoverageShippingQuote {
 
 /**
  * SHIPPING-CHAT-3B (diseño 3A-HARDEN) — Pointer del INTENTO de cotización en curso.
- * TIPO PREPARATORIO: el writer llega recién en SHIPPING-CHAT-3C (la saga). Sin estado, lease
- * ni attempts A PROPÓSITO: la ÚNICA fuente de verdad del envío es el outbox — este pointer
- * solo identifica el intento y congela el actor original (una recuperación por otro
- * OWNER/MANAGER completa la saga pero jamás reemplaza a `quotedBy*`).
+ * Lo escribe la saga de SHIPPING-CHAT-3C (`coverageQuote.ts`). Sin estado, lease ni attempts
+ * A PROPÓSITO: la ÚNICA fuente de verdad del envío es el outbox — este pointer solo identifica
+ * el intento y congela el actor original (una recuperación por otro OWNER/MANAGER completa la
+ * saga pero jamás reemplaza a `quotedBy*`).
  */
 export interface ShippingQuotePending {
   /** Nonce del intento: `qat_[0-9A-Za-z]{12}` (ID_PREFIX nuevo en 3C; jamás reusa checkoutAttemptId). */
@@ -142,15 +142,15 @@ export interface CoverageResumeJob {
  * el mensaje queda `prepared` ANTES de llamar a Meta; `sent` guarda el wamid del proveedor;
  * `unknown` (timeout/ACK perdido) JAMÁS se reenvía automáticamente. Solo backend (rules deny).
  * No contiene secretos: el texto es exactamente lo que el cliente recibe.
+ *
+ * SHIPPING-CHAT-3C-HARDEN-1: unión DISCRIMINADA por `action` — un mensaje de cotización exige
+ * sus campos `quote` en compile-time; una acción legacy no puede llevarlos por accidente.
+ * Compat de lectura: los docs legacy anteriores no traen los campos nuevos (opcionales/ausentes).
  */
-export interface CoverageOutboxMessage {
+interface CoverageOutboxMessageBase {
   id: string;
   tenantId: string;
   coverageRequestId: string;
-  /** SHIPPING-CHAT-3C: `quote` = mensaje canónico del costo de envío (saga TX-A→send→TX-C). */
-  action: 'approved' | 'rejected' | 'expired' | 'empty_cart' | 'quote';
-  /** Para `quote` es SIEMPRE null (el quoteAttemptId viaja en `quote.quoteAttemptId`). */
-  checkoutAttemptId: string | null;
   customerId: string;
   channel: MessageChannel;
   receivedVia: string | null;
@@ -160,34 +160,60 @@ export interface CoverageOutboxMessage {
   /**
    * SHIPPING-CHAT-3C: `sent_not_applied` = Meta aceptó el mensaje pero un mismatch determinístico
    * post-envío impidió aplicar la aprobación (terminal auditable; jamás se reenvía).
-   * Compat de lectura: docs anteriores no traen los campos nuevos (todos opcionales).
    */
   status: 'prepared' | 'sending' | 'sent' | 'failed' | 'unknown' | 'sent_not_applied';
   providerMessageId: string | null;
   attempts: number;
   leaseUntil: Timestamp | null;
-  /** SHIPPING-CHAT-3C — SOLO para action 'quote': datos del intento (actor ORIGINAL congelado). */
-  quote?: {
-    quoteAttemptId: string;
-    chargeGs: number;
-    quotedByUid: string;
-    quotedByName: string;
-    quotedByRole: string;
-    expectedLocationFingerprint: string;
-    expectedCartFingerprint: string;
-  } | null;
-  /** SHIPPING-CHAT-3C — resolución manual de un `unknown` (quién reconcilió; jamás pisa quotedBy). */
-  reconciled?: {
-    byUid: string;
-    byName: string;
-    byRole: string;
-    at: Timestamp;
-    note: string;
-    resolution: 'delivered' | 'not_delivered';
-  } | null;
   createdAt: Timestamp;
   updatedAt: Timestamp;
 }
+
+/** SHIPPING-CHAT-3C — datos del intento de cotización (actor ORIGINAL congelado). */
+export interface CoverageOutboxQuoteInfo {
+  quoteAttemptId: string;
+  chargeGs: number;
+  quotedByUid: string;
+  quotedByName: string;
+  quotedByRole: string;
+  expectedLocationFingerprint: string;
+  expectedCartFingerprint: string;
+}
+
+/** SHIPPING-CHAT-3C — resolución manual de un `unknown` (quién reconcilió; jamás pisa quotedBy). */
+export interface CoverageOutboxReconciled {
+  byUid: string;
+  byName: string;
+  byRole: string;
+  at: Timestamp;
+  note: string;
+  resolution: 'delivered' | 'not_delivered';
+}
+
+/** Mensajes legacy de la reanudación (1D): jamás llevan los campos de la saga de cotización. */
+export interface CoverageOutboxLegacyMessage extends CoverageOutboxMessageBase {
+  action: 'approved' | 'rejected' | 'expired' | 'empty_cart';
+  checkoutAttemptId: string | null;
+  quote?: never;
+  reconciled?: never;
+}
+
+/** Mensaje canónico de cotización (saga TX-A→send→TX-C, `coverageQuote.ts`). */
+export interface CoverageOutboxQuoteMessage extends CoverageOutboxMessageBase {
+  action: 'quote';
+  /** SIEMPRE null en quote (el nonce del intento viaja en `quote.quoteAttemptId`). */
+  checkoutAttemptId: null;
+  quote: CoverageOutboxQuoteInfo;
+  reconciled: CoverageOutboxReconciled | null;
+}
+
+export type CoverageOutboxMessage = CoverageOutboxLegacyMessage | CoverageOutboxQuoteMessage;
+
+/**
+ * SHIPPING-CHAT-3C-HARDEN-1 — Fase DERIVADA del intento de cotización para el panel (respuesta de
+ * `coverageQuoteAttemptState`). Jamás se persiste: el outbox es la única fuente de verdad.
+ */
+export type ShippingQuoteAttemptPhase = 'preparing' | 'in_progress' | 'sent_pending_approval' | 'failed' | 'unknown';
 
 /** Estados del ciclo de reanudación (job del outbox y espejo en el request). */
 export type CoverageResumeStatus =
@@ -301,7 +327,7 @@ export interface CoverageConfig {
 
 /**
  * SHIPPING-CHAT (ADR-0011) — Contrato compartido de entrada de la callable `coverageQuoteAndApprove`
- * (la callable se implementa en SHIPPING-CHAT-3; acá solo el tipo). El backend resuelve el tenant y
+ * (implementada en `coverageQuote.ts`, SHIPPING-CHAT-3C). El backend resuelve el tenant y
  * el actor desde los claims: JAMÁS se aceptan `customerId`, actor, nombre, rol, subtotal ni total
  * desde el cliente. El servidor re-parsea `sellerDraft` y exige `parsed === confirmedShippingGs`.
  */

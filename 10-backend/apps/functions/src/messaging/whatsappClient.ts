@@ -38,10 +38,10 @@ export type SendResult =
   | { ok: false; outcome: 'unknown' };
 
 /**
- * SHIPPING-CHAT-3B — Metadata NO sensible del transporte (jamás el token). La futura saga de
- * cotización (3C) la usa para distinguir: live con credenciales del PROPIO tenant (único caso
- * que podrá aprobar una cotización financiera en producción) · global fallback (live pero con
- * credenciales ajenas al tenant ⇒ NO apto para dinero) · mock (modo/credenciales no resueltas).
+ * SHIPPING-CHAT-3B — Metadata NO sensible del transporte (jamás el token). La saga de
+ * cotización (3C, `coverageQuote.ts`) la usa para distinguir: live con credenciales del PROPIO
+ * tenant (único caso que aprueba una cotización financiera en producción) · global fallback (live
+ * pero con credenciales ajenas al tenant ⇒ NO apto para dinero) · mock (modo/credenciales no resueltas).
  */
 export type WhatsappTransportInfo =
   | { transport: 'live'; credentials: 'tenant' | 'global_fallback' }
@@ -372,7 +372,7 @@ export async function getWhatsAppClient(
 
   // Fallback global (DEPRECATED): solo si está habilitado explícitamente y hay env globales.
   // SHIPPING-CHAT-3B: marcado 'global_fallback' en transportInfo — es live pero con credenciales
-  // AJENAS al tenant: la futura saga de cotización (3C) lo tratará como channel_unavailable.
+  // AJENAS al tenant: la saga de cotización (3C) lo trata como channel_unavailable.
   if (globalFallbackAllowed()) {
     const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
     const accessToken = process.env.WHATSAPP_ACCESS_TOKEN;
@@ -399,8 +399,9 @@ export async function getWhatsAppClientExact(tenantId: string, phoneNumberId: st
 }
 
 /*
- * ============================== REGLAS NORMATIVAS PARA SHIPPING-CHAT-3C ==============================
- * (diseño 3A-HARDEN aprobado — registradas acá porque la saga consumirá este módulo):
+ * ============================== REGLAS NORMATIVAS DE SHIPPING-CHAT-3C ==============================
+ * (diseño 3A-HARDEN aprobado — registradas acá porque la saga consume este módulo; implementadas
+ * en `functions/coverage/coverageQuote.ts`):
  *  1. La recuperación de un outbox de cotización ya 'sent' se ejecuta ANTES de resolver el
  *     transporte (no re-resolver credenciales para un mensaje que ya salió).
  *  2. HTTP aceptado SIN wamid = 'unknown' (ya implementado en sendResultFromCloudResponse).

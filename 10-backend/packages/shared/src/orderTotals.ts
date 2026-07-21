@@ -6,7 +6,8 @@
  *   total (= totalCollected) = subtotal - discount + shipping
  * El envío NUNCA se suma a `subtotal` (la ganancia de productos, anclada en subtotal, no se infla).
  *
- * Estos helpers son la fundación; NO crean pedidos ni tocan runtime (eso llega en SHIPPING-CHAT-4).
+ * Consumidores reales (SHIPPING-CHAT-3C): `createPendingOrder` (backend, totales de toda orden
+ * nueva) y la saga de cotización (`coverageQuote.ts`, validación de overflow del total).
  */
 
 import type { OrderTotals } from './types/order.types.js';
