@@ -184,10 +184,29 @@ export async function sendManualMessage(
   const to = customer.whatsappPhone || input.customerId;
   const res = await client.sendText(to, text, { tenantId: input.tenantId, channel: 'whatsapp' });
   if (!res.ok) {
-    // El detalle del rechazo ya quedó en el log del cliente (sin token). Al panel, error accionable.
-    // SHIPPING-CHAT-3B: cliente enmascarado en logs (el customerId ES el teléfono).
-    logger.warn('Mensaje manual: WhatsApp rechazó el envío', { tenantId: input.tenantId, customerId: maskPhone(input.customerId), outcome: res.outcome });
-    throw new HttpsError('unavailable', 'WhatsApp no aceptó el mensaje. Probá de nuevo en un momento.');
+    // SHIPPING-CHAT-3B-HARDEN: rejected ≠ unknown. Un RECHAZO CONFIRMADO (4xx de Meta) admite
+    // reintento; un resultado DESCONOCIDO (timeout/5xx/2xx sin wamid) NO — el mensaje PUDO haber
+    // salido y un reintento ciego lo duplicaría al cliente. En ninguno se persiste el mensaje
+    // (el historial no miente) ni se loguea texto/teléfono/PNID completos.
+    if (res.outcome === 'rejected') {
+      logger.warn('Mensaje manual: WhatsApp rechazó el envío (confirmado)', {
+        tenantId: input.tenantId,
+        customerId: maskPhone(input.customerId),
+        outcome: res.outcome,
+        providerCode: res.providerCode,
+      });
+      throw new HttpsError('unavailable', 'WhatsApp no aceptó el mensaje. Probá de nuevo en un momento.', {
+        kind: 'whatsapp_send_rejected',
+      });
+    }
+    logger.warn('Mensaje manual: resultado de envío desconocido', {
+      tenantId: input.tenantId,
+      customerId: maskPhone(input.customerId),
+      outcome: res.outcome,
+    });
+    throw new HttpsError('unavailable', 'No pudimos confirmar si el mensaje salió. Revisá el chat de WhatsApp antes de reenviarlo.', {
+      kind: 'whatsapp_send_unknown',
+    });
   }
 
   // Persistir DESPUÉS del envío OK (mock también persiste: el historial es la verdad del panel).
@@ -209,7 +228,7 @@ export async function sendManualMessage(
     customerId: maskPhone(input.customerId),
     chars: text.length,
     viaMock: !!res.viaMock,
-    phoneNumberId: phoneNumberId ?? '(principal)',
+    phoneNumberId: phoneNumberId ? maskPhone(phoneNumberId) : '(principal)',
   });
   return { ok: true, viaMock: !!res.viaMock, waMessageId: res.id ?? null };
 }

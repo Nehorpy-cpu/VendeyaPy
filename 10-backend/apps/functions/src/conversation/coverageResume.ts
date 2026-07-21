@@ -17,9 +17,11 @@
  * nunca pago automático.
  *
  * ======================= REGLAS NORMATIVAS PARA SHIPPING-CHAT-3C (diseño 3A-HARDEN) =======================
- *  1. NO cancelar automáticamente jobs `send_unknown`/`send_failed`/`held_by_seller` para iniciar
- *     otro checkout: un pipeline anterior debe quedar TERMINAL (`done`/`cancelled`) o reconciliado
- *     ANTES de crear un coverageRequest nuevo (la tx que crea el request nuevo lo verifica/cancela).
+ *  1. Un job/pipeline anterior en `send_unknown`/`send_failed`/`held_by_seller` o cualquier estado
+ *     NO terminal JAMÁS se cancela automáticamente para iniciar otro checkout: debe quedar terminal
+ *     (`done`/`cancelled`) o ser RECONCILIADO EXPLÍCITAMENTE (acción humana auditada) antes de crear
+ *     un coverageRequest nuevo. La transacción del request nuevo lo VERIFICA y, si no se cumple,
+ *     BLOQUEA/RECHAZA la creación — nunca cancela por conveniencia.
  *  2. La saga de cotización creará su outbox en 'prepared' (TX-A), NUNCA en 'sending'; el claim
  *     prepared→sending ocurre inmediatamente antes de Meta. Un crash post-TX-A queda 'prepared'
  *     recuperable — jamás se clasifica unknown sin haber claimeado.

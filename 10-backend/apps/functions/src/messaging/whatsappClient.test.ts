@@ -139,9 +139,12 @@ describe('SHIPPING-CHAT-3B — SendResult discriminado (sin regex)', () => {
   it('2xx con wamid string no vacío ⇒ accepted', () => {
     expect(sendResultFromCloudResponse('wamid.ABC')).toEqual({ ok: true, outcome: 'accepted', id: 'wamid.ABC', viaMock: false });
   });
-  it('2xx SIN wamid (undefined, vacío, no-string) ⇒ unknown', () => {
+  it('2xx SIN wamid válido (undefined, null, vacío, whitespace-only, no-string) ⇒ unknown', () => {
     expect(sendResultFromCloudResponse(undefined)).toEqual({ ok: false, outcome: 'unknown' });
+    expect(sendResultFromCloudResponse(null)).toEqual({ ok: false, outcome: 'unknown' });
     expect(sendResultFromCloudResponse('')).toEqual({ ok: false, outcome: 'unknown' });
+    expect(sendResultFromCloudResponse('   ')).toEqual({ ok: false, outcome: 'unknown' });
+    expect(sendResultFromCloudResponse('\n\t ')).toEqual({ ok: false, outcome: 'unknown' });
     expect(sendResultFromCloudResponse(42)).toEqual({ ok: false, outcome: 'unknown' });
   });
   it('4xx con body.error.code numérico ⇒ rejected con providerCode saneado', () => {
@@ -234,10 +237,17 @@ describe('SHIPPING-CHAT-3B — cache por tenant + número (bug multi-número pre
   });
 });
 
-describe('SHIPPING-CHAT-3B — higiene de logs (teléfonos enmascarados)', () => {
+describe('SHIPPING-CHAT-3B — higiene de logs (teléfonos y PNIDs enmascarados)', () => {
   it('Mock.sendText loguea `to` ENMASCARADO, jamás completo', async () => {
     vi.mocked(logger.info).mockClear();
     await new MockWhatsAppClient().sendText('595994893000', 'hola', { tenantId: 'perfumeria' });
+    const calls = JSON.stringify(vi.mocked(logger.info).mock.calls);
+    expect(calls).toContain('…3000');
+    expect(calls).not.toContain('595994893000');
+  });
+  it('Mock.sendLocationRequest loguea `to` ENMASCARADO', async () => {
+    vi.mocked(logger.info).mockClear();
+    await new MockWhatsAppClient().sendLocationRequest('595994893000', 'compartí tu ubicación', { tenantId: 'perfumeria' });
     const calls = JSON.stringify(vi.mocked(logger.info).mock.calls);
     expect(calls).toContain('…3000');
     expect(calls).not.toContain('595994893000');

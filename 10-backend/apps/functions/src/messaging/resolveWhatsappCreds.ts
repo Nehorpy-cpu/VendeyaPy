@@ -14,6 +14,7 @@
  */
 
 import type { MetaConnection, MetaAsset } from '@vpw/shared';
+import { maskPhone } from '@vpw/shared';
 import { db, paths } from '../lib/firebase.js';
 import { getSecretStore } from '../lib/secretStore.js';
 import { logger } from '../lib/logger.js';
@@ -107,13 +108,13 @@ export async function resolveTenantWhatsappCredsFor(tenantId: string, phoneNumbe
       try {
         token = await getSecretStore().get(conn.tokenSecretRef);
       } catch (e) {
-        logger.error('resolveTenantWhatsappCredsFor: no se pudo recuperar el token', e, { tenantId, phoneNumberId });
+        logger.error('resolveTenantWhatsappCredsFor: no se pudo recuperar el token', e, { tenantId, phoneNumberId: maskPhone(phoneNumberId) });
         token = null;
       }
     }
     return decideWhatsappCreds({ tenantId, connectionStatus, tokenExpiresAtMs, phoneNumberId, token, nowMs });
   } catch (e) {
-    logger.error('resolveTenantWhatsappCredsFor: error resolviendo credenciales', e, { tenantId, phoneNumberId });
+    logger.error('resolveTenantWhatsappCredsFor: error resolviendo credenciales', e, { tenantId, phoneNumberId: maskPhone(phoneNumberId) });
     return { ok: false, reason: 'token_unavailable' };
   }
 }

@@ -83,9 +83,13 @@ export function classifyCloudSendError(e: unknown): Extract<SendResult, { ok: fa
   return { ok: false, outcome: 'unknown' };
 }
 
-/** SHIPPING-CHAT-3B — 2xx de la Cloud API SOLO es 'accepted' con wamid string no vacío. */
+/**
+ * SHIPPING-CHAT-3B — 2xx de la Cloud API SOLO es 'accepted' con un wamid REALMENTE válido:
+ * string no vacío y no solo-whitespace. Un identificador evidentemente inválido NO se normaliza
+ * en silencio: se clasifica 'unknown' (el mensaje pudo salir, pero no hay wamid confiable).
+ */
 export function sendResultFromCloudResponse(id: unknown): SendResult {
-  if (typeof id === 'string' && id.length > 0) return { ok: true, outcome: 'accepted', id, viaMock: false };
+  if (typeof id === 'string' && id.trim().length > 0) return { ok: true, outcome: 'accepted', id, viaMock: false };
   return { ok: false, outcome: 'unknown' };
 }
 
@@ -205,7 +209,7 @@ export class MockWhatsAppClient implements WhatsAppClient {
     logger.info('WhatsApp (mock): location request NO enviado a Meta', {
       tenantId: ctx?.tenantId,
       channel: ctx?.channel,
-      to: `…${to.slice(-4)}`,
+      to: maskPhone(to),
       chars: bodyText.length,
       mode: this.resolution?.mode,
       reason: this.resolution?.reason,
@@ -277,7 +281,7 @@ export class CloudAPIClient implements WhatsAppClient {
       return { ok: true, id };
     } catch (e) {
       // Sin payloads sensibles: solo el error de Meta (mismo criterio que sendText, to enmascarado).
-      logger.error('WhatsApp Cloud API: error al enviar location request', e, { tenantId: ctx?.tenantId, to: `…${to.slice(-4)}` });
+      logger.error('WhatsApp Cloud API: error al enviar location request', e, { tenantId: ctx?.tenantId, to: maskPhone(to) });
       return { ok: false, reason: 'send_error' };
     }
   }
@@ -327,7 +331,7 @@ const defaultDeps: WhatsappClientDeps = {
     if (t && pnid) {
       const specific = await resolveTenantWhatsappCredsFor(t, pnid);
       if (specific.ok) return specific;
-      logger.warn('WhatsApp: número receptor no resoluble; fallback al principal', { tenantId: t, phoneNumberId: pnid, reason: specific.reason });
+      logger.warn('WhatsApp: número receptor no resoluble; fallback al principal', { tenantId: t, phoneNumberId: maskPhone(pnid), reason: specific.reason });
     }
     return resolveTenantWhatsappCreds(t);
   },

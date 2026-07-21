@@ -153,11 +153,46 @@ describe('conversation/manualMessage sendManualMessage', () => {
     await expect(sendManualMessage({ tenantId: 'arfagi', customerId: 'nadie', text: 'hola' }, SELLER, deps)).rejects.toThrow(/no existe/);
   });
 
-  it('9. Meta rechaza el envío (live) → unavailable y NADA se persiste (el historial no miente)', async () => {
+  it('9. RECHAZO CONFIRMADO de Meta → unavailable kind whatsapp_send_rejected y NADA se persiste', async () => {
     const sendText = vi.fn(async () => ({ ok: false as const, outcome: 'rejected' as const, providerCode: 131047 }));
     const { deps, append } = makeDeps({ getClient: async () => ({ sendText }) as never });
-    await expect(sendManualMessage({ tenantId: 'arfagi', customerId: 'c', text: 'hola' }, SELLER, deps)).rejects.toThrow(/no aceptó/);
+    try {
+      await sendManualMessage({ tenantId: 'arfagi', customerId: '595994893000', text: 'hola' }, SELLER, deps);
+      expect.unreachable('debió fallar');
+    } catch (e) {
+      expect(e).toBeInstanceOf(HttpsError);
+      expect((e as HttpsError).message).toMatch(/no aceptó/);
+      expect(((e as HttpsError).details as { kind?: string })?.kind).toBe('whatsapp_send_rejected');
+    }
     expect(append).not.toHaveBeenCalled();
+    // El log dice rechazo CONFIRMADO, con teléfono enmascarado.
+    const warns = JSON.stringify(vi.mocked(logger.warn).mock.calls);
+    expect(warns).toContain('confirmado');
+    expect(warns).not.toContain('595994893000');
+  });
+
+  it('9b. resultado DESCONOCIDO → kind whatsapp_send_unknown, mensaje honesto SIN afirmar rechazo ni sugerir reenvío ciego; nada se persiste', async () => {
+    const sendText = vi.fn(async () => ({ ok: false as const, outcome: 'unknown' as const }));
+    const { deps, append } = makeDeps({ getClient: async () => ({ sendText }) as never });
+    try {
+      await sendManualMessage({ tenantId: 'arfagi', customerId: '595994893000', text: 'hola' }, SELLER, deps);
+      expect.unreachable('debió fallar');
+    } catch (e) {
+      expect(e).toBeInstanceOf(HttpsError);
+      const msg = (e as HttpsError).message;
+      expect(msg).toBe('No pudimos confirmar si el mensaje salió. Revisá el chat de WhatsApp antes de reenviarlo.');
+      expect(msg).not.toMatch(/rechaz|no aceptó/i); // jamás afirmar rechazo
+      expect(msg).not.toMatch(/probá de nuevo/i); // jamás sugerir reintento ciego
+      expect(((e as HttpsError).details as { kind?: string })?.kind).toBe('whatsapp_send_unknown');
+    }
+    expect(append).not.toHaveBeenCalled();
+    // El log dice "desconocido" (jamás "rechazó") y no filtra texto/teléfono/PNID.
+    const warns = JSON.stringify(vi.mocked(logger.warn).mock.calls);
+    expect(warns).toContain('desconocido');
+    expect(warns).not.toMatch(/rechaz/);
+    expect(warns).not.toContain('595994893000');
+    expect(warns).not.toContain('hola');
+    expect(warns).not.toContain(PNID);
   });
 
   it('10. conversación vieja sin receivedVia → resuelve el número principal (pnid null)', async () => {
@@ -166,13 +201,17 @@ describe('conversation/manualMessage sendManualMessage', () => {
     expect(getClient).toHaveBeenCalledWith('arfagi', null);
   });
 
-  it('11. LOGS: el customerId (teléfono) va ENMASCARADO en el log de éxito', async () => {
+  it('11. LOGS: customerId (teléfono) y phoneNumberId (PNID) van ENMASCARADOS en el log de éxito', async () => {
     const { deps } = makeDeps();
     await sendManualMessage({ tenantId: 'arfagi', customerId: '595994893000', text: 'hola' }, SELLER, deps);
-    expect(vi.mocked(logger.info)).toHaveBeenCalledWith('Mensaje manual enviado', expect.objectContaining({ customerId: '…3000' }));
-    // Jamás el teléfono completo en NINGÚN log de este camino.
+    expect(vi.mocked(logger.info)).toHaveBeenCalledWith(
+      'Mensaje manual enviado',
+      expect.objectContaining({ customerId: '…3000', phoneNumberId: '…7904' }),
+    );
+    // Jamás el teléfono ni el PNID completos en NINGÚN log de este camino.
     for (const call of vi.mocked(logger.info).mock.calls) {
       expect(JSON.stringify(call)).not.toContain('595994893000');
+      expect(JSON.stringify(call)).not.toContain(PNID);
     }
   });
 });

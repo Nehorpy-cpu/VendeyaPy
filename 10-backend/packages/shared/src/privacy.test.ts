@@ -15,7 +15,11 @@ describe('maskPhone — enmascarado central para logs', () => {
     expect(maskPhone(null)).toBe('(sin dato)');
     expect(maskPhone(undefined)).toBe('(sin dato)');
   });
-  it('valores cortos no explotan', () => {
-    expect(maskPhone('abc')).toBe('…abc');
+  it('HARDEN: identificadores de 1 a 4 caracteres se ocultan ENTEROS (jamás el valor completo)', () => {
+    for (const v of ['a', 'ab', 'abc', 'abcd', '1234']) {
+      expect(maskPhone(v)).toBe('(oculto)');
+      expect(maskPhone(v)).not.toContain(v);
+    }
+    expect(maskPhone('abcde')).toBe('…bcde'); // 5+ ⇒ últimos 4, nunca completo
   });
 });
