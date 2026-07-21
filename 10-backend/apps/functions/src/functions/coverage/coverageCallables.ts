@@ -108,7 +108,7 @@ export const MENSAJE_ACTIVACION_ANTERIOR =
  * si el flujo está apagado o el request pertenece a otra activación. El estado visual del panel
  * NO es autoridad: este gate corre siempre.
  */
-function assertFlujoVigente(act: CoverageActivation, req: Pick<CoverageRequest, 'activationId'>): void {
+export function assertFlujoVigente(act: CoverageActivation, req: Pick<CoverageRequest, 'activationId'>): void {
   if (!act.enabled || !act.activationId) throw new HttpsError('failed-precondition', MENSAJE_FLUJO_DESHABILITADO);
   if ((req.activationId ?? null) !== act.activationId) throw new HttpsError('failed-precondition', MENSAJE_ACTIVACION_ANTERIOR);
 }

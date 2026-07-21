@@ -27,7 +27,7 @@ import type {
   MessageChannel,
   Session,
 } from '@vpw/shared';
-import { newCoverageRequestId, coverageActivationOf } from '@vpw/shared';
+import { newCoverageRequestId, coverageActivationOf, shippingQuotePolicyOf, maskPhone } from '@vpw/shared';
 import { db, paths } from '../lib/firebase.js';
 import { logger } from '../lib/logger.js';
 import { getCheckoutConfig, pickSeller } from '../orders/checkoutConfig.js';
@@ -97,6 +97,10 @@ export const MENSAJE_RESUME_EN_CURSO =
 
 export const MENSAJE_UBICACION_FALLO =
   'No pude registrar tu ubicación recién 🙏 Probá mandarla de nuevo en un momento.';
+
+/** SHIPPING-CHAT-3C: recompra con cotización obligatoria — la ubicación aprobada se reusa. */
+export const MENSAJE_REQUOTE_EN_REVISION =
+  'Ya tenemos tu ubicación ✅ Estamos confirmando el costo de envío de tu pedido: te avisamos enseguida para completar el pago.';
 
 /** Mensaje de solicitud según canal: el botón nativo existe SOLO en WhatsApp (review). */
 export function solicitudPara(cfg: ResolvedCoverageConfig, channel?: MessageChannel | null): string {
@@ -168,7 +172,38 @@ export function cartFingerprintOf(cart: Cart): string {
   return `cart:${sha16(pares)}`;
 }
 
-const cartSnapshotOf = (cart: Cart): CoverageRequest['cartSnapshot'] => ({
+/**
+ * SHIPPING-CHAT-3C — Huella FINANCIERA del carrito (versionada `cart2:`): incluye productId,
+ * quantity, unitPrice y el subtotal global recalculado — a diferencia de `cart:` (v1), garantiza
+ * que el total mostrado al cotizar es el total que se ordenará. PURA y fail-closed: cualquier
+ * inconsistencia ⇒ null (jamás se cotiza sobre un carrito inválido).
+ * El nombre y la imageUrl NUNCA son autoridad financiera (no participan de la huella).
+ * Valida: enteros seguros no negativos, quantity > 0, subtotal === Σ price×quantity, sin
+ * duplicados inconsistentes (mismo producto con precios distintos), sin overflow.
+ */
+export function shippingCartFingerprintOf(cart: { items: Array<{ productId: string; price: number; quantity: number }>; subtotal: number }): string | null {
+  if (!Array.isArray(cart.items) || cart.items.length === 0) return null;
+  const precioPorProducto = new Map<string, number>();
+  let suma = 0;
+  const lineas: string[] = [];
+  for (const i of cart.items) {
+    if (typeof i.productId !== 'string' || i.productId === '') return null;
+    if (!Number.isSafeInteger(i.quantity) || i.quantity <= 0) return null;
+    if (!Number.isSafeInteger(i.price) || i.price < 0) return null;
+    const previo = precioPorProducto.get(i.productId);
+    if (previo !== undefined && previo !== i.price) return null; // duplicado inconsistente
+    precioPorProducto.set(i.productId, i.price);
+    const linea = i.price * i.quantity;
+    if (!Number.isSafeInteger(linea)) return null; // overflow por línea
+    suma += linea;
+    if (!Number.isSafeInteger(suma)) return null; // overflow acumulado
+    lineas.push(`${i.productId}x${i.quantity}@${i.price}`);
+  }
+  if (!Number.isSafeInteger(cart.subtotal) || cart.subtotal !== suma) return null; // subtotal exacto
+  return `cart2:${sha16(lineas.sort().join('|') + '|s:' + suma)}`;
+}
+
+export const cartSnapshotOf = (cart: Cart | { items: Array<{ productId: string; name: string; price: number; quantity: number }>; subtotal: number }): CoverageRequest['cartSnapshot'] => ({
   // Precios públicos del carrito. SIN costos privados (ADR-0008) y sin imageUrl (ruido).
   items: cart.items.map((i) => ({ productId: i.productId, name: i.name, price: i.price, quantity: i.quantity })),
   subtotal: cart.subtotal,
@@ -290,9 +325,12 @@ export async function gateCoberturaCheckout(
   const sessionRef = db().doc(paths.session(tenantId, customerId));
   const now = Timestamp.now();
   const out = await db().runTransaction(async (tx) => {
-    const cfgTx = coverageSettingsDeSnapshot((await tx.get(configRefDe(tenantId))).data());
+    const cfgSnapTx = await tx.get(configRefDe(tenantId));
+    const cfgTx = coverageSettingsDeSnapshot(cfgSnapTx.data());
     if (!cfgTx.enabled) return { kind: 'off' as const };
     const actId = cfgTx.activationId;
+    // SHIPPING-CHAT-3C: política de cotización del MISMO snapshot (off ⇒ comportamiento legado).
+    const policyTx = shippingQuotePolicyOf((cfgSnapTx.data() as { coverage?: unknown } | undefined)?.coverage);
     const ses = await tx.get(sessionRef);
     const ctxSes = (ses.data() as Session | undefined)?.context;
     // 1D: hay una reanudación EN CURSO (el worker está creando la orden): un "pagar" concurrente
@@ -317,8 +355,73 @@ export async function gateCoberturaCheckout(
           if (resume === 'pending' || resume === 'processing' || resume === 'held_by_seller') {
             return { kind: 'resuming' as const, activationId: actId };
           }
-          // coverage_approved VIGENTE: la aprobación vale para la ubicación aunque el carrito
-          // haya cambiado (decisión de producto) → el checkout continúa por el camino normal.
+          if (policyTx.status !== 'off') {
+            // SHIPPING-CHAT-3C (H): con cotización obligatoria (o config inválida — fail-closed):
+            // 1) Un pipeline anterior NO terminal (send_failed/send_unknown) BLOQUEA el checkout
+            //    nuevo. JAMÁS se cancela automáticamente: debe quedar terminal o ser reconciliado
+            //    explícitamente. El cliente espera; el equipo resuelve por el panel.
+            if (resume === 'send_failed' || resume === 'send_unknown') {
+              return { kind: 'resuming' as const, activationId: actId };
+            }
+            // 2) Pipeline terminal (done/cancelled): una compra NUEVA jamás reusa el request
+            //    aprobado para otro carrito — se crea un REQUEST NUEVO reusando la ubicación
+            //    aprobada vigente (sin volver a pedírsela al cliente), directo a revisión para
+            //    que el vendedor cotice el envío del carrito actual.
+            const id = newCoverageRequestId();
+            const fp2 = shippingCartFingerprintOf(cart);
+            const nuevo: CoverageRequest = {
+              id,
+              tenantId,
+              customerId,
+              channel: opts.channel ?? req.channel ?? 'whatsapp',
+              receivedVia: opts.receivedVia ?? req.receivedVia ?? null,
+              activationId: cfgTx.activationId,
+              status: 'pending_coverage_review',
+              location: req.location,
+              locationFingerprint: req.locationFingerprint,
+              sourceMessageId: opts.messageId ?? null,
+              cartSnapshot: cartSnapshotOf(cart),
+              cartFingerprint: fp2 ?? cartFingerprintOf(cart),
+              checkoutAttemptId: null,
+              sellerUid: req.sellerUid ?? null,
+              sellerName: req.sellerName ?? null,
+              decision: null,
+              resume: null,
+              createdAt: now,
+              updatedAt: now,
+              expiresAt: Timestamp.fromMillis(now.toMillis() + cfgTx.expiryHours * 60 * 60 * 1000),
+              coordinatesPurgeAt: null,
+            };
+            tx.create(db().doc(requestPath(tenantId, id)), nuevo);
+            const ptrNuevo = ptrOf(nuevo, now);
+            tx.set(sessionRef, { context: { coverage: ptrNuevo }, updatedAt: now }, { merge: true });
+            // Campana ATÓMICA con el request (review adversarial 3C): un aviso post-tx best-effort
+            // podía perderse ante un crash y nadie lo reintentaba — el request quedaba huérfano en
+            // revisión sin que el equipo lo viera. requestId es nuevo por corrida ⇒ create sin colisión.
+            const notifId = `covrequote-${customerId}-${id}`;
+            tx.create(db().collection(paths.notifications(tenantId)).doc(notifId), {
+              id: notifId,
+              tenantId,
+              category: 'handoff',
+              type: 'handoff_coverage_review',
+              title: '📍 Un cliente espera confirmación de cobertura',
+              body: `El cliente …${customerId.slice(-4)} quiere volver a comprar con su ubicación ya aprobada. Cotizá el envío del carrito actual desde Conversaciones (el bot sigue activo).`,
+              dedupeKey: notifId,
+              customerId,
+              ...(req.sellerUid ? { targetUid: req.sellerUid } : {}),
+              read: false,
+              readAt: null,
+              createdAt: now,
+            });
+            return {
+              kind: 'requote' as const,
+              ptr: ptrNuevo,
+              activationId: actId,
+              requestId: id,
+            };
+          }
+          // coverage_approved VIGENTE (política off — legado): la aprobación vale para la
+          // ubicación aunque el carrito haya cambiado → el checkout continúa por el camino normal.
           return { kind: 'approved' as const };
         }
         tx.update(reqSnap.ref, { status: 'coverage_expired', updatedAt: now, coordinatesPurgeAt: purgeAtFrom(now, req) });
@@ -360,6 +463,14 @@ export async function gateCoberturaCheckout(
   if (out.kind === 'approved') return null;
   const act = out.activationId;
   if (out.kind === 'resuming') return { reply: MENSAJE_RESUME_EN_CURSO, coverageActivationId: act };
+  if (out.kind === 'requote') {
+    // SHIPPING-CHAT-3C: request nuevo + campana YA persistidos (atómicos, en la tx). SIN takeover:
+    // tomar el chat dentro de este turno haría que el tail del engine descarte la respuesta al
+    // cliente ("turno en vuelo descartado"). La cotización llega por el flujo canónico del panel,
+    // que no requiere takeover; el vendedor puede tomar el chat manualmente si lo necesita.
+    logger.info('Cobertura: recompra → request nuevo en revisión con ubicación reusada', { tenantId, customer: maskPhone(customerId), requestId: out.requestId });
+    return { reply: MENSAJE_REQUOTE_EN_REVISION, coverage: out.ptr, coverageActivationId: act };
+  }
   if (out.kind === 'pending') return { reply: MENSAJE_UBICACION_EN_REVISION, coverage: out.ptr, coverageActivationId: act };
   logger.info('Cobertura: checkout en espera de ubicación', { tenantId, customer: `…${customerId.slice(-4)}`, requestId: out.ptr.requestId });
   return { reply: solicitudPara(cfg, opts.channel), locationRequest: true, coverage: out.ptr, coverageActivationId: act };

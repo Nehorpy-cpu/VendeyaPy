@@ -34,4 +34,12 @@ describe('ids', () => {
     expect(getPrefix('ord_abc123def456')).toBe('ord');
     expect(getPrefix('invalid')).toBe(null);
   });
+
+  it('SHIPPING-CHAT-3C: quoteAttemptId con prefijo qat propio (jamás reutiliza checkoutAttemptId)', async () => {
+    const { newQuoteAttemptId } = await import('./ids.js');
+    const id = newQuoteAttemptId();
+    expect(id).toMatch(/^qat_[0-9a-zA-Z]{12}$/);
+    expect(id.startsWith('atm_')).toBe(false);
+    expect(id.startsWith('pay_')).toBe(false);
+  });
 });

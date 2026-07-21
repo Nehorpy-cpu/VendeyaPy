@@ -17,6 +17,16 @@ export interface OrderItem {
   // El costo/ganancia por ítem se movió a `orderFinancials/{orderId}.items` (privado). Ver ADR-0008.
 }
 
+/**
+ * SHIPPING-CHAT-3C — Entrada MÍNIMA de carrito que acepta `createPendingOrder`: solo los campos
+ * que la orden realmente usa (jamás imageUrl como autoridad de nada). `Cart` (sesión) es
+ * estructuralmente asignable; el snapshot congelado de cobertura (CoverageCartItem[]) también.
+ */
+export interface OrderCartInput {
+  items: Array<{ productId: string; name: string; price: number; quantity: number }>;
+  subtotal: number;
+}
+
 export interface OrderTotals {
   subtotal: number;
   discount: number;

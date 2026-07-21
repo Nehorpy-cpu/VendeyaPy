@@ -122,6 +122,16 @@ export interface CoverageResumeJob {
   leaseUntil?: Timestamp | null;
   /** 1D: reintentos consumidos (tope duro — jamás retries infinitos). */
   attempts?: number;
+  /**
+   * SHIPPING-CHAT-3C: costo de envío APROBADO (entero Gs) — presente solo en jobs creados por
+   * la saga de cotización (TX-C). El consumidor crea la orden con este monto separado en totals.
+   */
+  shippingGs?: number | null;
+  /**
+   * SHIPPING-CHAT-3C: carrito CONGELADO y verificado en TX-C (cart2). El consumidor crea la orden
+   * desde ESTE snapshot, jamás desde el carrito vivo de la sesión (el quote vale para este carrito).
+   */
+  cartSnapshot?: { items: CoverageCartItem[]; subtotal: number } | null;
   createdAt: Timestamp;
   updatedAt: Timestamp;
 }
@@ -137,7 +147,9 @@ export interface CoverageOutboxMessage {
   id: string;
   tenantId: string;
   coverageRequestId: string;
-  action: 'approved' | 'rejected' | 'expired' | 'empty_cart';
+  /** SHIPPING-CHAT-3C: `quote` = mensaje canónico del costo de envío (saga TX-A→send→TX-C). */
+  action: 'approved' | 'rejected' | 'expired' | 'empty_cart' | 'quote';
+  /** Para `quote` es SIEMPRE null (el quoteAttemptId viaja en `quote.quoteAttemptId`). */
   checkoutAttemptId: string | null;
   customerId: string;
   channel: MessageChannel;
@@ -145,10 +157,34 @@ export interface CoverageOutboxMessage {
   /** HARDEN-1: activación bajo la que se creó (trazabilidad del artefacto). */
   activationId?: string | null;
   text: string;
-  status: 'prepared' | 'sending' | 'sent' | 'failed' | 'unknown';
+  /**
+   * SHIPPING-CHAT-3C: `sent_not_applied` = Meta aceptó el mensaje pero un mismatch determinístico
+   * post-envío impidió aplicar la aprobación (terminal auditable; jamás se reenvía).
+   * Compat de lectura: docs anteriores no traen los campos nuevos (todos opcionales).
+   */
+  status: 'prepared' | 'sending' | 'sent' | 'failed' | 'unknown' | 'sent_not_applied';
   providerMessageId: string | null;
   attempts: number;
   leaseUntil: Timestamp | null;
+  /** SHIPPING-CHAT-3C — SOLO para action 'quote': datos del intento (actor ORIGINAL congelado). */
+  quote?: {
+    quoteAttemptId: string;
+    chargeGs: number;
+    quotedByUid: string;
+    quotedByName: string;
+    quotedByRole: string;
+    expectedLocationFingerprint: string;
+    expectedCartFingerprint: string;
+  } | null;
+  /** SHIPPING-CHAT-3C — resolución manual de un `unknown` (quién reconcilió; jamás pisa quotedBy). */
+  reconciled?: {
+    byUid: string;
+    byName: string;
+    byRole: string;
+    at: Timestamp;
+    note: string;
+    resolution: 'delivered' | 'not_delivered';
+  } | null;
   createdAt: Timestamp;
   updatedAt: Timestamp;
 }

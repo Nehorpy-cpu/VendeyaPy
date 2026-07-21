@@ -34,13 +34,15 @@
 import { Timestamp } from 'firebase-admin/firestore';
 import type {
   Address,
+  CoverageCartItem,
   CoverageOutboxMessage,
   CoverageRequest,
   CoverageResumeJob,
   CoverageResumeStatus,
+  OrderCartInput,
   Session,
 } from '@vpw/shared';
-import { newId, ID_PREFIX, newOrderId, coverageActivationOf } from '@vpw/shared';
+import { newId, ID_PREFIX, newOrderId, coverageActivationOf, shippingQuotePolicyOf, maskPhone } from '@vpw/shared';
 import { db, paths } from '../lib/firebase.js';
 import { logger } from '../lib/logger.js';
 import { recordAudit } from '../audit/audit.js';
@@ -184,7 +186,7 @@ const setJob = (tenantId: string, jobId: string, campos: Partial<CoverageResumeJ
  * Sin PII: cliente enmascarado, sin dirección/coordenadas.
  */
 async function notificarResumeCancelado(tenantId: string, job: CoverageResumeJob, sellerUid: string | null): Promise<void> {
-  const cliente = `…${job.customerId.slice(-4)}`;
+  const cliente = maskPhone(job.customerId);
   await recordAudit({
     tenantId,
     action: 'coverage.resume_cancelled',
@@ -438,10 +440,89 @@ export async function enviarPorOutbox(input: {
 const estadoPorEnvio = (r: 'sent' | 'already_sent' | 'failed' | 'unknown'): CoverageResumeStatus =>
   r === 'sent' || r === 'already_sent' ? 'done' : r === 'failed' ? 'send_failed' : 'send_unknown';
 
+/**
+ * SHIPPING-CHAT-3C — Adapter VALIDADO del snapshot congelado (TX-C) a la entrada de la orden.
+ * PURO y fail-closed: enteros seguros, quantity > 0, subtotal === Σ price×quantity; cualquier
+ * inconsistencia ⇒ null (jamás casts inseguros ni datos inventados; imageUrl no existe ni hace falta).
+ */
+export function orderCartInputFromSnapshot(
+  snap: { items: CoverageCartItem[]; subtotal: number } | null | undefined,
+): OrderCartInput | null {
+  if (!snap || !Array.isArray(snap.items) || snap.items.length === 0) return null;
+  let suma = 0;
+  for (const i of snap.items) {
+    if (typeof i.productId !== 'string' || i.productId === '' || typeof i.name !== 'string' || i.name === '') return null;
+    if (!Number.isSafeInteger(i.quantity) || i.quantity <= 0) return null;
+    if (!Number.isSafeInteger(i.price) || i.price < 0) return null;
+    const linea = i.price * i.quantity;
+    if (!Number.isSafeInteger(linea)) return null;
+    suma += linea;
+    if (!Number.isSafeInteger(suma)) return null;
+  }
+  if (!Number.isSafeInteger(snap.subtotal) || snap.subtotal !== suma) return null;
+  return {
+    items: snap.items.map((i) => ({ productId: i.productId, name: i.name, price: i.price, quantity: i.quantity })),
+    subtotal: snap.subtotal,
+  };
+}
+
+/**
+ * SHIPPING-CHAT-3C — Guard mecánico: un job de quote inconsistente (snapshot corrupto, monto
+ * inválido, o aprobación sin quote bajo política required) se CANCELA con campana — jamás una
+ * orden ni instrucciones bancarias con dinero inválido. Auditado, sin PII.
+ */
+async function cancelarJobPorQuoteInconsistente(
+  tenantId: string,
+  jobId: string,
+  requestId: string,
+  customerId: string,
+  motivo: string,
+): Promise<void> {
+  const now = Timestamp.now();
+  await db().doc(paths.session(tenantId, customerId)).set({ context: { coverageResumeInProgress: null }, updatedAt: now }, { merge: true }).catch(() => {});
+  await setJob(tenantId, jobId, { status: 'cancelled' });
+  await setResume(tenantId, requestId, 'cancelled', null);
+  logger.warn('Cobertura: job de quote cancelado por inconsistencia (guard mecánico)', { tenantId, jobId, motivo });
+  await recordAudit({
+    tenantId,
+    action: 'coverage.quote_job_cancelled',
+    actorUid: 'system',
+    actorRole: 'SYSTEM',
+    targetType: 'coverageRequest',
+    targetId: requestId,
+    summary: `Reanudación con cotización cancelada (${motivo}) para el cliente ${maskPhone(customerId)}`,
+  }).catch(() => {});
+  try {
+    await db()
+      .collection(paths.notifications(tenantId))
+      .doc(`covquote-${customerId}-${requestId}`)
+      .create({
+        id: `covquote-${customerId}-${requestId}`,
+        tenantId,
+        category: 'handoff',
+        type: 'handoff_coverage_stale',
+        title: '📦 Una cotización de envío necesita atención manual',
+        body: `La reanudación con cotización del cliente …${customerId.slice(-4)} se canceló por un control de consistencia. Revisá la conversación desde Conversaciones y atendé el pedido a mano.`,
+        dedupeKey: `covquote-${customerId}-${requestId}`,
+        customerId,
+        read: false,
+        readAt: null,
+        createdAt: now,
+      });
+  } catch (e) {
+    if ((e as { code?: number | string }).code !== 6 && (e as { code?: string }).code !== 'already-exists') {
+      logger.warn('Cobertura: no se pudo notificar la cancelación del job de quote', { tenantId, requestId });
+    }
+  }
+}
+
 /** Procesa un job del outbox de reanudación. Idempotente y re-ejecutable. */
 export async function processCoverageResumeJob(tenantId: string, jobId: string): Promise<void> {
   // Feature flag: apagado ⇒ CERO procesamiento (el job queda pending por si se reactiva).
-  const cfg = coverageSettings(await getCheckoutConfig(tenantId));
+  const cfgFull = await getCheckoutConfig(tenantId);
+  const cfg = coverageSettings(cfgFull);
+  // SHIPPING-CHAT-3C: política de cotización (mismo snapshot de config que el flag).
+  const politicaQuote = shippingQuotePolicyOf((cfgFull as { coverage?: unknown }).coverage);
   if (!cfg.enabled) {
     logger.info('Cobertura: resume omitido (feature off)', { tenantId, jobId });
     return;
@@ -522,6 +603,29 @@ export async function processCoverageResumeJob(tenantId: string, jobId: string):
       }
     }
 
+    // SHIPPING-CHAT-3C: job con COTIZACIÓN aprobada — la orden nace del snapshot CONGELADO y
+    // verificado en TX-C (jamás del carrito vivo: el quote vale para ESE carrito). Guard
+    // mecánico fail-closed: snapshot/monto inconsistentes ⇒ job cancelado con campana, jamás
+    // una orden ni banco con dinero inválido.
+    const conQuote = typeof job.shippingGs === 'number';
+    let cartCongelado: OrderCartInput | null = null;
+    if (conQuote) {
+      cartCongelado = orderCartInputFromSnapshot(job.cartSnapshot ?? null);
+      if (!cartCongelado || !Number.isSafeInteger(job.shippingGs) || (job.shippingGs as number) < 0) {
+        await cancelarJobPorQuoteInconsistente(tenantId, jobId, req.id, customerId, 'snapshot/monto del quote inválido');
+        return;
+      }
+    } else if (politicaQuote.status !== 'off') {
+      // Flip de required entre la aprobación vieja y el resume (diseño H5): un job SIN quote bajo
+      // política required/invalid no crea orden sin envío — se cancela con campana (fail-closed),
+      // salvo que la orden YA exista (se completa esa, totales congelados).
+      const ordenPrev = job.orderId ? (await db().doc(paths.order(tenantId, job.orderId)).get()).exists : false;
+      if (!ordenPrev) {
+        await cancelarJobPorQuoteInconsistente(tenantId, jobId, req.id, customerId, 'aprobación sin cotización bajo política required');
+        return;
+      }
+    }
+
     // 1) Reservar checkoutAttemptId + orderId UNA vez (en el job — doc-id determinístico).
     let checkoutAttemptId = job.checkoutAttemptId ?? null;
     let orderId = job.orderId ?? null;
@@ -550,7 +654,7 @@ export async function processCoverageResumeJob(tenantId: string, jobId: string):
     const ordenReservadaSnap = orderId ? await db().doc(paths.order(tenantId, orderId)).get() : null;
     const ordenYaCreada = ordenReservadaSnap?.exists === true;
 
-    if (cart.items.length === 0 && !ordenYaCreada) {
+    if (!conQuote && cart.items.length === 0 && !ordenYaCreada) {
       // Carrito vacío: liberar con candado, avisar y dejar la aprobación VIGENTE (sin orden).
       const liberacion = await liberarSesionGuardado(tenantId, customerId, req.id, jobAct, {});
       if (liberacion === 'apagado') {
@@ -602,10 +706,12 @@ export async function processCoverageResumeJob(tenantId: string, jobId: string):
     const orderSnap = await db().doc(paths.order(tenantId, orderId)).get();
     const order = orderSnap.exists
       ? (orderSnap.data() as { totals: { total: number } })
-      : await createPendingOrder(tenantId, customerId, cart, {
+      : await createPendingOrder(tenantId, customerId, conQuote ? (cartCongelado as OrderCartInput) : cart, {
           orderId,
           coverage: { requestId: req.id, locationFingerprint: req.locationFingerprint ?? null },
           deliveryAddress: direccionTextualDe(req),
+          // SHIPPING-CHAT-3C: el envío aprobado viaja separado a totals.shipping (jamás al subtotal).
+          ...(conQuote ? { shippingGs: job.shippingGs as number } : {}),
           guard: async (tx) => {
             const act = coverageActivationOf(((await tx.get(db().doc(`tenants/${tenantId}/config/checkout`))).data() as { coverage?: unknown } | undefined)?.coverage);
             return act.enabled && act.activationId === jobAct;
@@ -702,7 +808,7 @@ export async function reactivarResumeTrasLiberacion(tenantId: string, customerId
       return true;
     });
   } catch (e) {
-    logger.warn('Cobertura: no se pudo reactivar el resume tras la liberación', { tenantId, customer: `…${customerId.slice(-4)}` });
+    logger.warn('Cobertura: no se pudo reactivar el resume tras la liberación', { tenantId, customer: maskPhone(customerId) });
     return false;
   }
 }

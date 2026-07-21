@@ -58,3 +58,24 @@ describe('coverageResume — mensajes seguros', () => {
     }
   });
 });
+
+describe('SHIPPING-CHAT-3C — orderCartInputFromSnapshot (adapter validado snapshot→orden)', () => {
+  it('snapshot íntegro ⇒ OrderCartInput sin casts ni imageUrl inventada', async () => {
+    const { orderCartInputFromSnapshot } = await import('./coverageResume.js');
+    const out = orderCartInputFromSnapshot({ items: [{ productId: 'p1', name: 'Perfume', price: 100000, quantity: 2 }], subtotal: 200000 });
+    expect(out).toEqual({ items: [{ productId: 'p1', name: 'Perfume', price: 100000, quantity: 2 }], subtotal: 200000 });
+  });
+  it('fail-closed: null/vacío/subtotal≠Σ/no-enteros/negativos/overflow ⇒ null (jamás una orden con dinero inválido)', async () => {
+    const { orderCartInputFromSnapshot } = await import('./coverageResume.js');
+    expect(orderCartInputFromSnapshot(null)).toBeNull();
+    expect(orderCartInputFromSnapshot(undefined)).toBeNull();
+    expect(orderCartInputFromSnapshot({ items: [], subtotal: 0 })).toBeNull();
+    expect(orderCartInputFromSnapshot({ items: [{ productId: 'p1', name: 'X', price: 100, quantity: 1 }], subtotal: 999 })).toBeNull();
+    expect(orderCartInputFromSnapshot({ items: [{ productId: 'p1', name: 'X', price: 100.5, quantity: 1 }], subtotal: 100.5 })).toBeNull();
+    expect(orderCartInputFromSnapshot({ items: [{ productId: 'p1', name: 'X', price: -1, quantity: 1 }], subtotal: -1 })).toBeNull();
+    expect(orderCartInputFromSnapshot({ items: [{ productId: 'p1', name: 'X', price: 100, quantity: 0 }], subtotal: 0 })).toBeNull();
+    expect(orderCartInputFromSnapshot({ items: [{ productId: '', name: 'X', price: 100, quantity: 1 }], subtotal: 100 })).toBeNull();
+    expect(orderCartInputFromSnapshot({ items: [{ productId: 'p1', name: '', price: 100, quantity: 1 }], subtotal: 100 })).toBeNull();
+    expect(orderCartInputFromSnapshot({ items: [{ productId: 'p1', name: 'X', price: Number.MAX_SAFE_INTEGER, quantity: 2 }], subtotal: 0 })).toBeNull();
+  });
+});

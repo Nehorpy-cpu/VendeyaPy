@@ -59,6 +59,10 @@ export const AUDIT_ACTIONS = [
   'coverage.rejected',
   'coverage.info_requested',
   'coverage.resume_cancelled',
+  // SHIPPING-CHAT-3C: saga de cotización de envío.
+  'coverage.quote_approved',
+  'coverage.quote_unknown_resolved',
+  'coverage.quote_job_cancelled',
   'chat.released',
   'conversation.manual_message_sent',
   'conversation.returned_to_bot',

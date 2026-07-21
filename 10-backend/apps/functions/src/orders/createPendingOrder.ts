@@ -9,8 +9,8 @@
  */
 
 import { Timestamp, type Transaction } from 'firebase-admin/firestore';
-import { newOrderId, newOrderItemId } from '@vpw/shared';
-import type { Cart, Order, OrderItem, OrderFinancials, OrderFinancialsItem, Address } from '@vpw/shared';
+import { newOrderId, newOrderItemId, computeOrderTotals } from '@vpw/shared';
+import type { Order, OrderItem, OrderFinancials, OrderFinancialsItem, Address, OrderCartInput } from '@vpw/shared';
 import { db, paths } from '../lib/firebase.js';
 import { logger } from '../lib/logger.js';
 import { getProductCost } from '../catalog/financials.js';
@@ -41,24 +41,29 @@ export interface CreatePendingOrderOpts {
    * false ⇒ NO se crea nada (ni orden ni finanzas) y se devuelve null.
    */
   guard?: (tx: Transaction) => Promise<boolean>;
+  /**
+   * SHIPPING-CHAT-3C: cargo de envío ESTRUCTURADO (entero Gs; default 0). Se persiste separado en
+   * `totals.shipping` vía computeOrderTotals — jamás se suma al subtotal ni a la ganancia.
+   */
+  shippingGs?: number;
 }
 
 export async function createPendingOrder(
   tenantId: string,
   customerId: string,
-  cart: Cart,
+  cart: OrderCartInput,
   opts?: CreatePendingOrderOpts & { guard?: undefined },
 ): Promise<Order>;
 export async function createPendingOrder(
   tenantId: string,
   customerId: string,
-  cart: Cart,
+  cart: OrderCartInput,
   opts: CreatePendingOrderOpts & { guard: NonNullable<CreatePendingOrderOpts['guard']> },
 ): Promise<Order | null>;
 export async function createPendingOrder(
   tenantId: string,
   customerId: string,
-  cart: Cart,
+  cart: OrderCartInput,
   opts: CreatePendingOrderOpts = {},
 ): Promise<Order | null> {
   const now = Timestamp.now();
@@ -108,13 +113,30 @@ export async function createPendingOrder(
   const custData = (await db().doc(paths.customer(tenantId, customerId)).get()).data() as { attribution?: Order['attribution'] } | undefined;
   const attribution = custData?.attribution;
 
+  // SHIPPING-CHAT-3C: totales por la ÚNICA fuente compartida (total = subtotal - discount +
+  // shipping). Todos los pedidos nuevos persisten `totals.shipping` (0 sin cotización). El
+  // subtotal y grossProfit siguen siendo SOLO de productos: el envío jamás infla la ganancia.
+  // computeOrderTotals valida enteros seguros: en el camino CON cotización un carrito corrupto
+  // FALLA acá (jamás una orden con dinero cotizado inválido). SIN cotización (flag apagado /
+  // checkout legado) se preserva el comportamiento previo: el checkout nunca validó el subtotal
+  // como entero y un precio irregular del catálogo no debe romper la venta — total legado
+  // (subtotal tal cual, shipping 0) con rastro para corregir el dato.
+  let totals: Order['totals'];
+  try {
+    totals = computeOrderTotals({ subtotalGs: cart.subtotal, discountGs: 0, shippingGs: opts.shippingGs ?? 0 });
+  } catch (e) {
+    if (typeof opts.shippingGs === 'number') throw e;
+    logger.warn('Pedido con subtotal no entero: totales en modo compat legado (shipping 0)', { tenantId, customerId });
+    totals = { subtotal: cart.subtotal, discount: 0, shipping: 0, total: cart.subtotal, currency: 'PYG' };
+  }
+
   const order: Order = {
     id: orderId,
     tenantId,
     customerId,
     status: 'PENDING_PAYMENT',
     items,
-    totals: { subtotal: cart.subtotal, discount: 0, total: cart.subtotal, currency: 'PYG' },
+    totals,
     payment: { method: 'BANCARD', paymentId: '', paidAt: null, comprobanteUrl: null }, // provisional; se confirma al pagar
     delivery: { deliveryId: null, address: opts.deliveryAddress ?? emptyAddress() },
     invoice: { invoiceId: null, number: null },

@@ -384,6 +384,20 @@ export async function getWhatsAppClient(
   return new MockWhatsAppClient({ mode, reason: creds.ok ? 'no_tenant' : creds.reason });
 }
 
+/**
+ * SHIPPING-CHAT-3C — Resolución ESTRICTA del número: el cliente se resuelve para el pnid EXACTO,
+ * SIN fallback al número principal (una cotización financiera debe salir por el MISMO número que
+ * recibió la conversación; si ese número no resuelve, el caller aborta con channel_unavailable).
+ * Con pnid null (conversación vieja mono-número) se resuelve el principal del tenant.
+ */
+export async function getWhatsAppClientExact(tenantId: string, phoneNumberId: string | null): Promise<WhatsAppClient> {
+  const strictDeps: WhatsappClientDeps = {
+    getMode: defaultDeps.getMode,
+    resolveCreds: async (t, pnid) => (t && pnid ? resolveTenantWhatsappCredsFor(t, pnid) : resolveTenantWhatsappCreds(t)),
+  };
+  return getWhatsAppClient(tenantId, strictDeps, phoneNumberId);
+}
+
 /*
  * ============================== REGLAS NORMATIVAS PARA SHIPPING-CHAT-3C ==============================
  * (diseño 3A-HARDEN aprobado — registradas acá porque la saga consumirá este módulo):

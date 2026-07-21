@@ -199,3 +199,40 @@ describe('coverage mensajes — seguros y sin promesas', () => {
     }
   });
 });
+
+describe('SHIPPING-CHAT-3C — shippingCartFingerprintOf (huella FINANCIERA cart2)', () => {
+  const cart = (items, subtotal) => ({ items, subtotal });
+  const item = (productId, quantity, price) => ({ productId, quantity, price });
+
+  it('huella válida versionada cart2: incluye producto, cantidad y precio unitario', async () => {
+    const { shippingCartFingerprintOf } = await import('./coverage.js');
+    const fp = shippingCartFingerprintOf(cart([item('p1', 2, 100000), item('p2', 1, 50000)], 250000));
+    expect(fp).toMatch(/^cart2:[0-9a-f]{16}$/);
+  });
+  it('estable ante el orden de los items; sensible a cantidad Y precio', async () => {
+    const { shippingCartFingerprintOf } = await import('./coverage.js');
+    const a = shippingCartFingerprintOf(cart([item('p1', 2, 100000), item('p2', 1, 50000)], 250000));
+    const b = shippingCartFingerprintOf(cart([item('p2', 1, 50000), item('p1', 2, 100000)], 250000));
+    expect(a).toBe(b);
+    const c = shippingCartFingerprintOf(cart([item('p1', 2, 90000), item('p2', 1, 70000)], 250000));
+    expect(c).not.toBe(a); // mismo subtotal, precios distintos ⇒ huella distinta (v1 NO lo veía)
+    const d = shippingCartFingerprintOf(cart([item('p1', 1, 100000), item('p2', 3, 50000)], 250000));
+    expect(d).not.toBe(a);
+  });
+  it('fail-closed: subtotal que no cuadra, cantidades/precios inválidos, vacío, duplicado inconsistente, overflow ⇒ null', async () => {
+    const { shippingCartFingerprintOf } = await import('./coverage.js');
+    expect(shippingCartFingerprintOf(cart([item('p1', 1, 100000)], 999))).toBeNull(); // subtotal ≠ Σ
+    expect(shippingCartFingerprintOf(cart([], 0))).toBeNull(); // vacío
+    expect(shippingCartFingerprintOf(cart([item('p1', 0, 100000)], 0))).toBeNull(); // qty 0
+    expect(shippingCartFingerprintOf(cart([item('p1', -1, 100000)], -100000))).toBeNull();
+    expect(shippingCartFingerprintOf(cart([item('p1', 1, 100.5)], 100.5))).toBeNull(); // float
+    expect(shippingCartFingerprintOf(cart([item('p1', 1, -5)], -5))).toBeNull(); // precio negativo
+    expect(shippingCartFingerprintOf(cart([item('', 1, 100)], 100))).toBeNull(); // productId vacío
+    expect(shippingCartFingerprintOf(cart([item('p1', 1, 100), item('p1', 1, 200)], 300))).toBeNull(); // duplicado inconsistente
+    expect(shippingCartFingerprintOf(cart([item('p1', 2, Number.MAX_SAFE_INTEGER)], 0))).toBeNull(); // overflow
+  });
+  it('duplicado CONSISTENTE (mismo producto, mismo precio, dos líneas) es válido', async () => {
+    const { shippingCartFingerprintOf } = await import('./coverage.js');
+    expect(shippingCartFingerprintOf(cart([item('p1', 1, 100), item('p1', 2, 100)], 300))).toMatch(/^cart2:/);
+  });
+});
