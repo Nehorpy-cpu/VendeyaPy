@@ -9,7 +9,7 @@
  * (rechazar un texto con costo detectado en modo quote obligatorio) — la protección de frontend NO
  * es autoridad y puede evitarse.
  */
-import { parseShippingCost, computeOrderTotals, formatGuaranies, formatCanonicalShippingMessage } from '@vpw/shared';
+import { parseShippingCost, computeOrderTotals, formatGuaranies, formatCanonicalShippingMessage, DEFAULT_MAX_SHIPPING_GS } from '@vpw/shared';
 import type { ShippingParseReason, ShippingParseResult, CoverageQuoteAndApproveInput, CoverageStatus } from '@vpw/shared';
 
 /** Contexto SANEADO que recibe el componente. Sin PII: nunca dirección, coordenadas ni datos bancarios. */
@@ -98,9 +98,8 @@ export function messageForReason(reason: ShippingParseReason): string | null {
   }
 }
 
-/** Ciclo de vida del envío/aprobación (controlado por el PADRE; el componente no muta nada). */
+/** Errores de envío/aprobación distintos de `unknown` (que es su propio estado). */
 export type ShippingSendErrorKind =
-  | 'unknown'
   | 'meta_rejected'
   | 'cart_changed'
   | 'location_changed'
@@ -111,14 +110,21 @@ export type ShippingSendErrorKind =
   | 'over_max'
   | 'generic';
 
+/**
+ * Ciclo de vida del envío/aprobación (controlado por el PADRE; el componente no muta nada).
+ * HARDEN-1: todo estado NO-idle lleva `requestId` para AISLAMIENTO por conversación — el componente
+ * solo lo muestra si `send.requestId === context.requestId`. `unknown` es su propio estado y EXIGE
+ * evidencia financiera (requestId, shippingGs, totalGs, canonical) — nunca opcional.
+ */
 export type ShippingSendState =
   | { status: 'idle' }
-  | { status: 'sending' }
-  | { status: 'sent'; shippingGs: number; totalGs: number; canonical: string }
-  | { status: 'error'; kind: ShippingSendErrorKind; shippingGs?: number; totalGs?: number; canonical?: string };
+  | { status: 'sending'; requestId: string }
+  | { status: 'sent'; requestId: string; shippingGs: number; totalGs: number; canonical: string }
+  | { status: 'error'; requestId: string; kind: ShippingSendErrorKind; shippingGs?: number; totalGs?: number; canonical?: string }
+  | { status: 'unknown'; requestId: string; shippingGs: number; totalGs: number; canonical: string };
 
-/** Texto EXACTO por tipo de error de envío/aprobación. */
-export const SEND_ERROR_TEXT: Record<ShippingSendErrorKind, string> = {
+/** Texto EXACTO por resultado de envío/aprobación (incluye `unknown`). */
+export const SEND_ERROR_TEXT: Record<ShippingSendErrorKind | 'unknown', string> = {
   unknown: 'No pudimos confirmar el envío. Revisá el historial antes de intentar otra acción.',
   meta_rejected: 'WhatsApp no aceptó el mensaje, así que no aprobamos la cobertura. Revisá el chat y volvé a intentar.',
   cart_changed: 'El carrito cambió: volvé a informar el costo de envío antes de aprobar.',
@@ -190,8 +196,14 @@ export function deriveShippingQuote(ctx: ShippingDraftContext): ShippingQuoteVM 
   if (!usable) return hidden;
 
   const parse = parseShippingCost(ctx.draft, { maxChargeGs: ctx.maxChargeGs });
+  // HARDEN-1: si la CONFIG del máximo es inválida, el parse principal enmascara la intención con
+  // `limite_invalido` para CUALQUIER texto. Re-clasificamos SOLO la intención con un límite defensivo
+  // válido (el default compartido) para decidir `blocksManualSend` — JAMÁS para aprobar ni reemplazar
+  // la config del tenant (canApprove/payload siguen dependiendo del parse principal, que es `none`).
+  const configInvalida = parse.kind === 'none' && parse.reason === 'limite_invalido';
+  const intento = configInvalida ? parseShippingCost(ctx.draft, { maxChargeGs: DEFAULT_MAX_SHIPPING_GS }) : parse;
   const draftClass = classifyDraft(parse);
-  const blocks = blocksManualSend(parse);
+  const blocks = blocksManualSend(intento);
   const reason = parse.kind === 'none' ? parse.reason : null;
   const subtotalText = fmt(ctx.subtotalGs);
 

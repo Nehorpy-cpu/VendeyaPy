@@ -125,11 +125,11 @@ describe('deriveShippingQuote — gates', () => {
     expect(vm.blocksManualSend).toBe(false);
     expect(vm.payload).toBeNull();
   });
-  it('maxChargeGs inválido ⇒ invalid_configuration, sin aprobar', () => {
+  it('maxChargeGs inválido ⇒ invalid_configuration, sin aprobar (bloquea por intención de costo)', () => {
     const vm = deriveShippingQuote(baseCtx({ draft: 'el envío ₲30.000', maxChargeGs: 0 }));
     expect(vm.draftClass).toBe('invalid_configuration');
     expect(vm.canApprove).toBe(false);
-    expect(vm.blocksManualSend).toBe(false);
+    expect(vm.blocksManualSend).toBe(true); // HARDEN-1: intención re-clasificada con límite defensivo
     expect(vm.message).toBeTruthy();
   });
   it('ambiguo ⇒ invalid_price_attempt, bloquea envío manual, sin aprobar', () => {
@@ -165,6 +165,38 @@ describe('deriveShippingQuote — gates', () => {
     expect(Object.keys(vm.payload!).sort()).toEqual(
       ['confirmedShippingGs', 'expectedCartFingerprint', 'expectedLocationFingerprint', 'requestId', 'sellerDraft'].sort(),
     );
+  });
+});
+
+describe('deriveShippingQuote — HARDEN-1 A: config inválida sin bypass', () => {
+  const inv = (draft: string) => deriveShippingQuote(baseCtx({ draft, maxChargeGs: 0 }));
+  it('max inválido + "hola" ⇒ blocksManualSend=false, sin aprobar, sin payload', () => {
+    const vm = inv('hola, gracias');
+    expect(vm.blocksManualSend).toBe(false);
+    expect(vm.canApprove).toBe(false);
+    expect(vm.payload).toBeNull();
+  });
+  it('max inválido + "te confirmo luego el envío" ⇒ false', () => {
+    expect(inv('te confirmo luego el envío').blocksManualSend).toBe(false);
+  });
+  it('max inválido + "el envío cuesta ₲30.000" ⇒ true (intención de costo)', () => {
+    const vm = inv('el envío cuesta ₲30.000');
+    expect(vm.blocksManualSend).toBe(true);
+    expect(vm.canApprove).toBe(false);
+    expect(vm.payload).toBeNull();
+  });
+  it('max inválido + monto ambiguo ⇒ true', () => {
+    expect(inv('el envío ₲30.000 o ₲40.000').blocksManualSend).toBe(true);
+  });
+  it('max inválido + gratuidad condicional ⇒ true', () => {
+    expect(inv('envío gratis desde ₲150.000').blocksManualSend).toBe(true);
+  });
+  it('max inválido: canApprove=false y payload=null en todos los casos', () => {
+    for (const d of ['hola', 'el envío cuesta ₲30.000', 'el envío ₲30.000 o ₲40.000', 'envío gratis']) {
+      const vm = inv(d);
+      expect(vm.canApprove).toBe(false);
+      expect(vm.payload).toBeNull();
+    }
   });
 });
 

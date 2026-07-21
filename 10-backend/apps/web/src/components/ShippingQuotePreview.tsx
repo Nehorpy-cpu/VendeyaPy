@@ -1,16 +1,17 @@
 'use client';
 
 /**
- * ShippingQuotePreview — SHIPPING-CHAT-2B (capa presentacional pura).
+ * ShippingQuotePreview — SHIPPING-CHAT-2B (capa presentacional pura) + HARDEN-1.
  * Preview del costo de envío que el vendedor escribe en el chat, para revisarlo antes de enviarlo y
- * aprobar la cobertura. Es un componente CONTROLADO y SIN efectos externos: sin useQuery, sin Firebase,
+ * aprobar la cobertura. Componente CONTROLADO y SIN efectos externos: sin useQuery, sin Firebase,
  * sin httpsCallable, sin useAuth, sin tenantId/customerId, sin PII (nunca dirección/coordenadas/banco).
  *
- * Toda la lógica de negocio (parseo, totales, formato, mensaje canónico, bloqueo de envío manual) vive
- * en `@vpw/shared` vía `lib/shippingQuote` — este archivo solo renderiza el view-model derivado y llama
- * callbacks del padre. La integración con Firebase/callable es SHIPPING-CHAT-3.
+ * HARDEN-1: (a) config de máximo inválida no bloquea mensajes comunes (intención re-clasificada en la
+ * derivación); (b) AISLAMIENTO por conversación — un resultado de OTRO request no se muestra; (c) doble
+ * clic local acotado al payload exacto; (d) spinner respeta reducción de movimiento.
+ * La autoridad final (parseo, idempotencia) es SHIPPING-CHAT-3.
  */
-import { useId } from 'react';
+import { useEffect, useId, useRef } from 'react';
 import {
   deriveShippingQuote,
   formatGs,
@@ -23,7 +24,7 @@ import {
 export interface ShippingQuotePreviewProps {
   /** Contexto saneado (sin PII). */
   context: ShippingDraftContext;
-  /** Ciclo de vida del envío/aprobación, controlado por el padre. */
+  /** Ciclo de vida del envío/aprobación, controlado por el padre (todo estado no-idle lleva requestId). */
   send: ShippingSendState;
   /** Confirmar: entrega el payload compatible con Omit<CoverageQuoteAndApproveInput,'tenantId'>. */
   onConfirm: (payload: ShippingConfirmPayload) => void;
@@ -31,6 +32,8 @@ export interface ShippingQuotePreviewProps {
   onKeepEditing: () => void;
   /** Atajo "Informar costo de envío" (el padre arma el borrador — este componente NO escribe el composer). */
   onShortcut: () => void;
+  /** Abrir/enfocar el historial del chat (usado por `unknown`: no ofrece reintento). */
+  onReviewHistory: () => void;
 }
 
 const shell = 'border-t border-sky-100 bg-sky-50/60 px-4 py-3 text-xs';
@@ -63,16 +66,33 @@ function MoneyRows({ shipping, products, total }: { shipping: string; products: 
   );
 }
 
-export function ShippingQuotePreview({ context, send, onConfirm, onKeepEditing, onShortcut }: ShippingQuotePreviewProps) {
+export function ShippingQuotePreview({ context, send, onConfirm, onKeepEditing, onShortcut, onReviewHistory }: ShippingQuotePreviewProps) {
   const vm = deriveShippingQuote(context);
   const canonId = useId();
   const msgId = useId();
   const errId = useId();
+  const unkId = useId();
 
-  // ---- Ciclo de vida del envío PRIMERO: persiste aunque cambie el estado de la revisión
-  // (al aprobar, el status pasa a coverage_approved; el éxito NO debe auto-borrarse — decisión 9).
-  // El padre decide cuándo volver a `idle` para limpiar. ----
-  if (send.status === 'sending') {
+  // HARDEN-1 (C): doble clic real. Guarda local acotada al payload EXACTO (requestId + fingerprints +
+  // borrador + monto). Un segundo clic con el mismo payload no vuelve a llamar onConfirm, aunque el padre
+  // todavía no haya re-renderizado con `sending`. Cambiar request/fingerprints/borrador ⇒ payload distinto
+  // ⇒ se permite de nuevo. Al volver el padre a `idle` (ciclo cerrado) se reinicia. Sin efectos de red.
+  const submittedKeyRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (send.status === 'idle') submittedKeyRef.current = null;
+  }, [send.status]);
+  const confirmOnce = () => {
+    if (!vm.payload) return;
+    const key = JSON.stringify(vm.payload);
+    if (submittedKeyRef.current === key) return; // ya se envió este payload exacto
+    submittedKeyRef.current = key;
+    onConfirm(vm.payload);
+  };
+
+  // HARDEN-1 (B): AISLAMIENTO — un resultado de envío de OTRA conversación jamás se muestra sobre este chat.
+  const mine = send.status !== 'idle' && send.requestId === context.requestId;
+
+  if (mine && send.status === 'sending') {
     return (
       <section aria-label="Cotización del costo de envío" className={shell}>
         <div className={eyebrow + ' text-sky-700'}>
@@ -81,7 +101,7 @@ export function ShippingQuotePreview({ context, send, onConfirm, onKeepEditing, 
         <p role="status" className="mt-1 text-ink-600">Estamos enviando el mensaje y aprobando la cobertura.</p>
         <div className="mt-2">
           <button type="button" disabled className={btnPrimary + ' inline-flex items-center gap-2'}>
-            <span aria-hidden="true" className="inline-block h-3 w-3 animate-spin rounded-full border-2 border-white/50 border-t-white" />
+            <span aria-hidden="true" className="inline-block h-3 w-3 animate-spin motion-reduce:animate-none rounded-full border-2 border-white/50 border-t-white" />
             Enviando y aprobando…
           </button>
         </div>
@@ -89,7 +109,7 @@ export function ShippingQuotePreview({ context, send, onConfirm, onKeepEditing, 
     );
   }
 
-  if (send.status === 'sent') {
+  if (mine && send.status === 'sent') {
     return (
       <section aria-label="Cotización del costo de envío" className={shell}>
         <div className={eyebrow + ' text-mint-700'}>
@@ -106,8 +126,32 @@ export function ShippingQuotePreview({ context, send, onConfirm, onKeepEditing, 
     );
   }
 
-  if (send.status === 'error') {
-    const unknown = send.kind === 'unknown';
+  // HARDEN-1 (B): unknown es su propio estado, con evidencia financiera OBLIGATORIA y SOLO "Revisar historial"
+  // (nada de "Seguir editando" ni reintento inmediato — decisión 8).
+  if (mine && send.status === 'unknown') {
+    return (
+      <section aria-label="Cotización del costo de envío" className={shell}>
+        <div className={eyebrow + ' text-amber-700'}>
+          <Icon>⚠</Icon> Envío sin confirmar
+        </div>
+        <p role="alert" id={unkId} className="mt-1 font-semibold text-amber-700">
+          {SEND_ERROR_TEXT.unknown}
+        </p>
+        <p className="mt-2 rounded-lg border border-ink-100 bg-ink-50 px-2.5 py-2 text-ink-700">
+          Intentaste enviar: “{send.canonical}” · Envío{' '}
+          <span className="font-mono tabular-nums">₲ {formatGs(send.shippingGs)}</span> · Total{' '}
+          <span className="font-mono tabular-nums">₲ {formatGs(send.totalGs)}</span>
+        </p>
+        <div className="mt-2">
+          <button type="button" onClick={onReviewHistory} aria-describedby={unkId} className={btnGhost}>
+            Revisar historial
+          </button>
+        </div>
+      </section>
+    );
+  }
+
+  if (mine && send.status === 'error') {
     return (
       <section aria-label="Cotización del costo de envío" className={shell}>
         <div className={eyebrow + ' text-coral-700'}>
@@ -116,15 +160,6 @@ export function ShippingQuotePreview({ context, send, onConfirm, onKeepEditing, 
         <p role="alert" id={errId} className="mt-1 font-semibold text-coral-700">
           {SEND_ERROR_TEXT[send.kind]}
         </p>
-        {/* Decisión 8: en unknown se conserva visible el mensaje canónico y el total que se intentó aplicar. */}
-        {unknown && send.canonical && (
-          <p className="mt-2 rounded-lg border border-ink-100 bg-ink-50 px-2.5 py-2 text-ink-700">
-            Intentaste enviar: “{send.canonical}”
-            {typeof send.totalGs === 'number' && (
-              <> · Total <span className="font-mono tabular-nums">₲ {formatGs(send.totalGs)}</span></>
-            )}
-          </p>
-        )}
         <div className="mt-2">
           <button type="button" onClick={onKeepEditing} aria-describedby={errId} className={btnGhost}>
             Seguir editando
@@ -134,7 +169,7 @@ export function ShippingQuotePreview({ context, send, onConfirm, onKeepEditing, 
     );
   }
 
-  // A partir de acá (estado idle) aplica el gate de visibilidad de la revisión.
+  // A partir de acá (estado idle o resultado de OTRO request) aplica el gate de visibilidad de la revisión.
   if (!vm.visible) return null;
 
   // ---- Estado idle: feedback del borrador ----
@@ -177,12 +212,7 @@ export function ShippingQuotePreview({ context, send, onConfirm, onKeepEditing, 
             {vm.canonical}
           </p>
           <div className="mt-3 flex flex-wrap gap-2">
-            <button
-              type="button"
-              onClick={() => vm.payload && onConfirm(vm.payload)}
-              aria-describedby={canonId}
-              className={btnPrimary}
-            >
+            <button type="button" onClick={confirmOnce} aria-describedby={canonId} className={btnPrimary}>
               Enviar costo y aprobar cobertura
             </button>
             <button type="button" onClick={onKeepEditing} className={btnGhost}>

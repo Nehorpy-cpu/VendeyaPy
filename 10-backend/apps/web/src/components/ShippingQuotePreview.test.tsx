@@ -1,15 +1,17 @@
 /**
- * ShippingQuotePreview.test.tsx — SHIPPING-CHAT-2B
- * Estados visuales, accesibilidad, ausencia de PII/input numérico, y contrato del payload de confirmación.
- * El componente es presentacional puro: sin Firebase, sin callables — se prueba con props controladas.
+ * ShippingQuotePreview.test.tsx — SHIPPING-CHAT-2B + HARDEN-1
+ * Estados visuales, aislamiento por conversación, doble-clic, unknown con evidencia, accesibilidad,
+ * ausencia de PII/input numérico, y contrato del payload. Componente presentacional puro (props controladas).
  */
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent, within } from '@testing-library/react';
 import { ShippingQuotePreview } from './ShippingQuotePreview';
 import type { ShippingDraftContext, ShippingSendState } from '@/lib/shippingQuote';
 
+const RID = 'covr_abc123';
+
 const baseCtx = (over: Partial<ShippingDraftContext> = {}): ShippingDraftContext => ({
-  requestId: 'covr_abc123',
+  requestId: RID,
   status: 'pending_coverage_review',
   subtotalGs: 250000,
   locationFingerprint: 'loc:abc',
@@ -30,10 +32,12 @@ function renderPreview(opts: {
   onConfirm?: (p: unknown) => void;
   onKeepEditing?: () => void;
   onShortcut?: () => void;
+  onReviewHistory?: () => void;
 } = {}) {
   const onConfirm = opts.onConfirm ?? vi.fn();
   const onKeepEditing = opts.onKeepEditing ?? vi.fn();
   const onShortcut = opts.onShortcut ?? vi.fn();
+  const onReviewHistory = opts.onReviewHistory ?? vi.fn();
   const utils = render(
     <ShippingQuotePreview
       context={baseCtx(opts.ctx)}
@@ -41,9 +45,10 @@ function renderPreview(opts: {
       onConfirm={onConfirm}
       onKeepEditing={onKeepEditing}
       onShortcut={onShortcut}
+      onReviewHistory={onReviewHistory}
     />,
   );
-  return { ...utils, onConfirm, onKeepEditing, onShortcut };
+  return { ...utils, onConfirm, onKeepEditing, onShortcut, onReviewHistory };
 }
 
 describe('ShippingQuotePreview — costo detectado', () => {
@@ -60,7 +65,6 @@ describe('ShippingQuotePreview — costo detectado', () => {
   it('envío gratis ⇒ ₲ 0 y total = productos', () => {
     renderPreview({ ctx: { draft: 'envío gratis' } });
     expect(screen.getByText('₲ 0')).toBeInTheDocument();
-    // Productos y Total muestran ₲ 250.000 (envío 0 no cambia el total).
     expect(screen.getAllByText('₲ 250.000')).toHaveLength(2);
     expect(screen.getByText('Envío sin costo')).toBeInTheDocument();
   });
@@ -97,9 +101,8 @@ describe('ShippingQuotePreview — sin input numérico editable (decisión 10)',
 });
 
 describe('ShippingQuotePreview — ciclo de envío', () => {
-  it('enviando ⇒ acción bloqueada, sin botón habilitado (doble clic imposible)', () => {
-    renderPreview({ ctx: { draft: 'el envío cuesta ₲30.000' }, send: { status: 'sending' } });
-    expect(screen.getByText(/Enviando y aprobando…/)).toBeInTheDocument();
+  it('enviando ⇒ acción bloqueada, sin botón habilitado', () => {
+    renderPreview({ ctx: { draft: 'el envío cuesta ₲30.000' }, send: { status: 'sending', requestId: RID } });
     const btn = screen.getByRole('button', { name: /enviando y aprobando/i });
     expect(btn).toBeDisabled();
     expect(screen.queryByRole('button', { name: /enviar costo y aprobar cobertura/i })).toBeNull();
@@ -108,7 +111,7 @@ describe('ShippingQuotePreview — ciclo de envío', () => {
   it('éxito ⇒ confirmación estable con envío y total del resultado', () => {
     renderPreview({
       ctx: { draft: 'el envío cuesta ₲30.000' },
-      send: { status: 'sent', shippingGs: 30000, totalGs: 280000, canonical: 'El costo de envío para tu ubicación es ₲30.000.' },
+      send: { status: 'sent', requestId: RID, shippingGs: 30000, totalGs: 280000, canonical: 'El costo de envío para tu ubicación es ₲30.000.' },
     });
     expect(screen.getByRole('status')).toHaveTextContent(/Le enviamos el costo al cliente y aprobamos la cobertura/);
     expect(screen.getByText('₲ 30.000')).toBeInTheDocument();
@@ -117,32 +120,109 @@ describe('ShippingQuotePreview — ciclo de envío', () => {
   });
 
   it('rechazo de Meta ⇒ texto exacto + seguir editando', () => {
-    renderPreview({ ctx: { draft: 'el envío cuesta ₲30.000' }, send: { status: 'error', kind: 'meta_rejected' } });
+    renderPreview({ ctx: { draft: 'el envío cuesta ₲30.000' }, send: { status: 'error', requestId: RID, kind: 'meta_rejected' } });
     expect(screen.getByRole('alert')).toHaveTextContent(/WhatsApp no aceptó el mensaje/);
     expect(screen.getByRole('button', { name: /seguir editando/i })).toBeInTheDocument();
   });
 
-  it('unknown ⇒ texto EXACTO, conserva canónico y total, sin reintento inmediato', () => {
-    renderPreview({
-      ctx: { draft: 'el envío cuesta ₲30.000' },
-      send: { status: 'error', kind: 'unknown', canonical: 'El costo de envío para tu ubicación es ₲30.000.', totalGs: 280000 },
-    });
-    expect(screen.getByRole('alert')).toHaveTextContent('No pudimos confirmar el envío. Revisá el historial antes de intentar otra acción.');
-    expect(screen.getByText(/Intentaste enviar/)).toHaveTextContent(/El costo de envío para tu ubicación es ₲30.000/);
-    expect(screen.getByText(/Intentaste enviar/)).toHaveTextContent(/280\.000/);
-    // Sin reintento inmediato: no hay botón de "enviar/aprobar", solo "Seguir editando".
-    expect(screen.queryByRole('button', { name: /aprobar|enviar costo/i })).toBeNull();
-    expect(screen.getByRole('button', { name: /seguir editando/i })).toBeInTheDocument();
-  });
-
   it('carrito cambiado ⇒ pide recotizar', () => {
-    renderPreview({ ctx: { draft: 'el envío cuesta ₲30.000' }, send: { status: 'error', kind: 'cart_changed' } });
+    renderPreview({ ctx: { draft: 'el envío cuesta ₲30.000' }, send: { status: 'error', requestId: RID, kind: 'cart_changed' } });
     expect(screen.getByRole('alert')).toHaveTextContent(/El carrito cambió/);
   });
 
   it('ubicación cambiada ⇒ reabre y recotiza', () => {
-    renderPreview({ ctx: { draft: 'el envío cuesta ₲30.000' }, send: { status: 'error', kind: 'location_changed' } });
+    renderPreview({ ctx: { draft: 'el envío cuesta ₲30.000' }, send: { status: 'error', requestId: RID, kind: 'location_changed' } });
     expect(screen.getByRole('alert')).toHaveTextContent(/cambió su ubicación/);
+  });
+});
+
+describe('ShippingQuotePreview — HARDEN-1: unknown', () => {
+  const unknownSend = (): ShippingSendState => ({
+    status: 'unknown',
+    requestId: RID,
+    shippingGs: 30000,
+    totalGs: 280000,
+    canonical: 'El costo de envío para tu ubicación es ₲30.000.',
+  });
+
+  it('texto EXACTO, muestra canónico + envío + total', () => {
+    renderPreview({ ctx: { draft: 'el envío cuesta ₲30.000' }, send: unknownSend() });
+    expect(screen.getByRole('alert')).toHaveTextContent('No pudimos confirmar el envío. Revisá el historial antes de intentar otra acción.');
+    const evid = screen.getByText(/Intentaste enviar/);
+    expect(evid).toHaveTextContent(/El costo de envío para tu ubicación es ₲30.000/);
+    expect(evid).toHaveTextContent(/Envío ₲ 30\.000/);
+    expect(evid).toHaveTextContent(/Total ₲ 280\.000/);
+  });
+
+  it('ofrece ÚNICAMENTE "Revisar historial" (sin seguir editando ni reintento)', () => {
+    renderPreview({ ctx: { draft: 'el envío cuesta ₲30.000' }, send: unknownSend() });
+    expect(screen.getByRole('button', { name: /revisar historial/i })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /seguir editando/i })).toBeNull();
+    expect(screen.queryByRole('button', { name: /aprobar|enviar costo/i })).toBeNull();
+  });
+
+  it('"Revisar historial" dispara onReviewHistory una vez', () => {
+    const onReviewHistory = vi.fn();
+    renderPreview({ ctx: { draft: 'el envío cuesta ₲30.000' }, send: unknownSend(), onReviewHistory });
+    fireEvent.click(screen.getByRole('button', { name: /revisar historial/i }));
+    expect(onReviewHistory).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('ShippingQuotePreview — HARDEN-1: aislamiento por conversación', () => {
+  const otherRid = 'covr_OTHER';
+  it('sending de OTRO request no aparece; se ve el preview del request actual', () => {
+    renderPreview({ ctx: { draft: 'el envío cuesta ₲30.000' }, send: { status: 'sending', requestId: otherRid } });
+    expect(screen.queryByText(/Enviando y aprobando/)).toBeNull();
+    expect(screen.getByRole('button', { name: /enviar costo y aprobar cobertura/i })).toBeInTheDocument();
+  });
+  it('sent de OTRO request no aparece', () => {
+    renderPreview({
+      ctx: { draft: 'el envío cuesta ₲30.000' },
+      send: { status: 'sent', requestId: otherRid, shippingGs: 30000, totalGs: 280000, canonical: 'x' },
+    });
+    expect(screen.queryByText(/Le enviamos el costo/)).toBeNull();
+    expect(screen.getByRole('button', { name: /enviar costo y aprobar cobertura/i })).toBeInTheDocument();
+  });
+  it('unknown de OTRO request no aparece', () => {
+    renderPreview({
+      ctx: { draft: 'el envío cuesta ₲30.000' },
+      send: { status: 'unknown', requestId: otherRid, shippingGs: 30000, totalGs: 280000, canonical: 'x' },
+    });
+    expect(screen.queryByText(/No pudimos confirmar el envío/)).toBeNull();
+    expect(screen.getByRole('button', { name: /enviar costo y aprobar cobertura/i })).toBeInTheDocument();
+  });
+});
+
+describe('ShippingQuotePreview — HARDEN-1: doble clic', () => {
+  it('dos clics consecutivos ⇒ onConfirm exactamente una vez', () => {
+    const onConfirm = vi.fn();
+    renderPreview({ ctx: { draft: 'el envío cuesta ₲30.000' }, onConfirm });
+    const btn = screen.getByRole('button', { name: /enviar costo y aprobar cobertura/i });
+    fireEvent.click(btn);
+    fireEvent.click(btn);
+    fireEvent.click(btn);
+    expect(onConfirm).toHaveBeenCalledTimes(1);
+  });
+
+  it('la guarda se reinicia al cambiar el borrador (nuevo payload ⇒ nuevo envío)', () => {
+    const onConfirm = vi.fn();
+    const { rerender } = renderPreview({ ctx: { draft: 'el envío cuesta ₲30.000' }, onConfirm });
+    fireEvent.click(screen.getByRole('button', { name: /enviar costo y aprobar cobertura/i }));
+    // el padre cambia el borrador (mismo request) → payload distinto → se permite otro envío
+    rerender(
+      <ShippingQuotePreview
+        context={baseCtx({ draft: 'el envío cuesta ₲45.000' })}
+        send={{ status: 'idle' }}
+        onConfirm={onConfirm}
+        onKeepEditing={vi.fn()}
+        onShortcut={vi.fn()}
+        onReviewHistory={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: /enviar costo y aprobar cobertura/i }));
+    expect(onConfirm).toHaveBeenCalledTimes(2);
+    expect(onConfirm).toHaveBeenLastCalledWith(expect.objectContaining({ confirmedShippingGs: 45000 }));
   });
 });
 
@@ -152,27 +232,23 @@ describe('ShippingQuotePreview — gates', () => {
     expect(screen.getByRole('status')).toHaveTextContent(/venció/);
     expect(screen.queryByRole('button', { name: /aprobar cobertura|enviar costo/i })).toBeNull();
   });
-
   it('flujo apagado ⇒ no renderiza nada', () => {
     const { container } = renderPreview({ ctx: { flowActive: false, draft: 'el envío cuesta ₲30.000' } });
     expect(container).toBeEmptyDOMElement();
   });
-
   it('sin capacidad de decidir ⇒ no renderiza nada', () => {
     const { container } = renderPreview({ ctx: { canDecide: false, draft: 'el envío cuesta ₲30.000' } });
     expect(container).toBeEmptyDOMElement();
   });
-
   it('subtotal corrupto ⇒ muestra el mensaje (no queda huérfano) y no permite aprobar', () => {
     renderPreview({ ctx: { draft: 'el envío cuesta ₲30.000', subtotalGs: -100 } });
     expect(screen.getByRole('alert')).toHaveTextContent(/No pude calcular el total/);
     expect(screen.queryByRole('button', { name: /enviar costo y aprobar/i })).toBeNull();
   });
-
-  it('el éxito PERSISTE aunque la revisión ya no esté pendiente (status coverage_approved)', () => {
+  it('el éxito PERSISTE aunque la revisión ya no esté pendiente (mismo request, status approved)', () => {
     renderPreview({
       ctx: { status: 'coverage_approved', draft: 'el envío cuesta ₲30.000' },
-      send: { status: 'sent', shippingGs: 30000, totalGs: 280000, canonical: 'El costo de envío para tu ubicación es ₲30.000.' },
+      send: { status: 'sent', requestId: RID, shippingGs: 30000, totalGs: 280000, canonical: 'El costo de envío para tu ubicación es ₲30.000.' },
     });
     expect(screen.getByRole('status')).toHaveTextContent(/Le enviamos el costo al cliente/);
   });
@@ -185,7 +261,7 @@ describe('ShippingQuotePreview — contrato, PII y accesibilidad', () => {
     fireEvent.click(screen.getByRole('button', { name: /enviar costo y aprobar cobertura/i }));
     expect(onConfirm).toHaveBeenCalledTimes(1);
     expect(onConfirm).toHaveBeenCalledWith({
-      requestId: 'covr_abc123',
+      requestId: RID,
       sellerDraft: 'el envío cuesta ₲30.000',
       expectedLocationFingerprint: 'loc:abc',
       expectedCartFingerprint: 'cart:abc',
