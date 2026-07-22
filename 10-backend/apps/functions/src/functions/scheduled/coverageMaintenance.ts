@@ -221,10 +221,14 @@ export async function runCoverageMaintenance(): Promise<void> {
       //    TRANSACCIÓN con lecturas frescas (config, outbox, request, notificación; todas antes
       //    de la única escritura): si la saga completó/reemplazó el intento en la carrera, CERO
       //    campana obsoleta. La señal aplica únicamente al intento VIGENTE de la activación vigente.
+      // HARDEN-3: `stuckNotifiedAt == null` excluye lo YA alertado — sin este filtro, los mismos
+      // 50 docs más viejos (ya avisados, solo skippeados en la tx) ocupaban el limit(LOTE) en
+      // cada corrida y los candidatos 51+ jamás entraban al lote (inanición).
       const atascados = await db()
         .collection(`tenants/${tenantId}/coverageMessageOutbox`)
         .where('action', '==', 'quote')
         .where('status', 'in', ['prepared', 'sent', 'unknown'])
+        .where('stuckNotifiedAt', '==', null)
         .where('updatedAt', '<=', Timestamp.fromMillis(now.toMillis() - QUOTE_ATASCADO_MS))
         .limit(LOTE)
         .get();
@@ -243,18 +247,36 @@ export async function runCoverageMaintenance(): Promise<void> {
             const ob = (await tx.get(d.ref)).data() as CoverageOutboxMessage | undefined;
             const req = (await tx.get(db().doc(`tenants/${tenantId}/coverageRequests/${candidato.coverageRequestId}`))).data() as CoverageRequest | undefined;
             const notifSnap = await tx.get(notifRef);
-            if (!actTx.enabled || !actTx.activationId) return; // kill-switch ganó en la carrera
+            if (!actTx.enabled || !actTx.activationId) return; // kill-switch ganó en la carrera (transitorio: cero escrituras)
             if (!ob || ob.action !== 'quote') return;
-            if ((ob.activationId ?? null) !== actTx.activationId) return; // activación anterior: inerte
-            if (ob.status !== 'prepared' && ob.status !== 'sent' && ob.status !== 'unknown') return; // la saga lo terminó
-            if ((ob.updatedAt?.toMillis?.() ?? 0) > now.toMillis() - QUOTE_ATASCADO_MS) return; // ya no supera el umbral
+            if ((ob.activationId ?? null) !== actTx.activationId) {
+              // HARDEN-3 (review): skip PERMANENTE — una activación anterior jamás vuelve (los
+              // activationId no se reúsan por política) y el artefacto es inerte por diseño. Se
+              // marca SIN campana para que no ocupe un slot del lote en cada corrida (la misma
+              // inanición por acumulación que este programa cierra).
+              if ((ob.stuckNotifiedAt ?? null) === null) tx.update(d.ref, { stuckNotifiedAt: Timestamp.now() });
+              return;
+            }
+            if (ob.status !== 'prepared' && ob.status !== 'sent' && ob.status !== 'unknown') return; // la saga lo terminó (la query ya no lo matchea)
+            if ((ob.updatedAt?.toMillis?.() ?? 0) > now.toMillis() - QUOTE_ATASCADO_MS) return; // transitorio: ya no supera el umbral
+            if ((ob.stuckNotifiedAt ?? null) !== null) return; // HARDEN-3: otra corrida ya lo resolvió en la carrera
             if (!req || req.shippingQuotePending?.quoteAttemptId !== ob.quote?.quoteAttemptId) return; // reemplazado/cerrado
             // HARDEN-2 (review): un PREPARED sobre un request ya decidido/vencido no tiene nada
-            // "completable" — la campana sería obsoleta y engañosa (el retry de la saga lo cierra
-            // terminal). Un SENT/UNKNOWN sí alerta SIEMPRE: el cliente pudo recibir un costo y la
-            // señal humana es obligatoria aunque el request haya muerto.
-            if (ob.status === 'prepared' && req.status !== 'pending_coverage_review') return;
-            if (notifSnap.exists) return; // ya avisado
+            // "completable" — la campana sería obsoleta y engañosa. Un SENT/UNKNOWN sí alerta
+            // SIEMPRE: el cliente pudo recibir un costo y la señal humana es obligatoria aunque
+            // el request haya muerto.
+            if (ob.status === 'prepared' && req.status !== 'pending_coverage_review') {
+              // HARDEN-3 (review): también es un skip PERMANENTE (el request jamás vuelve a
+              // pendiente y nadie reintenta esa cotización): marcar libera el slot, sin campana.
+              if ((ob.stuckNotifiedAt ?? null) === null) tx.update(d.ref, { stuckNotifiedAt: Timestamp.now() });
+              return;
+            }
+            if (notifSnap.exists) {
+              // Defensivo (solo alcanzable con datos manuales/corruptos: campana presente sin
+              // marcador): liberar el slot marcando el outbox — bookkeeping puro.
+              tx.update(d.ref, { stuckNotifiedAt: Timestamp.now() });
+              return;
+            }
             tx.create(notifRef, {
               id: notifId,
               tenantId,
@@ -269,6 +291,10 @@ export async function runCoverageMaintenance(): Promise<void> {
               readAt: null,
               createdAt: Timestamp.now(),
             });
+            // HARDEN-3: campana + marcador en la MISMA transacción (todo-o-nada): el doc alertado
+            // deja de ocupar el limit de la query y el lote AVANZA. Bookkeeping puro: jamás toca
+            // status, quote ni updatedAt (el estado del envío sigue siendo solo de la saga).
+            tx.update(d.ref, { stuckNotifiedAt: Timestamp.now() });
           });
         } catch (e) {
           logger.warn('Cobertura: no se pudo evaluar/avisar el intento de cotización atascado', { tenantId, requestId: candidato.coverageRequestId, error: e instanceof Error ? e.message : String(e) });

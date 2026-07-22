@@ -411,6 +411,7 @@ async function txPrepararIntento(tenantId: string, actor: QuoteActor, input: Quo
         expectedCartFingerprint: fp2,
       },
       reconciled: null,
+      stuckNotifiedAt: null, // HARDEN-3: presente-en-null SIEMPRE (la query del sweep exige el campo)
       createdAt: now,
       updatedAt: now,
     };

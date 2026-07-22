@@ -208,6 +208,17 @@ export interface CoverageOutboxQuoteMessage extends CoverageOutboxMessageBase {
   checkoutAttemptId: null;
   quote: CoverageOutboxQuoteInfo;
   reconciled: CoverageOutboxReconciled | null;
+  /**
+   * SHIPPING-CHAT-3C-HARDEN-3 — Bookkeeping EXCLUSIVO del sweep de mantenimiento: momento en que
+   * el sweep RESOLVIÓ este candidato (campana de "intento atascado" creada, o candidato
+   * permanentemente inerte — activación anterior / prepared sobre request decidido — que jamás
+   * alertará). null = todavía no evaluado como atascado. Permite que la query del sweep excluya
+   * lo ya resuelto y el lote AVANCE (sin esto, los mismos 50 docs más viejos ocupaban el limit
+   * para siempre y los candidatos 51+ jamás se revisaban). JAMÁS afecta la saga: no es estado
+   * del envío ni de la aprobación. TX-A lo persiste explícitamente en null (la query `== null`
+   * exige el campo presente).
+   */
+  stuckNotifiedAt: Timestamp | null;
 }
 
 export type CoverageOutboxMessage = CoverageOutboxLegacyMessage | CoverageOutboxQuoteMessage;

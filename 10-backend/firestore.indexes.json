@@ -221,6 +221,10 @@
           "order": "ASCENDING"
         },
         {
+          "fieldPath": "stuckNotifiedAt",
+          "order": "ASCENDING"
+        },
+        {
           "fieldPath": "updatedAt",
           "order": "ASCENDING"
         }

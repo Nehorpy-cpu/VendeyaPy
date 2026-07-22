@@ -890,6 +890,119 @@ check('44. retry idempotente sobre aprobación corrupta/overflow ⇒ total_inval
   ordHH2.totals.total === ordHH.totals.total && (await outsCount(HH)) === outsHH,
   `ok=${rHHok.result?.ok} idem=${rHHidem.kind ?? rHHidem.err} total=${ordHH2?.totals?.total}`);
 
+// ============================================================================
+// SHIPPING-CHAT-3C-HARDEN-3 — check 45: PROGRESO del sweep con LOTE+1 candidatos
+// ============================================================================
+// 51 candidatos sintéticos válidos (requests+pointers coherentes, prepared, vencidos,
+// stuckNotifiedAt=null). El sweep debe avanzar 50 → 1 → 0 sin duplicar ni tocar la saga.
+const SW_N = 51;
+const swQat = (i) => `qat_sw${String(i).padStart(10, '0')}`;
+const swReq = (i) => `covr_sw${String(i).padStart(10, '0')}`;
+const swPast = Timestamp.fromMillis(Date.now() - 2 * 60 * 60 * 1000);
+const swFuturo = Timestamp.fromMillis(Date.now() + 24 * 60 * 60 * 1000);
+{
+  let batch = db.batch();
+  for (let i = 0; i < SW_N; i++) {
+    const rid = swReq(i);
+    const cust = `5959977${String(i).padStart(5, '0')}`;
+    batch.set(db.collection(`tenants/${T}/coverageRequests`).doc(rid), {
+      id: rid, tenantId: T, customerId: cust, channel: 'whatsapp', receivedVia: PNID,
+      activationId: ACT, status: 'pending_coverage_review', location: null,
+      locationFingerprint: `geo:sw${i}`, sourceMessageId: null,
+      cartSnapshot: { items: [{ productId: 'p1', name: 'P', price: 1000, quantity: 1 }], subtotal: 1000 },
+      cartFingerprint: 'cart2:sw', checkoutAttemptId: null, sellerUid: null, sellerName: null,
+      decision: null, resume: null,
+      shippingQuotePending: { quoteAttemptId: swQat(i), chargeGs: 9000, locationFingerprint: `geo:sw${i}`, cartFingerprint: 'cart2:sw', quotedByUid: 'u', quotedByName: 'V', quotedByRole: 'TENANT_OWNER', createdAt: swPast },
+      createdAt: swPast, updatedAt: swPast, expiresAt: swFuturo, coordinatesPurgeAt: null,
+    });
+    batch.set(db.collection(`tenants/${T}/coverageMessageOutbox`).doc(`${rid}_quote_${swQat(i)}`), {
+      id: `${rid}_quote_${swQat(i)}`, tenantId: T, coverageRequestId: rid, action: 'quote',
+      checkoutAttemptId: null, customerId: cust, channel: 'whatsapp', receivedVia: PNID,
+      activationId: ACT, text: 'El costo de envío para tu ubicación es ₲9.000.', status: 'prepared',
+      providerMessageId: null, attempts: 0, leaseUntil: null,
+      quote: { quoteAttemptId: swQat(i), chargeGs: 9000, quotedByUid: 'u', quotedByName: 'V', quotedByRole: 'TENANT_OWNER', expectedLocationFingerprint: `geo:sw${i}`, expectedCartFingerprint: 'cart2:sw' },
+      reconciled: null, stuckNotifiedAt: null, createdAt: swPast, updatedAt: swPast,
+    });
+    if ((i + 1) % 20 === 0) { await batch.commit(); batch = db.batch(); }
+  }
+  await batch.commit();
+}
+const swOutboxes = async () => (await db.collection(`tenants/${T}/coverageMessageOutbox`).where('action', '==', 'quote').get()).docs
+  .map((d) => d.data()).filter((o) => o.coverageRequestId.startsWith('covr_sw'));
+const swNotifs = async () => (await db.collection(`tenants/${T}/notifications`).get()).docs
+  .map((d) => d.id).filter((id) => id.startsWith('covstuck-covr_sw')).length;
+const swJobs = async () => (await db.collection(`tenants/${T}/coverageResumeJobs`).get()).docs.filter((d) => d.id.startsWith('covr_sw')).length;
+const ordenesAntesSw = (await db.collection(`tenants/${T}/orders`).get()).size;
+await devMaintenance(); // corrida 1: exactamente LOTE (50)
+const marcados1 = (await swOutboxes()).filter((o) => (o.stuckNotifiedAt ?? null) !== null).length;
+const notifs1 = await swNotifs();
+await devMaintenance(); // corrida 2: el candidato restante
+const marcados2 = (await swOutboxes()).filter((o) => (o.stuckNotifiedAt ?? null) !== null).length;
+const notifs2 = await swNotifs();
+await devMaintenance(); // corrida 3: nada nuevo
+const outsFinal = await swOutboxes();
+const notifs3 = await swNotifs();
+check('45a. PROGRESO del lote: corrida 1 ⇒ exactamente 50 campanas y 50 marcados; el candidato 51 queda pendiente',
+  notifs1 === 50 && marcados1 === 50, `notifs1=${notifs1} marcados1=${marcados1}`);
+check('45b. corrida 2 ⇒ procesa el restante (51/51 campanas y marcados); corrida 3 ⇒ CERO duplicados ni cambios',
+  notifs2 === 51 && marcados2 === 51 && notifs3 === 51 &&
+  outsFinal.filter((o) => (o.stuckNotifiedAt ?? null) !== null).length === 51,
+  `notifs2=${notifs2} marcados2=${marcados2} notifs3=${notifs3}`);
+check('45c. bookkeeping PURO: status/quote intactos en los 51; cero jobs/órdenes/mensajes nuevos del sweep',
+  outsFinal.length === SW_N && outsFinal.every((o) => o.status === 'prepared' && o.quote?.chargeGs === 9000 && (o.attempts ?? 0) === 0) &&
+  (await swJobs()) === 0 && (await db.collection(`tenants/${T}/orders`).get()).size === ordenesAntesSw,
+  `outs=${outsFinal.length} jobs=${await swJobs()}`);
+
+// ===== 46. Skips PERMANENTES ⇒ marcados SIN campana (jamás re-ocupan el limit) =====
+const sw46 = [
+  // (a) activación ANTERIOR: sent inerte por diseño (los activationId no se reúsan)
+  { rid: 'covr_sw46aaaaaaaa', qat: 'qat_sw46aaaaaaaa', obStatus: 'sent', obAct: 'act-viejo-0001', reqStatus: 'pending_coverage_review' },
+  // (b) prepared sobre request DECIDIDO: la campana sería obsoleta y nadie reintenta
+  { rid: 'covr_sw46bbbbbbbb', qat: 'qat_sw46bbbbbbbb', obStatus: 'prepared', obAct: ACT, reqStatus: 'coverage_rejected' },
+];
+for (const c of sw46) {
+  await db.collection(`tenants/${T}/coverageRequests`).doc(c.rid).set({
+    id: c.rid, tenantId: T, customerId: '595997999901', channel: 'whatsapp', receivedVia: PNID,
+    activationId: c.obAct, status: c.reqStatus, location: null, locationFingerprint: 'geo:sw46',
+    sourceMessageId: null, cartSnapshot: { items: [], subtotal: 0 }, cartFingerprint: 'cart2:sw46',
+    checkoutAttemptId: null, sellerUid: null, sellerName: null, decision: null, resume: null,
+    shippingQuotePending: { quoteAttemptId: c.qat, chargeGs: 9000, locationFingerprint: 'geo:sw46', cartFingerprint: 'cart2:sw46', quotedByUid: 'u', quotedByName: 'V', quotedByRole: 'TENANT_OWNER', createdAt: swPast },
+    createdAt: swPast, updatedAt: swPast, expiresAt: swFuturo, coordinatesPurgeAt: null,
+  });
+  await db.collection(`tenants/${T}/coverageMessageOutbox`).doc(`${c.rid}_quote_${c.qat}`).set({
+    id: `${c.rid}_quote_${c.qat}`, tenantId: T, coverageRequestId: c.rid, action: 'quote',
+    checkoutAttemptId: null, customerId: '595997999901', channel: 'whatsapp', receivedVia: PNID,
+    activationId: c.obAct, text: 'El costo de envío para tu ubicación es ₲9.000.', status: c.obStatus,
+    providerMessageId: c.obStatus === 'sent' ? 'mock-sw46' : null, attempts: 0, leaseUntil: null,
+    quote: { quoteAttemptId: c.qat, chargeGs: 9000, quotedByUid: 'u', quotedByName: 'V', quotedByRole: 'TENANT_OWNER', expectedLocationFingerprint: 'geo:sw46', expectedCartFingerprint: 'cart2:sw46' },
+    reconciled: null, stuckNotifiedAt: null, createdAt: swPast, updatedAt: swPast,
+  });
+}
+await devMaintenance();
+const sw46Docs = await Promise.all(sw46.map(async (c) => (await db.doc(`tenants/${T}/coverageMessageOutbox/${c.rid}_quote_${c.qat}`).get()).data()));
+const sw46Notifs = (await db.collection(`tenants/${T}/notifications`).get()).docs.map((d) => d.id).filter((id) => id.startsWith('covstuck-covr_sw46')).length;
+await devMaintenance(); // segunda corrida: ya no son candidatos
+check('46. skips PERMANENTES (activación anterior / prepared+decidido) ⇒ marcados SIN campana, status intacto, jamás re-ocupan el lote',
+  sw46Docs.every((o, i) => (o?.stuckNotifiedAt ?? null) !== null && o?.status === sw46[i].obStatus) && sw46Notifs === 0 &&
+  (await db.collection(`tenants/${T}/notifications`).get()).docs.map((d) => d.id).filter((id) => id.startsWith('covstuck-covr_sw46')).length === 0,
+  `marcados=${sw46Docs.filter((o) => (o?.stuckNotifiedAt ?? null) !== null).length}/2 campanas=${sw46Notifs} status=${sw46Docs.map((o) => o?.status).join(',')}`);
+for (const c of sw46) {
+  await db.doc(`tenants/${T}/coverageRequests/${c.rid}`).delete();
+  await db.doc(`tenants/${T}/coverageMessageOutbox/${c.rid}_quote_${c.qat}`).delete();
+}
+// Limpieza de los sintéticos (no contaminar los checks agregados 22/23 si se re-ordenara el script).
+{
+  let batch = db.batch();
+  let n = 0;
+  for (let i = 0; i < SW_N; i++) {
+    batch.delete(db.collection(`tenants/${T}/coverageRequests`).doc(swReq(i)));
+    batch.delete(db.collection(`tenants/${T}/coverageMessageOutbox`).doc(`${swReq(i)}_quote_${swQat(i)}`));
+    n += 2;
+    if (n >= 400) { await batch.commit(); batch = db.batch(); n = 0; }
+  }
+  await batch.commit();
+}
+
 // ---- Restore ----
 await db.doc(`tenants/${T}/config/channels`).set(beforeChannels ?? { whatsappSendMode: 'mock' });
 if (beforeCheckout) await db.doc(`tenants/${T}/config/checkout`).set(beforeCheckout); else await db.doc(`tenants/${T}/config/checkout`).delete().catch(() => {});
