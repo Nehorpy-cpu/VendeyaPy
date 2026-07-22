@@ -184,7 +184,19 @@ async function decidirCobertura(
     if (req.expiresAt.toMillis() <= now.toMillis()) {
       // OJO: lanzar acá ABORTARÍA la transacción y la marca de expirado se perdería (review).
       // La transición se commitea y el error al usuario sale DESPUÉS, fuera de la transacción.
-      tx.update(snap.ref, { status: 'coverage_expired', updatedAt: now, coordinatesPurgeAt: purgeAtFrom(now, req) });
+      // HARDEN-2 (review): un intento de quote PREPARED (jamás salió) se cierra terminal en la
+      // MISMA tx (sin pointer zombi); sent/sending/unknown conservan el pointer — la salida es
+      // la recuperación/reconciliación de la saga, nunca un expire ciego.
+      const cerrarPrepared = !!pendingQuote && (obQuoteStatus === null || obQuoteStatus === 'prepared');
+      tx.update(snap.ref, {
+        status: 'coverage_expired',
+        updatedAt: now,
+        coordinatesPurgeAt: purgeAtFrom(now, req),
+        ...(cerrarPrepared ? { shippingQuotePending: null } : {}),
+      });
+      if (obQuoteSnap?.exists && obQuoteStatus === 'prepared') {
+        tx.update(obQuoteSnap.ref, { status: 'failed', leaseUntil: null, updatedAt: now });
+      }
       tx.set(db().doc(paths.session(tenantId, req.customerId)), { context: { coverage: null }, updatedAt: now }, { merge: true });
       return { kind: 'expirado' as const };
     }

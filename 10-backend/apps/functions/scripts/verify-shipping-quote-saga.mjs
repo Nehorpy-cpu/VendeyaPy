@@ -151,7 +151,7 @@ check('1b. cotización OK: approved + shippingQuote estructurado + pointer limpi
   rA2.result?.ok === true && rA2.result?.status === 'coverage_approved' && rA2.result?.shippingGs === 30000 &&
   reqA3.status === 'coverage_approved' && reqA3.shippingQuote?.chargeGs === 30000 && reqA3.shippingQuote?.currency === 'PYG' &&
   reqA3.shippingQuote?.source === 'seller_chat' && (reqA3.shippingQuotePending ?? null) === null &&
-  obsA.length === 1 && obsA[0].status === 'sent' && (obsA[0].providerMessageId ?? '').startsWith('mock-') && obsA[0].checkoutAttemptId === null,
+  obsA.length === 1 && obsA[0].status === 'sent_applied' && (obsA[0].providerMessageId ?? '').startsWith('mock-') && obsA[0].checkoutAttemptId === null,
   `status=${reqA3.status} outbox=${obsA[0]?.status} wamid=${obsA[0]?.providerMessageId}`);
 const jobA = await jobOf(reqA.id);
 check('2. EXACTAMENTE un job con shippingGs y cartSnapshot congelado (cart2 verificado)',
@@ -199,7 +199,7 @@ const okB = [c1, c2].filter((r) => r.result?.ok === true).length;
 const obsB = await quoteOutboxesOf(reqB.id);
 const msgsQuoteB = (await msgsOf(B)).filter((m) => m.text === 'El costo de envío para tu ubicación es ₲45.000.').length;
 check('9. doble clic CONCURRENTE: un solo mensaje, un outbox sent, un job, una orden',
-  okB >= 1 && obsB.filter((o) => o.status === 'sent').length === 1 && msgsQuoteB === 1 && (await ordersOf(B)).length === 1 && !!(await jobOf(reqB.id)),
+  okB >= 1 && obsB.filter((o) => o.status === 'sent_applied').length === 1 && msgsQuoteB === 1 && (await ordersOf(B)).length === 1 && !!(await jobOf(reqB.id)),
   `oks=${okB} outboxes=${obsB.length} quotes=${msgsQuoteB} err2=${c2.kind ?? c1.kind ?? ''}`);
 
 // ===== 10-12. Parser/validaciones (sin outbox ni mensajes) =====
@@ -253,7 +253,7 @@ await db.doc(`tenants/${T}/_debug/whatsappFixtures`).delete();
 const rRetry = await call('coverageQuoteAndApprove', owner, { requestId: reqD.id, sellerDraft: DRAFT(20000), confirmedShippingGs: 20000, expectedLocationFingerprint: reqD2.locationFingerprint, expectedCartFingerprint: reqD2.cartFingerprint });
 const obsD2 = await quoteOutboxesOf(reqD.id);
 check('14b. reintento explícito ⇒ intento NUEVO (qat distinto) que completa: approved + orden',
-  rRetry.result?.ok === true && obsD2.length === 2 && obsD2.some((o) => o.status === 'sent') &&
+  rRetry.result?.ok === true && obsD2.length === 2 && obsD2.some((o) => o.status === 'sent_applied') &&
   obsD2[0].quote.quoteAttemptId !== obsD2[1].quote.quoteAttemptId && (await waitFor(async () => (await ordersOf(D)).length === 1, 20000)),
   `outboxes=${obsD2.map((o) => o.status).join(',')}`);
 
@@ -284,7 +284,7 @@ await waitFor(async () => (await ordersOf(E)).length === 1, 20000);
 const reqE3 = await requestOf(E);
 const obE2 = (await quoteOutboxesOf(reqE.id))[0];
 check('15e. delivered ⇒ outbox sent RECONCILIADO (wamid null, reconciled con actor), TX-C aprueba SIN reenviar; quotedBy = SELLER original',
-  rRes.result?.ok === true && obE2.status === 'sent' && obE2.providerMessageId === null && obE2.reconciled?.resolution === 'delivered' &&
+  rRes.result?.ok === true && obE2.status === 'sent_applied' && obE2.providerMessageId === null && obE2.reconciled?.resolution === 'delivered' &&
   reqE3.status === 'coverage_approved' && reqE3.decision?.byUid === sellerUid && reqE3.shippingQuote?.quotedByUid === sellerUid &&
   (await msgsOf(E)).filter((m) => m.text === 'El costo de envío para tu ubicación es ₲25.000.').length === 0 &&
   (await msgsOf(E)).some((m) => m.author === 'system' && /reconciliación manual/.test(m.text ?? '')),
@@ -317,7 +317,7 @@ check('16a. transporte no-live-válido ⇒ channel_unavailable: outbox queda PRE
 await db.doc(`tenants/${T}/config/channels`).set({ whatsappSendMode: 'live' });
 const rCh2 = await call('coverageQuoteAndApprove', owner, { requestId: reqG.id, sellerDraft: DRAFT(10000), confirmedShippingGs: 10000, expectedLocationFingerprint: reqGr.locationFingerprint, expectedCartFingerprint: reqGr.cartFingerprint });
 check('16b. canal restaurado ⇒ el MISMO intento (prepared) se re-drivea y completa (crash post-TX-A recuperable)',
-  rCh2.result?.ok === true && (await quoteOutboxesOf(reqG.id)).length === 1 && (await quoteOutboxesOf(reqG.id))[0].status === 'sent' &&
+  rCh2.result?.ok === true && (await quoteOutboxesOf(reqG.id)).length === 1 && (await quoteOutboxesOf(reqG.id))[0].status === 'sent_applied' &&
   (await waitFor(async () => (await ordersOf(G)).length === 1, 20000)));
 
 // ===== 17. sent-pre-TXC: recuperación SIN transporte ni reenvío; y sent+mismatch ⇒ sent_not_applied =====
@@ -481,7 +481,7 @@ const msgs13 = (await msgsOf(M)).filter((m) => m.text === 'El costo de envío pa
 const msgs14 = (await msgsOf(M)).filter((m) => m.text === 'El costo de envío para tu ubicación es ₲14.000.').length;
 check('24. intento reemplazado EN VUELO ⇒ terminal (failed) sin enviarse: UN solo canónico (el vigente), una orden con el monto vigente',
   rM2.result?.ok === true && rM1.result?.ok !== true && msgs13 === 0 && msgs14 === 1 &&
-  obsM.filter((o) => o.status === 'sent').length === 1 && obsM.filter((o) => o.status === 'failed').length === 1 &&
+  obsM.filter((o) => o.status === 'sent_applied').length === 1 && obsM.filter((o) => o.status === 'failed').length === 1 &&
   obsM.find((o) => o.status === 'failed')?.quote?.chargeGs === 13000 &&
   (await ordersOf(M)).length === 1 && (await ordersOf(M))[0].totals.shipping === 14000,
   `r1=${rM1.err ?? 'ok'} r2=${rM2.err ?? 'ok'} msgs13=${msgs13} msgs14=${msgs14} obs=${obsM.map((o) => o.status).join(',')}`);
@@ -784,6 +784,111 @@ check('39. approve viejo con política OFF + intento SENT ⇒ quote_en_curso (el
   rAppOff.err === 'FAILED_PRECONDITION' && (await requestOf(CC)).status === 'pending_coverage_review' &&
   !(await jobOf(reqCC.id)) && (await ordersOf(CC)).length === 0,
   `err=${rAppOff.err} status=${(await requestOf(CC)).status}`);
+
+// ============================================================================
+// SHIPPING-CHAT-3C-HARDEN-2 — checks 40-44 (carreras de recuperación)
+// ============================================================================
+
+// ===== 40. attemptState TRANSACCIONAL: jamás mezcla un intento con la fase de su reemplazo =====
+const DD = CUST(26);
+const reqDD = await crearPendiente(DD);
+await cotizar(owner, reqDD.id, DD, 31000, { sinReintento: true });
+const reqDDr = await requestOf(DD);
+const payloadDD = (gs) => ({ requestId: reqDD.id, sellerDraft: DRAFT(gs), confirmedShippingGs: gs, expectedLocationFingerprint: reqDDr.locationFingerprint, expectedCartFingerprint: reqDDr.cartFingerprint });
+await db.doc(`tenants/${T}/_debug/coverageHolds`).delete().catch(() => {});
+await db.doc(`tenants/${T}/_debug/coverageFixtures`).set({ holdAt: 'outbox_pre_claim' });
+const pDD1 = call('coverageQuoteAndApprove', owner, payloadDD(31000));
+const holdDD = await waitFor(async () => ((await db.doc(`tenants/${T}/_debug/coverageHolds`).get()).data()?.point === 'outbox_pre_claim'), 10000);
+const pDD2 = call('coverageQuoteAndApprove', owner, payloadDD(32000)); // reemplaza al parkeado
+await waitFor(async () => (await quoteOutboxesOf(reqDD.id)).length === 2, 10000);
+const rStDD = await call('coverageQuoteAttemptState', owner, { requestId: reqDD.id });
+const obsDD = await quoteOutboxesOf(reqDD.id);
+const qatVigenteDD = obsDD.find((o) => o.status === 'prepared')?.quote?.quoteAttemptId ?? null;
+await db.doc(`tenants/${T}/_debug/coverageFixtures`).set({ holdAt: null, resume: true }, { merge: true });
+await Promise.all([pDD1, pDD2]);
+await db.doc(`tenants/${T}/_debug/coverageFixtures`).delete();
+await waitFor(async () => (await ordersOf(DD)).length === 1, 20000);
+check('40. attemptState con AMBAS sagas parkeadas tras el reemplazo A→B ⇒ snapshot COHERENTE del intento VIGENTE (jamás mezcla)',
+  holdDD === true && rStDD.result?.attempt?.phase === 'preparing' && rStDD.result?.attempt?.chargeGs === 32000 &&
+  rStDD.result?.attempt?.quoteAttemptId === qatVigenteDD && qatVigenteDD !== null &&
+  (await ordersOf(DD))[0]?.totals?.shipping === 32000,
+  `hold=${holdDD} attempt=${JSON.stringify(rStDD.result?.attempt)} vigente=${qatVigenteDD}`);
+
+// ===== 41. attemptState: SELLER desasignado ⇒ denegado con el MISMO snapshot del request =====
+const EE = CUST(27);
+const reqEE = await crearPendiente(EE, sellerUid, 'Vendedora');
+const rStAntes = await call('coverageQuoteAttemptState', seller, { requestId: reqEE.id });
+await db.collection(`tenants/${T}/coverageRequests`).doc(reqEE.id).update({ sellerUid: null, sellerName: null });
+const rStDespues = await call('coverageQuoteAttemptState', seller, { requestId: reqEE.id });
+const rStOwnerEE = await call('coverageQuoteAttemptState', owner, { requestId: reqEE.id });
+check('41. SELLER desasignado ⇒ PERMISSION_DENIED (autorización del mismo snapshot); OWNER sigue pudiendo',
+  rStAntes.result?.ok === true && rStDespues.err === 'PERMISSION_DENIED' && rStOwnerEE.result?.ok === true,
+  `antes=${rStAntes.result?.ok} despues=${rStDespues.err}`);
+
+// ===== 42. Pointer huérfano ⇒ JAMÁS attempt:null — fail-closed accionable =====
+await cotizar(owner, reqEE.id, EE, 33000, { sinReintento: true });
+const reqEEr = await requestOf(EE);
+await db.doc(`tenants/${T}/config/channels`).set({ whatsappSendMode: 'mock' });
+await call('coverageQuoteAndApprove', owner, { requestId: reqEE.id, sellerDraft: DRAFT(33000), confirmedShippingGs: 33000, expectedLocationFingerprint: reqEEr.locationFingerprint, expectedCartFingerprint: reqEEr.cartFingerprint });
+await db.doc(`tenants/${T}/config/channels`).set({ whatsappSendMode: 'live' });
+const obEE = (await quoteOutboxesOf(reqEE.id))[0];
+const rStSano = await call('coverageQuoteAttemptState', owner, { requestId: reqEE.id });
+await db.doc(`tenants/${T}/coverageMessageOutbox/${obEE.id}`).delete(); // invariante rota simulada
+const rStHuerfano = await call('coverageQuoteAttemptState', owner, { requestId: reqEE.id });
+check('42. pointer con outbox AUSENTE ⇒ phase failed con attemptId/chargeGs del pointer (nunca null, nunca esconder la inconsistencia)',
+  rStSano.result?.attempt?.phase === 'preparing' &&
+  rStHuerfano.result?.attempt !== null && rStHuerfano.result?.attempt?.phase === 'failed' &&
+  rStHuerfano.result?.attempt?.quoteAttemptId === obEE.quote.quoteAttemptId && rStHuerfano.result?.attempt?.chargeGs === 33000 &&
+  Object.keys(rStHuerfano.result?.attempt ?? {}).sort().join(',') === 'chargeGs,phase,quoteAttemptId',
+  `sano=${rStSano.result?.attempt?.phase} huerfano=${JSON.stringify(rStHuerfano.result?.attempt)}`);
+
+// ===== 43. Sweep: el candidato completado EN LA CARRERA query→tx no genera campana obsoleta =====
+const GG = CUST(28);
+const reqGG = await crearPendiente(GG);
+await cotizar(owner, reqGG.id, GG, 35000, { sinReintento: true });
+const reqGGr = await requestOf(GG);
+const payloadGG = { requestId: reqGG.id, sellerDraft: DRAFT(35000), confirmedShippingGs: 35000, expectedLocationFingerprint: reqGGr.locationFingerprint, expectedCartFingerprint: reqGGr.cartFingerprint };
+await db.doc(`tenants/${T}/config/channels`).set({ whatsappSendMode: 'mock' });
+await call('coverageQuoteAndApprove', owner, payloadGG);
+await db.doc(`tenants/${T}/config/channels`).set({ whatsappSendMode: 'live' });
+const obGG = (await quoteOutboxesOf(reqGG.id))[0];
+await db.doc(`tenants/${T}/coverageMessageOutbox/${obGG.id}`).update({ updatedAt: Timestamp.fromMillis(Date.now() - 2 * 60 * 60 * 1000) });
+await db.doc(`tenants/${T}/_debug/coverageHolds`).delete().catch(() => {});
+await db.doc(`tenants/${T}/_debug/coverageFixtures`).set({ holdAt: 'sweep_pre_tx' });
+const pMaint = devMaintenance(); // parkea DESPUÉS de la query (GG ya es candidato)
+const holdGG = await waitFor(async () => ((await db.doc(`tenants/${T}/_debug/coverageHolds`).get()).data()?.point === 'sweep_pre_tx'), 10000);
+const rGGdone = await call('coverageQuoteAndApprove', owner, payloadGG); // la saga COMPLETA el intento en la carrera (TX-C ya limpió el pointer)
+await db.doc(`tenants/${T}/_debug/coverageFixtures`).set({ holdAt: null, resume: true }, { merge: true });
+await pMaint;
+await db.doc(`tenants/${T}/_debug/coverageFixtures`).delete();
+await waitFor(async () => (await ordersOf(GG)).length === 1, 20000);
+check('43. candidato del sweep COMPLETADO en la ventana query→tx (hold verificado) ⇒ CERO campana obsoleta',
+  holdGG === true && rGGdone.result?.ok === true && (await notifCountBy(`covstuck-${reqGG.id}-${obGG.quote.quoteAttemptId}`)) === 0 &&
+  (await requestOf(GG)).status === 'coverage_approved' && (await ordersOf(GG)).length === 1,
+  `hold=${holdGG} done=${rGGdone.result?.ok} campanas=${await notifCountBy(`covstuck-${reqGG.id}-${obGG.quote.quoteAttemptId}`)}`);
+
+// ===== 44. Idempotencia sobre aprobación CORRUPTA ⇒ total_invalido, jamás un entero inseguro =====
+const HH = CUST(29);
+const reqHH = await crearPendiente(HH);
+await cotizar(owner, reqHH.id, HH, 34000, { sinReintento: true });
+const reqHHr = await requestOf(HH);
+const payloadHH = { requestId: reqHH.id, sellerDraft: DRAFT(34000), confirmedShippingGs: 34000, expectedLocationFingerprint: reqHHr.locationFingerprint, expectedCartFingerprint: reqHHr.cartFingerprint };
+const rHHok = await call('coverageQuoteAndApprove', owner, payloadHH);
+// Esperar el resume COMPLETO (orden + banco + AWAITING_PAYMENT) antes de capturar outs — sin
+// esto, el mensaje bancario podía llegar después del snapshot y dar un falso rojo (review).
+await waitFor(async () => (await ordersOf(HH)).length === 1 && (await sessionOf(HH))?.state === 'AWAITING_PAYMENT', 20000);
+const ordHH = (await ordersOf(HH))[0];
+const outsHH = await outsCount(HH);
+// Corrupción simulada del snapshot persistido (jamás pasaría por TX-C — data corrupta real):
+await db.collection(`tenants/${T}/coverageRequests`).doc(reqHH.id).update({ 'cartSnapshot.subtotal': Number.MAX_SAFE_INTEGER - 1000 });
+const rHHidem = await call('coverageQuoteAndApprove', owner, payloadHH);
+const ordHH2 = (await ordersOf(HH))[0];
+check('44. retry idempotente sobre aprobación corrupta/overflow ⇒ total_invalido: jamás un número inseguro, cero escrituras, orden original intacta',
+  rHHok.result?.ok === true && Number.isSafeInteger(rHHok.result?.totalGs) &&
+  rHHidem.err === 'FAILED_PRECONDITION' && rHHidem.kind === 'total_invalido' &&
+  (await quoteOutboxesOf(reqHH.id)).length === 1 && (await ordersOf(HH)).length === 1 &&
+  ordHH2.totals.total === ordHH.totals.total && (await outsCount(HH)) === outsHH,
+  `ok=${rHHok.result?.ok} idem=${rHHidem.kind ?? rHHidem.err} total=${ordHH2?.totals?.total}`);
 
 // ---- Restore ----
 await db.doc(`tenants/${T}/config/channels`).set(beforeChannels ?? { whatsappSendMode: 'mock' });

@@ -160,8 +160,11 @@ interface CoverageOutboxMessageBase {
   /**
    * SHIPPING-CHAT-3C: `sent_not_applied` = Meta aceptó el mensaje pero un mismatch determinístico
    * post-envío impidió aplicar la aprobación (terminal auditable; jamás se reenvía).
+   * HARDEN-2 (review): `sent_applied` = TX-C aplicó la aprobación (terminal FELIZ del quote) —
+   * sin él, los quotes completados quedaban `sent` para siempre y saturaban los slots del sweep
+   * de mantenimiento (inanición: un intento nuevo genuinamente atascado jamás entraba al lote).
    */
-  status: 'prepared' | 'sending' | 'sent' | 'failed' | 'unknown' | 'sent_not_applied';
+  status: 'prepared' | 'sending' | 'sent' | 'failed' | 'unknown' | 'sent_not_applied' | 'sent_applied';
   providerMessageId: string | null;
   attempts: number;
   leaseUntil: Timestamp | null;

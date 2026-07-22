@@ -77,6 +77,9 @@ describe('faseDeIntentoQuote — fase derivada del outbox (única fuente de verd
     expect(faseDeIntentoQuote('failed', null, now)).toBe('failed');
     expect(faseDeIntentoQuote('sent_not_applied', null, now)).toBe('failed');
   });
+  it('sent_applied con pointer vivo = invariante rota ⇒ failed (TX-C limpia el pointer en el mismo commit)', () => {
+    expect(faseDeIntentoQuote('sent_applied', null, now)).toBe('failed');
+  });
   it('unknown ⇒ unknown', () => {
     expect(faseDeIntentoQuote('unknown', null, now)).toBe('unknown');
   });

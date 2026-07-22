@@ -96,7 +96,9 @@ export function faseDeIntentoQuote(
   if (status === 'prepared') return 'preparing';
   if (status === 'sending') return leaseUntilMs !== null && leaseUntilMs > nowMs ? 'in_progress' : 'unknown';
   if (status === 'sent') return 'sent_pending_approval';
-  if (status === 'failed' || status === 'sent_not_applied') return 'failed';
+  // `sent_applied` con pointer vivo es una invariante rota (TX-C limpia el pointer en el MISMO
+  // commit que aplica) ⇒ se reporta como 'failed' (fail-closed accionable), igual que los terminales.
+  if (status === 'failed' || status === 'sent_not_applied' || status === 'sent_applied') return 'failed';
   return 'unknown';
 }
 
@@ -111,19 +113,6 @@ export function totalConEnvioSeguro(subtotalGs: number, shippingGs: number): num
     return computeOrderTotals({ subtotalGs, discountGs: 0, shippingGs }).total;
   } catch {
     throw qerr('failed-precondition', 'El total con envío no es un monto válido: revisá el carrito y el costo antes de continuar.', 'total_invalido');
-  }
-}
-
-/**
- * HARDEN-1 (review): total para aprobaciones YA COMMITEADAS (reporte read-only de las ramas
- * idempotentes). JAMÁS lanza: una saga en vuelo pre-harden pudo fijar un total que hoy no
- * validaría — el dinero ya quedó decidido en TX-C y el retry no debe pintar rojo un estado sano.
- */
-function totalYaAprobado(subtotalGs: number, shippingGs: number): number {
-  try {
-    return totalConEnvioSeguro(subtotalGs, shippingGs);
-  } catch {
-    return subtotalGs + shippingGs;
   }
 }
 
@@ -231,8 +220,11 @@ async function txPrepararIntento(tenantId: string, actor: QuoteActor, input: Quo
       req.shippingQuote.locationFingerprint === input.expectedLocationFingerprint &&
       req.shippingQuote.cartFingerprint === input.expectedCartFingerprint
     ) {
+      // HARDEN-2 (C): también el reporte idempotente pasa por la ÚNICA fuente compartida — nada
+      // desplegado tiene aprobaciones pre-harden, así que un overflow acá es un estado corrupto
+      // real: total_invalido (error sin escrituras; el dinero persistido no se toca).
       const subtotal = req.cartSnapshot?.subtotal ?? 0;
-      return { kind: 'ok_idempotente', shippingGs: req.shippingQuote.chargeGs, totalGs: totalYaAprobado(subtotal, req.shippingQuote.chargeGs) };
+      return { kind: 'ok_idempotente', shippingGs: req.shippingQuote.chargeGs, totalGs: totalConEnvioSeguro(subtotal, req.shippingQuote.chargeGs) };
     }
     assertFlujoVigente(act, req); // activación anterior ⇒ failed-precondition (sin escrituras)
 
@@ -436,7 +428,7 @@ async function enviarQuote(tenantId: string, requestId: string, attemptId: strin
   const obId = outboxIdDeQuote(requestId, attemptId);
   const obPre = (await outboxRef(tenantId, obId).get()).data() as CoverageOutboxMessage | undefined;
   if (!obPre) throw qerr('internal', 'El intento de cotización no existe.', 'generic');
-  if (obPre.status === 'sent') return; // otro worker completó el envío
+  if (obPre.status === 'sent' || obPre.status === 'sent_applied') return; // otro worker completó el envío (y quizá la aprobación)
 
   // HARDEN-1 (D): SOLO WhatsApp con el número EXACTO que recibió la conversación. Canal distinto
   // o receivedVia ausente ⇒ channel_unavailable SIN escrituras (el outbox queda 'prepared',
@@ -473,7 +465,7 @@ async function enviarQuote(tenantId: string, requestId: string, attemptId: strin
     const ob = obSnap.exists ? (obSnap.data() as CoverageOutboxMessage) : null;
     if (!ob) return { r: 'missing' as const };
     if (!act.enabled || act.activationId !== (ob.activationId ?? null)) return { r: 'apagado' as const };
-    if (ob.status === 'sent') return { r: 'ya_enviado' as const };
+    if (ob.status === 'sent' || ob.status === 'sent_applied') return { r: 'ya_enviado' as const }; // aplicado ⇒ TX-C responde idempotente
     if (ob.status === 'unknown') return { r: 'unknown' as const };
     if (ob.status === 'failed' || ob.status === 'sent_not_applied') return { r: 'terminal' as const };
     if (ob.status === 'sending') {
@@ -581,9 +573,11 @@ async function txAplicarAprobacion(tenantId: string, requestId: string, attemptI
       const ses = sesSnap.data() as Session | undefined;
       const pending = req.shippingQuotePending ?? null;
 
-      // Idempotencia: TX-C ya commiteó para ESTE intento (reporte read-only: jamás lanza).
+      // Idempotencia: TX-C ya commiteó para ESTE intento. HARDEN-2 (C): el total SIEMPRE pasa por
+      // la única fuente compartida — un estado corrupto lanza total_invalido (sin escrituras),
+      // jamás se devuelve un entero inseguro.
       if (req.status === 'coverage_approved' && req.shippingQuote?.sourceOutboxId === obId) {
-        return { shippingGs: req.shippingQuote.chargeGs, totalGs: totalYaAprobado(req.cartSnapshot?.subtotal ?? 0, req.shippingQuote.chargeGs), customerId: req.customerId };
+        return { shippingGs: req.shippingQuote.chargeGs, totalGs: totalConEnvioSeguro(req.cartSnapshot?.subtotal ?? 0, req.shippingQuote.chargeGs), customerId: req.customerId };
       }
       if (!ob || ob.status !== 'sent') return { err: qerr('failed-precondition', 'El mensaje de cotización no está confirmado como enviado.', 'generic') };
       if (!pending || pending.quoteAttemptId !== attemptId) return { err: qerr('failed-precondition', 'El intento de cotización ya no está vigente.', 'generic') };
@@ -705,6 +699,9 @@ async function txAplicarAprobacion(tenantId: string, requestId: string, attemptI
         createdAt: req.createdAt,
         updatedAt: now,
       };
+      // HARDEN-2 (review): terminal FELIZ del outbox EN el mismo commit — sin esto, los quotes
+      // aplicados quedaban 'sent' para siempre y saturaban los slots del sweep (inanición).
+      tx.update(obSnap.ref, { status: 'sent_applied', leaseUntil: null, updatedAt: now });
       tx.set(db().doc(paths.session(tenantId, req.customerId)), { context: { coverage: ptr }, updatedAt: now }, { merge: true });
       return { shippingGs: pending.chargeGs, totalGs: totalAprobado, customerId: req.customerId };
     });
@@ -833,16 +830,26 @@ export const coverageQuoteResolveUnknown = onCall<{
 });
 
 /**
- * SHIPPING-CHAT-3C-HARDEN-1 (B) — Estado READ-ONLY del intento de cotización para el panel.
+ * SHIPPING-CHAT-3C-HARDEN-1 (B) + HARDEN-2 (A) — Estado READ-ONLY del intento de cotización.
  * El outbox sigue siendo la ÚNICA fuente de verdad: la fase se DERIVA con faseDeIntentoQuote y
  * jamás se persiste (cero duplicación de estado, CERO mutaciones — un lease vencido se reporta
  * 'unknown' pero la transición real la hace la saga en su próxima transacción).
+ *
+ * HARDEN-2: request + pointer + outbox se leen en UNA transacción READ-ONLY — la respuesta
+ * corresponde SIEMPRE a una única versión coherente (jamás el attemptId de un intento mezclado
+ * con la fase de su reemplazo), la autorización del SELLER usa el MISMO snapshot del request, y
+ * el artefacto se revalida (action 'quote', mismo tenant/request/quoteAttemptId).
+ *
+ * Pointer huérfano o artefacto que no coincide: `attempt:null` significa ÚNICAMENTE "no existe
+ * shippingQuotePending" — una inconsistencia real se reporta FAIL-CLOSED como `phase:'failed'`
+ * con el attemptId/chargeGs del pointer (accionable para 3D: "reintentá/revisá la cotización");
+ * el pointer NO se limpia desde acá (lo hace la saga en su próxima transacción).
  *
  * Autorización: tenant SIEMPRE de los claims; OWNER/MANAGER consultan cualquier request de su
  * tenant; SELLER solo el asignado; PLATFORM_ADMIN queda AFUERA (assertCoverageActor) — la
  * recuperación operativa de dinero es del negocio, no del soporte de plataforma.
  *
- * Respuesta SANEADA (contrato para el panel 3D): `{ ok, attempt: null }` sin intento activo, o
+ * Respuesta SANEADA (contrato para el panel 3D): `{ ok, attempt: null }` o
  * `{ ok, attempt: { quoteAttemptId, chargeGs, phase } }` — JAMÁS customerId, teléfono,
  * dirección, coordenadas, texto del outbox, sellerDraft, receivedVia, PNID, wamid ni datos del
  * proveedor.
@@ -853,17 +860,44 @@ export const coverageQuoteAttemptState = onCall<{ tenantId?: string; requestId?:
   const requestId = typeof req.data?.requestId === 'string' ? req.data.requestId.trim() : '';
   if (!/^covr_[0-9A-Za-z]{12}$/.test(requestId)) throw qerr('invalid-argument', 'Solicitud de cobertura inválida.', 'invalid_input');
 
-  const cov = (await reqRef(tenantId, requestId).get()).data() as CoverageRequest | undefined;
-  if (!cov || cov.tenantId !== tenantId) throw qerr('not-found', 'La solicitud de cobertura no existe.', 'not_found');
-  if (actor.role === 'SELLER' && cov.sellerUid !== actor.uid) {
-    throw qerr('permission-denied', 'Esta revisión está asignada a otra persona del equipo.', 'not_assigned');
+  type Estado =
+    | { kind: 'not_found' }
+    | { kind: 'not_assigned' }
+    | { kind: 'sin_intento' }
+    | { kind: 'inconsistente'; pending: ShippingQuotePending }
+    | { kind: 'ok'; pending: ShippingQuotePending; status: CoverageOutboxMessage['status']; leaseUntilMs: number | null };
+  // Transacción READ-ONLY real ({readOnly:true}): mismo snapshot único consistente, SIN locks —
+  // el panel pollea este endpoint sobre el doc más caliente de la saga y una tx read-write
+  // generaría contención evitable contra TX-A/TX-C (review HARDEN-2).
+  const out = await db().runTransaction(
+    async (tx): Promise<Estado> => {
+      const cov = (await tx.get(reqRef(tenantId, requestId))).data() as CoverageRequest | undefined;
+      if (!cov || cov.tenantId !== tenantId) return { kind: 'not_found' };
+      // Autorización con el MISMO snapshot: una desasignación concurrente jamás deja pasar al
+      // seller sobre una versión más nueva del request.
+      if (actor.role === 'SELLER' && cov.sellerUid !== actor.uid) return { kind: 'not_assigned' };
+      const pending = cov.shippingQuotePending ?? null;
+      if (!pending) return { kind: 'sin_intento' };
+      const ob = (await tx.get(outboxRef(tenantId, outboxIdDeQuote(requestId, pending.quoteAttemptId)))).data() as CoverageOutboxMessage | undefined;
+      // Revalidación del artefacto (fail-closed): debe ser el outbox QUOTE de ESTE intento de
+      // ESTE request/tenant — cualquier otra cosa (incluida corrupción parcial sin el mapa
+      // `quote`) es una invariante rota, jamás un "sin intento" ni un crash.
+      const coherente =
+        !!ob && ob.action === 'quote' && ob.tenantId === tenantId && ob.coverageRequestId === requestId && ob.quote?.quoteAttemptId === pending.quoteAttemptId;
+      if (!coherente) return { kind: 'inconsistente', pending };
+      return { kind: 'ok', pending, status: ob.status, leaseUntilMs: ob.leaseUntil?.toMillis?.() ?? null };
+    },
+    { readOnly: true },
+  );
+
+  if (out.kind === 'not_found') throw qerr('not-found', 'La solicitud de cobertura no existe.', 'not_found');
+  if (out.kind === 'not_assigned') throw qerr('permission-denied', 'Esta revisión está asignada a otra persona del equipo.', 'not_assigned');
+  if (out.kind === 'sin_intento') return { ok: true, attempt: null };
+  if (out.kind === 'inconsistente') {
+    // Invariante rota (outbox ausente o ajeno al pointer): el panel debe poder explicar que la
+    // cotización necesita reintentarse/revisarse — jamás esconderla como "sin intento".
+    return { ok: true, attempt: { quoteAttemptId: out.pending.quoteAttemptId, chargeGs: out.pending.chargeGs, phase: 'failed' as ShippingQuoteAttemptPhase } };
   }
-  const pending = cov.shippingQuotePending ?? null;
-  if (!pending) return { ok: true, attempt: null };
-  const ob = (await outboxRef(tenantId, outboxIdDeQuote(requestId, pending.quoteAttemptId)).get()).data() as CoverageOutboxMessage | undefined;
-  // Pointer huérfano (invariante rota): se reporta "sin intento" — la saga lo limpia en su
-  // próxima corrida; esta consulta jamás escribe.
-  if (!ob) return { ok: true, attempt: null };
-  const phase = faseDeIntentoQuote(ob.status, ob.leaseUntil?.toMillis?.() ?? null, Timestamp.now().toMillis());
-  return { ok: true, attempt: { quoteAttemptId: pending.quoteAttemptId, chargeGs: pending.chargeGs, phase } };
+  const phase = faseDeIntentoQuote(out.status, out.leaseUntilMs, Timestamp.now().toMillis());
+  return { ok: true, attempt: { quoteAttemptId: out.pending.quoteAttemptId, chargeGs: out.pending.chargeGs, phase } };
 });

@@ -23,6 +23,7 @@ import { logger } from '../../lib/logger.js';
 import { coverageSettings, purgeAtFrom } from '../../conversation/coverage.js';
 import { coverageHold } from '../../conversation/coverageTestHooks.js';
 import { enviarPorOutbox, processCoverageResumeJob, MENSAJE_COBERTURA_VENCIDA } from '../../conversation/coverageResume.js';
+import { outboxIdDeQuote } from '../coverage/coverageCallables.js';
 import { getCheckoutConfig } from '../../orders/checkoutConfig.js';
 
 const MAX_ATTEMPTS = 5;
@@ -66,11 +67,25 @@ export async function runCoverageMaintenance(): Promise<void> {
           const sesRef = db().doc(paths.session(tenantId, fresh.customerId));
           const ses = (await tx.get(sesRef)).data() as Session | undefined;
           const ctx = ses?.context;
+          // HARDEN-2 (review): un intento de cotización PREPARED (jamás salió) se cierra terminal
+          // en la MISMA tx del expire — sin esto quedaba pointer zombi + campana obsoleta del
+          // sweep. sent/sending/unknown conservan el pointer (la recuperación/reconciliación de
+          // la saga es la salida — jamás un expire ciego sobre algo que PUDO llegar al cliente).
+          const pendingExp = fresh.shippingQuotePending ?? null;
+          const obExpRef = pendingExp ? db().doc(`tenants/${tenantId}/coverageMessageOutbox/${outboxIdDeQuote(fresh.id, pendingExp.quoteAttemptId)}`) : null;
+          const obExp = obExpRef ? ((await tx.get(obExpRef)).data() as CoverageOutboxMessage | undefined) : undefined;
           // HARDEN-1: la expiración es higiene/privacidad y corre SIEMPRE; pero liberar el
           // takeover (y el mensaje de después) exige flag ON y la MISMA activación — con flag
           // off/stale el chat humano no se toca (lo libera una persona desde el panel).
           const vigente = actTx.enabled && (fresh.activationId ?? null) === actTx.activationId;
-          tx.update(d.ref, { status: 'coverage_expired', coordinatesPurgeAt: purgeAtFrom(now, fresh), updatedAt: now });
+          const cerrarPrepared = !!pendingExp && (!obExp || obExp.status === 'prepared');
+          tx.update(d.ref, {
+            status: 'coverage_expired',
+            coordinatesPurgeAt: purgeAtFrom(now, fresh),
+            ...(cerrarPrepared ? { shippingQuotePending: null } : {}),
+            updatedAt: now,
+          });
+          if (obExpRef && obExp?.status === 'prepared') tx.update(obExpRef, { status: 'failed', leaseUntil: null, updatedAt: now });
           if (vigente && ctx?.humanTakeover === true && ctx.handoffReason === 'coverage_review' && ctx.handoffSourceId === fresh.id) {
             tx.update(sesRef, {
               'context.humanTakeover': false,
@@ -197,12 +212,15 @@ export async function runCoverageMaintenance(): Promise<void> {
         await processCoverageResumeJob(tenantId, d.id);
       }
 
-      // 4) SHIPPING-CHAT-3C-HARDEN-1: intentos de COTIZACIÓN abandonados. Un outbox quote que
+      // 4) SHIPPING-CHAT-3C-HARDEN-1/2: intentos de COTIZACIÓN abandonados. Un outbox quote que
       //    sigue `prepared` (nunca salió), `sent` (salió y nadie aplicó la aprobación) o
       //    `unknown` (sin reconciliar) más allá del umbral ⇒ SOLO una campana idempotente al
       //    equipo. CERO re-drive automático, CERO Meta, CERO aprobación/orden/PAID: un humano
-      //    decide desde el panel (completar, recotizar o resolver el unknown). La señal aplica
-      //    únicamente al intento VIGENTE (pointer del request) de la activación vigente.
+      //    decide desde el panel (completar, recotizar o resolver el unknown).
+      //    HARDEN-2 (B): la query indexada SOLO elige candidatos — cada campana se decide en una
+      //    TRANSACCIÓN con lecturas frescas (config, outbox, request, notificación; todas antes
+      //    de la única escritura): si la saga completó/reemplazó el intento en la carrera, CERO
+      //    campana obsoleta. La señal aplica únicamente al intento VIGENTE de la activación vigente.
       const atascados = await db()
         .collection(`tenants/${tenantId}/coverageMessageOutbox`)
         .where('action', '==', 'quote')
@@ -210,33 +228,50 @@ export async function runCoverageMaintenance(): Promise<void> {
         .where('updatedAt', '<=', Timestamp.fromMillis(now.toMillis() - QUOTE_ATASCADO_MS))
         .limit(LOTE)
         .get();
+      await coverageHold(tenantId, 'sweep_pre_tx'); // solo-emulador: carrera query→tx determinística
       for (const d of atascados.docs) {
-        const ob = d.data() as CoverageOutboxMessage;
-        if (ob.action !== 'quote') continue; // narrow de la unión (la query ya filtra)
-        if ((ob.activationId ?? null) !== cfg.activationId) continue; // activación anterior: inerte
-        const req = (await db().doc(`tenants/${tenantId}/coverageRequests/${ob.coverageRequestId}`).get()).data() as CoverageRequest | undefined;
-        if (!req || req.shippingQuotePending?.quoteAttemptId !== ob.quote.quoteAttemptId) continue; // reemplazado/cerrado: sin ruido
-        const notifId = `covstuck-${ob.coverageRequestId}-${ob.quote.quoteAttemptId}`;
+        const candidato = d.data() as CoverageOutboxMessage;
+        if (candidato.action !== 'quote') continue; // narrow de la unión (la query ya filtra)
+        const qatCandidato = candidato.quote?.quoteAttemptId;
+        if (!qatCandidato) continue; // corrupción parcial: sin nonce no hay id determinístico (fail-closed)
+        const notifId = `covstuck-${candidato.coverageRequestId}-${qatCandidato}`;
+        const notifRef = db().doc(`${paths.notifications(tenantId)}/${notifId}`);
         try {
-          await db().doc(`${paths.notifications(tenantId)}/${notifId}`).create({
-            id: notifId,
-            tenantId,
-            category: 'handoff',
-            type: 'handoff_coverage_stale',
-            title: '📦 Una cotización de envío quedó a medio camino',
-            body: `Un intento de cotización del cliente …${ob.customerId.slice(-4)} lleva demasiado tiempo sin completarse. Revisalo desde Conversaciones: puede requerir completar el envío, recotizar o resolver un envío sin confirmar.`,
-            dedupeKey: notifId,
-            customerId: ob.customerId,
-            ...(req.sellerUid ? { targetUid: req.sellerUid } : {}),
-            read: false,
-            readAt: null,
-            createdAt: Timestamp.now(),
+          await db().runTransaction(async (tx) => {
+            // TODAS las lecturas frescas EN la transacción, antes de la única escritura.
+            const actTx = coverageActivationOf(((await tx.get(cfgRef)).data() as { coverage?: unknown } | undefined)?.coverage);
+            const ob = (await tx.get(d.ref)).data() as CoverageOutboxMessage | undefined;
+            const req = (await tx.get(db().doc(`tenants/${tenantId}/coverageRequests/${candidato.coverageRequestId}`))).data() as CoverageRequest | undefined;
+            const notifSnap = await tx.get(notifRef);
+            if (!actTx.enabled || !actTx.activationId) return; // kill-switch ganó en la carrera
+            if (!ob || ob.action !== 'quote') return;
+            if ((ob.activationId ?? null) !== actTx.activationId) return; // activación anterior: inerte
+            if (ob.status !== 'prepared' && ob.status !== 'sent' && ob.status !== 'unknown') return; // la saga lo terminó
+            if ((ob.updatedAt?.toMillis?.() ?? 0) > now.toMillis() - QUOTE_ATASCADO_MS) return; // ya no supera el umbral
+            if (!req || req.shippingQuotePending?.quoteAttemptId !== ob.quote?.quoteAttemptId) return; // reemplazado/cerrado
+            // HARDEN-2 (review): un PREPARED sobre un request ya decidido/vencido no tiene nada
+            // "completable" — la campana sería obsoleta y engañosa (el retry de la saga lo cierra
+            // terminal). Un SENT/UNKNOWN sí alerta SIEMPRE: el cliente pudo recibir un costo y la
+            // señal humana es obligatoria aunque el request haya muerto.
+            if (ob.status === 'prepared' && req.status !== 'pending_coverage_review') return;
+            if (notifSnap.exists) return; // ya avisado
+            tx.create(notifRef, {
+              id: notifId,
+              tenantId,
+              category: 'handoff',
+              type: 'handoff_coverage_stale',
+              title: '📦 Una cotización de envío quedó a medio camino',
+              body: `Un intento de cotización del cliente …${ob.customerId.slice(-4)} lleva demasiado tiempo sin completarse. Revisalo desde Conversaciones: puede requerir completar el envío, recotizar o resolver un envío sin confirmar.`,
+              dedupeKey: notifId,
+              customerId: ob.customerId,
+              ...(req.sellerUid ? { targetUid: req.sellerUid } : {}),
+              read: false,
+              readAt: null,
+              createdAt: Timestamp.now(),
+            });
           });
         } catch (e) {
-          const code = (e as { code?: number | string }).code;
-          if (code !== 6 && code !== 'already-exists') {
-            logger.warn('Cobertura: no se pudo avisar el intento de cotización atascado', { tenantId, requestId: ob.coverageRequestId });
-          }
+          logger.warn('Cobertura: no se pudo evaluar/avisar el intento de cotización atascado', { tenantId, requestId: candidato.coverageRequestId, error: e instanceof Error ? e.message : String(e) });
         }
       }
     } catch (e) {

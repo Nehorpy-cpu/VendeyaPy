@@ -26,7 +26,8 @@ export type CoverageHoldPoint =
   | 'resume_pre_awaiting'
   | 'outbox_pre_claim'
   | 'outbox_pre_meta'
-  | 'mant_pre_reencolar';
+  | 'mant_pre_reencolar'
+  | 'sweep_pre_tx';
 
 const HOLD_MAX_MS = 20_000;
 
