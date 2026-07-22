@@ -88,7 +88,9 @@ export function buildShippingDraftContext(
   return {
     requestId: req.id,
     status: req.status,
-    subtotalGs: req.cartSnapshot?.subtotal ?? 0,
+    // HARDEN-1 (D1): subtotal AUSENTE = no cotizable (NaN ⇒ computeOrderTotals falla en la
+    // derivación ⇒ sin aprobar) — jamás un total falso de solo-envío.
+    subtotalGs: req.cartSnapshot?.subtotal ?? Number.NaN,
     locationFingerprint: req.locationFingerprint ?? '',
     cartFingerprint: req.cartFingerprint,
     expiresAtMs: req.expiresAt?.toMillis?.() ?? 0,
@@ -99,6 +101,15 @@ export function buildShippingDraftContext(
     maxChargeGs: policy.status === 'required' ? policy.maxChargeGs : 0,
     draft: opts.draft,
   };
+}
+
+/** Formateo SEGURO de guaraníes persistidos: dato corrupto ⇒ null (jamás rompe la tarjeta). */
+function gsSeguro(n: number | null | undefined): string | null {
+  try {
+    return formatGuaranies(n as number);
+  } catch {
+    return null;
+  }
 }
 
 /** Total con envío para mostrar evidencia/persistencia. null = no verificable (fail-closed). */
@@ -177,25 +188,37 @@ export function CoverageReviewCard({
     setNotaResolucion('');
   }, [reqId, customerId]);
 
-  const invalidar = () => qc.invalidateQueries({ queryKey: ['coverage', tenantId, customerId] });
-  /** 4B: tras confirmar/resolver, TODO lo que muestra dinero/mensajes se refresca. */
-  const invalidarQuote = () => {
-    invalidar();
-    qc.invalidateQueries({ queryKey: ['coverage-attempt', tenantId, reqId] });
-    qc.invalidateQueries({ queryKey: ['messages', tenantId, customerId] });
-    qc.invalidateQueries({ queryKey: ['customer', tenantId, customerId] });
-    qc.invalidateQueries({ queryKey: ['customerOpenOrder', tenantId, customerId] });
-    qc.invalidateQueries({ queryKey: ['conversations', tenantId] });
-  };
-  const onDecidido = (msg: string) => { setHecho(msg); setAviso(null); setError(null); invalidar(); statusRef.current?.focus(); };
-  const onErr = (e: unknown) => { setError(e instanceof Error ? e.message : 'No se pudo completar la acción.'); invalidar(); };
+  // HARDEN-1 (B): el ref se sincroniza DURANTE el render (sin la ventana tardía de un useEffect):
+  // un callback antiguo jamás puede pintar el request nuevo por un efecto que todavía no corrió.
+  const reqIdRef = useRef<string | null>(reqId);
+  reqIdRef.current = reqId;
 
-  const fingerprint = req?.locationFingerprint ?? '';
-  const aprobar = useMutation({ mutationFn: () => approveCoverage(tenantId, req!.id, fingerprint), onSuccess: () => onDecidido('Decisión registrada: cobertura aprobada.'), onError: onErr });
-  const rechazar = useMutation({ mutationFn: () => rejectCoverage(tenantId, req!.id, fingerprint, nota), onSuccess: () => onDecidido('Decisión registrada: cobertura rechazada.'), onError: onErr });
+  // Review HARDEN-1: las mutations de decisión también congelan sus ids en VARIABLES — un
+  // resultado tardío tras cambiar de chat solo invalida (con los ids congelados) y jamás pinta
+  // banner/error ni roba el foco sobre la revisión de OTRO cliente.
+  interface DecisionVars { requestId: string; customerId: string; fingerprint: string; note: string }
+  const congelarDecision = (): DecisionVars | null =>
+    req ? { requestId: req.id, customerId, fingerprint: req.locationFingerprint ?? '', note: nota } : null;
+  const invalidarPara = (cid: string) => qc.invalidateQueries({ queryKey: ['coverage', tenantId, cid] });
+  const onDecidido = (msg: string, v: DecisionVars) => {
+    invalidarPara(v.customerId);
+    if (v.requestId !== reqIdRef.current) return;
+    setHecho(msg); setAviso(null); setError(null); statusRef.current?.focus();
+  };
+  const onErr = (e: unknown, v: DecisionVars) => {
+    invalidarPara(v.customerId);
+    if (v.requestId !== reqIdRef.current) return;
+    setError(e instanceof Error ? e.message : 'No se pudo completar la acción.');
+  };
+
+  const aprobar = useMutation({ mutationFn: (v: DecisionVars) => approveCoverage(tenantId, v.requestId, v.fingerprint), onSuccess: (_r, v) => onDecidido('Decisión registrada: cobertura aprobada.', v), onError: onErr });
+  const rechazar = useMutation({ mutationFn: (v: DecisionVars) => rejectCoverage(tenantId, v.requestId, v.fingerprint, v.note), onSuccess: (_r, v) => onDecidido('Decisión registrada: cobertura rechazada.', v), onError: onErr });
   const pedirInfo = useMutation({
-    mutationFn: () => requestCoverageInfo(tenantId, req!.id),
-    onSuccess: (r) => { setAviso(r.already ? 'Ya se pidió más información hace un momento.' : 'Le pedimos más detalle al cliente.'); setError(null); },
+    mutationFn: (v: DecisionVars) => requestCoverageInfo(tenantId, v.requestId),
+    onSuccess: (r, v) => {
+      if (v.requestId !== reqIdRef.current) return;
+      setAviso(r.already ? 'Ya se pidió más información hace un momento.' : 'Le pedimos más detalle al cliente.'); setError(null);
+    },
     onError: onErr,
   });
   const ocupado = aprobar.isPending || rechazar.isPending || pedirInfo.isPending;
@@ -206,34 +229,79 @@ export function CoverageReviewCard({
   const policyRequired = policy.status === 'required';
   const pending = req?.shippingQuotePending ?? null;
 
-  const evidenciaDe = (p: ShippingConfirmPayload) => ({
-    canonical: formatCanonicalShippingMessage(p.confirmedShippingGs),
-    totalGs: totalSeguroDe(req?.cartSnapshot?.subtotal ?? Number.NaN, p.confirmedShippingGs) ?? Number.NaN,
-  });
-
-  // Aislamiento de callbacks en vuelo (review 4B): un resultado que llega DESPUÉS de cambiar de
-  // conversación jamás pinta el estado del request nuevo — se descarta y solo se invalida.
-  const reqIdRef = useRef<string | null>(reqId);
-  useEffect(() => { reqIdRef.current = reqId; }, [reqId]);
+  /**
+   * HARDEN-1 (C) — Variables de mutation con EVIDENCIA FINANCIERA CONGELADA al confirmar:
+   * subtotal/total/canónico se fijan ANTES de llamar (computeOrderTotals); onError usa SOLO esto
+   * (jamás `req`/`cartSnapshot` vivos). Si el total no se puede calcular ⇒ fail-closed sin
+   * llamar la callable y sin NaN en ShippingSendState.
+   */
+  interface QuoteVars {
+    payload: ShippingConfirmPayload;
+    evidence: { shippingGs: number; subtotalGs: number; totalGs: number; canonical: string };
+    customerId: string;
+    requestId: string;
+  }
+  const congelarVars = (payload: ShippingConfirmPayload, subtotalGs: number): QuoteVars | null => {
+    const totalGs = totalSeguroDe(subtotalGs, payload.confirmedShippingGs);
+    if (totalGs === null) return null;
+    return {
+      payload,
+      evidence: {
+        shippingGs: payload.confirmedShippingGs,
+        subtotalGs,
+        totalGs,
+        canonical: formatCanonicalShippingMessage(payload.confirmedShippingGs),
+      },
+      customerId,
+      requestId: payload.requestId,
+    };
+  };
+  /** Invalidaciones con los ids CONGELADOS de la mutation (jamás los del chat actualmente visible). */
+  const invalidarQuotePara = (cid: string, rid: string | null) => {
+    qc.invalidateQueries({ queryKey: ['coverage', tenantId, cid] });
+    if (rid) qc.invalidateQueries({ queryKey: ['coverage-attempt', tenantId, rid] });
+    qc.invalidateQueries({ queryKey: ['messages', tenantId, cid] });
+    qc.invalidateQueries({ queryKey: ['customer', tenantId, cid] });
+    qc.invalidateQueries({ queryKey: ['customerOpenOrder', tenantId, cid] });
+    qc.invalidateQueries({ queryKey: ['conversations', tenantId] });
+  };
 
   const quoteMut = useMutation({
-    mutationFn: (p: ShippingConfirmPayload) => quoteAndApproveCoverage(tenantId, p),
-    onMutate: (p) => setSend({ status: 'sending', requestId: p.requestId }),
-    onSuccess: (r, p) => {
-      invalidarQuote();
-      if (p.requestId !== reqIdRef.current) return; // resolvió para otro request: no tocar la UI
-      // Montos DEL SERVIDOR (jamás los derivados en el cliente); el canónico visible se deriva
-      // del monto confirmado — nunca del sellerDraft.
-      setSend({ status: 'sent', requestId: p.requestId, shippingGs: r.shippingGs, totalGs: r.totalGs, canonical: formatCanonicalShippingMessage(r.shippingGs) });
+    mutationFn: (v: QuoteVars) => quoteAndApproveCoverage(tenantId, v.payload),
+    onMutate: (v) => setSend({ status: 'sending', requestId: v.requestId }),
+    onSuccess: (r, v) => {
+      invalidarQuotePara(v.customerId, v.requestId);
+      if (v.requestId !== reqIdRef.current) return; // resolvió para otro request: no tocar la UI
+      // Montos DEL SERVIDOR (jamás los derivados en el cliente) pero VALIDADOS (review HARDEN-1):
+      // una respuesta malformada (skew/contrato roto) lanzaría en formatCanonicalShippingMessage
+      // DENTRO del callback y dejaría un 'sending' absorbente — se degrada a error accionable.
+      if (Number.isSafeInteger(r.shippingGs) && r.shippingGs >= 0 && Number.isSafeInteger(r.totalGs) && r.totalGs >= 0) {
+        setSend({ status: 'sent', requestId: v.requestId, shippingGs: r.shippingGs, totalGs: r.totalGs, canonical: formatCanonicalShippingMessage(r.shippingGs) });
+      } else {
+        setSend({ status: 'error', requestId: v.requestId, kind: 'generic' });
+      }
     },
-    onError: (e, p) => {
+    onError: (e, v) => {
       // Cualquier error (incluido transporte ambiguo sin kind) refresca la revisión: la fuente
-      // durable (pointer + attemptState) decide qué ofrecer — jamás un retry ciego.
-      invalidarQuote();
-      if (p.requestId !== reqIdRef.current) return;
-      setSend(mapQuoteError(e, p, evidenciaDe(p)));
+      // durable (pointer + attemptState) decide qué ofrecer — jamás un retry ciego. La evidencia
+      // del estado unknown es la CONGELADA al confirmar (HARDEN-1 C).
+      invalidarQuotePara(v.customerId, v.requestId);
+      if (v.requestId !== reqIdRef.current) return;
+      setSend(mapQuoteError(e, v.payload, v.evidence));
     },
   });
+  /** Confirmación con gate fail-closed: sin total calculable NO se llama la callable.
+   *  Review HARDEN-1: exclusión mutua con la resolución manual — jamás dos mutations del mismo
+   *  request en vuelo pisándose los callbacks. */
+  const confirmarQuote = (payload: ShippingConfirmPayload, subtotalGs: number) => {
+    if (quoteMut.isPending || resolver.isPending) return;
+    const vars = congelarVars(payload, subtotalGs);
+    if (!vars) {
+      setSend({ status: 'error', requestId: payload.requestId, kind: 'total_invalido' });
+      return;
+    }
+    quoteMut.mutate(vars);
+  };
 
   // Recuperación DURABLE: la fase viene del server (outbox = única fuente de verdad) y se
   // consulta solo con pointer vivo o un ciclo local sin cerrar. Cambiar de conversación cambia
@@ -241,8 +309,10 @@ export function CoverageReviewCard({
   // Review 4B: NO exige política required ni activación vigente — un pointer vivo con la config
   // cambiada a mitad de saga DEBE seguir visible/cerrable (fail-open de lectura; el server
   // rechaza la acción si corresponde). El ciclo local habilita el poll solo en sending/unknown.
+  // HARDEN-1 (A): la IDENTIDAD de la query incluye el quoteAttemptId del pointer — un intento
+  // NUEVO dentro del mismo request estrena caché (la fase del intento anterior jamás se hereda).
   const attemptQ = useQuery({
-    queryKey: ['coverage-attempt', tenantId, reqId],
+    queryKey: ['coverage-attempt', tenantId, reqId, pending?.quoteAttemptId ?? 'sin-intento'],
     queryFn: () => getCoverageQuoteAttemptState(tenantId, reqId!),
     enabled: !!reqId && puedeVer && puedeDecidir0 && flujo.enabled && (!!pending || send.status === 'sending' || send.status === 'unknown'),
     refetchInterval: (q) => {
@@ -251,13 +321,24 @@ export function CoverageReviewCard({
       return 10_000;
     },
   });
-  // La fase SOLO aplica al intento durable vigente (pointer). Sin pointer no hay recuperación.
-  const fase = pending ? (attemptQ.data?.attempt?.phase ?? null) : null;
+  // HARDEN-1 (A): la fase SOLO vale si la respuesta corresponde EXACTAMENTE al intento vigente
+  // (pointer). Cualquier mismatch (respuesta vieja en caché, carrera de reemplazo) ⇒ fase null:
+  // cero botones, cero reconciliación — se espera/refresca la fuente durable.
+  const attemptVigente =
+    pending && attemptQ.data?.attempt && attemptQ.data.attempt.quoteAttemptId === pending.quoteAttemptId
+      ? attemptQ.data.attempt
+      : null;
+  const fase = attemptVigente?.phase ?? null;
+
+  // HARDEN-1 (A): un intento NUEVO limpia la nota de reconciliación del anterior.
+  const qatVigente = pending?.quoteAttemptId ?? null;
+  useEffect(() => {
+    setNotaResolucion('');
+  }, [qatVigente]);
 
   // Reconciliación del ciclo LOCAL con la fuente durable (review 4B — hallazgo ALTO): sin una
-  // mutation en vuelo, un `sending` (kind in_progress de otro worker) o un `unknown` resuelto
-  // por otro dispositivo JAMÁS quedan absorbentes; y un `error` contradicho por la aprobación
-  // persistida se cierra (el bloque persistido informa el resultado real).
+  // mutation en vuelo, un `unknown` resuelto por otro dispositivo JAMÁS queda absorbente; y un
+  // `error` contradicho por la aprobación persistida se cierra (el bloque persistido informa).
   const reqVivo = covQ.data?.request ?? null;
   const aplicadoDurable = reqVivo?.status === 'coverage_approved' && !!reqVivo.shippingQuote;
   const mutandoAhora = quoteMut.isPending;
@@ -265,16 +346,26 @@ export function CoverageReviewCard({
     if (mutandoAhora) return;
     // 'sending' no se reconcilia: SOLO existe con la mutation en vuelo (in_progress mapea a idle).
     if (send.status === 'unknown') {
-      if (attemptQ.data && attemptQ.data.attempt?.phase !== 'unknown') setSend({ status: 'idle' });
+      // Review HARDEN-1 (ALTO): SOLO una respuesta POSTERIOR al error puede cerrar el unknown.
+      // El onError invalida la query ⇒ mientras ese refetch está en vuelo (isFetching) los datos
+      // visibles son los CACHEADOS de antes del error y no prueban nada — se ESPERA (cerrar acá
+      // re-ofrecía "Continuar el envío" durante un envío sin confirmar). Con respuesta fresca:
+      // sin intento activo ⇒ resuelto en otro lado (no queda absorbente); intento vigente en fase
+      // ≠ unknown ⇒ ciclo cerrado; mismatch de attemptId ⇒ ambiguo, se sigue esperando.
+      if (attemptQ.isFetching || !attemptQ.data) return;
+      const sinIntento = attemptQ.data.attempt === null;
+      if (sinIntento || (attemptVigente && attemptVigente.phase !== 'unknown')) setSend({ status: 'idle' });
     } else if (send.status === 'error' && aplicadoDurable) {
       setSend({ status: 'idle' });
     }
-  }, [send.status, mutandoAhora, attemptQ.data, aplicadoDurable]);
+  }, [send.status, mutandoAhora, attemptQ.isFetching, attemptQ.data, attemptVigente, aplicadoDurable]);
 
-  /** Payload de recuperación: SIEMPRE del pointer congelado (jamás huellas vivas). */
+  /** Payload de recuperación: SIEMPRE del pointer congelado (jamás huellas vivas). Un pointer
+   *  con chargeGs corrupto ⇒ null (el formatter lanzaría dentro del onClick; el chip ya muestra
+   *  '—' vía gsSeguro). */
   const payloadDelPointer = (): ShippingConfirmPayload | null => {
     const p = covQ.data?.request?.shippingQuotePending ?? null;
-    if (!p || !req) return null;
+    if (!p || !req || !Number.isSafeInteger(p.chargeGs) || p.chargeGs < 0) return null;
     return {
       requestId: req.id,
       sellerDraft: formatCanonicalShippingMessage(p.chargeGs),
@@ -285,36 +376,61 @@ export function CoverageReviewCard({
   };
   const continuarIntento = () => {
     const p = payloadDelPointer();
-    if (p && !quoteMut.isPending) quoteMut.mutate(p);
+    if (!p) return;
+    // HARDEN-1 (C): la evidencia de la recuperación también se congela ANTES de llamar (subtotal
+    // del snapshot del request en este instante); sin total calculable ⇒ fail-closed sin llamar.
+    confirmarQuote(p, covQ.data?.request?.cartSnapshot?.subtotal ?? Number.NaN);
   };
 
   const puedeResolver = !!claims.role && ROLES_RESOLUCION.has(claims.role);
-  // Review 4B (ALTO): las VARIABLES congelan requestId/attemptId/monto — los callbacks jamás
-  // leen `req`/`covQ` vivos (un resultado tardío tras cambiar de chat se descarta: solo invalida).
+  // Review 4B (ALTO) + HARDEN-1 (A/C): las VARIABLES congelan requestId/attemptId/monto/evidencia
+  // y el customerId — los callbacks jamás leen `req`/`covQ` vivos; un resultado tardío tras
+  // cambiar de chat se descarta (solo invalida, con los ids congelados).
   const resolver = useMutation({
-    mutationFn: (vars: { requestId: string; quoteAttemptId: string; chargeGs: number; resolution: 'delivered' | 'not_delivered'; note: string }) =>
-      resolveCoverageQuoteUnknown(tenantId, vars.requestId, vars.quoteAttemptId, vars.resolution, vars.note),
+    mutationFn: (vars: {
+      requestId: string;
+      quoteAttemptId: string;
+      chargeGs: number;
+      customerId: string;
+      evidence: { canonical: string; totalGs: number } | null;
+      resolution: 'delivered' | 'not_delivered';
+      note: string;
+    }) => resolveCoverageQuoteUnknown(tenantId, vars.requestId, vars.quoteAttemptId, vars.resolution, vars.note),
     onSuccess: (r, vars) => {
-      invalidarQuote();
+      invalidarQuotePara(vars.customerId, vars.requestId);
       if (vars.requestId !== reqIdRef.current) return; // el vendedor cambió de conversación
-      if (r.resolved === 'delivered' && typeof r.shippingGs === 'number' && typeof r.totalGs === 'number') {
-        setSend({ status: 'sent', requestId: vars.requestId, shippingGs: r.shippingGs, totalGs: r.totalGs, canonical: formatCanonicalShippingMessage(r.shippingGs) });
+      if (r.resolved === 'delivered') {
+        // HARDEN-1 (D2): un delivered MALFORMADO (sin montos del server) jamás se trata como
+        // éxito ni como idle silencioso — error accionable y la fuente durable manda. Mismo
+        // criterio que el formatter (entero seguro ≥ 0): un float pasaría isFinite y lanzaría.
+        if (Number.isSafeInteger(r.shippingGs) && r.shippingGs >= 0 && Number.isSafeInteger(r.totalGs) && r.totalGs >= 0) {
+          setSend({ status: 'sent', requestId: vars.requestId, shippingGs: r.shippingGs, totalGs: r.totalGs, canonical: formatCanonicalShippingMessage(r.shippingGs) });
+        } else {
+          setSend({ status: 'error', requestId: vars.requestId, kind: 'generic' });
+        }
       } else {
         setSend({ status: 'idle' });
       }
       setNotaResolucion('');
     },
     onError: (e, vars) => {
-      invalidarQuote();
+      invalidarQuotePara(vars.customerId, vars.requestId);
       if (vars.requestId !== reqIdRef.current) return;
+      // Un chargeGs corrupto NO puede lanzar dentro del callback (se tragaría el feedback):
+      // el canónico solo se formatea si es un monto formateable.
+      const canonicalSeguro = Number.isSafeInteger(vars.chargeGs) && vars.chargeGs >= 0 ? formatCanonicalShippingMessage(vars.chargeGs) : '';
       const pseudoPayload: ShippingConfirmPayload = {
         requestId: vars.requestId,
-        sellerDraft: formatCanonicalShippingMessage(vars.chargeGs),
+        sellerDraft: canonicalSeguro,
         confirmedShippingGs: vars.chargeGs,
         expectedLocationFingerprint: '',
         expectedCartFingerprint: '',
       };
-      setSend(mapQuoteError(e, pseudoPayload, evidenciaDe(pseudoPayload)));
+      // HARDEN-1 (C): evidencia CONGELADA al iniciar la resolución (jamás el request vivo). Si no
+      // había evidencia calculable, cualquier estado financiero se degrada a error genérico —
+      // jamás NaN dentro de ShippingSendState.
+      const st = mapQuoteError(e, pseudoPayload, vars.evidence ?? { canonical: canonicalSeguro, totalGs: Number.NaN });
+      setSend(st.status === 'unknown' && !Number.isFinite(st.totalGs) ? { status: 'error', requestId: vars.requestId, kind: 'generic' } : st);
     },
   });
 
@@ -404,7 +520,7 @@ export function CoverageReviewCard({
       {req.cartSnapshot?.items?.length ? (
         <p className="mt-1 text-ink-600">
           🛒 {req.cartSnapshot.items.map((i) => `${i.name} x${i.quantity}`).join(' · ')} — Total ₲{' '}
-          {req.cartSnapshot.subtotal?.toLocaleString('es-PY') ?? '—'}
+          {gsSeguro(req.cartSnapshot.subtotal ?? Number.NaN) ?? '—'}
         </p>
       ) : null}
       {req.sellerName && <p className="mt-0.5 text-ink-500">Asignado a: {req.sellerName}</p>}
@@ -418,10 +534,12 @@ export function CoverageReviewCard({
           total no se puede verificar con computeOrderTotals). */}
       {mostrarPersistido && (
         <p className="mt-1 font-medium text-mint-700" role="status">
-          💸 Costo de envío enviado y aplicado: ₲ {formatGuaranies(quoteAplicado!.chargeGs)}
-          {totalPersistido !== null
-            ? <> · Total del pedido ₲ {formatGuaranies(totalPersistido)}</>
-            : <> · El total no se pudo verificar: revisá el pedido en Pedidos.</>}
+          {gsSeguro(quoteAplicado!.chargeGs) !== null
+            ? <>💸 Costo de envío enviado y aplicado: ₲ {gsSeguro(quoteAplicado!.chargeGs)}</>
+            : <>💸 Hay un costo de envío aplicado pero no verificable: revisá el pedido en Pedidos.</>}
+          {gsSeguro(quoteAplicado!.chargeGs) !== null && (totalPersistido !== null && gsSeguro(totalPersistido) !== null
+            ? <> · Total del pedido ₲ {gsSeguro(totalPersistido)}</>
+            : <> · El total no se pudo verificar: revisá el pedido en Pedidos.</>)}
         </p>
       )}
       {/* HARDEN-1 (review): sin esto, una reanudación cancelada/trabada parecía "resuelta". */}
@@ -457,7 +575,7 @@ export function CoverageReviewCard({
           {policy.status === 'off' && (
             <button
               type="button"
-              onClick={() => aprobar.mutate()}
+              onClick={() => { const v = congelarDecision(); if (v) aprobar.mutate(v); }}
               disabled={ocupado}
               className="rounded-lg bg-mint-600 px-3 py-1.5 font-semibold text-white transition-colors hover:bg-mint-500 disabled:opacity-50"
             >
@@ -466,7 +584,7 @@ export function CoverageReviewCard({
           )}
           <button
             type="button"
-            onClick={() => rechazar.mutate()}
+            onClick={() => { const v = congelarDecision(); if (v) rechazar.mutate(v); }}
             disabled={ocupado}
             className="rounded-lg bg-coral-600 px-3 py-1.5 font-semibold text-white transition-colors hover:bg-coral-500 disabled:opacity-50"
           >
@@ -474,7 +592,7 @@ export function CoverageReviewCard({
           </button>
           <button
             type="button"
-            onClick={() => pedirInfo.mutate()}
+            onClick={() => { const v = congelarDecision(); if (v) pedirInfo.mutate(v); }}
             disabled={ocupado}
             className="rounded-lg border border-ink-300 px-3 py-1.5 font-semibold text-ink-700 transition-colors hover:bg-ink-50 disabled:opacity-50"
           >
@@ -496,9 +614,9 @@ export function CoverageReviewCard({
       {pending && fase === 'preparing' && !cicloLocal && pendiente && puedeDecidir && flujo.enabled && (
         <div className="mt-2 rounded-lg border border-sky-100 bg-white/70 px-2.5 py-2">
           <p className="font-medium text-sky-700" role="status">
-            📨 Cotización de ₲ {formatGuaranies(pending.chargeGs)} preparada; podés continuar el envío.
+            📨 Cotización de ₲ {gsSeguro(pending.chargeGs) ?? '—'} preparada; podés continuar el envío.
           </p>
-          <button type="button" onClick={continuarIntento} disabled={quoteMut.isPending} className="mt-1.5 rounded-lg bg-mint-600 px-3 py-1.5 font-semibold text-white transition-colors hover:bg-mint-500 disabled:opacity-50">
+          <button type="button" onClick={continuarIntento} disabled={quoteMut.isPending || resolver.isPending} className="mt-1.5 rounded-lg bg-mint-600 px-3 py-1.5 font-semibold text-white transition-colors hover:bg-mint-500 disabled:opacity-50">
             Continuar el envío
           </button>
         </div>
@@ -509,9 +627,9 @@ export function CoverageReviewCard({
       {pending && fase === 'sent_pending_approval' && !cicloLocal && puedeDecidir && flujo.enabled && (
         <div className="mt-2 rounded-lg border border-sky-100 bg-white/70 px-2.5 py-2">
           <p className="font-medium text-sky-700" role="status">
-            ✉️ El mensaje del costo (₲ {formatGuaranies(pending.chargeGs)}) ya se envió; falta completar la aprobación (no se reenvía).
+            ✉️ El mensaje del costo (₲ {gsSeguro(pending.chargeGs) ?? '—'}) ya se envió; falta completar la aprobación (no se reenvía).
           </p>
-          <button type="button" onClick={continuarIntento} disabled={quoteMut.isPending} className="mt-1.5 rounded-lg bg-mint-600 px-3 py-1.5 font-semibold text-white transition-colors hover:bg-mint-500 disabled:opacity-50">
+          <button type="button" onClick={continuarIntento} disabled={quoteMut.isPending || resolver.isPending} className="mt-1.5 rounded-lg bg-mint-600 px-3 py-1.5 font-semibold text-white transition-colors hover:bg-mint-500 disabled:opacity-50">
             Completar la aprobación
           </button>
         </div>
@@ -527,7 +645,7 @@ export function CoverageReviewCard({
         <div className="mt-2 rounded-lg border border-amber-200 bg-amber-50/70 px-2.5 py-2">
           <p className="font-semibold text-amber-800" role="alert">⚠ Envío sin confirmar — resolución manual</p>
           <p className="mt-0.5 text-ink-700">
-            Intento: “{formatCanonicalShippingMessage(pending!.chargeGs)}” · Envío ₲ {formatGuaranies(pending!.chargeGs)}
+            Intento con envío de ₲ {gsSeguro(pending!.chargeGs) ?? '—'}
           </p>
           <p className="mt-0.5 text-ink-600">
             Verificá en el WhatsApp del negocio si el mensaje llegó.{' '}
@@ -548,16 +666,16 @@ export function CoverageReviewCard({
           <div className="mt-1.5 flex flex-wrap gap-2">
             <button
               type="button"
-              onClick={() => { const a = attemptQ.data?.attempt; if (notaResolucion.trim() && !resolver.isPending && a && req) resolver.mutate({ requestId: req.id, quoteAttemptId: a.quoteAttemptId, chargeGs: a.chargeGs, resolution: 'delivered', note: notaResolucion.trim() }); }}
-              disabled={!notaResolucion.trim() || resolver.isPending}
+              onClick={() => { const a = attemptVigente; if (notaResolucion.trim() && !resolver.isPending && !quoteMut.isPending && a && req) { const t = totalSeguroDe(req.cartSnapshot?.subtotal ?? Number.NaN, a.chargeGs); resolver.mutate({ requestId: req.id, quoteAttemptId: a.quoteAttemptId, chargeGs: a.chargeGs, customerId, evidence: t === null ? null : { canonical: formatCanonicalShippingMessage(a.chargeGs), totalGs: t }, resolution: 'delivered', note: notaResolucion.trim() }); } }}
+              disabled={!notaResolucion.trim() || resolver.isPending || quoteMut.isPending}
               className="rounded-lg bg-mint-600 px-3 py-1.5 font-semibold text-white transition-colors hover:bg-mint-500 disabled:opacity-50"
             >
               {resolver.isPending ? 'Resolviendo…' : 'Sí llegó al cliente'}
             </button>
             <button
               type="button"
-              onClick={() => { const a = attemptQ.data?.attempt; if (notaResolucion.trim() && !resolver.isPending && a && req) resolver.mutate({ requestId: req.id, quoteAttemptId: a.quoteAttemptId, chargeGs: a.chargeGs, resolution: 'not_delivered', note: notaResolucion.trim() }); }}
-              disabled={!notaResolucion.trim() || resolver.isPending}
+              onClick={() => { const a = attemptVigente; if (notaResolucion.trim() && !resolver.isPending && !quoteMut.isPending && a && req) { const t = totalSeguroDe(req.cartSnapshot?.subtotal ?? Number.NaN, a.chargeGs); resolver.mutate({ requestId: req.id, quoteAttemptId: a.quoteAttemptId, chargeGs: a.chargeGs, customerId, evidence: t === null ? null : { canonical: formatCanonicalShippingMessage(a.chargeGs), totalGs: t }, resolution: 'not_delivered', note: notaResolucion.trim() }); } }}
+              disabled={!notaResolucion.trim() || resolver.isPending || quoteMut.isPending}
               className="rounded-lg bg-coral-600 px-3 py-1.5 font-semibold text-white transition-colors hover:bg-coral-500 disabled:opacity-50"
             >
               No llegó al cliente
@@ -576,7 +694,7 @@ export function CoverageReviewCard({
         <ShippingQuotePreview
           context={context}
           send={send}
-          onConfirm={(p) => { if (!quoteMut.isPending) quoteMut.mutate(p); }}
+          onConfirm={(p) => confirmarQuote(p, req.cartSnapshot?.subtotal ?? Number.NaN)}
           onKeepEditing={() => {
             // "Seguir editando" CIERRA el ciclo local del error (vuelve a idle): el preview
             // re-deriva el borrador y la recuperación durable (pointer/fases) queda visible.

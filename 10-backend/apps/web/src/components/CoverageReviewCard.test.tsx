@@ -5,10 +5,12 @@
  * clic (window.open con noopener; sin <a href> pre-cargado) y mapsUrlFor puro.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
+import { useState, useRef, useCallback, useEffect } from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { CoverageReviewCard, buildShippingDraftContext } from './CoverageReviewCard';
 import { mapsUrlFor } from '@/lib/coverage';
+import { composerGateActivo, type ManualShippingGate } from '@/lib/shippingQuote';
 import type { CoverageRequest } from '@vpw/shared';
 
 const getCoverageRequestFor = vi.fn();
@@ -528,5 +530,233 @@ describe('4B · gate del envío manual (publicación aislada)', () => {
     const onGate = vi.fn();
     renderCard({ draft: DRAFT_OK, onManualShippingGateChange: onGate });
     await waitFor(() => expect(onGate).toHaveBeenCalledWith(expect.objectContaining({ blocked: true })));
+  });
+});
+
+// ============================================================================
+// SHIPPING-CHAT-4B-HARDEN-1 — carreras: intento A→B, gate entre chats, evidencia congelada
+// ============================================================================
+
+const qcNuevo = () => new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+const renderCardQc = (qc: QueryClient, props: Partial<Parameters<typeof CoverageReviewCard>[0]> = {}) =>
+  render(
+    <QueryClientProvider client={qc}>
+      <CoverageReviewCard tenantId="perfumeria" customerId="595991234567" {...props} />
+    </QueryClientProvider>,
+  );
+
+describe('HARDEN-1 A · aislamiento del intento por quoteAttemptId (mismo request)', () => {
+  const PENDING_A2 = { quoteAttemptId: 'qat_AAAAAAAAAAAA', chargeGs: 25000, locationFingerprint: 'geo:V', cartFingerprint: 'cart2:V', quotedByUid: 'u', quotedByName: 'V', quotedByRole: 'TENANT_OWNER', createdAt: ts(Date.now() - 2000) };
+  const PENDING_B2 = { quoteAttemptId: 'qat_BBBBBBBBBBBB', chargeGs: 30000, locationFingerprint: 'geo:V', cartFingerprint: 'cart2:V', quotedByUid: 'u', quotedByName: 'V', quotedByRole: 'TENANT_OWNER', createdAt: ts(Date.now() - 1000) };
+  const conPtr = (p: typeof PENDING_A2) => reqQuote({ shippingQuotePending: p as CoverageRequest['shippingQuotePending'] } as Partial<CoverageRequest>);
+  const faseDe = (p: typeof PENDING_A2, phase: string) => ({ ok: true, attempt: { quoteAttemptId: p.quoteAttemptId, chargeGs: p.chargeGs, phase } });
+
+  const cambiarAPointerB = async (qc: QueryClient, respuestaB: Promise<unknown>) => {
+    getCoverageRequestFor.mockResolvedValue({ request: conPtr(PENDING_B2), denied: false });
+    getCoverageQuoteAttemptState.mockImplementation(() => respuestaB);
+    await act(async () => { await qc.invalidateQueries({ queryKey: ['coverage'] }); });
+  };
+
+  it('A=unknown → B pointer: la respuesta A cacheada JAMÁS muestra unknown/controles sobre B; la query de B corre y solo su respuesta habilita; la nota se limpia', async () => {
+    flowRequired();
+    getCoverageRequestFor.mockResolvedValue({ request: conPtr(PENDING_A2), denied: false });
+    getCoverageQuoteAttemptState.mockResolvedValue(faseDe(PENDING_A2, 'unknown'));
+    const qc = qcNuevo();
+    renderCardQc(qc);
+    await screen.findByText(/resolución manual/i);
+    fireEvent.change(screen.getByLabelText(/nota obligatoria/i), { target: { value: 'nota del intento A' } });
+    const llamadasAntes = getCoverageQuoteAttemptState.mock.calls.length;
+
+    // B toma el pointer; su consulta queda EN VUELO (promesa pendiente) — el caché de A persiste.
+    let resolverB!: (v: unknown) => void;
+    await cambiarAPointerB(qc, new Promise((res) => { resolverB = res; }));
+
+    // Con el pointer B vigente y SIN respuesta de B: cero unknown de A, cero botones de A.
+    await waitFor(() => expect(screen.queryByText(/resolución manual/i)).toBeNull());
+    expect(screen.queryByRole('button', { name: /llegó al cliente/i })).toBeNull();
+    expect(screen.queryByRole('button', { name: /completar la aprobación|continuar el envío/i })).toBeNull();
+    // La query de B SÍ se ejecutó (key nueva por quoteAttemptId).
+    await waitFor(() => expect(getCoverageQuoteAttemptState.mock.calls.length).toBeGreaterThan(llamadasAntes));
+
+    // Solo la respuesta de B habilita — y la nota de A quedó limpia.
+    resolverB(faseDe(PENDING_B2, 'unknown'));
+    await screen.findByText(/resolución manual/i);
+    expect((screen.getByLabelText(/nota obligatoria/i) as HTMLInputElement).value).toBe('');
+    expect(screen.getByText(/Intento con envío de ₲ 30\.000/)).toBeTruthy(); // monto de B, no de A
+  });
+
+  it('A=failed → B=preparing: el failed cacheado no se muestra; B habilita "Continuar el envío"', async () => {
+    flowRequired();
+    getCoverageRequestFor.mockResolvedValue({ request: conPtr(PENDING_A2), denied: false });
+    getCoverageQuoteAttemptState.mockResolvedValue(faseDe(PENDING_A2, 'failed'));
+    const qc = qcNuevo();
+    renderCardQc(qc);
+    await screen.findByText(/quedó cerrado o inconsistente/i);
+    await cambiarAPointerB(qc, Promise.resolve(faseDe(PENDING_B2, 'preparing')));
+    await waitFor(() => expect(screen.queryByText(/quedó cerrado o inconsistente/i)).toBeNull());
+    expect(await screen.findByRole('button', { name: /continuar el envío/i })).toBeTruthy();
+  });
+
+  it('A=sent_pending_approval → B=preparing: jamás "Completar la aprobación" sobre el intento nuevo prepared', async () => {
+    flowRequired();
+    getCoverageRequestFor.mockResolvedValue({ request: conPtr(PENDING_A2), denied: false });
+    getCoverageQuoteAttemptState.mockResolvedValue(faseDe(PENDING_A2, 'sent_pending_approval'));
+    const qc = qcNuevo();
+    renderCardQc(qc);
+    await screen.findByRole('button', { name: /completar la aprobación/i });
+    await cambiarAPointerB(qc, Promise.resolve(faseDe(PENDING_B2, 'preparing')));
+    await waitFor(() => expect(screen.queryByRole('button', { name: /completar la aprobación/i })).toBeNull());
+    expect(await screen.findByRole('button', { name: /continuar el envío/i })).toBeTruthy();
+  });
+
+  it('MISMATCH: la respuesta trae el intento A bajo el pointer B (el server consulta por requestId) ⇒ fase null, cero controles; recién la respuesta del intento B habilita', async () => {
+    // Regresión del guard attemptVigente (review #2): la queryKey nueva NO alcanza — una única
+    // respuesta fresca puede traer el attempt equivocado si el server aún no conmutó el pointer.
+    flowRequired();
+    getCoverageRequestFor.mockResolvedValue({ request: conPtr(PENDING_B2), denied: false });
+    getCoverageQuoteAttemptState.mockResolvedValue(faseDe(PENDING_A2, 'sent_pending_approval'));
+    const qc = qcNuevo();
+    renderCardQc(qc);
+    await screen.findByText(/pendiente de revisión/i);
+    await waitFor(() => expect(getCoverageQuoteAttemptState).toHaveBeenCalled());
+    expect(screen.queryByRole('button', { name: /completar la aprobación/i })).toBeNull();
+    expect(screen.queryByRole('button', { name: /continuar el envío/i })).toBeNull();
+    expect(screen.queryByText(/resolución manual/i)).toBeNull();
+    getCoverageQuoteAttemptState.mockResolvedValue(faseDe(PENDING_B2, 'preparing'));
+    await act(async () => { await qc.invalidateQueries({ queryKey: ['coverage-attempt'] }); });
+    expect(await screen.findByRole('button', { name: /continuar el envío/i })).toBeTruthy();
+  });
+});
+
+describe('HARDEN-1 B · gate del composer sin carrera entre chats (harness padre/card real)', () => {
+  const enviarSpy = vi.fn();
+  // Capturado en el render: permite inyectar publicaciones TARDÍAS "como si" viniesen de un card
+  // viejo, DESPUÉS de que el card nuevo ya publicó — la carrera real que el filtro debe parar.
+  let publicarComoCard: ((g: ManualShippingGate) => void) | null = null;
+  function GateHarness({ draft }: { draft: string }) {
+    const [selected, setSelected] = useState<string>('595991234567');
+    const selRef = useRef<string | null>(null);
+    selRef.current = selected; // patrón EXACTO de la página (sincronizado en el render)
+    const [gate, setGate] = useState<ManualShippingGate | null>(null);
+    const onGate = useCallback((g: ManualShippingGate) => {
+      if (g.customerId !== selRef.current) return; // TODA publicación ajena se ignora
+      setGate(g);
+    }, []);
+    publicarComoCard = onGate;
+    useEffect(() => { setGate(null); }, [selected]);
+    const activo = composerGateActivo(gate, selected);
+    return (
+      <>
+        <button onClick={() => setSelected('595990000002')}>ir-a-B</button>
+        <button onClick={() => setSelected('595990000003')}>ir-a-C</button>
+        <button onClick={() => { if (!activo) enviarSpy(selected); }}>enviar-manual</button>
+        <span data-testid="gate-activo">{String(activo)}</span>
+        <CoverageReviewCard tenantId="perfumeria" customerId={selected} draft={draft} onManualShippingGateChange={onGate} />
+      </>
+    );
+  }
+  const renderHarness = (draft: string) => {
+    const qc = qcNuevo();
+    return render(
+      <QueryClientProvider client={qc}>
+        <GateHarness draft={draft} />
+      </QueryClientProvider>,
+    );
+  };
+  const requestPara = (cid: string) =>
+    cid === '595990000003' ? null : (reqQuote({ customerId: cid } as Partial<CoverageRequest>) as CoverageRequest);
+
+  it('A bloquea → cambio a B → B bloquea; el cleanup tardío de A (blocked:false) NO limpia el gate de B; Enter sigue bloqueado', async () => {
+    flowRequired();
+    getCoverageRequestFor.mockImplementation(async (_t: unknown, cid: string) => ({ request: requestPara(cid), denied: false }));
+    renderHarness(DRAFT_OK);
+    await waitFor(() => expect(screen.getByTestId('gate-activo').textContent).toBe('true'));
+    fireEvent.click(screen.getByRole('button', { name: 'ir-a-B' }));
+    // El card de B publica su gate; el cleanup del card A (blocked:false, customerId A) se ignora.
+    await waitFor(() => expect(screen.getByTestId('gate-activo').textContent).toBe('true'));
+    // CARRERA (review #2 — este es el caso que discrimina el fix): una publicación TARDÍA del
+    // card viejo con blocked:false llega DESPUÉS del gate de B. El filtro viejo (que solo
+    // filtraba blocked:true ajenos) la aplicaba y LIMPIABA el gate vigente de B.
+    act(() => { publicarComoCard!({ customerId: '595991234567', requestId: 'covr_abc123DEF456', blocked: false, canQuote: true }); });
+    expect(screen.getByTestId('gate-activo').textContent).toBe('true');
+    // Y una publicación tardía ajena con blocked:true tampoco pinta el chat nuevo.
+    act(() => { publicarComoCard!({ customerId: '595991234567', requestId: 'covr_abc123DEF456', blocked: true, canQuote: true }); });
+    expect(screen.getByTestId('gate-activo').textContent).toBe('true');
+    // "Enter"/envío manual con gate vigente de B: JAMÁS llama a enviar.
+    enviarSpy.mockClear();
+    fireEvent.click(screen.getByRole('button', { name: 'enviar-manual' }));
+    expect(enviarSpy).not.toHaveBeenCalled();
+  });
+
+  it('cambiar a un chat SIN request limpia el gate; texto común se envía normalmente', async () => {
+    flowRequired();
+    getCoverageRequestFor.mockImplementation(async (_t: unknown, cid: string) => ({ request: requestPara(cid), denied: false }));
+    const r = renderHarness(DRAFT_OK);
+    await waitFor(() => expect(screen.getByTestId('gate-activo').textContent).toBe('true'));
+    fireEvent.click(screen.getByRole('button', { name: 'ir-a-C' }));
+    await waitFor(() => expect(screen.getByTestId('gate-activo').textContent).toBe('false'));
+    enviarSpy.mockClear();
+    fireEvent.click(screen.getByRole('button', { name: 'enviar-manual' }));
+    expect(enviarSpy).toHaveBeenCalledWith('595990000003');
+    r.unmount();
+    // Texto común: el gate nunca se activa ni en el chat con request.
+    getCoverageRequestFor.mockImplementation(async (_t: unknown, cid: string) => ({ request: requestPara(cid), denied: false }));
+    renderHarness('hola, ya te confirmo');
+    await screen.findByText(/pendiente de revisión/i);
+    expect(screen.getByTestId('gate-activo').textContent).toBe('false');
+    enviarSpy.mockClear();
+    fireEvent.click(screen.getByRole('button', { name: 'enviar-manual' }));
+    expect(enviarSpy).toHaveBeenCalled();
+  });
+});
+
+describe('HARDEN-1 C · evidencia financiera CONGELADA', () => {
+  it('unknown muestra el total congelado al confirmar (₲285.000), aunque el subtotal vivo haya cambiado a ₲400.000', async () => {
+    flowRequired();
+    getCoverageRequestFor.mockResolvedValue({
+      request: reqQuote({ cartSnapshot: { items: [{ productId: 'p1', name: 'P', price: 250000, quantity: 1 }], subtotal: 250000 } as CoverageRequest['cartSnapshot'] }),
+      denied: false,
+    });
+    let rechazar!: (e: unknown) => void;
+    quoteAndApproveCoverage.mockReturnValue(new Promise((_res, rej) => { rechazar = rej; }));
+    // La fuente durable queda EN VUELO: es exactamente el momento en que la evidencia congelada
+    // es lo único que la UI puede mostrar (si respondiera "sin intento", la reconciliación
+    // durable cerraría el unknown local — eso ya lo cubre el test de reconciliación de 4B).
+    getCoverageQuoteAttemptState.mockReturnValue(new Promise(() => {}));
+    const qc = qcNuevo();
+    renderCardQc(qc, { draft: 'El costo de envío para tu ubicación es ₲35.000' });
+    fireEvent.click(await screen.findByRole('button', { name: /enviar costo y aprobar cobertura/i }));
+    await waitFor(() => expect(quoteAndApproveCoverage).toHaveBeenCalledTimes(1));
+
+    // El carrito/request cambia EN VUELO (subtotal vivo 400.000).
+    getCoverageRequestFor.mockResolvedValue({
+      request: reqQuote({ cartSnapshot: { items: [{ productId: 'p1', name: 'P', price: 400000, quantity: 1 }], subtotal: 400000 } as CoverageRequest['cartSnapshot'] }),
+      denied: false,
+    });
+    await act(async () => { await qc.invalidateQueries({ queryKey: ['coverage'] }); });
+    await act(async () => { rechazar({ code: 'functions/unavailable', details: { kind: 'unknown' } }); });
+
+    await screen.findByText(/envío sin confirmar/i);
+    expect(screen.getByText(/285\.000/)).toBeTruthy(); // 250.000 + 35.000 CONGELADO
+    expect(screen.queryByText(/435\.000/)).toBeNull(); // jamás el subtotal vivo
+    expect(screen.getAllByText(/35\.000/).length).toBeGreaterThan(0); // envío congelado (canónico + monto)
+  });
+
+  it('recuperación con subtotal inválido ⇒ CERO callable, error accionable, cero NaN', async () => {
+    flowRequired();
+    const PENDING_X = { quoteAttemptId: 'qat_XXXXXXXXXXXX', chargeGs: 25000, locationFingerprint: 'geo:V', cartFingerprint: 'cart2:V', quotedByUid: 'u', quotedByName: 'V', quotedByRole: 'TENANT_OWNER', createdAt: ts(Date.now() - 1000) };
+    getCoverageRequestFor.mockResolvedValue({
+      request: reqQuote({
+        shippingQuotePending: PENDING_X as CoverageRequest['shippingQuotePending'],
+        cartSnapshot: { items: [], subtotal: 100000.5 } as CoverageRequest['cartSnapshot'],
+      }),
+      denied: false,
+    });
+    getCoverageQuoteAttemptState.mockResolvedValue({ ok: true, attempt: { quoteAttemptId: PENDING_X.quoteAttemptId, chargeGs: 25000, phase: 'preparing' } });
+    renderCard();
+    fireEvent.click(await screen.findByRole('button', { name: /continuar el envío/i }));
+    expect(quoteAndApproveCoverage).not.toHaveBeenCalled();
+    await screen.findByText(/total con envío no es un monto válido/i);
+    expect(document.body.textContent).not.toContain('NaN');
   });
 });

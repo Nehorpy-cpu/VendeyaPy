@@ -123,7 +123,9 @@ function ConversationsInner() {
   const [sendError, setSendError] = useState<string | null>(null);
   const [lastViaMock, setLastViaMock] = useState(false);
   const selectedRef = useRef<string | null>(null);
-  useEffect(() => { selectedRef.current = selected; }, [selected]);
+  // HARDEN-1 (B): sincronizado DURANTE el render — los efectos del card nuevo pueden correr
+  // ANTES que un efecto tardío del padre, y el filtro del gate necesita el valor fresco.
+  selectedRef.current = selected;
   const sendMut = useMutation({
     mutationFn: (vars: { customerId: string; text: string }) =>
       sendManualMessage(tenantId!, vars.customerId, vars.text),
@@ -142,13 +144,16 @@ function ConversationsInner() {
   useEffect(() => { setDraft(''); setSendError(null); setLastViaMock(false); setManualGate(null); }, [selected]);
 
   // SHIPPING-CHAT-4B — el card publica el gate del envío manual (espejo del gate server de 3B;
-  // la autoridad es el server). Solo bloquea si pertenece a la conversación SELECCIONADA; se
-  // limpia al cambiar de chat (arriba) y cuando el card se desmonta (publica blocked:false).
+  // la autoridad es el server). Solo bloquea si pertenece a la conversación SELECCIONADA. La
+  // limpieza real al cambiar de chat es el efecto [selected] de arriba: la publicación de
+  // desmontaje del card llega siempre con el customerId VIEJO y el filtro de abajo la ignora.
   const [manualGate, setManualGate] = useState<ManualShippingGate | null>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const endRef = useRef<HTMLDivElement>(null);
   const onManualShippingGateChange = useCallback((g: ManualShippingGate) => {
-    if (g.customerId !== selectedRef.current && g.blocked) return; // gate de otro chat: no aplicar
+    // HARDEN-1 (B): TODA publicación de otro chat se ignora — un blocked:true tardío no bloquea
+    // al chat nuevo, y el cleanup blocked:false de un card viejo JAMÁS limpia el gate vigente.
+    if (g.customerId !== selectedRef.current) return;
     setManualGate(g);
   }, []);
   const onFocusComposer = useCallback(() => composerRef.current?.focus(), []);

@@ -128,13 +128,11 @@ export async function getCoverageQuoteAttemptState(tenantId: string, requestId: 
   return (await fn({ tenantId, requestId })).data;
 }
 
-export interface ResolveQuoteUnknownResult {
-  ok: boolean;
-  resolved: 'delivered' | 'not_delivered';
-  status?: string;
-  shippingGs?: number;
-  totalGs?: number;
-}
+/** HARDEN-1 (D2): unión discriminada — un delivered SIEMPRE trae los montos del server
+ * (contrato del backend); el consumidor igual valida en runtime antes de pintar éxito. */
+export type ResolveQuoteUnknownResult =
+  | { ok: boolean; resolved: 'not_delivered' }
+  | { ok: boolean; resolved: 'delivered'; status: string; shippingGs: number; totalGs: number };
 
 /** Reconciliación HUMANA de un envío sin confirmar (OWNER/MANAGER; nota obligatoria; sin reenvío). */
 export async function resolveCoverageQuoteUnknown(
