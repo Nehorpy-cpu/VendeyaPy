@@ -99,6 +99,14 @@ export type ShippingSendErrorKind =
   | 'flow_off'
   | 'not_assigned'
   | 'over_max'
+  // SHIPPING-CHAT-4B — kinds del backend 3C mapeados 1:1 (jamás por strings del mensaje):
+  | 'config_invalida'
+  | 'total_invalido'
+  | 'quote_en_curso'
+  | 'channel_unavailable'
+  | 'parse_mismatch'
+  | 'quote_not_required'
+  | 'no_aplicado'
   | 'generic';
 
 /**
@@ -114,7 +122,9 @@ export type ShippingSendState =
   | { status: 'error'; requestId: string; kind: ShippingSendErrorKind; shippingGs?: number; totalGs?: number; canonical?: string }
   | { status: 'unknown'; requestId: string; shippingGs: number; totalGs: number; canonical: string };
 
-/** Texto EXACTO por resultado de envío/aprobación (incluye `unknown`). */
+/** Texto EXACTO por resultado de envío/aprobación (incluye `unknown`). Los textos JAMÁS afirman
+ * un resultado que el backend no confirmó (p.ej. `generic` no dice que Meta rechazó ni que el
+ * mensaje no llegó — la recuperación durable decide qué ofrecer). */
 export const SEND_ERROR_TEXT: Record<ShippingSendErrorKind | 'unknown', string> = {
   unknown: 'No pudimos confirmar el envío. Revisá el historial antes de intentar otra acción.',
   meta_rejected: 'WhatsApp no aceptó el mensaje, así que no aprobamos la cobertura. Revisá el chat y volvé a intentar.',
@@ -123,10 +133,41 @@ export const SEND_ERROR_TEXT: Record<ShippingSendErrorKind | 'unknown', string> 
   fingerprint_stale: 'Lo que ves cambió recién. Actualizamos la revisión; volvé a confirmar el costo.',
   expired: 'La solicitud venció: el cliente tiene que escribir *pagar* para retomar.',
   flow_off: 'El flujo de cobertura está deshabilitado: no se puede aprobar.',
-  not_assigned: 'Esta conversación no está asignada a vos: no podés aprobar la cobertura.',
+  not_assigned: 'Esta acción no está disponible para tu usuario en esta conversación.',
   over_max: 'Ese costo supera el máximo permitido. Revisalo antes de enviar.',
-  generic: 'No se pudo aprobar la cobertura. Revisá e intentá de nuevo.',
+  config_invalida: 'La configuración de cotización de envío no es válida: avisá al administrador antes de aprobar.',
+  total_invalido: 'El total con envío no es un monto válido: revisá el carrito antes de continuar.',
+  quote_en_curso: 'Hay una cotización enviada pendiente de aplicar: completala o resolvela antes de cotizar otro monto.',
+  channel_unavailable: 'El número de WhatsApp del negocio no está disponible para cotizar. Revisá la conexión del canal.',
+  parse_mismatch: 'El texto no confirma ese costo exacto: revisá el borrador y el monto.',
+  quote_not_required: 'La cotización obligatoria se deshabilitó: aprobá la cobertura con el botón "Aprobar cobertura".',
+  no_aplicado: 'El costo YA se había enviado al cliente pero NO se aplicó (algo cambió en el medio). Revisá la campana del equipo y recotizá si corresponde.',
+  generic: 'No se pudo completar la acción. Revisá el estado actualizado de la revisión antes de volver a intentar.',
 };
+
+/**
+ * SHIPPING-CHAT-4B — Gate VISUAL del composer (ayuda de UI; la AUTORIDAD sigue siendo el gate
+ * server-side de sendManualMessage). El card lo publica hacia la página con este contrato chico
+ * y SIN PII; la página solo lo honra si pertenece a la conversación seleccionada.
+ */
+export interface ManualShippingGate {
+  customerId: string;
+  requestId: string | null;
+  blocked: boolean;
+  /** true = este rol puede cotizar desde el preview (la ayuda del gate lo referencia). */
+  canQuote: boolean;
+}
+
+/** ¿El gate bloquea el composer de ESTA conversación? PURA (testeable). */
+export function composerGateActivo(gate: ManualShippingGate | null, selectedCustomerId: string | null): boolean {
+  return !!gate && gate.blocked && !!selectedCustomerId && gate.customerId === selectedCustomerId;
+}
+
+export const COMPOSER_GATE_HELP = 'Revisá el costo de envío y usá «Enviar costo y aprobar cobertura».';
+
+/** Variante para roles de solo lectura (PLATFORM_ADMIN): el preview no está disponible. */
+export const COMPOSER_GATE_HELP_SOLO_LECTURA =
+  'Ese texto informa un costo de envío: solo el equipo del negocio puede enviarlo (desde la cotización).';
 
 /** View-model derivado del contexto (todo lo que el componente necesita para renderizar). */
 export interface ShippingQuoteVM {

@@ -6,9 +6,13 @@ import {
   classifyDraft,
   messageForReason,
   deriveShippingQuote,
+  composerGateActivo,
+  COMPOSER_GATE_HELP,
   SEND_ERROR_TEXT,
   formatGs,
+  type ManualShippingGate,
   type ShippingDraftContext,
+  type ShippingSendErrorKind,
 } from './shippingQuote';
 
 const none = (reason: ShippingParseReason): ShippingParseResult => ({ kind: 'none', reason, parserVersion: 'shipping-parser-3' });
@@ -211,5 +215,44 @@ describe('SEND_ERROR_TEXT / formatGs', () => {
   it('formatGs reusa el helper compartido', () => {
     expect(formatGs(280000)).toBe('280.000');
     expect(formatGs(0)).toBe('0');
+  });
+
+  // SHIPPING-CHAT-4B: kinds nuevos con texto propio no vacío; ninguno afirma resultados que el
+  // backend no confirmó (generic no menciona rechazo ni "no llegó" ni recomienda retry ciego).
+  it('4B: los kinds nuevos existen con texto propio', () => {
+    const nuevos: ShippingSendErrorKind[] = ['config_invalida', 'total_invalido', 'quote_en_curso', 'channel_unavailable', 'parse_mismatch', 'quote_not_required', 'no_aplicado'];
+    for (const k of nuevos) {
+      expect(SEND_ERROR_TEXT[k]).toBeTruthy();
+      expect(SEND_ERROR_TEXT[k].length).toBeGreaterThan(10);
+    }
+  });
+  it('4B: generic no afirma rechazo de Meta ni no-entrega ni pide reintentar a ciegas', () => {
+    expect(SEND_ERROR_TEXT.generic).not.toMatch(/WhatsApp no aceptó|no llegó|rechaz/i);
+    expect(SEND_ERROR_TEXT.generic).toMatch(/estado actualizado/);
+  });
+});
+
+// SHIPPING-CHAT-4B — gate visual del composer (aislado por conversación; PURO)
+describe('composerGateActivo', () => {
+  const gate = (over: Partial<ManualShippingGate> = {}): ManualShippingGate => ({
+    customerId: '595991234567',
+    requestId: 'covr_abc123DEF456',
+    blocked: true,
+    canQuote: true,
+    ...over,
+  });
+  it('bloquea SOLO cuando el gate pertenece a la conversación seleccionada', () => {
+    expect(composerGateActivo(gate(), '595991234567')).toBe(true);
+  });
+  it('gate de OTRA conversación jamás bloquea la actual', () => {
+    expect(composerGateActivo(gate({ customerId: '595990000001' }), '595991234567')).toBe(false);
+  });
+  it('sin gate, sin bloqueo, o sin selección ⇒ no bloquea', () => {
+    expect(composerGateActivo(null, '595991234567')).toBe(false);
+    expect(composerGateActivo(gate({ blocked: false }), '595991234567')).toBe(false);
+    expect(composerGateActivo(gate(), null)).toBe(false);
+  });
+  it('la ayuda del gate existe y nombra la acción correcta', () => {
+    expect(COMPOSER_GATE_HELP).toContain('Enviar costo y aprobar cobertura');
   });
 });

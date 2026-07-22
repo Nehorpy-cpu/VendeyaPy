@@ -1,6 +1,6 @@
 'use client';
 
-import { Suspense, useEffect, useRef, useState } from 'react';
+import { Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import type { Customer, Message } from '@vpw/shared';
@@ -18,6 +18,7 @@ import {
 import { listTenantWhatsappNumbers } from '@/lib/whatsapp-activation';
 import { getChannelConfig } from '@/lib/channels';
 import { getCustomerOpenOrder, comprobanteEstado, esMensajeImagenCliente } from '@/lib/orders';
+import { composerGateActivo, COMPOSER_GATE_HELP, COMPOSER_GATE_HELP_SOLO_LECTURA, type ManualShippingGate } from '@/lib/shippingQuote';
 import { ComprobanteViewer } from '@/components/ComprobanteViewer';
 import { CoverageReviewCard } from '@/components/CoverageReviewCard';
 
@@ -138,7 +139,33 @@ function ConversationsInner() {
       setSendError(e instanceof Error ? e.message : 'No se pudo enviar el mensaje.');
     },
   });
-  useEffect(() => { setDraft(''); setSendError(null); setLastViaMock(false); }, [selected]);
+  useEffect(() => { setDraft(''); setSendError(null); setLastViaMock(false); setManualGate(null); }, [selected]);
+
+  // SHIPPING-CHAT-4B — el card publica el gate del envío manual (espejo del gate server de 3B;
+  // la autoridad es el server). Solo bloquea si pertenece a la conversación SELECCIONADA; se
+  // limpia al cambiar de chat (arriba) y cuando el card se desmonta (publica blocked:false).
+  const [manualGate, setManualGate] = useState<ManualShippingGate | null>(null);
+  const composerRef = useRef<HTMLTextAreaElement>(null);
+  const endRef = useRef<HTMLDivElement>(null);
+  const onManualShippingGateChange = useCallback((g: ManualShippingGate) => {
+    if (g.customerId !== selectedRef.current && g.blocked) return; // gate de otro chat: no aplicar
+    setManualGate(g);
+  }, []);
+  const onFocusComposer = useCallback(() => composerRef.current?.focus(), []);
+  const onReviewHistory = useCallback(() => {
+    endRef.current?.scrollIntoView({ behavior: 'smooth' });
+    composerRef.current?.focus();
+  }, []);
+  const onSetDraft = useCallback((texto: string) => {
+    // Completa la plantilla SOLO sobre un composer vacío — jamás pisa un borrador escrito.
+    setDraft((actual) => (actual.trim() === '' ? texto : actual));
+    composerRef.current?.focus();
+  }, []);
+  const gateActivo = composerGateActivo(manualGate, selected);
+  const enviarManual = () => {
+    if (gateActivo) return; // ayuda de UI: el server igual lo rechazaría (autoridad 3B)
+    if (draft.trim() && !sendMut.isPending) sendMut.mutate({ customerId: selected!, text: draft });
+  };
 
   // Modo de envío (para avisar mock ANTES de escribir). Si el rol no puede leer config → sin aviso previo.
   const channelQ = useQuery({
@@ -158,8 +185,7 @@ function ConversationsInner() {
     refetchInterval: 15000,
   });
 
-  // Autoscroll al final cuando llegan mensajes
-  const endRef = useRef<HTMLDivElement>(null);
+  // Autoscroll al final cuando llegan mensajes (endRef se declara junto al gate del composer)
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messagesQ.data]);
@@ -290,8 +316,18 @@ function ConversationsInner() {
                 </div>
               </div>
 
-              {/* COVERAGE-1C: revisión de cobertura del cliente seleccionado (roles autorizados) */}
-              {selected && tenantId && <CoverageReviewCard tenantId={tenantId} customerId={selected} />}
+              {/* COVERAGE-1C + SHIPPING-CHAT-4B: revisión de cobertura + cotización de envío */}
+              {selected && tenantId && (
+                <CoverageReviewCard
+                  tenantId={tenantId}
+                  customerId={selected}
+                  draft={draft}
+                  onSetDraft={onSetDraft}
+                  onFocusComposer={onFocusComposer}
+                  onReviewHistory={onReviewHistory}
+                  onManualShippingGateChange={onManualShippingGateChange}
+                />
+              )}
 
               {/* HUMAN-HANDOFF-1: pedido abierto del cliente — contexto del comprobante sin salir del chat */}
               {orderQ.data && (
@@ -328,7 +364,7 @@ function ConversationsInner() {
                   className="space-y-1.5 border-t border-ink-100 px-4 py-3"
                   onSubmit={(e) => {
                     e.preventDefault();
-                    if (draft.trim() && !sendMut.isPending) sendMut.mutate({ customerId: selected!, text: draft });
+                    enviarManual();
                   }}
                 >
                   <div className="flex items-center gap-2 text-[11px] text-ink-500">
@@ -341,12 +377,13 @@ function ConversationsInner() {
                   </div>
                   <div className="flex items-end gap-2">
                     <textarea
+                      ref={composerRef}
                       value={draft}
                       onChange={(e) => setDraft(e.target.value)}
                       onKeyDown={(e) => {
                         if (e.key === 'Enter' && !e.shiftKey) {
                           e.preventDefault();
-                          if (draft.trim() && !sendMut.isPending) sendMut.mutate({ customerId: selected!, text: draft });
+                          enviarManual();
                         }
                       }}
                       rows={2}
@@ -356,12 +393,19 @@ function ConversationsInner() {
                     />
                     <button
                       type="submit"
-                      disabled={!draft.trim() || sendMut.isPending}
+                      disabled={!draft.trim() || sendMut.isPending || gateActivo}
                       className="shrink-0 rounded-xl bg-mint-600 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-mint-700 disabled:opacity-50"
                     >
                       {sendMut.isPending ? 'Enviando…' : 'Enviar por WhatsApp'}
                     </button>
                   </div>
+                  {/* SHIPPING-CHAT-4B: ayuda NO destructiva del gate (el draft se conserva; el
+                      preview de la tarjeta queda disponible para corregir o confirmar). */}
+                  {gateActivo && (
+                    <div className="text-xs font-medium text-sky-700" role="status">
+                      {manualGate?.canQuote === false ? COMPOSER_GATE_HELP_SOLO_LECTURA : COMPOSER_GATE_HELP}
+                    </div>
+                  )}
                   {sendError && <div className="text-xs font-medium text-coral-600">{sendError}</div>}
                 </form>
               ) : (

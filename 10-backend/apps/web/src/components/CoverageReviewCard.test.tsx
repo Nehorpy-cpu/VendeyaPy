@@ -7,7 +7,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { CoverageReviewCard } from './CoverageReviewCard';
+import { CoverageReviewCard, buildShippingDraftContext } from './CoverageReviewCard';
 import { mapsUrlFor } from '@/lib/coverage';
 import type { CoverageRequest } from '@vpw/shared';
 
@@ -16,6 +16,10 @@ const getCoverageFlowState = vi.fn();
 const approveCoverage = vi.fn();
 const rejectCoverage = vi.fn();
 const requestCoverageInfo = vi.fn();
+// SHIPPING-CHAT-4B: adapters de la saga de cotización.
+const quoteAndApproveCoverage = vi.fn();
+const getCoverageQuoteAttemptState = vi.fn();
+const resolveCoverageQuoteUnknown = vi.fn();
 vi.mock('@/lib/coverage', async (importOriginal) => {
   const real = await importOriginal<typeof import('@/lib/coverage')>();
   return {
@@ -25,7 +29,16 @@ vi.mock('@/lib/coverage', async (importOriginal) => {
     approveCoverage: (...a: unknown[]) => approveCoverage(...a),
     rejectCoverage: (...a: unknown[]) => rejectCoverage(...a),
     requestCoverageInfo: (...a: unknown[]) => requestCoverageInfo(...a),
+    quoteAndApproveCoverage: (...a: unknown[]) => quoteAndApproveCoverage(...a),
+    getCoverageQuoteAttemptState: (...a: unknown[]) => getCoverageQuoteAttemptState(...a),
+    resolveCoverageQuoteUnknown: (...a: unknown[]) => resolveCoverageQuoteUnknown(...a),
   };
+});
+// 4B (test 29): la confirmación de la cotización JAMÁS pasa por el envío manual.
+const sendManualMessageSpy = vi.fn();
+vi.mock('@/lib/conversations', async (importOriginal) => {
+  const real = await importOriginal<typeof import('@/lib/conversations')>();
+  return { ...real, sendManualMessage: (...a: unknown[]) => sendManualMessageSpy(...a) };
 });
 const mockAuth = { user: { uid: 'owner-1' }, claims: { role: 'TENANT_OWNER', tenantId: 'perfumeria' } };
 vi.mock('@/lib/auth-context', () => ({
@@ -51,11 +64,11 @@ const baseReq = (over: Partial<CoverageRequest> = {}): CoverageRequest =>
     ...over,
   }) as unknown as CoverageRequest;
 
-const renderCard = () => {
+const renderCard = (props: Partial<Parameters<typeof CoverageReviewCard>[0]> = {}) => {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   return render(
     <QueryClientProvider client={qc}>
-      <CoverageReviewCard tenantId="perfumeria" customerId="595991234567" />
+      <CoverageReviewCard tenantId="perfumeria" customerId="595991234567" {...props} />
     </QueryClientProvider>,
   );
 };
@@ -64,7 +77,9 @@ beforeEach(() => {
   vi.clearAllMocks();
   mockAuth.claims = { role: 'TENANT_OWNER', tenantId: 'perfumeria' };
   // HARDEN-1: por defecto el flujo está ACTIVO bajo la misma activación del request base.
+  // (Sin shippingQuote ⇒ política OFF por normalización: los tests legacy no cambian.)
   getCoverageFlowState.mockResolvedValue({ enabled: true, activationId: ACT });
+  getCoverageQuoteAttemptState.mockResolvedValue({ ok: true, attempt: null });
 });
 
 describe('CoverageReviewCard', () => {
@@ -243,5 +258,275 @@ describe('CoverageReviewCard — review 1C', () => {
 describe('mapsUrlFor — puro', () => {
   it('construye el link de Google Maps con las coordenadas codificadas', () => {
     expect(mapsUrlFor({ lat: -25.5, lng: -57.1 })).toBe('https://www.google.com/maps?q=-25.5%2C-57.1');
+  });
+});
+
+// ============================================================================
+// SHIPPING-CHAT-4B — integración de la saga de cotización en el card
+// ============================================================================
+
+const POLICY_REQ = { status: 'required', maxChargeGs: 5_000_000 } as const;
+const reqQuote = (over: Partial<CoverageRequest> = {}): CoverageRequest =>
+  baseReq({ cartFingerprint: 'cart2:vivo123', ...over } as Partial<CoverageRequest>);
+const flowRequired = () => getCoverageFlowState.mockResolvedValue({ enabled: true, activationId: ACT, shippingQuote: POLICY_REQ });
+const DRAFT_OK = 'El costo de envío para tu ubicación es ₲30.000';
+
+describe('4B · política off/required/invalid', () => {
+  it('required ⇒ botón viejo AUSENTE, preview MONTADO (atajo visible); Rechazar y Pedir info se conservan', async () => {
+    flowRequired();
+    getCoverageRequestFor.mockResolvedValue({ request: reqQuote(), denied: false });
+    renderCard();
+    expect(await screen.findByRole('button', { name: /informar costo de envío/i })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /aprobar cobertura/i })).toBeNull();
+    expect(screen.getByRole('button', { name: /rechazar/i })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /pedir más información/i })).toBeTruthy();
+  });
+  it('off (default de los mocks legacy) ⇒ botón viejo PRESENTE, preview NO montado', async () => {
+    getCoverageRequestFor.mockResolvedValue({ request: reqQuote(), denied: false });
+    renderCard();
+    expect(await screen.findByRole('button', { name: /aprobar cobertura/i })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /informar costo de envío/i })).toBeNull();
+  });
+  it('invalid ⇒ fail-closed: ni botón viejo ni aprobación posible + mensaje administrativo', async () => {
+    getCoverageFlowState.mockResolvedValue({ enabled: true, activationId: ACT, shippingQuote: { status: 'invalid' } });
+    getCoverageRequestFor.mockResolvedValue({ request: reqQuote(), denied: false });
+    renderCard();
+    expect(await screen.findByText(/configuración de cotización de envío no es válida/i)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /aprobar cobertura/i })).toBeNull();
+    expect(screen.queryByRole('button', { name: /enviar costo y aprobar/i })).toBeNull();
+  });
+  it('PLATFORM_ADMIN con required ⇒ solo lectura: sin preview ni acciones', async () => {
+    mockAuth.claims = { role: 'PLATFORM_ADMIN', tenantId: 'perfumeria' };
+    flowRequired();
+    getCoverageRequestFor.mockResolvedValue({ request: reqQuote(), denied: false });
+    renderCard();
+    await screen.findByText(/pendiente de revisión/i);
+    expect(screen.queryByRole('button', { name: /informar costo de envío/i })).toBeNull();
+    expect(screen.queryByRole('button', { name: /aprobar cobertura/i })).toBeNull();
+  });
+  it('Coverage OFF (flag) ⇒ cero callables de cotización', async () => {
+    getCoverageFlowState.mockResolvedValue({ enabled: false, activationId: null, shippingQuote: { status: 'off' } });
+    getCoverageRequestFor.mockResolvedValue({ request: reqQuote(), denied: false });
+    renderCard();
+    await screen.findByText(/deshabilitado/i);
+    expect(quoteAndApproveCoverage).not.toHaveBeenCalled();
+    expect(getCoverageQuoteAttemptState).not.toHaveBeenCalled();
+  });
+});
+
+describe('4B · contexto saneado (no-PII)', () => {
+  it('las claves entregadas al preview son EXACTAMENTE las de ShippingDraftContext (sin dirección/coords/teléfono/customerId/banco)', () => {
+    const req = reqQuote(); // incluye location con addressText y customerId completo
+    const ctx = buildShippingDraftContext(req, POLICY_REQ, { flowActive: true, canDecide: true, draft: 'x', nowMs: 123 });
+    expect(Object.keys(ctx).sort()).toEqual([
+      'canDecide', 'cartFingerprint', 'draft', 'expiresAtMs', 'flowActive', 'locationFingerprint',
+      'maxChargeGs', 'nowMs', 'requestId', 'required', 'status', 'subtotalGs',
+    ]);
+    const dump = JSON.stringify(ctx);
+    expect(dump).not.toContain('Av. Test');       // dirección
+    expect(dump).not.toContain('595991234567');   // customerId/teléfono
+  });
+});
+
+describe('4B · confirmación (mutation)', () => {
+  it('confirmar llama UNA vez con el payload exacto; doble clic no duplica; el éxito usa montos DEL SERVIDOR; jamás sendManualMessage', async () => {
+    flowRequired();
+    getCoverageRequestFor.mockResolvedValue({ request: reqQuote(), denied: false });
+    let resolver!: (v: unknown) => void;
+    quoteAndApproveCoverage.mockReturnValue(new Promise((res) => { resolver = res; }));
+    renderCard({ draft: DRAFT_OK });
+    const btn = await screen.findByRole('button', { name: /enviar costo y aprobar cobertura/i });
+    fireEvent.click(btn);
+    fireEvent.click(btn); // doble clic
+    await waitFor(() => expect(quoteAndApproveCoverage).toHaveBeenCalledTimes(1)); // react-query invoca async
+    expect(quoteAndApproveCoverage).toHaveBeenCalledTimes(1);
+    expect(quoteAndApproveCoverage).toHaveBeenCalledWith('perfumeria', {
+      requestId: 'covr_abc123DEF456',
+      sellerDraft: DRAFT_OK,
+      confirmedShippingGs: 30000,
+      expectedLocationFingerprint: 'txt:abc',
+      expectedCartFingerprint: 'cart2:vivo123',
+    });
+    // Montos del SERVIDOR distintos a los derivados localmente: la UI muestra los del server.
+    resolver({ ok: true, status: 'coverage_approved', shippingGs: 30000, totalGs: 999999 });
+    await screen.findByText(/costo enviado y cobertura aprobada/i);
+    expect(screen.getByText(/999\.999/)).toBeTruthy();
+    expect(sendManualMessageSpy).not.toHaveBeenCalled();
+  });
+  it('"Seguir editando" tras un error CIERRA el ciclo local: el preview vuelve a derivar (hallazgo visual)', async () => {
+    flowRequired();
+    getCoverageRequestFor.mockResolvedValue({ request: reqQuote(), denied: false });
+    quoteAndApproveCoverage.mockRejectedValue({ code: 'functions/failed-precondition', details: { kind: 'channel_unavailable' } });
+    renderCard({ draft: DRAFT_OK });
+    fireEvent.click(await screen.findByRole('button', { name: /enviar costo y aprobar cobertura/i }));
+    await screen.findByText(/no está disponible para cotizar/i);
+    fireEvent.click(screen.getByRole('button', { name: /seguir editando/i }));
+    // Vuelve la vista de derivación (idle): el costo detectado y el botón de confirmar reaparecen.
+    expect(await screen.findByText(/costo de envío detectado/i)).toBeTruthy();
+    expect(screen.getByRole('button', { name: /enviar costo y aprobar cobertura/i })).toBeTruthy();
+  });
+
+  it('error de transporte ambiguo (sin kind) ⇒ generic SIN retry ciego (solo "Seguir editando")', async () => {
+    flowRequired();
+    getCoverageRequestFor.mockResolvedValue({ request: reqQuote(), denied: false });
+    quoteAndApproveCoverage.mockRejectedValue(new Error('network down'));
+    renderCard({ draft: DRAFT_OK });
+    fireEvent.click(await screen.findByRole('button', { name: /enviar costo y aprobar cobertura/i }));
+    await screen.findByText(/estado actualizado de la revisión/i);
+    expect(screen.getByRole('button', { name: /seguir editando/i })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /reintentar|volver a enviar/i })).toBeNull();
+  });
+});
+
+describe('4B · recuperación durable (pointer + fase server)', () => {
+  const PENDING = { quoteAttemptId: 'qat_XYZ987654321', chargeGs: 25000, locationFingerprint: 'geo:VIEJO', cartFingerprint: 'cart2:VIEJO', quotedByUid: 'u', quotedByName: 'V', quotedByRole: 'TENANT_OWNER', createdAt: ts(Date.now() - 1000) };
+  const conPointer = (over: Partial<CoverageRequest> = {}) =>
+    reqQuote({ shippingQuotePending: PENDING as CoverageRequest['shippingQuotePending'], ...over } as Partial<CoverageRequest>);
+
+  it('sent_pending_approval ⇒ "Completar la aprobación" con el payload CONGELADO del pointer (jamás huellas vivas)', async () => {
+    flowRequired();
+    getCoverageRequestFor.mockResolvedValue({ request: conPointer(), denied: false });
+    getCoverageQuoteAttemptState.mockResolvedValue({ ok: true, attempt: { quoteAttemptId: PENDING.quoteAttemptId, chargeGs: 25000, phase: 'sent_pending_approval' } });
+    quoteAndApproveCoverage.mockResolvedValue({ ok: true, status: 'coverage_approved', shippingGs: 25000, totalGs: 125000 });
+    renderCard();
+    fireEvent.click(await screen.findByRole('button', { name: /completar la aprobación/i }));
+    await waitFor(() => expect(quoteAndApproveCoverage).toHaveBeenCalledWith('perfumeria', {
+      requestId: 'covr_abc123DEF456',
+      sellerDraft: 'El costo de envío para tu ubicación es ₲25.000.',
+      confirmedShippingGs: 25000,
+      expectedLocationFingerprint: 'geo:VIEJO',
+      expectedCartFingerprint: 'cart2:VIEJO',
+    }));
+  });
+  it('preparing ⇒ "Continuar el envío"; in_progress ⇒ SIN acciones (jamás unknown); failed ⇒ recotizar', async () => {
+    flowRequired();
+    getCoverageRequestFor.mockResolvedValue({ request: conPointer(), denied: false });
+    getCoverageQuoteAttemptState.mockResolvedValue({ ok: true, attempt: { quoteAttemptId: PENDING.quoteAttemptId, chargeGs: 25000, phase: 'preparing' } });
+    const r1 = renderCard();
+    expect(await screen.findByRole('button', { name: /continuar el envío/i })).toBeTruthy();
+    r1.unmount();
+    getCoverageQuoteAttemptState.mockResolvedValue({ ok: true, attempt: { quoteAttemptId: PENDING.quoteAttemptId, chargeGs: 25000, phase: 'in_progress' } });
+    const r2 = renderCard();
+    await screen.findByText(/envío del costo en curso/i);
+    expect(screen.queryByRole('button', { name: /continuar|completar|llegó/i })).toBeNull();
+    expect(screen.queryByText(/sin confirmar/i)).toBeNull(); // in_progress JAMÁS se muestra como unknown
+    r2.unmount();
+    getCoverageQuoteAttemptState.mockResolvedValue({ ok: true, attempt: { quoteAttemptId: PENDING.quoteAttemptId, chargeGs: 25000, phase: 'failed' } });
+    renderCard();
+    await screen.findByText(/quedó cerrado o inconsistente/i);
+  });
+  it('ALTO review: in_progress local se RECONCILIA con la fase durable — jamás spinner absorbente', async () => {
+    flowRequired();
+    getCoverageRequestFor.mockResolvedValue({ request: conPointer(), denied: false });
+    // El server responde in_progress (otro worker con el lease): estado local sending SIN mutation.
+    quoteAndApproveCoverage.mockRejectedValue({ code: 'functions/failed-precondition', details: { kind: 'in_progress' } });
+    // La fuente durable dice que el envío YA quedó sent: la UI debe salir del spinner y ofrecer completar.
+    getCoverageQuoteAttemptState.mockResolvedValue({ ok: true, attempt: { quoteAttemptId: PENDING.quoteAttemptId, chargeGs: 25000, phase: 'sent_pending_approval' } });
+    renderCard();
+    fireEvent.click(await screen.findByRole('button', { name: /completar la aprobación/i }));
+    // (el click dispara quoteMut que rechaza con in_progress ⇒ send=sending ⇒ reconciliación ⇒ idle ⇒ chip visible)
+    expect(await screen.findByRole('button', { name: /completar la aprobación/i })).toBeTruthy();
+    expect(screen.queryByText(/estamos enviando el mensaje/i)).toBeNull();
+  });
+
+  it('éxito PERSISTIDO desde req.shippingQuote tras recarga (send local idle): costo + total por computeOrderTotals', async () => {
+    getCoverageRequestFor.mockResolvedValue({
+      request: reqQuote({
+        status: 'coverage_approved',
+        shippingQuote: { chargeGs: 30000 } as CoverageRequest['shippingQuote'],
+        decision: { action: 'approved', byName: 'Vendedora', byRole: 'TENANT_OWNER', at: ts(Date.now()) } as CoverageRequest['decision'],
+      }),
+      denied: false,
+    });
+    renderCard();
+    await screen.findByText(/costo de envío enviado y aplicado/i);
+    expect(screen.getByText(/130\.000/)).toBeTruthy(); // 100.000 + 30.000 vía computeOrderTotals
+  });
+  it('éxito persistido con subtotal corrupto ⇒ fail-closed (no inventa el total)', async () => {
+    getCoverageRequestFor.mockResolvedValue({
+      request: reqQuote({
+        status: 'coverage_approved',
+        shippingQuote: { chargeGs: 30000 } as CoverageRequest['shippingQuote'],
+        cartSnapshot: { items: [], subtotal: 100000.5 } as CoverageRequest['cartSnapshot'],
+      }),
+      denied: false,
+    });
+    renderCard();
+    await screen.findByText(/no se pudo verificar/i);
+  });
+});
+
+describe('4B · reconciliación de unknown (solo fase server)', () => {
+  const PENDING = { quoteAttemptId: 'qat_XYZ987654321', chargeGs: 25000, locationFingerprint: 'geo:V', cartFingerprint: 'cart2:V', quotedByUid: 'u', quotedByName: 'V', quotedByRole: 'TENANT_OWNER', createdAt: ts(Date.now() - 1000) };
+  const conUnknown = () => {
+    flowRequired();
+    getCoverageRequestFor.mockResolvedValue({ request: reqQuote({ shippingQuotePending: PENDING as CoverageRequest['shippingQuotePending'] } as Partial<CoverageRequest>), denied: false });
+    getCoverageQuoteAttemptState.mockResolvedValue({ ok: true, attempt: { quoteAttemptId: PENDING.quoteAttemptId, chargeGs: 25000, phase: 'unknown' } });
+  };
+  it('OWNER: nota vacía ⇒ botones deshabilitados y la callable NO se llama; con nota ⇒ delivered exacto', async () => {
+    conUnknown();
+    resolveCoverageQuoteUnknown.mockResolvedValue({ ok: true, resolved: 'delivered', status: 'coverage_approved', shippingGs: 25000, totalGs: 125000 });
+    renderCard();
+    const si = await screen.findByRole('button', { name: /sí llegó al cliente/i });
+    expect((si as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(si);
+    expect(resolveCoverageQuoteUnknown).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByLabelText(/nota obligatoria/i), { target: { value: 'verificado en el teléfono' } });
+    fireEvent.click(screen.getByRole('button', { name: /sí llegó al cliente/i }));
+    await waitFor(() => expect(resolveCoverageQuoteUnknown).toHaveBeenCalledWith('perfumeria', 'covr_abc123DEF456', 'qat_XYZ987654321', 'delivered', 'verificado en el teléfono'));
+    await screen.findByText(/costo enviado y cobertura aprobada/i);
+  });
+  it('not_delivered ⇒ vuelve a idle (permite recotizar) sin aprobar', async () => {
+    conUnknown();
+    resolveCoverageQuoteUnknown.mockResolvedValue({ ok: true, resolved: 'not_delivered' });
+    renderCard();
+    fireEvent.change(await screen.findByLabelText(/nota obligatoria/i), { target: { value: 'no llegó' } });
+    fireEvent.click(screen.getByRole('button', { name: /no llegó al cliente/i }));
+    await waitFor(() => expect(resolveCoverageQuoteUnknown).toHaveBeenCalledWith('perfumeria', 'covr_abc123DEF456', 'qat_XYZ987654321', 'not_delivered', 'no llegó'));
+    expect(screen.queryByText(/costo enviado y cobertura aprobada/i)).toBeNull();
+  });
+  it('SELLER: no recibe controles de resolución (solo el aviso de encargado)', async () => {
+    mockAuth.claims = { role: 'SELLER', tenantId: 'perfumeria' };
+    mockAuth.user = { uid: 'seller-1' } as typeof mockAuth.user;
+    conUnknown();
+    renderCard();
+    await screen.findByText(/un encargado del negocio debe resolverlo/i);
+    expect(screen.queryByRole('button', { name: /llegó al cliente/i })).toBeNull();
+  });
+});
+
+describe('4B · gate del envío manual (publicación aislada)', () => {
+  it('required + borrador con costo ⇒ blocked:true; desmontar ⇒ blocked:false', async () => {
+    flowRequired();
+    getCoverageRequestFor.mockResolvedValue({ request: reqQuote(), denied: false });
+    const onGate = vi.fn();
+    const r = renderCard({ draft: DRAFT_OK, onManualShippingGateChange: onGate });
+    await waitFor(() => expect(onGate).toHaveBeenCalledWith({ customerId: '595991234567', requestId: 'covr_abc123DEF456', blocked: true, canQuote: true }));
+    r.unmount();
+    expect(onGate).toHaveBeenLastCalledWith({ customerId: '595991234567', requestId: null, blocked: false, canQuote: true });
+  });
+  it('texto común NO bloquea; política off NO bloquea aunque el texto sea una cotización', async () => {
+    flowRequired();
+    getCoverageRequestFor.mockResolvedValue({ request: reqQuote(), denied: false });
+    const onGate = vi.fn();
+    const r = renderCard({ draft: 'hola, ya te confirmo', onManualShippingGateChange: onGate });
+    await waitFor(() => expect(onGate).toHaveBeenCalled());
+    expect(onGate.mock.calls.every((c) => c[0].blocked === false)).toBe(true);
+    r.unmount();
+    vi.clearAllMocks();
+    getCoverageFlowState.mockResolvedValue({ enabled: true, activationId: ACT }); // sin shippingQuote: off
+    getCoverageRequestFor.mockResolvedValue({ request: reqQuote(), denied: false });
+    getCoverageQuoteAttemptState.mockResolvedValue({ ok: true, attempt: null });
+    const onGate2 = vi.fn();
+    renderCard({ draft: DRAFT_OK, onManualShippingGateChange: onGate2 });
+    await screen.findByRole('button', { name: /aprobar cobertura/i });
+    expect(onGate2.mock.calls.every((c) => c[0].blocked === false)).toBe(true);
+  });
+  it('política INVALID bloquea intentos de costo (fail-closed, mismo criterio compartido)', async () => {
+    getCoverageFlowState.mockResolvedValue({ enabled: true, activationId: ACT, shippingQuote: { status: 'invalid' } });
+    getCoverageRequestFor.mockResolvedValue({ request: reqQuote(), denied: false });
+    const onGate = vi.fn();
+    renderCard({ draft: DRAFT_OK, onManualShippingGateChange: onGate });
+    await waitFor(() => expect(onGate).toHaveBeenCalledWith(expect.objectContaining({ blocked: true })));
   });
 });
