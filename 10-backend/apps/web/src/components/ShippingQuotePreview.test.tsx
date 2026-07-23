@@ -311,3 +311,35 @@ describe('ShippingQuotePreview — callbacks', () => {
     expect(onShortcut).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('ShippingQuotePreview — HARDEN-2: bloqueo externo (actionsBlocked)', () => {
+  const ctx = baseCtx({ draft: 'el envío cuesta ₲30.000' });
+  const props = { send: { status: 'idle' } as ShippingSendState, onKeepEditing: vi.fn(), onShortcut: vi.fn(), onReviewHistory: vi.fn() };
+  const armado = (onConfirm: (p: unknown) => void, blocked: boolean) => (
+    <ShippingQuotePreview
+      context={ctx}
+      send={props.send}
+      onConfirm={onConfirm}
+      onKeepEditing={props.onKeepEditing}
+      onShortcut={props.onShortcut}
+      onReviewHistory={props.onReviewHistory}
+      actionsBlocked={blocked}
+    />
+  );
+
+  it('bloqueado ⇒ confirmar deshabilitado y sin llamadas; al desbloquear, el MISMO payload sale UNA vez (la guarda de doble clic no quedó consumida)', () => {
+    const onConfirm = vi.fn();
+    const r = render(armado(onConfirm, true));
+    const btn = screen.getByRole('button', { name: /enviar costo y aprobar cobertura/i });
+    expect((btn as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(btn);
+    expect(onConfirm).not.toHaveBeenCalled();
+    r.rerender(armado(onConfirm, false));
+    fireEvent.click(screen.getByRole('button', { name: /enviar costo y aprobar cobertura/i }));
+    expect(onConfirm).toHaveBeenCalledTimes(1);
+    expect(onConfirm).toHaveBeenCalledWith(expect.objectContaining({ confirmedShippingGs: 30000 }));
+    // El doble clic REAL (payload ya entregado) sigue protegido.
+    fireEvent.click(screen.getByRole('button', { name: /enviar costo y aprobar cobertura/i }));
+    expect(onConfirm).toHaveBeenCalledTimes(1);
+  });
+});

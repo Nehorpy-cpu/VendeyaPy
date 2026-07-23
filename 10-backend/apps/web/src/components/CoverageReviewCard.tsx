@@ -153,6 +153,18 @@ export function CoverageReviewCard({
   const [error, setError] = useState<string | null>(null);
   const [send, setSend] = useState<ShippingSendState>({ status: 'idle' });
   const [notaResolucion, setNotaResolucion] = useState('');
+  // HARDEN-2 (B): IDENTIDAD del ciclo local — `send` solo por requestId no alcanza cuando el
+  // mismo request cambia de quoteAttemptId. `base` se congela al INICIAR el ciclo (qat del
+  // pointer vigente, o null si el intento nuevo aún no materializó su pointer); `adoptado` se
+  // fija UNA única vez cuando un `unknown` propio ve su pointer, verificado contra la HUELLA
+  // congelada del payload (TX-A copia chargeGs + fingerprints al pointer: si no coinciden, el
+  // pointer es de OTRO intento — fail-closed, sin importar el orden de renders). null = sin
+  // ciclo. La comparación vive en el efecto de invalidación de más abajo.
+  const [cicloQat, setCicloQat] = useState<{
+    base: string | null;
+    adoptado: string | null;
+    huella: { chargeGs: number; loc: string; cart: string } | null;
+  } | null>(null);
   const statusRef = useRef<HTMLParagraphElement>(null);
 
   const puedeVer = !!claims.role && ROLES_LECTURA.has(claims.role);
@@ -186,6 +198,7 @@ export function CoverageReviewCard({
     setError(null);
     setSend({ status: 'idle' });
     setNotaResolucion('');
+    setCicloQat(null);
   }, [reqId, customerId]);
 
   // HARDEN-1 (B): el ref se sincroniza DURANTE el render (sin la ventana tardía de un useEffect):
@@ -211,17 +224,28 @@ export function CoverageReviewCard({
     setError(e instanceof Error ? e.message : 'No se pudo completar la acción.');
   };
 
+  // HARDEN-2 review: el "en vuelo" se ACOTA al request visible — una mutation colgada de OTRA
+  // conversación (misma instancia de tarjeta, sin key) no bloquea ni etiqueta las acciones de
+  // esta. La exclusión mutua del programa es POR SOLICITUD; los callbacks tardíos del request
+  // ajeno ya están aislados por variables congeladas + reqIdRef.
+  const enVueloDe = (m: { isPending: boolean; variables?: { requestId: string } }) =>
+    m.isPending && m.variables?.requestId === reqId;
+
   const aprobar = useMutation({ mutationFn: (v: DecisionVars) => approveCoverage(tenantId, v.requestId, v.fingerprint), onSuccess: (_r, v) => onDecidido('Decisión registrada: cobertura aprobada.', v), onError: onErr });
   const rechazar = useMutation({ mutationFn: (v: DecisionVars) => rejectCoverage(tenantId, v.requestId, v.fingerprint, v.note), onSuccess: (_r, v) => onDecidido('Decisión registrada: cobertura rechazada.', v), onError: onErr });
   const pedirInfo = useMutation({
     mutationFn: (v: DecisionVars) => requestCoverageInfo(tenantId, v.requestId),
     onSuccess: (r, v) => {
+      // HARDEN-2 (C): SIEMPRE refrescar los datos del cliente CONGELADO antes del guard visual
+      // (igual que aprobar/rechazar) — un resultado tardío de otro chat no pinta UI, pero sí
+      // deja frescos los datos de SU conversación.
+      invalidarPara(v.customerId);
       if (v.requestId !== reqIdRef.current) return;
       setAviso(r.already ? 'Ya se pidió más información hace un momento.' : 'Le pedimos más detalle al cliente.'); setError(null);
     },
     onError: onErr,
   });
-  const ocupado = aprobar.isPending || rechazar.isPending || pedirInfo.isPending;
+  const ocupado = enVueloDe(aprobar) || enVueloDe(rechazar) || enVueloDe(pedirInfo);
 
   // ---- SHIPPING-CHAT-4B: saga de cotización ----
   const flujoActivo0 = flujo.enabled && flujo.activationId !== null && flujo.activationId === (req?.activationId ?? null);
@@ -291,10 +315,26 @@ export function CoverageReviewCard({
     },
   });
   /** Confirmación con gate fail-closed: sin total calculable NO se llama la callable.
-   *  Review HARDEN-1: exclusión mutua con la resolución manual — jamás dos mutations del mismo
-   *  request en vuelo pisándose los callbacks. */
+   *  HARDEN-2 (A): exclusión mutua con TODAS las demás acciones del request (resolver manual y
+   *  las tres decisiones) — jamás dos mutations del mismo request en vuelo pisándose. */
   const confirmarQuote = (payload: ShippingConfirmPayload, subtotalGs: number) => {
-    if (quoteMut.isPending || resolver.isPending) return;
+    if (accionEnVuelo) return;
+    // HARDEN-2 (B, review #2): la identidad se congela con el qat del pointer vigente SOLO si el
+    // payload ES de ese pointer (recuperación: misma huella). Cotizar un monto NUEVO con un
+    // pointer viejo a la vista es un REEMPLAZO — TX-A va a crear otro intento: la identidad
+    // queda null y el pointer propio se reconoce después por la huella (adopción verificada).
+    const p0 = covQ.data?.request?.shippingQuotePending ?? null;
+    const esDelPointer =
+      !!p0 &&
+      p0.chargeGs === payload.confirmedShippingGs &&
+      p0.locationFingerprint === payload.expectedLocationFingerprint &&
+      p0.cartFingerprint === payload.expectedCartFingerprint;
+    const qatCiclo = esDelPointer ? p0.quoteAttemptId : null;
+    setCicloQat({
+      base: qatCiclo,
+      adoptado: qatCiclo,
+      huella: { chargeGs: payload.confirmedShippingGs, loc: payload.expectedLocationFingerprint, cart: payload.expectedCartFingerprint },
+    });
     const vars = congelarVars(payload, subtotalGs);
     if (!vars) {
       setSend({ status: 'error', requestId: payload.requestId, kind: 'total_invalido' });
@@ -433,6 +473,66 @@ export function CoverageReviewCard({
       setSend(st.status === 'unknown' && !Number.isFinite(st.totalGs) ? { status: 'error', requestId: vars.requestId, kind: 'generic' } : st);
     },
   });
+
+  // HARDEN-2 (A): exclusión mutua entre las CINCO acciones del mismo request — una decisión
+  // (aprobar/rechazar/pedir info) y una mutation de la saga (cotizar/resolver) jamás corren a la
+  // vez. Guard en el HANDLER además del disabled: el atributo solo no protege si el render que
+  // deshabilita todavía no llegó. La autoridad final sigue siendo el server.
+  const accionEnVuelo = ocupado || enVueloDe(quoteMut) || enVueloDe(resolver);
+  const decidir = (m: { mutate: (v: DecisionVars) => void }) => {
+    if (accionEnVuelo) return;
+    const v = congelarDecision();
+    if (v) m.mutate(v);
+  };
+  /** Inicio de la resolución manual: congela identidad + evidencia y excluye acciones paralelas. */
+  const iniciarResolucion = (resolution: 'delivered' | 'not_delivered') => {
+    const a = attemptVigente;
+    if (!notaResolucion.trim() || accionEnVuelo || !a || !req) return;
+    setCicloQat({ base: a.quoteAttemptId, adoptado: a.quoteAttemptId, huella: null });
+    const t = totalSeguroDe(req.cartSnapshot?.subtotal ?? Number.NaN, a.chargeGs);
+    resolver.mutate({
+      requestId: req.id,
+      quoteAttemptId: a.quoteAttemptId,
+      chargeGs: a.chargeGs,
+      customerId,
+      evidence: t === null ? null : { canonical: formatCanonicalShippingMessage(a.chargeGs), totalGs: t },
+      resolution,
+      note: notaResolucion.trim(),
+    });
+  };
+
+  // HARDEN-2 (B): invalidación del ciclo local por CAMBIO DE INTENTO dentro del mismo request.
+  // Sin ciclo registrado ⇒ identidad insuficiente ⇒ fail-closed (se cierra). Mientras el ciclo
+  // no adoptó pointer, SOLO una foto FRESCA de la revisión decide (review #1: un pointer
+  // cacheado a mitad de saga por el poll no prueba nada — tras el settle, la invalidación del
+  // callback está refetcheando y se ESPERA). Con foto fresca: pointer con la huella congelada
+  // del payload (TX-A la copia tal cual) = intento PROPIO ⇒ se adopta UNA vez y la evidencia
+  // local se conserva (unknown que espera resolución, y también sent/error cuyo pointer
+  // sobrevive legítimamente, p.ej. channel_unavailable con outbox prepared); otra huella = OTRO
+  // intento ⇒ idle: solo la evidencia/controles del intento vigente gobiernan. Trade-off
+  // documentado: un intento sucesor con huella IDÉNTICA se adopta (evidencia financieramente
+  // indistinguible por construcción; "Seguir editando" libera los controles durables).
+  useEffect(() => {
+    if (send.status === 'idle') return;
+    if (quoteMut.isPending || resolver.isPending) return; // en vuelo: mandan los callbacks congelados
+    if (!cicloQat) { setSend({ status: 'idle' }); return; }
+    if (cicloQat.adoptado === null) {
+      if (qatVigente === null || !pending) return; // aún sin pointer: nada que comparar (no limpiar temprano)
+      if (covQ.isFetching) return; // foto potencialmente pre-settle: esperar la fresca
+      const propio =
+        !!cicloQat.huella &&
+        pending.chargeGs === cicloQat.huella.chargeGs &&
+        pending.locationFingerprint === cicloQat.huella.loc &&
+        pending.cartFingerprint === cicloQat.huella.cart;
+      if (propio) {
+        setCicloQat({ ...cicloQat, adoptado: qatVigente }); // primera evidencia durable propia
+      } else {
+        setSend({ status: 'idle' });
+      }
+      return;
+    }
+    if (qatVigente !== null && qatVigente !== cicloQat.adoptado) setSend({ status: 'idle' });
+  }, [send.status, quoteMut.isPending, resolver.isPending, cicloQat, qatVigente, pending, covQ.isFetching]);
 
   // ---- SHIPPING-CHAT-4B: gate VISUAL del envío manual (espejo del gate server de 3B; la
   // autoridad sigue siendo el server). Aislado por customerId/requestId; al desmontar o cambiar
@@ -575,28 +675,28 @@ export function CoverageReviewCard({
           {policy.status === 'off' && (
             <button
               type="button"
-              onClick={() => { const v = congelarDecision(); if (v) aprobar.mutate(v); }}
-              disabled={ocupado}
+              onClick={() => decidir(aprobar)}
+              disabled={accionEnVuelo}
               className="rounded-lg bg-mint-600 px-3 py-1.5 font-semibold text-white transition-colors hover:bg-mint-500 disabled:opacity-50"
             >
-              {aprobar.isPending ? 'Aprobando…' : 'Aprobar cobertura'}
+              {enVueloDe(aprobar) ? 'Aprobando…' : 'Aprobar cobertura'}
             </button>
           )}
           <button
             type="button"
-            onClick={() => { const v = congelarDecision(); if (v) rechazar.mutate(v); }}
-            disabled={ocupado}
+            onClick={() => decidir(rechazar)}
+            disabled={accionEnVuelo}
             className="rounded-lg bg-coral-600 px-3 py-1.5 font-semibold text-white transition-colors hover:bg-coral-500 disabled:opacity-50"
           >
-            {rechazar.isPending ? 'Rechazando…' : 'Rechazar'}
+            {enVueloDe(rechazar) ? 'Rechazando…' : 'Rechazar'}
           </button>
           <button
             type="button"
-            onClick={() => { const v = congelarDecision(); if (v) pedirInfo.mutate(v); }}
-            disabled={ocupado}
+            onClick={() => decidir(pedirInfo)}
+            disabled={accionEnVuelo}
             className="rounded-lg border border-ink-300 px-3 py-1.5 font-semibold text-ink-700 transition-colors hover:bg-ink-50 disabled:opacity-50"
           >
-            {pedirInfo.isPending ? 'Enviando…' : 'Pedir más información'}
+            {enVueloDe(pedirInfo) ? 'Enviando…' : 'Pedir más información'}
           </button>
           <input
             type="text"
@@ -616,7 +716,7 @@ export function CoverageReviewCard({
           <p className="font-medium text-sky-700" role="status">
             📨 Cotización de ₲ {gsSeguro(pending.chargeGs) ?? '—'} preparada; podés continuar el envío.
           </p>
-          <button type="button" onClick={continuarIntento} disabled={quoteMut.isPending || resolver.isPending} className="mt-1.5 rounded-lg bg-mint-600 px-3 py-1.5 font-semibold text-white transition-colors hover:bg-mint-500 disabled:opacity-50">
+          <button type="button" onClick={continuarIntento} disabled={accionEnVuelo} className="mt-1.5 rounded-lg bg-mint-600 px-3 py-1.5 font-semibold text-white transition-colors hover:bg-mint-500 disabled:opacity-50">
             Continuar el envío
           </button>
         </div>
@@ -629,7 +729,7 @@ export function CoverageReviewCard({
           <p className="font-medium text-sky-700" role="status">
             ✉️ El mensaje del costo (₲ {gsSeguro(pending.chargeGs) ?? '—'}) ya se envió; falta completar la aprobación (no se reenvía).
           </p>
-          <button type="button" onClick={continuarIntento} disabled={quoteMut.isPending || resolver.isPending} className="mt-1.5 rounded-lg bg-mint-600 px-3 py-1.5 font-semibold text-white transition-colors hover:bg-mint-500 disabled:opacity-50">
+          <button type="button" onClick={continuarIntento} disabled={accionEnVuelo} className="mt-1.5 rounded-lg bg-mint-600 px-3 py-1.5 font-semibold text-white transition-colors hover:bg-mint-500 disabled:opacity-50">
             Completar la aprobación
           </button>
         </div>
@@ -666,16 +766,16 @@ export function CoverageReviewCard({
           <div className="mt-1.5 flex flex-wrap gap-2">
             <button
               type="button"
-              onClick={() => { const a = attemptVigente; if (notaResolucion.trim() && !resolver.isPending && !quoteMut.isPending && a && req) { const t = totalSeguroDe(req.cartSnapshot?.subtotal ?? Number.NaN, a.chargeGs); resolver.mutate({ requestId: req.id, quoteAttemptId: a.quoteAttemptId, chargeGs: a.chargeGs, customerId, evidence: t === null ? null : { canonical: formatCanonicalShippingMessage(a.chargeGs), totalGs: t }, resolution: 'delivered', note: notaResolucion.trim() }); } }}
-              disabled={!notaResolucion.trim() || resolver.isPending || quoteMut.isPending}
+              onClick={() => iniciarResolucion('delivered')}
+              disabled={!notaResolucion.trim() || accionEnVuelo}
               className="rounded-lg bg-mint-600 px-3 py-1.5 font-semibold text-white transition-colors hover:bg-mint-500 disabled:opacity-50"
             >
-              {resolver.isPending ? 'Resolviendo…' : 'Sí llegó al cliente'}
+              {enVueloDe(resolver) ? 'Resolviendo…' : 'Sí llegó al cliente'}
             </button>
             <button
               type="button"
-              onClick={() => { const a = attemptVigente; if (notaResolucion.trim() && !resolver.isPending && !quoteMut.isPending && a && req) { const t = totalSeguroDe(req.cartSnapshot?.subtotal ?? Number.NaN, a.chargeGs); resolver.mutate({ requestId: req.id, quoteAttemptId: a.quoteAttemptId, chargeGs: a.chargeGs, customerId, evidence: t === null ? null : { canonical: formatCanonicalShippingMessage(a.chargeGs), totalGs: t }, resolution: 'not_delivered', note: notaResolucion.trim() }); } }}
-              disabled={!notaResolucion.trim() || resolver.isPending || quoteMut.isPending}
+              onClick={() => iniciarResolucion('not_delivered')}
+              disabled={!notaResolucion.trim() || accionEnVuelo}
               className="rounded-lg bg-coral-600 px-3 py-1.5 font-semibold text-white transition-colors hover:bg-coral-500 disabled:opacity-50"
             >
               No llegó al cliente
@@ -694,6 +794,7 @@ export function CoverageReviewCard({
         <ShippingQuotePreview
           context={context}
           send={send}
+          actionsBlocked={accionEnVuelo}
           onConfirm={(p) => confirmarQuote(p, req.cartSnapshot?.subtotal ?? Number.NaN)}
           onKeepEditing={() => {
             // "Seguir editando" CIERRA el ciclo local del error (vuelve a idle): el preview

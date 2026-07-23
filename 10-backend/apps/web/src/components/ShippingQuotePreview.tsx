@@ -34,6 +34,10 @@ export interface ShippingQuotePreviewProps {
   onShortcut: () => void;
   /** Abrir/enfocar el historial del chat (usado por `unknown`: no ofrece reintento). */
   onReviewHistory: () => void;
+  /** HARDEN-2 (A): bloqueo EXTERNO (otra acción del mismo request en vuelo — decisión o
+   *  resolución manual). Deshabilita la confirmación; un clic bloqueado NO consume la guarda de
+   *  doble clic, así el mismo payload puede confirmarse legítimamente al liberarse el bloqueo. */
+  actionsBlocked?: boolean;
 }
 
 const shell = 'border-t border-sky-100 bg-sky-50/60 px-4 py-3 text-xs';
@@ -66,7 +70,7 @@ function MoneyRows({ shipping, products, total }: { shipping: string; products: 
   );
 }
 
-export function ShippingQuotePreview({ context, send, onConfirm, onKeepEditing, onShortcut, onReviewHistory }: ShippingQuotePreviewProps) {
+export function ShippingQuotePreview({ context, send, onConfirm, onKeepEditing, onShortcut, onReviewHistory, actionsBlocked = false }: ShippingQuotePreviewProps) {
   const vm = deriveShippingQuote(context);
   const canonId = useId();
   const msgId = useId();
@@ -83,10 +87,16 @@ export function ShippingQuotePreview({ context, send, onConfirm, onKeepEditing, 
   }, [send.status]);
   const confirmOnce = () => {
     if (!vm.payload) return;
+    // HARDEN-2 (A): bloqueo externo ANTES de consumir la guarda — un clic bloqueado no puede
+    // impedir el intento legítimo posterior con el mismo payload.
+    if (actionsBlocked) return;
     const key = JSON.stringify(vm.payload);
     if (submittedKeyRef.current === key) return; // ya se envió este payload exacto
-    submittedKeyRef.current = key;
     onConfirm(vm.payload);
+    // La guarda se consume DESPUÉS de entregar el payload (misma vuelta síncrona — el doble clic
+    // real llega en un tick posterior): consumirla sin haber llamado dejaría un payload válido
+    // inenviable para siempre si cualquier guard descartara el clic (review HARDEN-2).
+    submittedKeyRef.current = key;
   };
 
   // HARDEN-1 (B): AISLAMIENTO — un resultado de envío de OTRA conversación jamás se muestra sobre este chat.
@@ -212,7 +222,7 @@ export function ShippingQuotePreview({ context, send, onConfirm, onKeepEditing, 
             {vm.canonical}
           </p>
           <div className="mt-3 flex flex-wrap gap-2">
-            <button type="button" onClick={confirmOnce} aria-describedby={canonId} className={btnPrimary}>
+            <button type="button" onClick={confirmOnce} disabled={actionsBlocked} aria-describedby={canonId} className={btnPrimary}>
               Enviar costo y aprobar cobertura
             </button>
             <button type="button" onClick={onKeepEditing} className={btnGhost}>

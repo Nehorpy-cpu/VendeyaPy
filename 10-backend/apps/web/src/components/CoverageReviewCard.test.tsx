@@ -760,3 +760,216 @@ describe('HARDEN-1 C · evidencia financiera CONGELADA', () => {
     expect(document.body.textContent).not.toContain('NaN');
   });
 });
+
+// ============================================================================
+// SHIPPING-CHAT-4B-HARDEN-2 — exclusión mutua total, identidad por intento, pedirInfo tardío
+// ============================================================================
+
+describe('HARDEN-2 A · exclusión mutua entre las cinco acciones (promesas diferidas)', () => {
+  it('quote en vuelo ⇒ Rechazar y Pedir info deshabilitados y con CERO llamadas', async () => {
+    flowRequired();
+    getCoverageRequestFor.mockResolvedValue({ request: reqQuote(), denied: false });
+    quoteAndApproveCoverage.mockReturnValue(new Promise(() => {}));
+    renderCard({ draft: DRAFT_OK });
+    fireEvent.click(await screen.findByRole('button', { name: /enviar costo y aprobar cobertura/i }));
+    await waitFor(() => expect(quoteAndApproveCoverage).toHaveBeenCalledTimes(1));
+    const btnRechazar = screen.getByRole('button', { name: /rechazar/i });
+    const btnInfo = screen.getByRole('button', { name: /pedir más información/i });
+    await waitFor(() => expect((btnRechazar as HTMLButtonElement).disabled).toBe(true));
+    expect((btnInfo as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(btnRechazar);
+    fireEvent.click(btnInfo);
+    expect(rejectCoverage).not.toHaveBeenCalled();
+    expect(requestCoverageInfo).not.toHaveBeenCalled();
+  });
+
+  it('Pedir info en vuelo ⇒ confirmación bloqueada SIN consumir la guarda de doble clic; al liberarse, el MISMO payload se envía', async () => {
+    flowRequired();
+    getCoverageRequestFor.mockResolvedValue({ request: reqQuote(), denied: false });
+    let liberarInfo!: (v: unknown) => void;
+    requestCoverageInfo.mockReturnValue(new Promise((res) => { liberarInfo = res; }));
+    quoteAndApproveCoverage.mockResolvedValue({ ok: true, status: 'coverage_approved', shippingGs: 30000, totalGs: 130000 });
+    renderCard({ draft: DRAFT_OK });
+    const confirmar = await screen.findByRole('button', { name: /enviar costo y aprobar cobertura/i });
+    fireEvent.click(screen.getByRole('button', { name: /pedir más información/i }));
+    await waitFor(() => expect(requestCoverageInfo).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect((confirmar as HTMLButtonElement).disabled).toBe(true));
+    fireEvent.click(confirmar);
+    expect(quoteAndApproveCoverage).not.toHaveBeenCalled();
+    await act(async () => { liberarInfo({ ok: true }); });
+    await waitFor(() => expect((screen.getByRole('button', { name: /enviar costo y aprobar cobertura/i }) as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(screen.getByRole('button', { name: /enviar costo y aprobar cobertura/i }));
+    // La guarda de doble clic NO quedó consumida por el clic bloqueado: el mismo payload sale.
+    await waitFor(() => expect(quoteAndApproveCoverage).toHaveBeenCalledTimes(1));
+    expect(quoteAndApproveCoverage).toHaveBeenCalledWith('perfumeria', expect.objectContaining({ confirmedShippingGs: 30000 }));
+  });
+
+  it('Rechazar en vuelo ⇒ la cotización no llama a la callable', async () => {
+    flowRequired();
+    getCoverageRequestFor.mockResolvedValue({ request: reqQuote(), denied: false });
+    rejectCoverage.mockReturnValue(new Promise(() => {}));
+    renderCard({ draft: DRAFT_OK });
+    const confirmar = await screen.findByRole('button', { name: /enviar costo y aprobar cobertura/i });
+    fireEvent.click(screen.getByRole('button', { name: /^rechazar$/i }));
+    await waitFor(() => expect(rejectCoverage).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect((confirmar as HTMLButtonElement).disabled).toBe(true));
+    fireEvent.click(confirmar);
+    expect(quoteAndApproveCoverage).not.toHaveBeenCalled();
+  });
+
+  it('resolver en vuelo ⇒ ninguna decisión paralela (política off + unknown durable: Aprobar visible pero inerte)', async () => {
+    getCoverageFlowState.mockResolvedValue({ enabled: true, activationId: ACT }); // política off
+    const PTR = { quoteAttemptId: 'qat_RRR888888888', chargeGs: 25000, locationFingerprint: 'geo:V', cartFingerprint: 'cart2:V', quotedByUid: 'u', quotedByName: 'V', quotedByRole: 'TENANT_OWNER', createdAt: ts(Date.now() - 1000) };
+    getCoverageRequestFor.mockResolvedValue({ request: reqQuote({ shippingQuotePending: PTR as CoverageRequest['shippingQuotePending'] } as Partial<CoverageRequest>), denied: false });
+    getCoverageQuoteAttemptState.mockResolvedValue({ ok: true, attempt: { quoteAttemptId: PTR.quoteAttemptId, chargeGs: 25000, phase: 'unknown' } });
+    resolveCoverageQuoteUnknown.mockReturnValue(new Promise(() => {}));
+    renderCard();
+    fireEvent.change(await screen.findByLabelText(/nota obligatoria/i), { target: { value: 'verifiqué el teléfono' } });
+    fireEvent.click(screen.getByRole('button', { name: /sí llegó al cliente/i }));
+    await waitFor(() => expect(resolveCoverageQuoteUnknown).toHaveBeenCalledTimes(1));
+    const btnAprobar = screen.getByRole('button', { name: /aprobar cobertura/i });
+    await waitFor(() => expect((btnAprobar as HTMLButtonElement).disabled).toBe(true));
+    fireEvent.click(btnAprobar);
+    fireEvent.click(screen.getByRole('button', { name: /^rechazar$/i }));
+    fireEvent.click(screen.getByRole('button', { name: /pedir más información/i }));
+    expect(approveCoverage).not.toHaveBeenCalled();
+    expect(rejectCoverage).not.toHaveBeenCalled();
+    expect(requestCoverageInfo).not.toHaveBeenCalled();
+  });
+});
+
+describe('HARDEN-2 B · el estado local pertenece a UN intento (identidad por quoteAttemptId)', () => {
+  // TX-A copia al pointer la huella EXACTA del payload (charge + fingerprints): el pointer
+  // propio del test debe reproducirla; el de OTRO intento lleva otra huella.
+  const PTR_DE = (qat: string, chargeGs: number, loc = 'geo:OTRO', cart = 'cart2:OTRO') =>
+    ({ quoteAttemptId: qat, chargeGs, locationFingerprint: loc, cartFingerprint: cart, quotedByUid: 'u', quotedByName: 'V', quotedByRole: 'TENANT_OWNER', createdAt: ts(Date.now() - 1000) });
+  const req250 = (over: Partial<CoverageRequest> = {}) =>
+    reqQuote({ cartSnapshot: { items: [{ productId: 'p1', name: 'P', price: 250000, quantity: 1 }], subtotal: 250000 } as CoverageRequest['cartSnapshot'], ...over } as Partial<CoverageRequest>);
+  const cardCon = (qc: QueryClient, draft: string) => (
+    <QueryClientProvider client={qc}>
+      <CoverageReviewCard tenantId="perfumeria" customerId="595991234567" draft={draft} />
+    </QueryClientProvider>
+  );
+
+  it('unknown de A (₲35.000/₲285.000) → pointer B unknown con otro costo: la evidencia de A JAMÁS se muestra bajo B; gobierna la fuente durable de B', async () => {
+    flowRequired();
+    getCoverageRequestFor.mockResolvedValue({ request: req250(), denied: false });
+    let rechazarQuote!: (e: unknown) => void;
+    quoteAndApproveCoverage.mockReturnValue(new Promise((_res, rej) => { rechazarQuote = rej; }));
+    getCoverageQuoteAttemptState.mockReturnValue(new Promise(() => {})); // durable aún sin responder
+    const qc = qcNuevo();
+    const r = render(cardCon(qc, 'El costo de envío para tu ubicación es ₲35.000'));
+    fireEvent.click(await screen.findByRole('button', { name: /enviar costo y aprobar cobertura/i }));
+    await waitFor(() => expect(quoteAndApproveCoverage).toHaveBeenCalledTimes(1));
+    await act(async () => { rechazarQuote({ code: 'functions/unavailable', details: { kind: 'unknown' } }); });
+    await screen.findByText(/Intentaste enviar/);
+    expect(screen.getByText(/285.000/)).toBeTruthy();
+    r.rerender(cardCon(qc, '')); // el vendedor limpió el composer: queda SOLO la evidencia local
+
+    // Materializa el pointer PROPIO (misma huella que el payload congelado — TX-A la copia) con
+    // fase durable 'unknown': el panel de ₲35.000 PRUEBA que el render con el pointer propio
+    // ocurrió — y la evidencia local se ADOPTA, no se limpia (review #2: sin un punto observable
+    // la mitad positiva de la adopción quedaba sin cobertura y el mutante "nunca adoptar" pasaba).
+    getCoverageQuoteAttemptState.mockResolvedValue({ ok: true, attempt: { quoteAttemptId: 'qat_AAAAAAAAAAAA', chargeGs: 35000, phase: 'unknown' } });
+    getCoverageRequestFor.mockResolvedValue({ request: req250({ shippingQuotePending: PTR_DE('qat_AAAAAAAAAAAA', 35000, 'txt:abc', 'cart2:vivo123') as CoverageRequest['shippingQuotePending'] }), denied: false });
+    await act(async () => { await qc.invalidateQueries({ queryKey: ['coverage'] }); });
+    await screen.findByText(/Intento con envío de ₲ 35\.000/); // render con el pointer propio OBSERVADO
+    expect(screen.getByText(/285.000/)).toBeTruthy(); // la evidencia congelada sigue (adoptada)
+    expect(screen.getByText(/Intentaste enviar/)).toBeTruthy();
+
+    // El pointer cambia a B (OTRO intento, otro costo) con fase durable unknown.
+    getCoverageRequestFor.mockResolvedValue({ request: req250({ shippingQuotePending: PTR_DE('qat_BBBBBBBBBBBB', 40000) as CoverageRequest['shippingQuotePending'] }), denied: false });
+    getCoverageQuoteAttemptState.mockResolvedValue({ ok: true, attempt: { quoteAttemptId: 'qat_BBBBBBBBBBBB', chargeGs: 40000, phase: 'unknown' } });
+    await act(async () => { await qc.invalidateQueries({ queryKey: ['coverage'] }); });
+    await waitFor(() => expect(screen.queryByText(/Intentaste enviar/)).toBeNull());
+    expect(screen.queryByText(/285.000/)).toBeNull();
+    expect(screen.queryByText(/35.000/)).toBeNull();
+    expect(await screen.findByText(/Intento con envío de ₲ 40\.000/)).toBeTruthy();
+    expect((screen.getByLabelText(/nota obligatoria/i) as HTMLInputElement).value).toBe('');
+  });
+
+  it('error de A → pointer B preparing: el error desaparece y solo quedan los controles de B', async () => {
+    flowRequired();
+    getCoverageRequestFor.mockResolvedValue({ request: reqQuote(), denied: false });
+    quoteAndApproveCoverage.mockRejectedValue({ code: 'functions/failed-precondition', details: { kind: 'meta_rejected' } });
+    const qc = qcNuevo();
+    render(cardCon(qc, DRAFT_OK));
+    fireEvent.click(await screen.findByRole('button', { name: /enviar costo y aprobar cobertura/i }));
+    await screen.findByText(/WhatsApp no aceptó el mensaje/);
+    getCoverageRequestFor.mockResolvedValue({ request: reqQuote({ shippingQuotePending: PTR_DE('qat_BBBBBBBBBBBB', 40000) as CoverageRequest['shippingQuotePending'] } as Partial<CoverageRequest>), denied: false });
+    getCoverageQuoteAttemptState.mockResolvedValue({ ok: true, attempt: { quoteAttemptId: 'qat_BBBBBBBBBBBB', chargeGs: 40000, phase: 'preparing' } });
+    await act(async () => { await qc.invalidateQueries({ queryKey: ['coverage'] }); });
+    await waitFor(() => expect(screen.queryByText(/WhatsApp no aceptó el mensaje/)).toBeNull());
+    expect(await screen.findByRole('button', { name: /continuar el envío/i })).toBeTruthy();
+    expect(screen.getByText(/Cotización de ₲ 40\.000 preparada/)).toBeTruthy();
+  });
+
+  it('REEMPLAZO (review #2): cotizar un monto NUEVO con un pointer viejo a la vista — el unknown propio conserva su evidencia al materializar SU pointer', async () => {
+    flowRequired();
+    // Intento anterior (otro qat, otra huella) todavía visible como pointer del request.
+    getCoverageRequestFor.mockResolvedValue({ request: reqQuote({ shippingQuotePending: PTR_DE('qat_VIEJOVIEJO1', 25000) as CoverageRequest['shippingQuotePending'] } as Partial<CoverageRequest>), denied: false });
+    getCoverageQuoteAttemptState.mockResolvedValue({ ok: true, attempt: { quoteAttemptId: 'qat_VIEJOVIEJO1', chargeGs: 25000, phase: 'failed' } });
+    let rechazarQ!: (e: unknown) => void;
+    quoteAndApproveCoverage.mockReturnValue(new Promise((_res, rej) => { rechazarQ = rej; }));
+    const qc = qcNuevo();
+    const r = render(cardCon(qc, DRAFT_OK)); // ₲30.000 ≠ pointer viejo ⇒ REEMPLAZO
+    fireEvent.click(await screen.findByRole('button', { name: /enviar costo y aprobar cobertura/i }));
+    await waitFor(() => expect(quoteAndApproveCoverage).toHaveBeenCalledTimes(1));
+    // El refetch del onError trae el pointer PROPIO nuevo (la huella exacta del payload).
+    getCoverageRequestFor.mockResolvedValue({ request: reqQuote({ shippingQuotePending: PTR_DE('qat_NUEVONUEVO1', 30000, 'txt:abc', 'cart2:vivo123') as CoverageRequest['shippingQuotePending'] } as Partial<CoverageRequest>), denied: false });
+    getCoverageQuoteAttemptState.mockResolvedValue({ ok: true, attempt: { quoteAttemptId: 'qat_NUEVONUEVO1', chargeGs: 30000, phase: 'unknown' } });
+    await act(async () => { rechazarQ({ code: 'functions/unavailable', details: { kind: 'unknown' } }); });
+    r.rerender(cardCon(qc, ''));
+    // La evidencia congelada del reemplazo (100.000 + 30.000) queda — jamás se cierra por culpa
+    // de la identidad del intento VIEJO, ni por la foto cacheada pre-settle del pointer viejo.
+    expect(await screen.findByText(/Intentaste enviar/)).toBeTruthy();
+    expect(screen.getByText(/130\.000/)).toBeTruthy();
+    await screen.findByText(/Intento con envío de ₲ 30\.000/); // su pointer, observado y adoptado
+    expect(screen.getByText(/Intentaste enviar/)).toBeTruthy();
+  });
+
+  it('sent de A → pointer B preparing: la tarjeta de éxito de A no se muestra sobre el intento B', async () => {
+    flowRequired();
+    getCoverageRequestFor.mockResolvedValue({ request: reqQuote(), denied: false });
+    quoteAndApproveCoverage.mockResolvedValue({ ok: true, status: 'coverage_approved', shippingGs: 30000, totalGs: 130000 });
+    const qc = qcNuevo();
+    render(cardCon(qc, DRAFT_OK));
+    fireEvent.click(await screen.findByRole('button', { name: /enviar costo y aprobar cobertura/i }));
+    await screen.findByText(/Costo enviado y cobertura aprobada/);
+    getCoverageRequestFor.mockResolvedValue({ request: reqQuote({ shippingQuotePending: PTR_DE('qat_BBBBBBBBBBBB', 40000) as CoverageRequest['shippingQuotePending'] } as Partial<CoverageRequest>), denied: false });
+    getCoverageQuoteAttemptState.mockResolvedValue({ ok: true, attempt: { quoteAttemptId: 'qat_BBBBBBBBBBBB', chargeGs: 40000, phase: 'preparing' } });
+    await act(async () => { await qc.invalidateQueries({ queryKey: ['coverage'] }); });
+    await waitFor(() => expect(screen.queryByText(/Costo enviado y cobertura aprobada/)).toBeNull());
+    expect(await screen.findByRole('button', { name: /continuar el envío/i })).toBeTruthy();
+  });
+});
+
+describe('HARDEN-2 C · pedirInfo tardío tras cambiar de conversación', () => {
+  it('no pinta el aviso en el chat nuevo pero SÍ invalida los datos del cliente CONGELADO', async () => {
+    flowRequired();
+    getCoverageRequestFor.mockImplementation(async (_t: unknown, cid: string) => ({
+      request: reqQuote({ id: cid === '595990000002' ? 'covr_OTRO9999999' : 'covr_abc123DEF456', customerId: cid } as Partial<CoverageRequest>),
+      denied: false,
+    }));
+    let liberar!: (v: unknown) => void;
+    requestCoverageInfo.mockReturnValue(new Promise((res) => { liberar = res; }));
+    const qc = qcNuevo();
+    const card = (cid: string) => (
+      <QueryClientProvider client={qc}>
+        <CoverageReviewCard tenantId="perfumeria" customerId={cid} />
+      </QueryClientProvider>
+    );
+    const r = render(card('595991234567'));
+    fireEvent.click(await screen.findByRole('button', { name: /pedir más información/i }));
+    await waitFor(() => expect(requestCoverageInfo).toHaveBeenCalledTimes(1));
+    r.rerender(card('595990000002'));
+    await screen.findByText(/…0002/);
+    await act(async () => { liberar({ ok: true }); });
+    // Guard visual: el aviso del chat viejo JAMÁS aparece sobre el nuevo…
+    expect(screen.queryByText(/pedimos más detalle/i)).toBeNull();
+    // …pero los datos del cliente CONGELADO quedaron invalidados (refresco correcto al volver).
+    const viejas = qc.getQueryCache().findAll({ queryKey: ['coverage', 'perfumeria', '595991234567'] });
+    expect(viejas.length).toBeGreaterThan(0);
+    expect(viejas.every((q) => q.state.isInvalidated)).toBe(true);
+  });
+});
