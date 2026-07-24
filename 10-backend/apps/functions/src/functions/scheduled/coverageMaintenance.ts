@@ -33,6 +33,11 @@ const LOTE = 50; // tope por corrida y por tenant: costo acotado; lo que quede s
  * interactivo se completa en minutos; pasada la hora es señal humana (diseño 3A: prepared/sent
  * atascados y unknown sin reconciliar requieren a una persona; JAMÁS re-drive automático).
  */
+// INVARIANTE cruzada (HARDEN-4, review): QUOTE_LEASE_MS (60 s, coverageQuote.ts) DEBE quedar muy
+// por debajo de este umbral — el claim escribe lease y updatedAt en la misma tx, así que un
+// candidato del sweep (updatedAt <= now-1h) tiene SIEMPRE el lease vencido. Si el lease creciera
+// por encima del umbral, los 'sending' con lease vigente re-matchearían la query en cada corrida
+// y volvería la inanición de slots que HARDEN-3 cerró.
 const QUOTE_ATASCADO_MS = 60 * 60 * 1000;
 
 export async function runCoverageMaintenance(): Promise<void> {
@@ -226,8 +231,10 @@ export async function runCoverageMaintenance(): Promise<void> {
       // cada corrida y los candidatos 51+ jamás entraban al lote (inanición).
       const atascados = await db()
         .collection(`tenants/${tenantId}/coverageMessageOutbox`)
+        // HARDEN-4: 'sending' entra a los candidatos (crash duro entre claim y settlement lo
+        // dejaba varado para siempre). Ampliar el array del `in` usa el MISMO índice compuesto.
         .where('action', '==', 'quote')
-        .where('status', 'in', ['prepared', 'sent', 'unknown'])
+        .where('status', 'in', ['prepared', 'sent', 'unknown', 'sending'])
         .where('stuckNotifiedAt', '==', null)
         .where('updatedAt', '<=', Timestamp.fromMillis(now.toMillis() - QUOTE_ATASCADO_MS))
         .limit(LOTE)
@@ -257,10 +264,20 @@ export async function runCoverageMaintenance(): Promise<void> {
               if ((ob.stuckNotifiedAt ?? null) === null) tx.update(d.ref, { stuckNotifiedAt: Timestamp.now() });
               return;
             }
-            if (ob.status !== 'prepared' && ob.status !== 'sent' && ob.status !== 'unknown') return; // la saga lo terminó (la query ya no lo matchea)
+            if (ob.status !== 'prepared' && ob.status !== 'sent' && ob.status !== 'unknown' && ob.status !== 'sending') return; // la saga lo terminó (la query ya no lo matchea)
             if ((ob.updatedAt?.toMillis?.() ?? 0) > now.toMillis() - QUOTE_ATASCADO_MS) return; // transitorio: ya no supera el umbral
             if ((ob.stuckNotifiedAt ?? null) !== null) return; // HARDEN-3: otra corrida ya lo resolvió en la carrera
-            if (!req || req.shippingQuotePending?.quoteAttemptId !== ob.quote?.quoteAttemptId) return; // reemplazado/cerrado
+            // HARDEN-4: un 'sending' SOLO se recupera con el lease realmente VENCIDO — un worker
+            // vivo (lease vigente) jamás se toca: cero escrituras, cero campana.
+            const sendingVencido = ob.status === 'sending' && (ob.leaseUntil?.toMillis?.() ?? 0) <= now.toMillis();
+            if (ob.status === 'sending' && !sendingVencido) return;
+            if (!req || req.shippingQuotePending?.quoteAttemptId !== ob.quote?.quoteAttemptId) {
+              // Reemplazado/cerrado: la saga terminaliza los suyos. Un 'sending' huérfano
+              // (invariante rota: el claim exige pointer vigente) se marca para no ocupar el
+              // lote para siempre — fail-closed, sin campana y sin tocar su status.
+              if (ob.status === 'sending' && (ob.stuckNotifiedAt ?? null) === null) tx.update(d.ref, { stuckNotifiedAt: Timestamp.now() });
+              return;
+            }
             // HARDEN-2 (review): un PREPARED sobre un request ya decidido/vencido no tiene nada
             // "completable" — la campana sería obsoleta y engañosa. Un SENT/UNKNOWN sí alerta
             // SIEMPRE: el cliente pudo recibir un costo y la señal humana es obligatoria aunque
@@ -273,8 +290,9 @@ export async function runCoverageMaintenance(): Promise<void> {
             }
             if (notifSnap.exists) {
               // Defensivo (solo alcanzable con datos manuales/corruptos: campana presente sin
-              // marcador): liberar el slot marcando el outbox — bookkeeping puro.
-              tx.update(d.ref, { stuckNotifiedAt: Timestamp.now() });
+              // marcador): liberar el slot marcando el outbox; un sending vencido se normaliza
+              // igual (la reconciliación humana debe poder operar).
+              tx.update(d.ref, { stuckNotifiedAt: Timestamp.now(), ...(sendingVencido ? { status: 'unknown', leaseUntil: null, updatedAt: now } : {}) });
               return;
             }
             tx.create(notifRef, {
@@ -292,9 +310,12 @@ export async function runCoverageMaintenance(): Promise<void> {
               createdAt: Timestamp.now(),
             });
             // HARDEN-3: campana + marcador en la MISMA transacción (todo-o-nada): el doc alertado
-            // deja de ocupar el limit de la query y el lote AVANZA. Bookkeeping puro: jamás toca
-            // status, quote ni updatedAt (el estado del envío sigue siendo solo de la saga).
-            tx.update(d.ref, { stuckNotifiedAt: Timestamp.now() });
+            // deja de ocupar el limit de la query y el lote AVANZA. HARDEN-4: un 'sending' con
+            // lease vencido se NORMALIZA acá mismo a 'unknown' (leaseUntil null) — la transición
+            // que la saga habría hecho en su próxima transacción — para que la reconciliación
+            // humana (coverageQuoteResolveUnknown) sea posible YA. Cero re-drive, cero Meta,
+            // cero aprobación automática. Para el resto sigue siendo bookkeeping puro.
+            tx.update(d.ref, { stuckNotifiedAt: Timestamp.now(), ...(sendingVencido ? { status: 'unknown', leaseUntil: null, updatedAt: now } : {}) });
           });
         } catch (e) {
           logger.warn('Cobertura: no se pudo evaluar/avisar el intento de cotización atascado', { tenantId, requestId: candidato.coverageRequestId, error: e instanceof Error ? e.message : String(e) });

@@ -26,6 +26,7 @@ export type CoverageHoldPoint =
   | 'resume_pre_awaiting'
   | 'outbox_pre_claim'
   | 'outbox_pre_meta'
+  | 'outbox_post_meta'
   | 'mant_pre_reencolar'
   | 'sweep_pre_tx';
 

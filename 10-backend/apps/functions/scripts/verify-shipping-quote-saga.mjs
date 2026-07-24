@@ -172,6 +172,7 @@ const finA = (await db.doc(`tenants/${T}/orderFinancials/${ordA.id}`).get()).dat
 check('5. grossProfit SOLO de productos (el envío jamás infla la ganancia)',
   finA?.subtotal === subtotalA && (finA?.grossProfit == null || finA.grossProfit <= subtotalA) && (finA?.grossProfit == null || finA.grossProfit === subtotalA - finA.totalCost),
   `grossProfit=${finA?.grossProfit} totalCost=${finA?.totalCost}`);
+await waitFor(async () => (await msgsOf(A)).some((m) => m.direction === 'out' && (m.text ?? '').includes('transferir')), 20000);
 const bancoA = (await msgsOf(A)).filter((m) => m.direction === 'out').map((m) => m.text).find((t) => (t ?? '').includes('transferir'));
 check('6. instrucciones bancarias con el TOTAL CON ENVÍO (order.totals.total)',
   !!bancoA && bancoA.includes(`₲ ${(subtotalA + 30000).toLocaleString('es-PY')}`),
@@ -1002,6 +1003,209 @@ for (const c of sw46) {
   }
   await batch.commit();
 }
+
+
+// ===== 47-55. HARDEN-4: recuperación de 'sending' varado + settlement con ownership =====
+// Receta base: prepared REAL (channel_unavailable vía mock) y luego se simula el crash duro
+// post-claim mutando SOLO los campos del claim (status/leaseUntil/attempts/updatedAt).
+const ultimoEnvioFisico = async () => ((await db.doc(`tenants/${T}/_debug/lastWhatsappSend`).get()).data()?.text ?? '');
+const varadoSending = async (cust, monto) => {
+  const req = await crearPendiente(cust);
+  await cotizar(owner, req.id, cust, monto, { sinReintento: true }); // priming: renueva la huella v1→cart2
+  const reqR = await requestOf(cust);
+  await db.doc(`tenants/${T}/config/channels`).set({ whatsappSendMode: 'mock' });
+  await call('coverageQuoteAndApprove', owner, { requestId: req.id, sellerDraft: DRAFT(monto), confirmedShippingGs: monto, expectedLocationFingerprint: reqR.locationFingerprint, expectedCartFingerprint: reqR.cartFingerprint });
+  await db.doc(`tenants/${T}/config/channels`).set({ whatsappSendMode: 'live' });
+  const ob = (await quoteOutboxesOf(req.id))[0];
+  await db.doc(`tenants/${T}/coverageMessageOutbox/${ob.id}`).update({
+    status: 'sending', attempts: 1,
+    leaseUntil: Timestamp.fromMillis(Date.now() - 65 * 60 * 1000),
+    updatedAt: Timestamp.fromMillis(Date.now() - 2 * 60 * 60 * 1000),
+  });
+  return { req, ob };
+};
+
+// 47: lease VIGENTE ⇒ intocable aunque la antigüedad supere el umbral
+const SV = CUST(31);
+const { req: reqSV, ob: obSV } = await varadoSending(SV, 21000);
+await db.doc(`tenants/${T}/coverageMessageOutbox/${obSV.id}`).update({ leaseUntil: Timestamp.fromMillis(Date.now() + 55_000) });
+await devMaintenance();
+const stuckSVId = `covstuck-${reqSV.id}-${obSV.quote.quoteAttemptId}`;
+const obSV47 = (await quoteOutboxesOf(reqSV.id))[0];
+check('47. sending con lease VIGENTE ⇒ el sweep no lo toca: cero escrituras, cero campana',
+  obSV47.status === 'sending' && (obSV47.stuckNotifiedAt ?? null) === null && (await notifCountBy(stuckSVId)) === 0,
+  `status=${obSV47.status} campanas=${await notifCountBy(stuckSVId)}`);
+
+// 48: lease VENCIDO > umbral ⇒ recuperación real
+await db.doc(`tenants/${T}/coverageMessageOutbox/${obSV.id}`).update({ leaseUntil: Timestamp.fromMillis(Date.now() - 65 * 60 * 1000) });
+const rStSV = await call('coverageQuoteAttemptState', owner, { requestId: reqSV.id });
+const rResPre = await call('coverageQuoteResolveUnknown', owner, { requestId: reqSV.id, quoteAttemptId: obSV.quote.quoteAttemptId, resolution: 'not_delivered', note: 'verificado: no llegó' });
+check('48a. PRE-sweep: la fase read-only ya dice unknown pero la resolución manual se RECHAZA (Firestore aún dice sending)',
+  rStSV.result?.attempt?.phase === 'unknown' && rResPre.err === 'FAILED_PRECONDITION',
+  `phase=${rStSV.result?.attempt?.phase} resolver=${rResPre.err ?? 'OK'}`);
+await devMaintenance();
+const obSV48 = (await quoteOutboxesOf(reqSV.id))[0];
+check('48b. sweep ⇒ sending vencido NORMALIZADO a unknown (leaseUntil null) + UNA campana + marcador, todo en una transacción',
+  obSV48.status === 'unknown' && (obSV48.leaseUntil ?? null) === null && (obSV48.stuckNotifiedAt ?? null) !== null && (await notifCountBy(stuckSVId)) === 1,
+  `status=${obSV48.status} campanas=${await notifCountBy(stuckSVId)}`);
+await devMaintenance();
+const obSV48b = (await quoteOutboxesOf(reqSV.id))[0];
+check('48c. dos sweeps ⇒ UNA sola campana; unknown intacto (idempotente)',
+  (await notifCountBy(stuckSVId)) === 1 && obSV48b.status === 'unknown' && obSV48b.updatedAt.toMillis() === obSV48.updatedAt.toMillis(),
+  `campanas=${await notifCountBy(stuckSVId)}`);
+const rResPost = await call('coverageQuoteResolveUnknown', owner, { requestId: reqSV.id, quoteAttemptId: obSV.quote.quoteAttemptId, resolution: 'not_delivered', note: 'verificado en el teléfono: no llegó' });
+const reqSVfin = await requestOf(SV);
+check('48d. POST-sweep: la resolución manual FUNCIONA ⇒ failed + pointer libre; cero orden/job/aprobación/PAID',
+  rResPost.result?.ok === true && (await quoteOutboxesOf(reqSV.id))[0].status === 'failed' && (reqSVfin.shippingQuotePending ?? null) === null &&
+  reqSVfin.status === 'pending_coverage_review' && !(await jobOf(reqSV.id)) && (await ordersOf(SV)).length === 0,
+  `resolver=${rResPost.err ?? 'ok'} outbox=${(await quoteOutboxesOf(reqSV.id))[0].status}`);
+
+// 49: recuperado + delivered ⇒ TX-C aplica de verdad; attemptState coherente
+const SW = CUST(32);
+const { req: reqSW, ob: obSW } = await varadoSending(SW, 23000);
+await devMaintenance();
+const rResDel = await call('coverageQuoteResolveUnknown', owner, { requestId: reqSW.id, quoteAttemptId: obSW.quote.quoteAttemptId, resolution: 'delivered', note: 'verificado: sí llegó' });
+const reqSWfin = await requestOf(SW);
+const rStSW = await call('coverageQuoteAttemptState', owner, { requestId: reqSW.id });
+check('49. sending recuperado + delivered ⇒ TX-C aplica (approved + shippingQuote + UN job + sent_applied) y attemptState queda coherente',
+  rResDel.result?.ok === true && rResDel.result?.resolved === 'delivered' && reqSWfin.status === 'coverage_approved' &&
+  reqSWfin.shippingQuote?.chargeGs === 23000 && !!(await jobOf(reqSW.id)) && rStSW.result?.attempt === null &&
+  (await quoteOutboxesOf(reqSW.id))[0].status === 'sent_applied',
+  `resolved=${rResDel.result?.resolved} status=${reqSWfin.status} outbox=${(await quoteOutboxesOf(reqSW.id))[0].status}`);
+
+// 50: sweep gana ANTES del envío del zombi (hold pre-Meta) ⇒ cero segundo envío físico
+const SX = CUST(33);
+const reqSX = await crearPendiente(SX);
+await cotizar(owner, reqSX.id, SX, 25000, { sinReintento: true }); // priming huella v1→cart2
+const reqSXr = await requestOf(SX);
+const outsSX = await outsCount(SX);
+await db.doc(`tenants/${T}/_debug/coverageHolds`).delete().catch(() => {});
+await db.doc(`tenants/${T}/_debug/coverageFixtures`).set({ holdAt: 'outbox_pre_meta' });
+const pResSX = call('coverageQuoteAndApprove', owner, { requestId: reqSX.id, sellerDraft: DRAFT(25000), confirmedShippingGs: 25000, expectedLocationFingerprint: reqSXr.locationFingerprint, expectedCartFingerprint: reqSXr.cartFingerprint });
+const holdSX = await waitFor(async () => ((await db.doc(`tenants/${T}/_debug/coverageHolds`).get()).data()?.point === 'outbox_pre_meta'), 10000);
+const obSX = (await quoteOutboxesOf(reqSX.id))[0];
+await db.doc(`tenants/${T}/coverageMessageOutbox/${obSX.id}`).update({ leaseUntil: Timestamp.fromMillis(Date.now() - 61 * 60 * 1000), updatedAt: Timestamp.fromMillis(Date.now() - 2 * 60 * 60 * 1000) });
+await devMaintenance();
+await db.doc(`tenants/${T}/_debug/coverageFixtures`).set({ holdAt: null, resume: true }, { merge: true });
+const rSX = await pResSX;
+const obSX2 = (await quoteOutboxesOf(reqSX.id))[0];
+check('50. sweep normaliza ANTES del envío del zombi ⇒ el worker NO envía (cero mensaje físico), no pisa el unknown y responde unknown',
+  holdSX === true && rSX.err === 'UNAVAILABLE' && rSX.kind === 'unknown' && obSX2.status === 'unknown' && (obSX2.attempts ?? 0) === 1 &&
+  (await outsCount(SX)) === outsSX && !(await msgsOf(SX)).some((m) => m.author === 'seller' && (m.text ?? '').includes('25.000')) &&
+  !(await ultimoEnvioFisico()).includes('25.000'),
+  `hold=${holdSX} kind=${rSX.kind} outbox=${obSX2.status} outs=${await outsCount(SX)} vs ${outsSX}`);
+
+// 51: humano resuelve delivered ANTES del retorno del zombi (hold pre-Meta) ⇒ idempotente sin reenvío
+const SY = CUST(34);
+const reqSY = await crearPendiente(SY);
+await cotizar(owner, reqSY.id, SY, 27000, { sinReintento: true });
+const reqSYr = await requestOf(SY);
+const outsSY = await outsCount(SY);
+await db.doc(`tenants/${T}/_debug/coverageHolds`).delete().catch(() => {});
+await db.doc(`tenants/${T}/_debug/coverageFixtures`).set({ holdAt: 'outbox_pre_meta' });
+const pResSY = call('coverageQuoteAndApprove', owner, { requestId: reqSY.id, sellerDraft: DRAFT(27000), confirmedShippingGs: 27000, expectedLocationFingerprint: reqSYr.locationFingerprint, expectedCartFingerprint: reqSYr.cartFingerprint });
+const holdSY = await waitFor(async () => ((await db.doc(`tenants/${T}/_debug/coverageHolds`).get()).data()?.point === 'outbox_pre_meta'), 10000);
+const obSY = (await quoteOutboxesOf(reqSY.id))[0];
+await db.doc(`tenants/${T}/coverageMessageOutbox/${obSY.id}`).update({ leaseUntil: Timestamp.fromMillis(Date.now() - 61 * 60 * 1000), updatedAt: Timestamp.fromMillis(Date.now() - 2 * 60 * 60 * 1000) });
+await devMaintenance();
+const rDelSY = await call('coverageQuoteResolveUnknown', owner, { requestId: reqSY.id, quoteAttemptId: obSY.quote.quoteAttemptId, resolution: 'delivered', note: 'verificado: sí llegó' });
+await waitFor(async () => (await sessionOf(SY))?.state === 'AWAITING_PAYMENT', 20000); // el resume legítimo termina ANTES de soltar al zombi
+const outsAntesZombi = await outsCount(SY);
+await db.doc(`tenants/${T}/_debug/coverageFixtures`).set({ holdAt: null, resume: true }, { merge: true });
+const rSY = await pResSY;
+await new Promise((r) => setTimeout(r, 1500)); // deja aterrizar cualquier append indebido del zombi
+const obSY2 = (await quoteOutboxesOf(reqSY.id))[0];
+check('51. humano delivered ANTES del zombi ⇒ el zombi no reenvía, no pisa sent_applied y responde idempotente con los montos del server',
+  holdSY === true && rDelSY.result?.resolved === 'delivered' && rSY.result?.ok === true && rSY.result?.shippingGs === 27000 &&
+  obSY2.status === 'sent_applied' &&
+  (await msgsOf(SY)).filter((m) => m.author === 'seller' && (m.text ?? '').includes('27.000')).length === 0 &&
+  !(await ultimoEnvioFisico()).includes('27.000'),
+  `hold=${holdSY} zombi=${rSY.err ?? 'ok'} outbox=${obSY2.status} espejos=${(await msgsOf(SY)).filter((m) => m.author === 'seller' && (m.text ?? '').includes('27.000')).length}`);
+
+// 52: humano not_delivered + INTENTO NUEVO antes del retorno del zombi ⇒ el zombi no pisa nada
+const SZ = CUST(35);
+const reqSZ = await crearPendiente(SZ);
+await cotizar(owner, reqSZ.id, SZ, 29000, { sinReintento: true });
+const reqSZr = await requestOf(SZ);
+await db.doc(`tenants/${T}/_debug/coverageHolds`).delete().catch(() => {});
+await db.doc(`tenants/${T}/_debug/coverageFixtures`).set({ holdAt: 'outbox_pre_meta' });
+const pResSZ = call('coverageQuoteAndApprove', owner, { requestId: reqSZ.id, sellerDraft: DRAFT(29000), confirmedShippingGs: 29000, expectedLocationFingerprint: reqSZr.locationFingerprint, expectedCartFingerprint: reqSZr.cartFingerprint });
+const holdSZ = await waitFor(async () => ((await db.doc(`tenants/${T}/_debug/coverageHolds`).get()).data()?.point === 'outbox_pre_meta'), 10000);
+const obSZ = (await quoteOutboxesOf(reqSZ.id))[0];
+await db.doc(`tenants/${T}/coverageMessageOutbox/${obSZ.id}`).update({ leaseUntil: Timestamp.fromMillis(Date.now() - 61 * 60 * 1000), updatedAt: Timestamp.fromMillis(Date.now() - 2 * 60 * 60 * 1000) });
+await devMaintenance();
+await call('coverageQuoteResolveUnknown', owner, { requestId: reqSZ.id, quoteAttemptId: obSZ.quote.quoteAttemptId, resolution: 'not_delivered', note: 'no llegó' });
+const rNuevoSZ = await call('coverageQuoteAndApprove', owner, { requestId: reqSZ.id, sellerDraft: DRAFT(31000), confirmedShippingGs: 31000, expectedLocationFingerprint: reqSZr.locationFingerprint, expectedCartFingerprint: reqSZr.cartFingerprint });
+await db.doc(`tenants/${T}/_debug/coverageFixtures`).set({ holdAt: null, resume: true }, { merge: true });
+const rSZ = await pResSZ;
+const reqSZfin = await requestOf(SZ);
+const obSZviejo = (await quoteOutboxesOf(reqSZ.id)).find((o) => o.id === obSZ.id);
+check('52. not_delivered + intento NUEVO aplicado antes del retorno del zombi ⇒ el zombi no pisa el intento nuevo ni el viejo (failed reconciliado intacto)',
+  holdSZ === true && rNuevoSZ.result?.ok === true && rNuevoSZ.result?.shippingGs === 31000 && reqSZfin.status === 'coverage_approved' &&
+  reqSZfin.shippingQuote?.chargeGs === 31000 && obSZviejo?.status === 'failed' && (obSZviejo?.reconciled ?? null) !== null &&
+  rSZ.err !== null && (await msgsOf(SZ)).filter((m) => m.author === 'seller' && (m.text ?? '').includes('29.000')).length === 0 &&
+  !(await ultimoEnvioFisico()).includes('29.000'),
+  `hold=${holdSZ} nuevo=${rNuevoSZ.err ?? 'ok'} viejo=${obSZviejo?.status} zombi=${rSZ.err}`);
+
+// 53: éxito FÍSICO ya salido + sweep gana antes del settlement (hold post-Meta) ⇒ unknown manda
+const TA = CUST(36);
+const reqTA = await crearPendiente(TA);
+await cotizar(owner, reqTA.id, TA, 33000, { sinReintento: true });
+const reqTAr = await requestOf(TA);
+const outsTA = await outsCount(TA);
+await db.doc(`tenants/${T}/_debug/coverageHolds`).delete().catch(() => {});
+await db.doc(`tenants/${T}/_debug/coverageFixtures`).set({ holdAt: 'outbox_post_meta' });
+const pResTA = call('coverageQuoteAndApprove', owner, { requestId: reqTA.id, sellerDraft: DRAFT(33000), confirmedShippingGs: 33000, expectedLocationFingerprint: reqTAr.locationFingerprint, expectedCartFingerprint: reqTAr.cartFingerprint });
+const holdTA = await waitFor(async () => ((await db.doc(`tenants/${T}/_debug/coverageHolds`).get()).data()?.point === 'outbox_post_meta'), 10000);
+const obTA = (await quoteOutboxesOf(reqTA.id))[0];
+await db.doc(`tenants/${T}/coverageMessageOutbox/${obTA.id}`).update({ leaseUntil: Timestamp.fromMillis(Date.now() - 61 * 60 * 1000), updatedAt: Timestamp.fromMillis(Date.now() - 2 * 60 * 60 * 1000) });
+await devMaintenance();
+await db.doc(`tenants/${T}/_debug/coverageFixtures`).set({ holdAt: null, resume: true }, { merge: true });
+const rTA = await pResTA;
+const obTA2 = (await quoteOutboxesOf(reqTA.id))[0];
+check('53. envío físico salido + sweep gana antes del settlement ⇒ el zombi NO pisa el unknown ni espeja el historial y responde unknown',
+  holdTA === true && rTA.err === 'UNAVAILABLE' && rTA.kind === 'unknown' && obTA2.status === 'unknown' &&
+  (await outsCount(TA)) === outsTA && (await msgsOf(TA)).filter((m) => m.author === 'seller' && (m.text ?? '').includes('33.000')).length === 0,
+  `hold=${holdTA} kind=${rTA.kind} outbox=${obTA2.status} outs=${await outsCount(TA)} vs ${outsTA}`);
+
+// 54: rechazo de Meta + sweep gana antes del settlement ⇒ el zombi no marca failed ni libera el pointer
+const TB = CUST(37);
+const reqTB = await crearPendiente(TB);
+await cotizar(owner, reqTB.id, TB, 35000, { sinReintento: true });
+const reqTBr = await requestOf(TB);
+await db.doc(`tenants/${T}/_debug/whatsappFixtures`).set({ failSendText: 'error' });
+await db.doc(`tenants/${T}/_debug/coverageHolds`).delete().catch(() => {});
+await db.doc(`tenants/${T}/_debug/coverageFixtures`).set({ holdAt: 'outbox_post_meta' });
+const pResTB = call('coverageQuoteAndApprove', owner, { requestId: reqTB.id, sellerDraft: DRAFT(35000), confirmedShippingGs: 35000, expectedLocationFingerprint: reqTBr.locationFingerprint, expectedCartFingerprint: reqTBr.cartFingerprint });
+const holdTB = await waitFor(async () => ((await db.doc(`tenants/${T}/_debug/coverageHolds`).get()).data()?.point === 'outbox_post_meta'), 10000);
+const obTB = (await quoteOutboxesOf(reqTB.id))[0];
+await db.doc(`tenants/${T}/coverageMessageOutbox/${obTB.id}`).update({ leaseUntil: Timestamp.fromMillis(Date.now() - 61 * 60 * 1000), updatedAt: Timestamp.fromMillis(Date.now() - 2 * 60 * 60 * 1000) });
+await devMaintenance();
+await db.doc(`tenants/${T}/_debug/coverageFixtures`).set({ holdAt: null, resume: true }, { merge: true });
+const rTB = await pResTB;
+await db.doc(`tenants/${T}/_debug/whatsappFixtures`).delete();
+const obTB2 = (await quoteOutboxesOf(reqTB.id))[0];
+const reqTB2 = await requestOf(TB);
+const rResTB = await call('coverageQuoteResolveUnknown', owner, { requestId: reqTB.id, quoteAttemptId: obTB.quote.quoteAttemptId, resolution: 'not_delivered', note: 'rechazado por WhatsApp: no llegó' });
+check('54. rejected tardío tras perder el claim ⇒ el zombi NO pisa el unknown del sweep ni libera el pointer; la reconciliación humana cierra',
+  holdTB === true && rTB.err === 'UNAVAILABLE' && rTB.kind === 'meta_rejected' && obTB2.status === 'unknown' &&
+  (reqTB2.shippingQuotePending?.quoteAttemptId ?? null) === obTB.quote.quoteAttemptId && rResTB.result?.ok === true &&
+  (await quoteOutboxesOf(reqTB.id))[0].status === 'failed',
+  `hold=${holdTB} kind=${rTB.kind} outbox=${obTB2.status} pointer=${reqTB2.shippingQuotePending?.quoteAttemptId === obTB.quote.quoteAttemptId ? 'intacto' : 'PISADO'}`);
+
+// 55: kill-switch durante la carrera del sweep ⇒ fail-closed; al reactivar, recupera
+const TC = CUST(38);
+const { req: reqTC, ob: obTC } = await varadoSending(TC, 37000);
+await db.doc(`tenants/${T}/config/checkout`).update({ 'coverage.enabled': false });
+await devMaintenance();
+const obTC1 = (await quoteOutboxesOf(reqTC.id))[0];
+await db.doc(`tenants/${T}/config/checkout`).update({ 'coverage.enabled': true });
+await devMaintenance();
+const obTC2 = (await quoteOutboxesOf(reqTC.id))[0];
+const stuckTCId = `covstuck-${reqTC.id}-${obTC.quote.quoteAttemptId}`;
+check('55. flag OFF durante el sweep ⇒ cero escrituras/campana; al reactivar la MISMA activación ⇒ recuperación normal',
+  obTC1.status === 'sending' && (obTC1.stuckNotifiedAt ?? null) === null && obTC2.status === 'unknown' && (await notifCountBy(stuckTCId)) === 1,
+  `off=${obTC1.status} on=${obTC2.status} campanas=${await notifCountBy(stuckTCId)}`);
 
 // ---- Restore ----
 await db.doc(`tenants/${T}/config/channels`).set(beforeChannels ?? { whatsappSendMode: 'mock' });

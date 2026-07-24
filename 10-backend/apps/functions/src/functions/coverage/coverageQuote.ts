@@ -422,6 +422,28 @@ async function txPrepararIntento(tenantId: string, actor: QuoteActor, input: Quo
 }
 
 /**
+ * HARDEN-4 — Settlement con OWNERSHIP: solo el worker que todavía posee el claim (status
+ * 'sending' y la MISMA generación `attempts` que fijó su claim) asienta el resultado del envío.
+ * Ownership perdido (el sweep normalizó el sending vencido a 'unknown', un humano reconcilió,
+ * o el intento fue reemplazado) ⇒ CERO escrituras: el estado durable manda y la salida es la
+ * reconciliación humana — jamás se pisa unknown/failed/sent/sent_applied/sent_not_applied.
+ */
+async function settleSiPropio(
+  tenantId: string,
+  obId: string,
+  gen: number,
+  patch: Record<string, unknown>,
+): Promise<{ propio: boolean; status: CoverageOutboxMessage['status'] | null }> {
+  return db().runTransaction(async (tx) => {
+    const ref = outboxRef(tenantId, obId);
+    const ob = (await tx.get(ref)).data() as CoverageOutboxMessage | undefined;
+    if (!ob || ob.status !== 'sending' || (ob.attempts ?? 0) !== gen) return { propio: false, status: ob?.status ?? null };
+    tx.update(ref, { ...patch, updatedAt: Timestamp.now() });
+    return { propio: true, status: ob.status };
+  });
+}
+
+/**
  * Envío exactly-once conservador. El transporte se resuelve ANTES del claim (toda excepción de
  * resolución deja el outbox en 'prepared', recuperable — jamás un unknown falso pre-claim).
  */
@@ -483,9 +505,12 @@ async function enviarQuote(tenantId: string, requestId: string, attemptId: strin
       return { r: 'reemplazado' as const };
     }
     if (req.expiresAt.toMillis() <= now.toMillis()) return { r: 'expirado' as const }; // sin escrituras: TX-A expira con su patrón commit-expire
-    // prepared → sending
-    tx.update(obSnap.ref, { status: 'sending', leaseUntil: Timestamp.fromMillis(now.toMillis() + QUOTE_LEASE_MS), attempts: (ob.attempts ?? 0) + 1, updatedAt: now });
-    return { r: 'go' as const, ob };
+    // prepared → sending. HARDEN-4: `attempts` es la GENERACIÓN inmutable de este claim — todo
+    // settlement posterior exige presentarla junto con status 'sending' (ownership): un worker
+    // zombi (lease vencido, sweep o humano ya actuaron) no puede escribir nada.
+    const gen = (ob.attempts ?? 0) + 1;
+    tx.update(obSnap.ref, { status: 'sending', leaseUntil: Timestamp.fromMillis(now.toMillis() + QUOTE_LEASE_MS), attempts: gen, updatedAt: now });
+    return { r: 'go' as const, ob, gen };
   });
   if (claim.r === 'missing') throw qerr('internal', 'El intento de cotización no existe.', 'generic');
   if (claim.r === 'apagado') throw qerr('failed-precondition', MENSAJE_FLUJO_DESHABILITADO, 'flow_off');
@@ -496,14 +521,28 @@ async function enviarQuote(tenantId: string, requestId: string, attemptId: strin
   if (claim.r === 'expirado') throw qerr('failed-precondition', 'La solicitud venció: el cliente tiene que retomar la compra.', 'expired');
   if (claim.r === 'in_progress') throw qerr('failed-precondition', 'Hay un envío de cotización en curso: esperá un momento.', 'in_progress');
   const ob = claim.ob;
+  const gen = claim.gen;
 
   await coverageHold(tenantId, 'outbox_pre_meta'); // solo-emulador: kill-switch en la frontera
 
   // 3) Re-chequeo del flag INMEDIATO pre-Meta: apagado ⇒ revert a 'prepared' (recuperable).
   const actPre = coverageActivationOf(((await configRef(tenantId).get()).data() as { coverage?: unknown } | undefined)?.coverage);
   if (!actPre.enabled || actPre.activationId !== (ob.activationId ?? null)) {
-    await outboxRef(tenantId, obId).update({ status: 'prepared', leaseUntil: null, updatedAt: Timestamp.now() });
+    // HARDEN-4: revert con ownership — un zombi jamás pisa un estado ya normalizado/reconciliado.
+    await settleSiPropio(tenantId, obId, gen, { status: 'prepared', leaseUntil: null }).catch(() => {});
     throw qerr('failed-precondition', MENSAJE_FLUJO_DESHABILITADO, 'flow_off');
+  }
+
+  // HARDEN-4: re-chequeo de OWNERSHIP inmediato pre-Meta. Si este worker perdió el claim (el
+  // sweep normalizó su sending vencido a 'unknown', o un humano ya reconcilió el intento), NO
+  // se envía NADA: cero segundo envío físico. sent/sent_applied de otro camino ⇒ idempotente.
+  const obOwn = (await outboxRef(tenantId, obId).get()).data() as CoverageOutboxMessage | undefined;
+  if (!obOwn || obOwn.status !== 'sending' || (obOwn.attempts ?? 0) !== gen) {
+    if (obOwn?.status === 'sent' || obOwn?.status === 'sent_applied') return;
+    if (obOwn?.status === 'failed' || obOwn?.status === 'sent_not_applied') {
+      throw qerr('failed-precondition', 'El intento anterior quedó cerrado: volvé a cotizar.', 'generic');
+    }
+    throw qerr('unavailable', 'No pudimos confirmar si el mensaje salió. Revisá el chat de WhatsApp del negocio antes de intentar otra acción.', 'unknown');
   }
 
   // 4) Envío físico (sendText nunca lanza; una excepción inesperada acá es POST-inicio ⇒ unknown).
@@ -512,13 +551,24 @@ async function enviarQuote(tenantId: string, requestId: string, attemptId: strin
     res = await client.sendText(ob.customerId, ob.text, { tenantId, channel: ob.channel });
   } catch (e) {
     logger.error('Cotización: excepción durante el envío (resultado desconocido)', e, { tenantId, outboxId: obId });
-    await outboxRef(tenantId, obId).update({ status: 'unknown', leaseUntil: null, updatedAt: Timestamp.now() }).catch(() => {});
+    await settleSiPropio(tenantId, obId, gen, { status: 'unknown', leaseUntil: null }).catch(() => {});
     throw qerr('unavailable', 'No pudimos confirmar si el mensaje salió. Revisá el chat de WhatsApp del negocio antes de intentar otra acción.', 'unknown');
   }
 
+  await coverageHold(tenantId, 'outbox_post_meta'); // solo-emulador: carrera settlement vs sweep/humano
+
   if (res.ok) {
-    await outboxRef(tenantId, obId).update({ status: 'sent', providerMessageId: res.id ?? null, leaseUntil: null, updatedAt: Timestamp.now() });
-    // Espejo al historial como MENSAJE DEL VENDEDOR (actor ORIGINAL del intento — jamás el caller).
+    // HARDEN-4: settlement con ownership. Si otro camino ya lo dio por enviado (humano
+    // delivered) ⇒ idempotente SIN duplicar historial; cualquier otro estado (unknown del
+    // sweep, failed reconciliado, reemplazado) ⇒ conservador: no se pisa nada y la salida es
+    // la reconciliación humana, aunque este envío haya salido físicamente.
+    const settle = await settleSiPropio(tenantId, obId, gen, { status: 'sent', providerMessageId: res.id ?? null, leaseUntil: null });
+    if (!settle.propio) {
+      if (settle.status === 'sent' || settle.status === 'sent_applied') return;
+      throw qerr('unavailable', 'No pudimos confirmar si el mensaje salió. Revisá el chat de WhatsApp del negocio antes de intentar otra acción.', 'unknown');
+    }
+    // Espejo al historial como MENSAJE DEL VENDEDOR (actor ORIGINAL del intento — jamás el
+    // caller). SOLO después del settlement durable propio (jamás se duplica).
     try {
       await appendMessage(tenantId, ob.customerId, {
         direction: 'out',
@@ -537,14 +587,21 @@ async function enviarQuote(tenantId: string, requestId: string, attemptId: strin
     return;
   }
   if (res.outcome === 'rejected') {
-    // Rechazo CONFIRMADO: failed + pointer liberado EN UNA transacción (reintento explícito = intento nuevo).
+    // Rechazo CONFIRMADO: failed + pointer liberado EN UNA transacción — SOLO si este worker
+    // aún posee el claim (HARDEN-4) y el pointer sigue siendo de ESTE intento: un zombi jamás
+    // pisa el unknown del sweep, una reconciliación humana ni el pointer de un intento nuevo.
     await db().runTransaction(async (tx) => {
+      const obNow = (await tx.get(outboxRef(tenantId, obId))).data() as CoverageOutboxMessage | undefined;
+      const reqNow = (await tx.get(reqRef(tenantId, requestId))).data() as CoverageRequest | undefined;
+      if (!obNow || obNow.status !== 'sending' || (obNow.attempts ?? 0) !== gen) return;
       tx.update(outboxRef(tenantId, obId), { status: 'failed', leaseUntil: null, updatedAt: Timestamp.now() });
-      tx.update(reqRef(tenantId, requestId), { shippingQuotePending: null, updatedAt: Timestamp.now() });
+      if (reqNow?.shippingQuotePending?.quoteAttemptId === attemptId) {
+        tx.update(reqRef(tenantId, requestId), { shippingQuotePending: null, updatedAt: Timestamp.now() });
+      }
     });
     throw qerr('unavailable', 'WhatsApp no aceptó el mensaje de cotización. Revisá el número y volvé a intentar.', 'meta_rejected', { providerCode: res.providerCode });
   }
-  await outboxRef(tenantId, obId).update({ status: 'unknown', leaseUntil: null, updatedAt: Timestamp.now() });
+  await settleSiPropio(tenantId, obId, gen, { status: 'unknown', leaseUntil: null }).catch(() => {});
   throw qerr('unavailable', 'No pudimos confirmar si el mensaje salió. Revisá el chat de WhatsApp del negocio antes de intentar otra acción.', 'unknown');
 }
 
