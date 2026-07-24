@@ -408,21 +408,10 @@ export async function decidirRespuesta(
       };
     }
 
-    // COVERAGE-1B: con `coverage.enabled` y SIN aprobación vigente para la ubicación, el
-    // checkout se frena ANTES de crear orden / mostrar banco / pasar a AWAITING_PAYMENT:
-    // primero la ubicación (botón nativo o dirección escrita). Flag off ⇒ gate null ⇒ intacto.
-    const gate = await gateCoberturaCheckout(tenantId, customerId, prev.cart, prev.coverageTurno ?? {});
-    if (gate) {
-      return {
-        reply: gate.reply,
-        nextState: 'CART',
-        pendingCart: null, // el checkout congela el contexto de oferta (mismo criterio que pagar)
-        ...(gate.coverage !== undefined ? { coverage: gate.coverage } : {}),
-        ...(gate.locationRequest ? { locationRequest: true } : {}),
-        ...(gate.coverageActivationId !== undefined ? { coverageActivationId: gate.coverageActivationId } : {}),
-      };
-    }
-
+    // F5 PRIMERO (COVERAGE-CHECKOUT-REUSE-GATE-1 — hallazgo MEDIO de ACTIVATION-AUDIT-2): el
+    // pedido REUTILIZABLE/abierto se resuelve ANTES de que Coverage pueda iniciar una
+    // cotización — "pagar" repetido reenvía el MISMO pedido (o avisa que el comprobante está
+    // en revisión) y JAMÁS dispara un request/REQUOTE sobre una orden abierta.
     const decision = await resolveCheckoutReuse(tenantId, customerId, prev.pendingOrderId ?? null, prev.cart);
     if (decision.kind === 'reuse') {
       const config = await getCheckoutConfig(tenantId);
@@ -453,6 +442,23 @@ export async function decidirRespuesta(
         pendingCart: null,
       };
     }
+    // COVERAGE-1B: el gate corre SOLO para una compra realmente NUEVA (decisiones new /
+    // new_cart_changed — el pedido reutilizable/abierto ya retornó arriba): con
+    // `coverage.enabled` y SIN aprobación vigente, el checkout se frena ANTES de crear orden /
+    // mostrar banco / consumir cuota. El gate no toca pendingOrderId ni la orden anterior.
+    // Flag off ⇒ gate null ⇒ F5 intacto.
+    const gate = await gateCoberturaCheckout(tenantId, customerId, prev.cart, prev.coverageTurno ?? {});
+    if (gate) {
+      return {
+        reply: gate.reply,
+        nextState: 'CART',
+        pendingCart: null, // el checkout congela el contexto de oferta (mismo criterio que pagar)
+        ...(gate.coverage !== undefined ? { coverage: gate.coverage } : {}),
+        ...(gate.locationRequest ? { locationRequest: true } : {}),
+        ...(gate.coverageActivationId !== undefined ? { coverageActivationId: gate.coverageActivationId } : {}),
+      };
+    }
+
     const avisoCambio =
       decision.kind === 'new_cart_changed'
         ? 'Como tu carrito cambió, te generé un pedido nuevo 🧾\n\n'
