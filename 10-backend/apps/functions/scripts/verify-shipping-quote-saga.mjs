@@ -1207,6 +1207,19 @@ check('55. flag OFF durante el sweep ⇒ cero escrituras/campana; al reactivar l
   obTC1.status === 'sending' && (obTC1.stuckNotifiedAt ?? null) === null && obTC2.status === 'unknown' && (await notifCountBy(stuckTCId)) === 1,
   `off=${obTC1.status} on=${obTC2.status} campanas=${await notifCountBy(stuckTCId)}`);
 
+
+// ===== 56-57. PURGE-FIX-1: TX-C programa la purga; el retry idempotente no la cambia =====
+const reqAfin = (await db.doc(`tenants/${T}/coverageRequests/${reqA.id}`).get()).data(); // por ID: requestOf(A) devolvería un request más nuevo de otro caso
+const purgaA = reqAfin.coordinatesPurgeAt?.toMillis?.() ?? null;
+check('56. TX-C (quoteAndApprove) programo coordinatesPurgeAt = decision.at + 30 dias',
+  purgaA !== null && purgaA === (reqAfin.decision?.at?.toMillis?.() ?? 0) + 30 * 24 * 60 * 60 * 1000,
+  `purga=${purgaA}`);
+const rIdemP = await call('coverageQuoteAndApprove', owner, { requestId: reqA.id, sellerDraft: DRAFT(30000), confirmedShippingGs: 30000, expectedLocationFingerprint: reqA3.locationFingerprint, expectedCartFingerprint: reqA3.cartFingerprint });
+const reqAfin2 = (await db.doc(`tenants/${T}/coverageRequests/${reqA.id}`).get()).data();
+check('57. re-invocacion idempotente NO extiende ni reinicia la purga',
+  rIdemP.result?.ok === true && (reqAfin2.coordinatesPurgeAt?.toMillis?.() ?? null) === purgaA,
+  `ok=${rIdemP.result?.ok} purga2=${reqAfin2.coordinatesPurgeAt?.toMillis?.()}`);
+
 // ---- Restore ----
 await db.doc(`tenants/${T}/config/channels`).set(beforeChannels ?? { whatsappSendMode: 'mock' });
 if (beforeCheckout) await db.doc(`tenants/${T}/config/checkout`).set(beforeCheckout); else await db.doc(`tenants/${T}/config/checkout`).delete().catch(() => {});

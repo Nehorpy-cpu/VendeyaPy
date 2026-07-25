@@ -139,7 +139,7 @@ const limpiarClientes = async () => {
   for (const d of jobs.docs) { if (String(d.data().customerId ?? '').startsWith('59599410')) await d.ref.delete().catch(() => {}); }
   const notifs = await db.collection(`tenants/${T}/notifications`).get();
   for (const d of notifs.docs) { if (String(d.data().customerId ?? '').startsWith('59599410')) await d.ref.delete().catch(() => {}); }
-  for (let i = 1; i <= 14; i++) await db.doc(`tenants/${T}/customers/${CUST(i)}/sessions/active`).delete().catch(() => {});
+  for (let i = 1; i <= 33; i++) await db.doc(`tenants/${T}/customers/${CUST(i)}/sessions/active`).delete().catch(() => {}); // PURGE-FIX-1: cubre también CUST(31-33)
 };
 await limpiarClientes();
 
@@ -417,6 +417,40 @@ check('30. coverageFlowState: seller ve {enabled:true, activationId} con el fluj
 const fsCross = await call('coverageFlowState', otroOwner, { tenantId: T });
 check('30b. coverageFlowState: un owner de OTRO tenant no consulta este tenant (PERMISSION_DENIED)',
   fsCross.err === 'PERMISSION_DENIED', `err=${fsCross.err}`);
+
+
+// ===== PURGE-FIX-1: purga de coordenadas programada en decisiones terminales =====
+const P1 = CUST(31);
+const rp1 = await crearPendiente(P1);
+const ap1 = await call('coverageApprove', owner, { tenantId: T, requestId: rp1.id, expectedFingerprint: rp1.locationFingerprint });
+const rp1b = await requestOf(P1);
+const DIA30 = 30 * 24 * 60 * 60 * 1000;
+const espera1 = (rp1b.decision?.at?.toMillis?.() ?? 0) + DIA30;
+check('33. APPROVE con coordenadas => coordinatesPurgeAt = decision.at + 30 dias (misma tx)',
+  ap1.result?.ok === true && rp1b.coordinatesPurgeAt?.toMillis?.() === espera1,
+  `purga=${rp1b.coordinatesPurgeAt?.toMillis?.()} esperado=${espera1}`);
+await call('coverageApprove', owner, { tenantId: T, requestId: rp1.id, expectedFingerprint: rp1.locationFingerprint });
+const rp1c = await requestOf(P1);
+check('34. reintento already_decided NO reinicia la fecha de purga',
+  rp1c.coordinatesPurgeAt?.toMillis?.() === espera1);
+const P2 = CUST(32);
+const rp2 = await crearPendiente(P2);
+const rj2 = await call('coverageReject', owner, { tenantId: T, requestId: rp2.id, expectedFingerprint: rp2.locationFingerprint, note: 'prueba purga' });
+const rp2b = await requestOf(P2);
+check('35. REJECT con coordenadas => coordinatesPurgeAt = decision.at + 30 dias',
+  rj2.result?.ok === true && rp2b.coordinatesPurgeAt?.toMillis?.() === ((rp2b.decision?.at?.toMillis?.() ?? 0) + DIA30),
+  `purga=${rp2b.coordinatesPurgeAt?.toMillis?.()}`);
+const P3 = CUST(33);
+await armarCarrito(P3);
+await sendAndWait(P3, 'quiero pagar');
+await sendAndWait(P3, 'Asuncion, barrio Recoleta, Molas Lopez 456, porton negro casi Espana');
+await waitFor(async () => (await requestOf(P3))?.status === 'pending_coverage_review');
+const rp3 = await requestOf(P3);
+const rj3 = await call('coverageReject', owner, { tenantId: T, requestId: rp3.id, expectedFingerprint: rp3.locationFingerprint, note: 'sin coordenadas' });
+const rp3b = await requestOf(P3);
+check('36. direccion TEXTUAL (sin coordenadas) => coordinatesPurgeAt queda null tras decidir',
+  rj3.result?.ok === true && (rp3b.coordinatesPurgeAt ?? null) === null && (rp3b.location?.coordinates ?? null) === null,
+  `purga=${rp3b.coordinatesPurgeAt ?? 'null'} coords=${rp3b.location?.coordinates ?? 'null'}`);
 
 } finally {
 // ---- Cleanup (SIEMPRE, incluso si un check explota) ----

@@ -732,6 +732,10 @@ async function txAplicarAprobacion(tenantId: string, requestId: string, attemptI
         cartSnapshot: snapshotCongelado,
         cartFingerprint: pending.cartFingerprint,
         resume: { status: 'pending', orderId: null },
+        // PURGE-FIX-1: la aprobación autoritativa de TX-C también programa la purga de
+        // coordenadas (30 días) en el MISMO commit; el camino idempotente (sourceOutboxId)
+        // retorna antes de escribir — la fecha jamás se extiende ni reinicia.
+        coordinatesPurgeAt: purgeAtFrom(now, req),
         updatedAt: now,
       });
       const job: CoverageResumeJob = {

@@ -238,6 +238,10 @@ async function decidirCobertura(
       status: action === 'approved' ? 'coverage_approved' : 'coverage_rejected',
       decision,
       resume: { status: 'pending', orderId: null },
+      // PURGE-FIX-1: TODA decisión terminal programa la purga de coordenadas (30 días) EN ESTA
+      // MISMA transacción — sin coordenadas (dirección textual) queda null. El retry
+      // already_decided retorna antes de escribir: la fecha jamás se reinicia.
+      coordinatesPurgeAt: purgeAtFrom(now, req),
       updatedAt: now,
     });
     // Outbox 1D — doc-id determinístico = requestId: imposible encolar dos veces (además la
