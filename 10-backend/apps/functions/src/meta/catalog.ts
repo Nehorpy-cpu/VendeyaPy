@@ -1,40 +1,589 @@
 /**
- * meta/catalog.ts — Sincronización del catálogo al Meta Catalog (D4)
- * =================================================================
- * Nuestro panel es la fuente del catálogo; Meta RECIBE los productos. En modo demo
- * marca cada producto activo como `synced` (con su metaProductItemId) y deja un log
- * por envío. La sync real corre en Cloud Functions, nunca en el frontend (ADR-0009).
- * Idempotente.
+ * meta/catalog.ts — Sincronización REAL del catálogo a Meta (META-CATALOG-LIVE-1)
+ * ================================================================================
+ * Reemplaza la sync DEMO (D4). Contrato B:
+ *  - Fuente de verdad: VendeyaPy → Meta. Meta→VendeyaPy solo para descubrimiento/drift.
+ *  - Matching SOLO por retailer_id === SKU único. Coincidencia por nombre = SUGERENCIA
+ *    (bloquea con confirmación pendiente); SKU vacío/duplicado bloquea el producto.
+ *  - Payload SOLO con campos públicos (nombre, descripción pública, precio "N PYG",
+ *    condition new, availability, imagen HTTPS, marca). JAMÁS costo/margen/aiNotes/
+ *    aiFicha/datos de clientes/config bancaria/Coverage.
+ *  - Disponibilidad por stock/ARCHIVED vía availability; NUNCA se borra un item de Meta.
+ *    La palanca de availability funciona AUN con el producto bloqueado para create/update
+ *    (disable mínimo), salvo ambigüedad de identidad (SKU duplicado/ausente).
+ *  - Config fail-closed por tenant (catalogSyncConfig.ts): sin config ⇒ NO sincroniza.
+ *  - dry_run: CERO escrituras en Meta y CERO cambios en products; solo run log + audit.
+ *  - apply: SOLO con mode:'live'; upserts idempotentes vía items_batch (method UPDATE).
+ *    items_batch es ASÍNCRONO en Meta: la verificación relee el catálogo y compara los
+ *    campos públicos — solo lo confirmado queda 'synced'/'disabled'; lo demás 'pending'
+ *    y CONVERGE en el próximo apply (los 'unchanged' con item remoto se re-confirman).
  */
 
 import { Timestamp } from 'firebase-admin/firestore';
 import type { Product, MetaCatalogSyncLog } from '@vpw/shared';
 import { db, paths } from '../lib/firebase.js';
 import { logger } from '../lib/logger.js';
+import { recordAudit } from '../audit/audit.js';
+import { normalizeCatalogSyncConfig, type CatalogSyncMode } from './catalogSyncConfig.js';
+import {
+  getMetaCatalogClientForTenant,
+  MetaCatalogApiError,
+  type CatalogBatchRequest,
+  type MetaCatalogClient,
+  type MetaRemoteCatalogItem,
+} from './catalogClient.js';
 
-const META_CATALOG_ID = 'cat-500'; // activo "catalog" del demo connect (D1)
+const BATCH_CHUNK = 100;
+const MAX_STORED_ENTRIES = 500; // techo del run doc (y de la respuesta al panel)
+const STATE_COMMIT_CHUNK = 200; // docs por commit al persistir meta* (lejos de los techos de Firestore)
 
-export async function syncProductsToMetaDemo(tenantId: string): Promise<{ synced: number }> {
-  const snap = await db().collection(paths.products(tenantId)).get();
-  const products = snap.docs.map((d) => d.data() as Product).filter((p) => p.status === 'ACTIVE');
-  const now = Timestamp.now();
-  const batch = db().batch();
-  let synced = 0;
+// ---------------------------------------------------------------------------
+// Payload público (PURO, testeable): lo ÚNICO que puede viajar a Meta.
+// ---------------------------------------------------------------------------
 
+export type CatalogAvailability = 'in stock' | 'out of stock';
+
+/** Disponibilidad pública: vendible solo si está ACTIVE y con stock (si trackea). */
+export function productAvailability(p: Product): CatalogAvailability {
+  // Optional chaining defensivo: docs históricos podrían no tener inventory completo.
+  const sellable = p.status === 'ACTIVE' && (!p.inventory?.trackStock || (p.inventory?.stock ?? 0) > 0);
+  return sellable ? 'in stock' : 'out of stock';
+}
+
+const firstHttpsImage = (p: Product): string | null => {
+  const img = (p.images ?? []).find((u) => typeof u === 'string' && u.startsWith('https://'));
+  return img ?? null;
+};
+
+/**
+ * Construye el item público para items_batch. PURO: no toca red ni DB.
+ * Precondición: el producto pasó los bloqueos (SKU válido, PYG, precio > 0, imagen HTTPS).
+ * Nota: retailer_id se incluye para identidad/tests; al armar el request de batch se
+ * quita del `data` (viaja en el nivel del request, como pide el formato de Meta).
+ */
+export function buildCatalogItemPayload(p: Product): Record<string, unknown> {
+  const sku = (p.inventory?.sku ?? '').trim();
+  const brand = p.perfume?.brand?.trim();
+  const name = (p.name ?? '').trim();
+  return {
+    retailer_id: sku,
+    name: name.slice(0, 200),
+    description: ((p.description ?? '').trim() || name).slice(0, 5000),
+    // Formato documentado de items_batch: precio como string "N PYG" (PYG sin decimales).
+    price: `${Math.round(p.price)} PYG`,
+    condition: 'new',
+    availability: productAvailability(p),
+    image_url: firstHttpsImage(p) ?? '',
+    ...(brand ? { brand: brand.slice(0, 100) } : {}),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Plan (PURO): diff local vs remoto con matching por retailer_id === SKU.
+// ---------------------------------------------------------------------------
+
+export type CatalogPlanAction = 'create' | 'update' | 'disable' | 'unchanged' | 'blocked';
+export type CatalogBlockReason =
+  | 'sku_missing'
+  | 'sku_duplicated'
+  | 'name_missing'
+  | 'currency_not_pyg'
+  | 'price_invalid'
+  | 'image_not_https'
+  | 'name_conflict_requires_confirmation';
+
+export interface CatalogPlanEntry {
+  productId: string;
+  sku: string;
+  productName: string;
+  action: CatalogPlanAction;
+  blockedReasons?: CatalogBlockReason[];
+  /** Coincidencia por NOMBRE con otro retailer_id: sugerencia, jamás auto-vincula. */
+  suggestion?: { remoteRetailerId: string; remoteName: string };
+  changedFields?: string[];
+  payload?: Record<string, unknown>;
+  remoteItemId?: string | null;
+  note?: string;
+}
+
+export interface CatalogSyncPlan {
+  entries: CatalogPlanEntry[];
+  /** Items que existen en Meta sin producto local con ese SKU. Solo se REPORTAN. */
+  remoteOnly: Array<{ retailerId: string; name: string }>;
+  /** ARCHIVED sin presencia remota (o con SKU reclamado por un producto vivo). */
+  ignoredArchived: number;
+  summary: Record<CatalogPlanAction | 'remoteOnly', number>;
+}
+
+const normName = (s: string) => s.trim().toLowerCase().replace(/\s+/g, ' ');
+const priceDigits = (s: string) => s.replace(/\D+/g, '');
+
+/**
+ * Compara el precio local ("250000 PYG") contra el formateado por Meta ("₲250.000",
+ * "PYG 250,000.00", "USD 250"). Moneda ISO explícita distinta de PYG ⇒ distinto;
+ * decimales finales ",00"/".00" se descartan (PYG no tiene decimales); después,
+ * solo dígitos.
+ */
+export function priceEquals(local: string, remote: string): boolean {
+  const iso = remote.match(/[A-Z]{3}/)?.[0];
+  if (iso && iso !== 'PYG') return false;
+  const remoteDigits = priceDigits(remote.replace(/[.,]00(?!\d)/, ''));
+  const localDigits = priceDigits(local);
+  return localDigits !== '' && remoteDigits === localDigits;
+}
+
+function diffPublicFields(payload: Record<string, unknown>, remote: MetaRemoteCatalogItem): string[] {
+  const changed: string[] = [];
+  if (String(payload.name) !== remote.name) changed.push('name');
+  if (String(payload.description) !== remote.description) changed.push('description');
+  if (String(payload.availability) !== remote.availability) changed.push('availability');
+  if (!priceEquals(String(payload.price), remote.price)) changed.push('price');
+  if (String(payload.image_url) !== remote.imageUrl) changed.push('image_url');
+  const brand = typeof payload.brand === 'string' ? payload.brand : '';
+  if (brand && brand !== remote.brand) changed.push('brand');
+  return changed;
+}
+
+export function planCatalogSync(products: Product[], remoteItems: MetaRemoteCatalogItem[]): CatalogSyncPlan {
+  const remoteByRetailerId = new Map<string, MetaRemoteCatalogItem>();
+  for (const r of remoteItems) if (r.retailerId) remoteByRetailerId.set(r.retailerId, r);
+  const remoteByName = new Map<string, MetaRemoteCatalogItem>();
+  for (const r of remoteItems) if (r.name) remoteByName.set(normName(r.name), r);
+
+  // SOLO productos vivos: un ARCHIVED no debe bloquear el reuso de su SKU
+  // (soft-delete + reemplazo con el mismo SKU es flujo normal del comerciante).
+  const skuCounts = new Map<string, number>();
   for (const p of products) {
-    const itemId = `item-${p.id}`;
-    const isNew = !p.metaProductItemId;
-    batch.set(
-      db().doc(paths.product(tenantId, p.id)),
-      { syncToMeta: true, metaSyncStatus: 'synced', metaCatalogId: META_CATALOG_ID, metaProductItemId: itemId, metaLastSyncAt: now, metaSyncError: '', updatedAt: now },
-      { merge: true },
-    );
-    const log: MetaCatalogSyncLog = { id: `log-${p.id}`, tenantId, productId: p.id, metaCatalogId: META_CATALOG_ID, metaProductItemId: itemId, action: isNew ? 'create' : 'update', status: 'success', errorMessage: '', createdAt: now };
-    batch.set(db().doc(paths.metaCatalogSyncLog(tenantId, log.id)), log);
-    synced++;
+    if (p.status === 'ARCHIVED') continue;
+    const sku = (p.inventory?.sku ?? '').trim();
+    if (sku) skuCounts.set(sku, (skuCounts.get(sku) ?? 0) + 1);
   }
 
-  await batch.commit();
-  logger.info('Catálogo sincronizado a Meta (demo)', { tenantId, synced });
-  return { synced };
+  const entries: CatalogPlanEntry[] = [];
+  let ignoredArchived = 0;
+
+  for (const p of products) {
+    const sku = (p.inventory?.sku ?? '').trim();
+    const remote = sku ? remoteByRetailerId.get(sku) : undefined;
+    const name = (p.name ?? '').trim();
+
+    // ARCHIVED: sin rastro remoto no hay nada que hacer; si un producto VIVO reclama el
+    // mismo SKU, el item remoto le pertenece a ese reemplazo (el archivado se ignora).
+    if (p.status === 'ARCHIVED' && (!remote || (skuCounts.get(sku) ?? 0) > 0)) {
+      ignoredArchived++;
+      continue;
+    }
+
+    const reasons: CatalogBlockReason[] = [];
+    if (!sku) reasons.push('sku_missing');
+    else if ((skuCounts.get(sku) ?? 0) > 1) reasons.push('sku_duplicated');
+    if (!name) reasons.push('name_missing');
+    if (p.currency !== 'PYG') reasons.push('currency_not_pyg');
+    if (!Number.isFinite(p.price) || p.price <= 0) reasons.push('price_invalid');
+    if (!firstHttpsImage(p)) reasons.push('image_not_https');
+    if (reasons.length) {
+      // La palanca de availability NO depende de los campos bloqueados: si el item vive
+      // en Meta y acá dejó de ser vendible, se emite un disable MÍNIMO igual (salvo que
+      // la identidad sea ambigua: SKU ausente o duplicado).
+      const identityOk = !reasons.includes('sku_missing') && !reasons.includes('sku_duplicated');
+      const wantsOut = productAvailability(p) === 'out of stock';
+      if (remote && identityOk && wantsOut && remote.availability !== 'out of stock') {
+        entries.push({
+          productId: p.id,
+          sku,
+          productName: name,
+          action: 'disable',
+          blockedReasons: reasons,
+          changedFields: ['availability'],
+          payload: { retailer_id: sku, availability: 'out of stock' },
+          remoteItemId: remote.id,
+          note: 'disable_minimo_con_bloqueos',
+        });
+        continue;
+      }
+      entries.push({ productId: p.id, sku, productName: name, action: 'blocked', blockedReasons: reasons });
+      continue;
+    }
+
+    const payload = buildCatalogItemPayload(p);
+
+    if (!remote) {
+      // Matching por nombre = solo SUGERENCIA: crear igual duplicaría el item ⇒ bloquea.
+      const nameMatch = remoteByName.get(normName(name));
+      if (nameMatch && nameMatch.retailerId !== sku) {
+        entries.push({
+          productId: p.id,
+          sku,
+          productName: name,
+          action: 'blocked',
+          blockedReasons: ['name_conflict_requires_confirmation'],
+          suggestion: { remoteRetailerId: nameMatch.retailerId, remoteName: nameMatch.name },
+        });
+        continue;
+      }
+      if (payload.availability === 'out of stock') {
+        // No vendible y no existe en Meta: no se crea un item oculto.
+        entries.push({ productId: p.id, sku, productName: name, action: 'unchanged', note: 'no_vendible_sin_item_remoto', remoteItemId: null });
+        continue;
+      }
+      entries.push({ productId: p.id, sku, productName: name, action: 'create', payload, remoteItemId: null });
+      continue;
+    }
+
+    const changed = diffPublicFields(payload, remote);
+    if (!changed.length) {
+      // payload presente: el apply usa availability para confirmar synced/disabled.
+      entries.push({ productId: p.id, sku, productName: name, action: 'unchanged', payload, remoteItemId: remote.id });
+      continue;
+    }
+    const disabling = payload.availability === 'out of stock' && remote.availability !== 'out of stock';
+    entries.push({
+      productId: p.id,
+      sku,
+      productName: name,
+      action: disabling ? 'disable' : 'update',
+      changedFields: changed,
+      payload,
+      remoteItemId: remote.id,
+    });
+  }
+
+  const localSkus = new Set<string>();
+  for (const p of products) {
+    const sku = (p.inventory?.sku ?? '').trim();
+    if (sku) localSkus.add(sku);
+  }
+  const remoteOnly = remoteItems
+    .filter((r) => r.retailerId && !localSkus.has(r.retailerId))
+    .map((r) => ({ retailerId: r.retailerId, name: r.name }));
+
+  const summary: CatalogSyncPlan['summary'] = { create: 0, update: 0, disable: 0, unchanged: 0, blocked: 0, remoteOnly: remoteOnly.length };
+  for (const e of entries) summary[e.action]++;
+
+  return { entries, remoteOnly, ignoredArchived, summary };
+}
+
+// ---------------------------------------------------------------------------
+// Servicio: runCatalogSync(tenantId, { mode }) — dry_run / apply.
+// ---------------------------------------------------------------------------
+
+export interface CatalogSyncActor {
+  uid?: string | null;
+  role?: string | null;
+}
+
+export interface CatalogSyncRunResult {
+  runId: string;
+  requestedMode: 'dry_run' | 'apply';
+  status: 'disabled' | 'apply_blocked' | 'error' | 'planned' | 'applied' | 'partial_failure';
+  configMode: CatalogSyncMode;
+  reason?: 'mode_not_live' | 'missing_token' | 'catalog_unreachable' | 'batch_failed' | 'state_persist_failed';
+  /** Detalle SANEADO (jamás token ni datos internos). */
+  errorDetail?: string;
+  catalogId?: string;
+  summary?: CatalogSyncPlan['summary'];
+  entries?: Array<Pick<CatalogPlanEntry, 'productId' | 'sku' | 'productName' | 'action' | 'blockedReasons' | 'changedFields' | 'suggestion' | 'note'>>;
+  ignoredArchived?: number;
+  appliedCount?: number;
+  failedCount?: number;
+}
+
+const newRunId = () => `mcs_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+
+/** Recorte del plan para persistir/devolver: sin payloads (auditables por producto). */
+function slimEntries(entries: CatalogPlanEntry[]): NonNullable<CatalogSyncRunResult['entries']> {
+  return entries.slice(0, MAX_STORED_ENTRIES).map((e) => ({
+    productId: e.productId,
+    sku: e.sku,
+    productName: e.productName,
+    action: e.action,
+    ...(e.blockedReasons ? { blockedReasons: e.blockedReasons } : {}),
+    ...(e.changedFields ? { changedFields: e.changedFields } : {}),
+    ...(e.suggestion ? { suggestion: e.suggestion } : {}),
+    ...(e.note ? { note: e.note } : {}),
+  }));
+}
+
+async function writeRunDoc(tenantId: string, runId: string, data: Record<string, unknown>): Promise<void> {
+  try {
+    await db()
+      .doc(paths.metaCatalogSyncRun(tenantId, runId))
+      .set({ id: runId, tenantId, ...data }, { merge: true });
+  } catch (e) {
+    logger.error('No se pudo escribir el run de catalog sync', e, { tenantId, runId });
+  }
+}
+
+async function auditRun(tenantId: string, runId: string, result: CatalogSyncRunResult, actor?: CatalogSyncActor): Promise<void> {
+  await recordAudit({
+    tenantId,
+    action: 'meta.catalog_sync',
+    actorUid: actor?.uid ?? null,
+    actorRole: actor?.role ?? null,
+    targetType: 'metaCatalogSyncRun',
+    targetId: runId,
+    summary: `Catalog sync ${result.requestedMode} → ${result.status}`,
+    metadata: {
+      runId,
+      requestedMode: result.requestedMode,
+      configMode: result.configMode,
+      status: result.status,
+      ...(result.reason ? { reason: result.reason } : {}),
+      ...(result.summary ? { counts: result.summary } : {}),
+    },
+  });
+}
+
+/** Persiste ops en commits chunkeados. Devuelve false si algún commit falló. */
+async function commitStateOps(tenantId: string, runId: string, ops: Array<{ path: string; data: Record<string, unknown> }>): Promise<boolean> {
+  for (let i = 0; i < ops.length; i += STATE_COMMIT_CHUNK) {
+    const writer = db().batch();
+    for (const op of ops.slice(i, i + STATE_COMMIT_CHUNK)) writer.set(db().doc(op.path), op.data, { merge: true });
+    try {
+      await writer.commit();
+    } catch (e) {
+      logger.error('No se pudo persistir el estado meta* de los productos', e, { tenantId, runId, desde: i });
+      return false;
+    }
+  }
+  return true;
+}
+
+export async function runCatalogSync(
+  tenantId: string,
+  opts: { mode: 'dry_run' | 'apply'; actor?: CatalogSyncActor },
+): Promise<CatalogSyncRunResult> {
+  const runId = newRunId();
+  const startedAt = Timestamp.now();
+  const actor = opts.actor;
+
+  // 1) Config fail-closed: sin config válida NO se toca Meta (ni siquiera lectura).
+  const cfgDoc = await db().doc(`tenants/${tenantId}/config/meta`).get();
+  const cfg = normalizeCatalogSyncConfig((cfgDoc.data() as { catalogSync?: unknown } | undefined)?.catalogSync);
+  if (!cfg.enabled) {
+    logger.info('Catalog sync desactivada para el tenant', { tenantId, runId });
+    return { runId, requestedMode: opts.mode, status: 'disabled', configMode: 'off' };
+  }
+
+  const base: CatalogSyncRunResult = { runId, requestedMode: opts.mode, status: 'planned', configMode: cfg.mode, catalogId: cfg.catalogId };
+
+  // 2) apply exige mode 'live' explícito en la config (dry_run jamás escala solo).
+  if (opts.mode === 'apply' && cfg.mode !== 'live') {
+    const res: CatalogSyncRunResult = { ...base, status: 'apply_blocked', reason: 'mode_not_live' };
+    await writeRunDoc(tenantId, runId, { status: res.status, requestedMode: opts.mode, configMode: cfg.mode, reason: res.reason, actorUid: actor?.uid ?? null, startedAt, finishedAt: Timestamp.now() });
+    await auditRun(tenantId, runId, res, actor);
+    return res;
+  }
+
+  // 3) Cliente + lecturas remotas (read-only hasta acá, siempre).
+  let client: MetaCatalogClient;
+  try {
+    client = await getMetaCatalogClientForTenant(tenantId);
+  } catch (e) {
+    // SOLO la falta real de token se reporta como missing_token; el resto (Firestore,
+    // SecretStore) va como catalog_unreachable con su detalle saneado.
+    const missingToken = e instanceof MetaCatalogApiError && e.kind === 'missing_token';
+    const res: CatalogSyncRunResult = {
+      ...base,
+      status: 'error',
+      reason: missingToken ? 'missing_token' : 'catalog_unreachable',
+      errorDetail: e instanceof Error ? e.message : 'no se pudo preparar el cliente de Meta',
+    };
+    await writeRunDoc(tenantId, runId, { status: res.status, requestedMode: opts.mode, configMode: cfg.mode, reason: res.reason, errorDetail: res.errorDetail, actorUid: actor?.uid ?? null, startedAt, finishedAt: Timestamp.now() });
+    await auditRun(tenantId, runId, res, actor);
+    return res;
+  }
+
+  let remoteItems: MetaRemoteCatalogItem[];
+  try {
+    await client.getCatalog(cfg.catalogId);
+    remoteItems = await client.listItems(cfg.catalogId);
+  } catch (e) {
+    const detail = e instanceof MetaCatalogApiError ? e.message : 'error consultando Meta';
+    const res: CatalogSyncRunResult = { ...base, status: 'error', reason: 'catalog_unreachable', errorDetail: detail };
+    await writeRunDoc(tenantId, runId, { status: res.status, requestedMode: opts.mode, configMode: cfg.mode, reason: res.reason, errorDetail: detail, actorUid: actor?.uid ?? null, startedAt, finishedAt: Timestamp.now() });
+    await auditRun(tenantId, runId, res, actor);
+    return res;
+  }
+
+  // 4) Plan puro local vs remoto. El id SIEMPRE es el del doc (no confiar en data().id).
+  const snap = await db().collection(paths.products(tenantId)).get();
+  const products = snap.docs.map((d) => ({ ...(d.data() as Product), id: d.id }));
+  const plan = planCatalogSync(products, remoteItems);
+
+  const planned: CatalogSyncRunResult = {
+    ...base,
+    status: 'planned',
+    summary: plan.summary,
+    entries: slimEntries(plan.entries),
+    ignoredArchived: plan.ignoredArchived,
+  };
+  await writeRunDoc(tenantId, runId, {
+    status: 'planned',
+    requestedMode: opts.mode,
+    configMode: cfg.mode,
+    catalogId: cfg.catalogId,
+    summary: plan.summary,
+    ignoredArchived: plan.ignoredArchived,
+    remoteOnly: plan.remoteOnly.slice(0, MAX_STORED_ENTRIES),
+    entries: planned.entries,
+    actorUid: actor?.uid ?? null,
+    startedAt,
+    finishedAt: Timestamp.now(),
+  });
+
+  // 5) dry_run: acá termina. CERO escrituras en Meta y CERO cambios en products.
+  if (opts.mode === 'dry_run') {
+    await auditRun(tenantId, runId, planned, actor);
+    return planned;
+  }
+
+  // 6) apply (config live verificada): upserts idempotentes por chunks. JAMÁS delete.
+  //    El run queda en 'applying' mientras corre (visible si la función muere a mitad).
+  await writeRunDoc(tenantId, runId, { status: 'applying' });
+  const actionable = plan.entries.filter((e) => e.action === 'create' || e.action === 'update' || e.action === 'disable');
+  let batchError: string | undefined;
+  const appliedEntries: CatalogPlanEntry[] = [];
+  const failedEntries: CatalogPlanEntry[] = [];
+  const unprocessedEntries: CatalogPlanEntry[] = [];
+  const handles: string[] = [];
+
+  for (let i = 0; i < actionable.length; i += BATCH_CHUNK) {
+    const chunk = actionable.slice(i, i + BATCH_CHUNK);
+    const requests: CatalogBatchRequest[] = chunk.map((e) => {
+      // retailer_id viaja en el nivel del request (formato items_batch), no en data.
+      const data = { ...(e.payload ?? {}) } as Record<string, unknown>;
+      delete data.retailer_id;
+      return { method: 'UPDATE', retailer_id: e.sku, data };
+    });
+    try {
+      const res = await client.submitItemsBatch(cfg.catalogId, requests);
+      handles.push(...res.handles);
+      appliedEntries.push(...chunk);
+    } catch (e) {
+      batchError = e instanceof MetaCatalogApiError ? e.message : 'items_batch falló';
+      failedEntries.push(...chunk);
+      unprocessedEntries.push(...actionable.slice(i + BATCH_CHUNK));
+      break; // no seguir martillando la API con el resto de los chunks
+    }
+  }
+
+  // 7) Validación por item (best-effort): Meta procesa el batch asíncrono y reporta
+  //    errores por handle. Si el estado aún no está disponible, la verificación por
+  //    diff de abajo mantiene el producto en 'pending' (jamás un 'synced' falso).
+  const itemErrors = new Map<string, string>();
+  for (const h of handles) {
+    try {
+      for (const err of (await client.getBatchStatus(cfg.catalogId, h)).errors) {
+        if (err.retailerId) itemErrors.set(err.retailerId, err.message);
+      }
+    } catch {
+      // best-effort: sin estado del batch, el diff decide pending.
+    }
+  }
+
+  // 8) Verificación honesta: releer Meta y comparar campos públicos. Solo lo que ya
+  //    coincide queda 'synced'/'disabled'; lo demás 'pending' (converge en el próximo apply).
+  let verified = new Map<string, MetaRemoteCatalogItem>();
+  let verifyFailed = false;
+  try {
+    const after = await client.listItems(cfg.catalogId);
+    verified = new Map(after.filter((r) => r.retailerId).map((r) => [r.retailerId, r]));
+  } catch {
+    verifyFailed = true;
+    logger.warn('No se pudo releer el catálogo para verificar; los items quedan pending', { tenantId, runId });
+  }
+
+  // 9) Estado meta* por producto + log por producto (Admin SDK, mismo tenant SIEMPRE).
+  const now = Timestamp.now();
+  const ops: Array<{ path: string; data: Record<string, unknown> }> = [];
+  const pushLog = (e: CatalogPlanEntry, status: 'success' | 'failed', itemId: string | null, errorMessage: string) => {
+    const log: MetaCatalogSyncLog = { id: `${runId}_${e.productId}`, tenantId, productId: e.productId, metaCatalogId: cfg.catalogId, metaProductItemId: itemId, action: e.action, status, errorMessage, createdAt: now };
+    ops.push({ path: paths.metaCatalogSyncLog(tenantId, log.id), data: log as unknown as Record<string, unknown> });
+  };
+
+  let appliedFailed = 0;
+  for (const e of appliedEntries) {
+    const after = verified.get(e.sku);
+    const itemErr = itemErrors.get(e.sku);
+    let metaSyncStatus: string;
+    let errMsg = '';
+    if (itemErr) {
+      metaSyncStatus = 'failed';
+      errMsg = itemErr.slice(0, 500);
+      appliedFailed++;
+    } else if (e.action === 'disable') {
+      metaSyncStatus = after && after.availability === 'out of stock' ? 'disabled' : 'pending';
+    } else {
+      metaSyncStatus = after && e.payload && diffPublicFields(e.payload, after).length === 0 ? 'synced' : 'pending';
+    }
+    const itemId = after?.id ?? e.remoteItemId ?? null;
+    ops.push({
+      path: paths.product(tenantId, e.productId),
+      data: { syncToMeta: true, metaSyncStatus, metaCatalogId: cfg.catalogId, metaProductItemId: itemId, metaLastSyncAt: now, metaSyncError: errMsg, updatedAt: now },
+    });
+    pushLog(e, itemErr ? 'failed' : 'success', itemId, errMsg);
+  }
+  // Convergencia: un 'unchanged' con item remoto está CONFIRMADO en sync ⇒ se refresca su
+  // estado (esto saca de 'pending' a los creados/actualizados en applies anteriores).
+  for (const e of plan.entries) {
+    if (e.action !== 'unchanged' || !e.remoteItemId) continue;
+    const metaSyncStatus = e.payload?.availability === 'out of stock' ? 'disabled' : 'synced';
+    ops.push({
+      path: paths.product(tenantId, e.productId),
+      data: { syncToMeta: true, metaSyncStatus, metaCatalogId: cfg.catalogId, metaProductItemId: e.remoteItemId, metaLastSyncAt: now, metaSyncError: '', updatedAt: now },
+    });
+  }
+  for (const e of failedEntries) {
+    const msg = (batchError ?? 'items_batch falló').slice(0, 500);
+    ops.push({ path: paths.product(tenantId, e.productId), data: { metaSyncStatus: 'failed', metaSyncError: msg, updatedAt: now } });
+    pushLog(e, 'failed', e.remoteItemId ?? null, msg);
+  }
+  for (const e of unprocessedEntries) {
+    const msg = 'no procesado: falló un batch anterior de la misma corrida';
+    ops.push({ path: paths.product(tenantId, e.productId), data: { metaSyncStatus: 'failed', metaSyncError: msg, updatedAt: now } });
+    pushLog(e, 'failed', e.remoteItemId ?? null, msg);
+  }
+  const statePersisted = await commitStateOps(tenantId, runId, ops);
+
+  const failedTotal = failedEntries.length + unprocessedEntries.length + appliedFailed;
+  const appliedOk = appliedEntries.length - appliedFailed;
+  const finalStatus: CatalogSyncRunResult['status'] = failedTotal > 0 || !statePersisted ? 'partial_failure' : 'applied';
+  const reason: CatalogSyncRunResult['reason'] | undefined = !statePersisted
+    ? 'state_persist_failed'
+    : batchError || appliedFailed
+      ? 'batch_failed'
+      : undefined;
+  const errorDetail = !statePersisted
+    ? 'los cambios llegaron a Meta pero no se pudo guardar el estado meta* de los productos'
+    : batchError;
+
+  const result: CatalogSyncRunResult = {
+    ...planned,
+    status: finalStatus,
+    appliedCount: appliedOk,
+    failedCount: failedTotal,
+    ...(reason ? { reason } : {}),
+    ...(errorDetail ? { errorDetail } : {}),
+  };
+  await writeRunDoc(tenantId, runId, {
+    status: finalStatus,
+    appliedCount: appliedOk,
+    failedCount: failedTotal,
+    verifyFailed,
+    batchHandles: handles.slice(0, 50),
+    ...(errorDetail ? { errorDetail } : {}),
+    finishedAt: Timestamp.now(),
+  });
+  // lastSuccessfulSyncAt SOLO si todo se aplicó y el estado quedó persistido.
+  if (finalStatus === 'applied') {
+    try {
+      await db().doc(`tenants/${tenantId}/config/meta`).set({ catalogSync: { lastSuccessfulSyncAt: now } }, { merge: true });
+    } catch {
+      logger.warn('No se pudo actualizar lastSuccessfulSyncAt', { tenantId, runId });
+    }
+  }
+  await auditRun(tenantId, runId, result, actor);
+  logger.info('Catalog sync aplicada', { tenantId, runId, applied: appliedOk, failed: failedTotal });
+  return result;
 }

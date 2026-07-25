@@ -13,6 +13,7 @@ import {
   deleteProduct,
   productMargin,
   syncCatalogToMeta,
+  type CatalogSyncRun,
   type ProductInput,
 } from '@/lib/catalog';
 import { ProductForm } from '@/components/ProductForm';
@@ -61,7 +62,19 @@ export default function CatalogPage() {
       setConfirmDelete(null);
     },
   });
-  const syncMut = useMutation({ mutationFn: () => syncCatalogToMeta(tenantId!), onSuccess: () => qc.invalidateQueries({ queryKey: ['products', tenantId] }) });
+  // META-CATALOG-LIVE-1: el botón corre SIEMPRE un dry-run (plan sin escrituras en Meta).
+  // "Aplicar" solo aparece si el backend confirma config en modo live, y con confirmación.
+  const [syncRun, setSyncRun] = useState<CatalogSyncRun | null>(null);
+  const [confirmApply, setConfirmApply] = useState(false);
+  const syncMut = useMutation({
+    mutationFn: (apply: boolean) => syncCatalogToMeta(tenantId!, { apply }),
+    onSuccess: (run) => {
+      setSyncRun(run);
+      setConfirmApply(false);
+      if (run.requestedMode === 'apply') qc.invalidateQueries({ queryKey: ['products', tenantId] });
+    },
+    onError: () => setConfirmApply(false),
+  });
 
   // Ocultamos los productos dados de baja (status ARCHIVED, por el soft-delete del callable).
   const activeProducts = useMemo(
@@ -94,8 +107,8 @@ export default function CatalogPage() {
           <p className="mt-1 text-sm text-ink-500">Tus productos, precios y stock. El bot ofrece lo que esté activo acá.</p>
         </div>
         <div className="flex gap-2">
-          <button onClick={() => syncMut.mutate()} disabled={syncMut.isPending} className="inline-flex items-center gap-1.5 rounded-lg border border-ink-200 px-3 py-2 text-sm font-medium text-ink-700 transition-colors hover:bg-ink-50 disabled:opacity-50">
-            {syncMut.isPending ? 'Sincronizando…' : 'Sincronizar a Meta'}
+          <button onClick={() => syncMut.mutate(false)} disabled={syncMut.isPending} className="inline-flex items-center gap-1.5 rounded-lg border border-ink-200 px-3 py-2 text-sm font-medium text-ink-700 transition-colors hover:bg-ink-50 disabled:opacity-50">
+            {syncMut.isPending ? 'Analizando…' : 'Sincronizar a Meta'}
           </button>
           <button onClick={() => setEditing(null)} className="rounded-lg bg-mint-600 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-mint-700">
             + Nuevo producto
@@ -103,10 +116,117 @@ export default function CatalogPage() {
         </div>
       </div>
 
+      {(syncMut.isError || syncRun) && (
+        <div role="status" aria-live="polite" className="rounded-2xl border border-ink-100 bg-white p-4 shadow-soft">
+          {syncMut.isError ? (
+            <p className="rounded-lg bg-coral-50 px-3 py-2 text-sm text-coral-700">
+              No se pudo correr la sincronización: {errMsg(syncMut.error)}
+            </p>
+          ) : syncRun ? (
+            <div className="space-y-3 text-sm">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <h2 className="font-semibold text-ink-900">{syncTitle(syncRun)}</h2>
+                <button
+                  onClick={() => { setSyncRun(null); setConfirmApply(false); }}
+                  className="text-xs font-medium text-ink-400 transition-colors hover:text-ink-600"
+                >
+                  Cerrar
+                </button>
+              </div>
+
+              {syncRun.status === 'disabled' && (
+                <p className="text-ink-600">
+                  Esta empresa no tiene habilitada la sincronización de catálogo con Meta. Se habilita por configuración de la plataforma.
+                </p>
+              )}
+              {syncRun.status === 'apply_blocked' && (
+                <p className="text-ink-600">
+                  La configuración está en modo <span className="font-semibold">{syncRun.configMode}</span>: aplicar cambios reales en Meta requiere el modo <span className="font-semibold">live</span>.
+                </p>
+              )}
+              {syncRun.status === 'error' && (
+                <p className="rounded-lg bg-coral-50 px-3 py-2 text-coral-700">{syncErrorText(syncRun)}</p>
+              )}
+
+              {syncRun.summary && (
+                <div className="flex flex-wrap gap-2 text-xs">
+                  <SyncChip label="Crear" n={syncRun.summary.create} tone="mint" />
+                  <SyncChip label="Actualizar" n={syncRun.summary.update} tone="mint" />
+                  <SyncChip label="Deshabilitar" n={syncRun.summary.disable} tone="amber" />
+                  <SyncChip label="Sin cambios" n={syncRun.summary.unchanged} tone="ink" />
+                  <SyncChip label="Bloqueados" n={syncRun.summary.blocked} tone="coral" />
+                  <SyncChip label="Solo en Meta" n={syncRun.summary.remoteOnly} tone="ink" />
+                </div>
+              )}
+
+              {(syncRun.entries ?? []).some((e) => e.action === 'blocked') && (
+                <ul className="space-y-1 rounded-lg bg-coral-50/60 px-3 py-2 text-xs text-coral-800">
+                  {(syncRun.entries ?? [])
+                    .filter((e) => e.action === 'blocked')
+                    .map((e) => (
+                      <li key={e.productId}>
+                        <span className="font-medium">{e.productName}</span>
+                        {e.sku ? ` (SKU ${e.sku})` : ''}: {(e.blockedReasons ?? []).map(blockReasonLabel).join(', ')}
+                        {e.suggestion && (
+                          <> — en Meta existe “{e.suggestion.remoteName}” con SKU {e.suggestion.remoteRetailerId}; verificá el SKU antes de sincronizar.</>
+                        )}
+                      </li>
+                    ))}
+                </ul>
+              )}
+
+              {(syncRun.status === 'applied' || syncRun.status === 'partial_failure') && (
+                <p className={syncRun.status === 'applied' ? 'text-mint-700' : 'text-coral-700'}>
+                  Aplicados: {syncRun.appliedCount ?? 0} · Fallidos: {syncRun.failedCount ?? 0}
+                  {syncRun.errorDetail ? ` — ${syncRun.errorDetail}` : ''}
+                </p>
+              )}
+
+              {syncRun.status === 'planned' && (
+                <div className="flex flex-wrap items-center gap-3 border-t border-ink-100 pt-3">
+                  {syncRun.configMode === 'live' ? (
+                    confirmApply ? (
+                      <>
+                        <span className="text-xs text-ink-600">¿Aplicar estos cambios al catálogo real de Meta?</span>
+                        <button
+                          onClick={() => syncMut.mutate(true)}
+                          disabled={syncMut.isPending}
+                          className="rounded-lg bg-mint-600 px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-mint-700 disabled:opacity-60"
+                        >
+                          {syncMut.isPending ? 'Aplicando…' : 'Sí, aplicar a Meta'}
+                        </button>
+                        <button
+                          onClick={() => setConfirmApply(false)}
+                          className="rounded-lg border border-ink-200 px-3 py-1.5 text-xs font-medium text-ink-700 transition-colors hover:bg-ink-50"
+                        >
+                          Cancelar
+                        </button>
+                      </>
+                    ) : (
+                      <button
+                        onClick={() => setConfirmApply(true)}
+                        className="rounded-lg border border-mint-600 px-3 py-1.5 text-xs font-semibold text-mint-700 transition-colors hover:bg-mint-50"
+                      >
+                        Aplicar a Meta…
+                      </button>
+                    )
+                  ) : (
+                    <p className="text-xs text-ink-400">
+                      Modo dry-run: este análisis no escribió nada en Meta. Para aplicar cambios reales, la plataforma debe activar el modo live.
+                    </p>
+                  )}
+                </div>
+              )}
+            </div>
+          ) : null}
+        </div>
+      )}
+
       <div className="flex flex-wrap items-center gap-3">
         <input
           value={search}
           onChange={(e) => setSearch(e.target.value)}
+          aria-label="Buscar productos por nombre o marca"
           placeholder="Buscar por nombre o marca…"
           className="w-full max-w-sm rounded-lg border border-ink-200 px-3 py-2 text-sm text-ink-800 transition-colors focus:border-mint-500 focus:outline-none focus:ring-2 focus:ring-mint-500/30"
         />
@@ -196,9 +316,17 @@ export default function CatalogPage() {
                       </span>
                     </td>
                     <td className="px-4 py-3">
-                      {p.metaSyncStatus === 'synced'
-                        ? <span className="inline-flex rounded-full bg-mint-50 px-2 py-0.5 text-xs font-semibold text-mint-700">Sincronizado</span>
-                        : <span className="text-xs text-ink-400">—</span>}
+                      {p.metaSyncStatus === 'synced' ? (
+                        <span className="inline-flex rounded-full bg-mint-50 px-2 py-0.5 text-xs font-semibold text-mint-700">Sincronizado</span>
+                      ) : p.metaSyncStatus === 'pending' ? (
+                        <span className="inline-flex rounded-full bg-amber-50 px-2 py-0.5 text-xs font-semibold text-amber-700">Pendiente</span>
+                      ) : p.metaSyncStatus === 'failed' ? (
+                        <span title={p.metaSyncError || undefined} className="inline-flex rounded-full bg-coral-50 px-2 py-0.5 text-xs font-semibold text-coral-600">Falló</span>
+                      ) : p.metaSyncStatus === 'disabled' ? (
+                        <span className="inline-flex rounded-full bg-ink-50 px-2 py-0.5 text-xs font-semibold text-ink-500">Oculto</span>
+                      ) : (
+                        <span className="text-xs text-ink-400">—</span>
+                      )}
                     </td>
                     <td className="px-4 py-3 text-right">
                       <button onClick={() => setEditing(p)} className="mr-3 font-medium text-mint-700 hover:text-mint-600">Editar</button>
@@ -227,8 +355,8 @@ export default function CatalogPage() {
 
       {confirmDelete && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink-950/40 p-4" onClick={() => setConfirmDelete(null)}>
-          <div className="w-full max-w-sm rounded-2xl border border-ink-100 bg-white p-6 shadow-float" onClick={(e) => e.stopPropagation()}>
-            <h3 className="text-base font-semibold text-ink-900">¿Dar de baja el producto?</h3>
+          <div role="dialog" aria-modal="true" aria-labelledby="confirm-delete-title" className="w-full max-w-sm rounded-2xl border border-ink-100 bg-white p-6 shadow-float" onClick={(e) => e.stopPropagation()}>
+            <h3 id="confirm-delete-title" className="text-base font-semibold text-ink-900">¿Dar de baja el producto?</h3>
             <p className="mt-2 text-sm text-ink-600">
               <span className="font-medium text-ink-800">{confirmDelete.name}</span> se va a archivar: deja de mostrarse en el catálogo y al bot, pero se conservan sus pedidos y su costo. Podés reactivarlo editándolo y poniéndolo en ACTIVE.
             </p>
@@ -258,4 +386,50 @@ export default function CatalogPage() {
 function errMsg(e: unknown): string {
   const m = (e as { message?: string } | null)?.message;
   return m && m.trim() ? m : 'No se pudo completar la operación. Revisá tus permisos o tu plan.';
+}
+
+// --- Presentación del resultado de la sync de catálogo (META-CATALOG-LIVE-1) ---
+
+function syncTitle(run: CatalogSyncRun): string {
+  switch (run.status) {
+    case 'disabled': return 'Sincronización con Meta desactivada';
+    case 'apply_blocked': return 'Aplicación bloqueada';
+    case 'error': return 'Error al consultar Meta';
+    case 'planned': return 'Dry-run del catálogo (sin escrituras en Meta)';
+    case 'applied': return 'Cambios aplicados en Meta';
+    case 'partial_failure': return 'Aplicación parcial (con fallas)';
+  }
+}
+
+function syncErrorText(run: CatalogSyncRun): string {
+  if (run.reason === 'missing_token') return 'No hay conexión con Meta configurada para esta empresa (falta el token).';
+  if (run.reason === 'catalog_unreachable') return `No se pudo acceder al catálogo en Meta. ${run.errorDetail ?? ''}`.trim();
+  return run.errorDetail ?? 'Error desconocido.';
+}
+
+function blockReasonLabel(r: string): string {
+  switch (r) {
+    case 'sku_missing': return 'sin SKU';
+    case 'sku_duplicated': return 'SKU duplicado';
+    case 'name_missing': return 'sin nombre';
+    case 'currency_not_pyg': return 'la moneda no es PYG';
+    case 'price_invalid': return 'precio inválido';
+    case 'image_not_https': return 'sin imagen HTTPS';
+    case 'name_conflict_requires_confirmation': return 'coincide por nombre con un item de Meta (requiere confirmación)';
+    default: return r;
+  }
+}
+
+function SyncChip({ label, n, tone }: { label: string; n: number; tone: 'mint' | 'amber' | 'coral' | 'ink' }) {
+  const tones: Record<string, string> = {
+    mint: 'bg-mint-50 text-mint-700',
+    amber: 'bg-amber-50 text-amber-700',
+    coral: 'bg-coral-50 text-coral-600',
+    ink: 'bg-ink-50 text-ink-500',
+  };
+  return (
+    <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 font-semibold ${n > 0 ? tones[tone] : 'bg-ink-50 text-ink-400'}`}>
+      {label}: {n}
+    </span>
+  );
 }

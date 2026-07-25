@@ -27,8 +27,10 @@ function authorizeTenant(req: CallableRequest<unknown>, requestedTenantId?: stri
   return result.tenantId;
 }
 
+// timeoutSeconds: la sync de catálogo (META-CATALOG-LIVE-1) lee Meta paginado con
+// retries + Retry-After y verifica releyendo: el default de 60s puede cortarla a mitad.
 export const runTenantJob = onCall<{ action?: string; tenantId?: string }>(
-  { region: 'us-central1' },
+  { region: 'us-central1', timeoutSeconds: 300 },
   async (req) => {
     const action = req.data?.action;
     if (!action || !isPanelJobAction(action)) {
@@ -40,7 +42,9 @@ export const runTenantJob = onCall<{ action?: string; tenantId?: string }>(
     if (jobReq.feature) await assertFeatureEnabled(tenantId, jobReq.feature, { actorUid: req.auth?.uid });
     if (jobReq.quota === 'adSyncs') await assertWithinLimit(tenantId, 'adSyncs', { actorUid: req.auth?.uid });
     try {
-      const result = await runPanelJob(action, tenantId);
+      // El actor va a la auditoría del job (quién disparó la acción, con qué rol).
+      const actorRole = (req.auth?.token as { role?: string } | undefined)?.role ?? null;
+      const result = await runPanelJob(action, tenantId, { uid: req.auth?.uid ?? null, role: actorRole });
       await meterUsage(tenantId, jobReq.meter).catch(() => { /* metering no crítico */ });
       logger.info('Panel job ejecutado', { tenantId, action });
       return { ok: true, action, tenantId, result };

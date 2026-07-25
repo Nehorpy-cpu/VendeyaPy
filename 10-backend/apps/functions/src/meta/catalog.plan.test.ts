@@ -1,0 +1,278 @@
+import { describe, it, expect } from 'vitest';
+import type { Product } from '@vpw/shared';
+import { buildCatalogItemPayload, planCatalogSync, priceEquals, productAvailability } from './catalog.js';
+import type { MetaRemoteCatalogItem } from './catalogClient.js';
+
+/**
+ * META-CATALOG-LIVE-1 — plan y payload PUROS:
+ *  - payload solo con campos públicos (jamás costo/margen/aiNotes/aiFicha);
+ *  - matching SOLO por retailer_id === SKU; nombre = sugerencia que BLOQUEA;
+ *  - SKU vacío/duplicado, moneda ≠ PYG, precio inválido e imagen no-HTTPS bloquean;
+ *  - disponibilidad por stock/ARCHIVED; jamás una acción 'delete'.
+ */
+
+const TS = { seconds: 0, nanoseconds: 0 } as unknown as Product['createdAt'];
+
+const prod = (over: Partial<Product> & { id: string }): Product =>
+  ({
+    tenantId: 't1',
+    name: 'Perfume A',
+    description: 'Descripción pública',
+    price: 250000,
+    compareAtPrice: null,
+    aiNotes: 'NOTA-INTERNA-DE-VENTA',
+    currency: 'PYG',
+    categoryId: 'c1',
+    images: ['https://cdn.example.com/a.jpg'],
+    emoji: '🌸',
+    inventory: { trackStock: true, stock: 5, lowStockThreshold: 1, sku: 'SKU-A' },
+    status: 'ACTIVE',
+    featured: false,
+    position: 0,
+    externalIds: { facebook: null, instagram: null, tiktok: null },
+    perfume: null,
+    aiFicha: { cuandoRecomendar: 'FICHA-INTERNA' },
+    createdAt: TS,
+    updatedAt: TS,
+    ...over,
+  }) as Product;
+
+const remote = (over: Partial<MetaRemoteCatalogItem> = {}): MetaRemoteCatalogItem => ({
+  id: 'itm-1',
+  retailerId: 'SKU-A',
+  name: 'Perfume A',
+  description: 'Descripción pública',
+  availability: 'in stock',
+  price: '₲250.000',
+  imageUrl: 'https://cdn.example.com/a.jpg',
+  brand: '',
+  ...over,
+});
+
+describe('buildCatalogItemPayload (solo campos públicos)', () => {
+  it('contiene EXACTAMENTE los campos públicos permitidos, con precio "N PYG" y condition new', () => {
+    const payload = buildCatalogItemPayload(prod({ id: 'p1' }));
+    expect(Object.keys(payload).sort()).toEqual(['availability', 'condition', 'description', 'image_url', 'name', 'price', 'retailer_id']);
+    expect(payload).toMatchObject({
+      retailer_id: 'SKU-A',
+      name: 'Perfume A',
+      description: 'Descripción pública',
+      price: '250000 PYG',
+      condition: 'new',
+      availability: 'in stock',
+      image_url: 'https://cdn.example.com/a.jpg',
+    });
+  });
+
+  it('agrega brand solo si el producto tiene marca', () => {
+    const payload = buildCatalogItemPayload(prod({ id: 'p1', perfume: { brand: 'Armaf' } as Product['perfume'] }));
+    expect(payload.brand).toBe('Armaf');
+  });
+
+  it('JAMÁS filtra datos internos: ni aiNotes, ni aiFicha, ni costo/margen', () => {
+    const payload = buildCatalogItemPayload(prod({ id: 'p1' }));
+    const json = JSON.stringify(payload);
+    expect(json).not.toContain('NOTA-INTERNA');
+    expect(json).not.toContain('FICHA-INTERNA');
+    expect(json).not.toMatch(/aiNotes|aiFicha|cost|margin|costPrice/i);
+  });
+
+  it('disponibilidad: ACTIVE+stock ⇒ in stock; sin stock / INACTIVE / ARCHIVED ⇒ out of stock', () => {
+    expect(productAvailability(prod({ id: 'p1' }))).toBe('in stock');
+    expect(productAvailability(prod({ id: 'p2', inventory: { trackStock: true, stock: 0, lowStockThreshold: 1, sku: 'S' } }))).toBe('out of stock');
+    expect(productAvailability(prod({ id: 'p3', status: 'INACTIVE' }))).toBe('out of stock');
+    expect(productAvailability(prod({ id: 'p4', status: 'ARCHIVED' }))).toBe('out of stock');
+    // Sin tracking de stock, ACTIVE alcanza.
+    expect(productAvailability(prod({ id: 'p5', inventory: { trackStock: false, stock: 0, lowStockThreshold: 1, sku: 'S' } }))).toBe('in stock');
+  });
+});
+
+describe('priceEquals (formateo de Meta)', () => {
+  it.each([
+    ['símbolo y puntos de miles', '250000 PYG', '₲250.000', true],
+    ['ISO con comas', '250000 PYG', 'PYG 250,000', true],
+    ['decimales .00 finales', '250000 PYG', 'PYG 250,000.00', true],
+    ['decimales ,00 finales', '2500 PYG', '₲ 2.500,00', true],
+    ['moneda distinta con mismos dígitos', '250000 PYG', 'USD 250,000', false],
+    ['monto distinto', '250000 PYG', '₲250.001', false],
+    ['remoto vacío', '250000 PYG', '', false],
+  ])('%s → %s', (_label, local, remoteStr, expected) => {
+    expect(priceEquals(local, remoteStr)).toBe(expected);
+  });
+});
+
+describe('planCatalogSync — matching y bloqueos', () => {
+  it('producto nuevo válido sin item remoto ⇒ create con payload', () => {
+    const plan = planCatalogSync([prod({ id: 'p1' })], []);
+    expect(plan.entries).toHaveLength(1);
+    expect(plan.entries[0]).toMatchObject({ productId: 'p1', action: 'create', sku: 'SKU-A' });
+    expect(plan.entries[0].payload).toBeDefined();
+    expect(plan.summary.create).toBe(1);
+  });
+
+  it('matching por retailer_id: remoto idéntico ⇒ unchanged (idempotencia del dry-run)', () => {
+    const plan = planCatalogSync([prod({ id: 'p1' })], [remote()]);
+    expect(plan.entries[0].action).toBe('unchanged');
+    expect(plan.entries[0].remoteItemId).toBe('itm-1');
+  });
+
+  it('el precio se compara pese al formateo de Meta', () => {
+    const plan = planCatalogSync([prod({ id: 'p1' })], [remote({ price: 'PYG 250,000' })]);
+    expect(plan.entries[0].action).toBe('unchanged');
+  });
+
+  it('decimales ",00"/".00" del formateo remoto no generan updates perpetuos', () => {
+    const plan = planCatalogSync([prod({ id: 'p1' })], [remote({ price: 'PYG 250,000.00' })]);
+    expect(plan.entries[0].action).toBe('unchanged');
+  });
+
+  it('moneda remota distinta de PYG ⇒ update (corrige el drift aunque los dígitos coincidan)', () => {
+    const plan = planCatalogSync([prod({ id: 'p1' })], [remote({ price: 'USD 250,000' })]);
+    expect(plan.entries[0].action).toBe('update');
+    expect(plan.entries[0].changedFields).toContain('price');
+  });
+
+  it('difiere un campo público ⇒ update con changedFields', () => {
+    const plan = planCatalogSync([prod({ id: 'p1' })], [remote({ description: 'vieja' })]);
+    expect(plan.entries[0].action).toBe('update');
+    expect(plan.entries[0].changedFields).toEqual(['description']);
+  });
+
+  it('sin stock con item remoto visible ⇒ disable (availability out of stock), jamás delete', () => {
+    const plan = planCatalogSync(
+      [prod({ id: 'p1', inventory: { trackStock: true, stock: 0, lowStockThreshold: 1, sku: 'SKU-A' } })],
+      [remote()],
+    );
+    expect(plan.entries[0].action).toBe('disable');
+    expect(plan.entries[0].payload?.availability).toBe('out of stock');
+  });
+
+  it('ARCHIVED con item remoto ⇒ disable; ARCHIVED sin item remoto ⇒ se ignora', () => {
+    const conRemoto = planCatalogSync([prod({ id: 'p1', status: 'ARCHIVED' })], [remote()]);
+    expect(conRemoto.entries[0].action).toBe('disable');
+    const sinRemoto = planCatalogSync([prod({ id: 'p1', status: 'ARCHIVED' })], []);
+    expect(sinRemoto.entries).toHaveLength(0);
+    expect(sinRemoto.ignoredArchived).toBe(1);
+  });
+
+  it('un ARCHIVED no bloquea el reuso de su SKU: soft-delete + reemplazo es flujo normal', () => {
+    const plan = planCatalogSync(
+      [prod({ id: 'viejo', status: 'ARCHIVED' }), prod({ id: 'nuevo', name: 'Perfume A v2' })],
+      [],
+    );
+    expect(plan.ignoredArchived).toBe(1);
+    expect(plan.entries).toHaveLength(1);
+    expect(plan.entries[0]).toMatchObject({ productId: 'nuevo', action: 'create' });
+    expect(plan.entries[0].blockedReasons).toBeUndefined();
+  });
+
+  it('ARCHIVED con remoto pero SKU reclamado por un producto vivo ⇒ el item es del reemplazo', () => {
+    const plan = planCatalogSync(
+      [prod({ id: 'viejo', status: 'ARCHIVED' }), prod({ id: 'nuevo', name: 'Perfume A v2' })],
+      [remote()],
+    );
+    expect(plan.ignoredArchived).toBe(1);
+    const nuevo = plan.entries.find((e) => e.productId === 'nuevo');
+    expect(nuevo?.action).toBe('update'); // difiere el nombre; identidad por SKU intacta
+  });
+
+  it('producto BLOQUEADO (precio inválido) con item remoto visible y sin stock ⇒ disable MÍNIMO igual', () => {
+    const p = prod({ id: 'p1', price: 0, inventory: { trackStock: true, stock: 0, lowStockThreshold: 1, sku: 'SKU-A' } });
+    const plan = planCatalogSync([p], [remote()]);
+    expect(plan.entries[0].action).toBe('disable');
+    expect(plan.entries[0].blockedReasons).toContain('price_invalid');
+    // payload mínimo: solo la palanca de availability (nada de los campos bloqueados)
+    expect(plan.entries[0].payload).toEqual({ retailer_id: 'SKU-A', availability: 'out of stock' });
+  });
+
+  it('SKU duplicado con remoto y sin stock ⇒ NO hay disable (identidad ambigua): sigue blocked', () => {
+    const plan = planCatalogSync(
+      [
+        prod({ id: 'p1', inventory: { trackStock: true, stock: 0, lowStockThreshold: 1, sku: 'SKU-A' } }),
+        prod({ id: 'p2', name: 'Perfume B' }),
+      ],
+      [remote()],
+    );
+    expect(plan.entries.map((e) => e.action)).toEqual(['blocked', 'blocked']);
+  });
+
+  it('nombre vacío bloquea (name_missing)', () => {
+    const plan = planCatalogSync([prod({ id: 'p1', name: '   ' })], []);
+    expect(plan.entries[0].blockedReasons).toContain('name_missing');
+  });
+
+  it('unchanged con remoto lleva payload (lo usa la convergencia del apply)', () => {
+    const plan = planCatalogSync([prod({ id: 'p1' })], [remote()]);
+    expect(plan.entries[0].action).toBe('unchanged');
+    expect(plan.entries[0].payload).toBeDefined();
+  });
+
+  it('no vendible y sin item remoto ⇒ NO se crea un item oculto', () => {
+    const plan = planCatalogSync([prod({ id: 'p1', inventory: { trackStock: true, stock: 0, lowStockThreshold: 1, sku: 'SKU-A' } })], []);
+    expect(plan.entries[0].action).toBe('unchanged');
+    expect(plan.entries[0].note).toBe('no_vendible_sin_item_remoto');
+    expect(plan.summary.create).toBe(0);
+  });
+
+  it('SKU vacío bloquea', () => {
+    const plan = planCatalogSync([prod({ id: 'p1', inventory: { trackStock: true, stock: 5, lowStockThreshold: 1, sku: '  ' } })], []);
+    expect(plan.entries[0].action).toBe('blocked');
+    expect(plan.entries[0].blockedReasons).toContain('sku_missing');
+  });
+
+  it('SKU duplicado bloquea a TODOS los que lo comparten', () => {
+    const plan = planCatalogSync([prod({ id: 'p1' }), prod({ id: 'p2', name: 'Perfume B' })], []);
+    expect(plan.entries.map((e) => e.action)).toEqual(['blocked', 'blocked']);
+    expect(plan.entries[0].blockedReasons).toContain('sku_duplicated');
+    expect(plan.entries[1].blockedReasons).toContain('sku_duplicated');
+  });
+
+  it('moneda distinta de PYG bloquea', () => {
+    const plan = planCatalogSync([prod({ id: 'p1', currency: 'USD' as Product['currency'] })], []);
+    expect(plan.entries[0].blockedReasons).toContain('currency_not_pyg');
+  });
+
+  it('precio inválido (0 / negativo / NaN) bloquea', () => {
+    for (const price of [0, -100, Number.NaN]) {
+      const plan = planCatalogSync([prod({ id: 'p1', price })], []);
+      expect(plan.entries[0].blockedReasons).toContain('price_invalid');
+    }
+  });
+
+  it('imagen no-HTTPS (o sin imagen) bloquea', () => {
+    const http = planCatalogSync([prod({ id: 'p1', images: ['http://inseguro.com/a.jpg'] })], []);
+    expect(http.entries[0].blockedReasons).toContain('image_not_https');
+    const sin = planCatalogSync([prod({ id: 'p1', images: [] })], []);
+    expect(sin.entries[0].blockedReasons).toContain('image_not_https');
+  });
+
+  it('coincidencia por NOMBRE con otro retailer_id ⇒ BLOQUEA con sugerencia (jamás auto-vincula ni crea duplicado)', () => {
+    const plan = planCatalogSync(
+      [prod({ id: 'p1', name: '  perfume  A ' })],
+      [remote({ retailerId: 'OTRO-SKU', name: 'Perfume A' })],
+    );
+    expect(plan.entries[0].action).toBe('blocked');
+    expect(plan.entries[0].blockedReasons).toEqual(['name_conflict_requires_confirmation']);
+    expect(plan.entries[0].suggestion).toEqual({ remoteRetailerId: 'OTRO-SKU', remoteName: 'Perfume A' });
+    expect(plan.summary.create).toBe(0);
+  });
+
+  it('items remotos sin producto local ⇒ remoteOnly (solo reporte, nunca delete)', () => {
+    const plan = planCatalogSync([prod({ id: 'p1' })], [remote(), remote({ id: 'itm-9', retailerId: 'HUERFANO', name: 'Viejo' })]);
+    expect(plan.remoteOnly).toEqual([{ retailerId: 'HUERFANO', name: 'Viejo' }]);
+    const acciones = new Set(plan.entries.map((e) => e.action));
+    expect([...acciones].every((a) => ['create', 'update', 'disable', 'unchanged', 'blocked'].includes(a))).toBe(true);
+  });
+
+  it('summary consistente con las entradas', () => {
+    const plan = planCatalogSync(
+      [
+        prod({ id: 'p1' }), // unchanged (remoto idéntico)
+        prod({ id: 'p2', name: 'Perfume B', inventory: { trackStock: true, stock: 3, lowStockThreshold: 1, sku: 'SKU-B' } }), // create
+        prod({ id: 'p3', name: 'Perfume C', inventory: { trackStock: true, stock: 3, lowStockThreshold: 1, sku: '' } }), // blocked
+      ],
+      [remote(), remote({ id: 'itm-9', retailerId: 'HUERFANO', name: 'Viejo' })],
+    );
+    expect(plan.summary).toEqual({ create: 1, update: 0, disable: 0, unchanged: 1, blocked: 1, remoteOnly: 1 });
+  });
+});

@@ -332,6 +332,7 @@ export const TENANT_JOB_ACTIONS = [
   'metaAdsSync',
   'computeAttribution',
   'catalogSync',
+  'catalogSyncApply',
   'generateFollowups',
   'generateAudits',
   'computeTracking',

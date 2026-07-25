@@ -91,7 +91,17 @@ await post('devGenerateInsights'); // incluye promos + reactivación + sin respo
 // Meta (demo): conexión + anuncios + catálogo + atribución
 await post('devMetaConnect');
 await post('devSyncMetaAds');
-await post('devSyncCatalogToMeta');
+// META-CATALOG-LIVE-1: la sync real exige config catalogSync por tenant (fail-closed) y
+// jamás inventa estado. Para la DEMO, el badge "Sincronizado" se sella directo acá
+// (equivalente al viejo demo sync, sin pasar por el camino de producción).
+{
+  const prodSnap = await db.collection(`tenants/${T}/products`).get();
+  const metaBatch = db.batch();
+  for (const d of prodSnap.docs) {
+    metaBatch.set(d.ref, { syncToMeta: true, metaSyncStatus: 'synced', metaCatalogId: 'cat-500', metaProductItemId: `item-${d.id}`, metaLastSyncAt: now, metaSyncError: '' }, { merge: true });
+  }
+  await metaBatch.commit();
+}
 await post('devComputeAttribution');
 await post('devComputeTracking');
 await post('devProcessConversions');

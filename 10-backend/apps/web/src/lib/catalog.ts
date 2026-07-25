@@ -116,12 +116,49 @@ export function productMargin(price: number, costPrice: number | null): number |
   return ((price - costPrice) / price) * 100;
 }
 
-const API = process.env['NEXT_PUBLIC_API_BASE_URL'] ?? 'http://localhost:5001/demo-aiafg/us-central1';
+// --- Sincronización con el Meta Catalog (META-CATALOG-LIVE-1) ---------------
+// Va por el callable autenticado `runTenantJob` (Owner/Manager/PLATFORM_ADMIN;
+// Seller denegado por resolvePanelAuth). El endpoint dev quedó fuera del panel.
+
+/** Espejo liviano del resultado de runCatalogSync (backend meta/catalog.ts). */
+export interface CatalogSyncSummary {
+  create: number;
+  update: number;
+  disable: number;
+  unchanged: number;
+  blocked: number;
+  remoteOnly: number;
+}
+export interface CatalogSyncEntry {
+  productId: string;
+  sku: string;
+  productName: string;
+  action: 'create' | 'update' | 'disable' | 'unchanged' | 'blocked';
+  blockedReasons?: string[];
+  changedFields?: string[];
+  suggestion?: { remoteRetailerId: string; remoteName: string };
+  note?: string;
+}
+export interface CatalogSyncRun {
+  runId: string;
+  requestedMode: 'dry_run' | 'apply';
+  status: 'disabled' | 'apply_blocked' | 'error' | 'planned' | 'applied' | 'partial_failure';
+  configMode: 'off' | 'dry_run' | 'live';
+  reason?: string;
+  errorDetail?: string;
+  summary?: CatalogSyncSummary;
+  entries?: CatalogSyncEntry[];
+  appliedCount?: number;
+  failedCount?: number;
+}
 
 /**
- * Sincroniza el catálogo al Meta Catalog (D4). Sigue usando el endpoint dev (job),
- * NO es un write directo a Firestore. Migrará a `runTenantJob('catalogSync')` aparte.
+ * Corre la sync de catálogo. Por defecto DRY-RUN (plan, cero escrituras en Meta);
+ * `apply` solo tiene efecto si la config del tenant está en mode 'live' (el backend
+ * lo rechaza fail-closed si no).
  */
-export async function syncCatalogToMeta(tenantId: string): Promise<void> {
-  await fetch(`${API}/devSyncCatalogToMeta`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tenantId }) });
+export async function syncCatalogToMeta(tenantId: string, opts?: { apply?: boolean }): Promise<CatalogSyncRun> {
+  const call = httpsCallable(firebaseFunctions(), 'runTenantJob');
+  const res = await call({ action: opts?.apply ? 'catalogSyncApply' : 'catalogSync', tenantId });
+  return (res.data as { result: CatalogSyncRun }).result;
 }
