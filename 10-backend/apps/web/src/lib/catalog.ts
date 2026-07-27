@@ -150,7 +150,8 @@ export interface CatalogSyncEntry {
 export interface CatalogSyncRun {
   runId: string;
   requestedMode: 'dry_run' | 'apply';
-  status: 'disabled' | 'apply_blocked' | 'error' | 'planned' | 'applied' | 'partial_failure';
+  /** `queued`: confirmar el plan ENCOLA el trabajo. Lo aplicado lo confirma Meta después. */
+  status: 'disabled' | 'apply_blocked' | 'error' | 'planned' | 'queued' | 'partial_failure';
   configMode: 'off' | 'dry_run' | 'live';
   reason?: string;
   errorDetail?: string;
@@ -159,7 +160,12 @@ export interface CatalogSyncRun {
   /** Productos sin opt-in de sincronización: quedan fuera del plan (fail-closed). */
   excludedNotManaged?: number;
   remoteOnly?: Array<{ retailerId: string; name: string }>;
-  appliedCount?: number;
+  /** Cambios encolados hacia Meta (todavía NO aplicados). */
+  queuedCount?: number;
+  /** Confirmaciones repetidas del mismo cambio: no generan trabajo nuevo. */
+  deduplicatedCount?: number;
+  /** Productos cuyo cambio no cumple el contrato de Meta. */
+  blockedCount?: number;
   failedCount?: number;
 }
 

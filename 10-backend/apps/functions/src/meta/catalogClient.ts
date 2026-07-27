@@ -33,7 +33,7 @@ const PAGE_LIMIT = 100;
 const MAX_PAGES = 50; // 5000 items: techo del propio items_batch de Meta
 
 /** Campos PÚBLICOS que leemos de Meta para el diff. Nada interno viaja ni vuelve. */
-export const REMOTE_ITEM_FIELDS = 'id,retailer_id,name,description,availability,price,currency,image_url,brand,url,product_type';
+export const REMOTE_ITEM_FIELDS = 'id,retailer_id,name,description,availability,price,currency,image_url,brand,url,condition,product_type';
 
 export interface MetaRemoteCatalogItem {
   /** ID del item en Meta (product item id). */
@@ -50,6 +50,8 @@ export interface MetaRemoteCatalogItem {
   brand: string;
   /** URL pública del artículo (identidad de negocio del sitio del tenant). */
   url?: string;
+  /** Estado del artículo ("new"). Se lee para poder CONFIRMAR lo que un CREATE mandó. */
+  condition?: string;
   /** Taxonomía del artículo ("Perfumes > Perfume > Femenino"): género/tipo sugeridos. */
   productType?: string;
 }
@@ -148,12 +150,21 @@ export class HttpMetaCatalogClient implements MetaCatalogClient {
     this.sleep = opts?.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
   }
 
-  /** GET/POST con retry 429/5xx/red (backoff + Retry-After). El token NUNCA sale en logs/errores. */
+  /**
+   * GET/POST con retry 429/5xx/red (backoff + Retry-After). El token NUNCA sale en logs/errores.
+   *
+   * ⚠️ EL POST NO SE REINTENTA. Un GET es idempotente y reintentarlo no tiene consecuencias,
+   * pero un `items_batch` que sufrió un timeout PUDO haber sido aceptado por Meta: repetirlo
+   * acá sería exactamente el "reintento a ciegas" que el outbox tiene prohibido, y lo haría
+   * DEBAJO de su disciplina de ambigüedad, sin que quedara registro. El outbox recibe el error
+   * ambiguo, mira el catálogo real y recién ahí decide (ADR-0013 §7).
+   */
   private async request(method: 'GET' | 'POST', url: string, data?: unknown): Promise<unknown> {
     let lastMsg = 'error de red';
     let lastStatus: number | null = null;
     let lastCode: number | null = null;
-    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    const maxAttempts = method === 'GET' ? MAX_ATTEMPTS : 1;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       let res: CatalogHttpResponse | null = null;
       try {
         res = await this.transport({
@@ -179,13 +190,14 @@ export class HttpMetaCatalogClient implements MetaCatalogClient {
           throw new MetaCatalogApiError(`Meta Catalog API ${res.status} (code ${fb.code ?? '?'}): ${fb.message}`, 'http', res.status, fb.code, false);
         }
       }
-      if (attempt < MAX_ATTEMPTS) {
+      if (attempt < maxAttempts) {
         const wait = retryAfterMs(res?.headers ?? {}, attempt);
         logger.warn('Meta Catalog API reintentando', { status: lastStatus, attempt, waitMs: wait });
         await this.sleep(wait);
       }
     }
-    throw new MetaCatalogApiError(`Meta Catalog API agotó reintentos (${lastStatus ?? 'red'}): ${lastMsg}`, 'http', lastStatus, lastCode, true);
+    const prefijo = method === 'GET' ? 'agotó reintentos' : 'no pudo confirmar el resultado';
+    throw new MetaCatalogApiError(`Meta Catalog API ${prefijo} (${lastStatus ?? 'red'}): ${lastMsg}`, 'http', lastStatus, lastCode, true);
   }
 
   async getCatalog(catalogId: string): Promise<{ id: string; name: string }> {
@@ -213,6 +225,7 @@ export class HttpMetaCatalogClient implements MetaCatalogClient {
           imageUrl: String(raw.image_url ?? ''),
           brand: String(raw.brand ?? ''),
           url: String(raw.url ?? ''),
+          condition: String(raw.condition ?? ''),
           productType: String(raw.product_type ?? ''),
         });
       }
@@ -279,7 +292,22 @@ export interface CatalogFixture {
   batchHandles?: string[];
   /** Errores por item que "reporta" el batch asíncrono (simula check_batch_request_status). */
   batchStatusErrors?: Array<{ retailer_id?: string; message?: string }>;
-  failWith?: { op: 'getCatalog' | 'listItems' | 'batch'; status?: number; code?: number; message?: string };
+  /**
+   * `when` distingue los DOS momentos en que puede fallar un batch, que producen consecuencias
+   * opuestas y hasta ahora eran indistinguibles:
+   *  - `before_accept` (default): Meta rechazó la llamada. NADA se escribió.
+   *  - `after_accept`: Meta ACEPTÓ y procesó, pero el cliente vio un timeout. El escrito
+   *    EXISTE aunque el llamador no lo sepa. Es el caso que obliga a mirar antes de reintentar.
+   */
+  failWith?: { op: 'getCatalog' | 'listItems' | 'batch' | 'batchStatus'; status?: number; code?: number; message?: string; when?: 'before_accept' | 'after_accept' };
+  /**
+   * Con esto en true el fake APLICA el batch sobre `items` (como haría Meta), normalizando la
+   * URL igual que Meta. Sin esto, el camino "enviado → confirmado" no se puede ejercitar: la
+   * relectura devolvería siempre el estado viejo.
+   */
+  applyBatchToFixture?: boolean;
+  /** Estado por handle: `queued`/`in_progress` = Meta todavía no terminó de procesar. */
+  batchStatus?: Record<string, { status?: string; errors?: Array<{ retailer_id?: string; message?: string }> }>;
 }
 
 /**
@@ -383,19 +411,33 @@ export function assertBatchRequestShape(r: unknown, where = 'request'): void {
 }
 
 export class FakeMetaCatalogClient implements MetaCatalogClient {
-  constructor(private readonly fx: CatalogFixture) {}
+  constructor(private readonly seed: CatalogFixture) {}
 
-  private failIf(op: 'getCatalog' | 'listItems' | 'batch'): void {
-    const f = this.fx.failWith;
-    if (f?.op === op) {
+  /**
+   * El fixture se RELEE en cada llamada. Congelarlo en el constructor hacía imposible el caso
+   * central de un outbox asíncrono: mutar el estado remoto entre el envío y la relectura.
+   */
+  private async fixture(): Promise<CatalogFixture> {
+    try {
+      const fresh = (await db().doc('metaTestFixtures/catalog').get()).data() as CatalogFixture | undefined;
+      return fresh ?? this.seed;
+    } catch {
+      return this.seed;
+    }
+  }
+
+  private failIf(fx: CatalogFixture, op: 'getCatalog' | 'listItems' | 'batch' | 'batchStatus', when: 'before_accept' | 'after_accept' = 'before_accept'): void {
+    const f = fx.failWith;
+    if (f?.op === op && (f.when ?? 'before_accept') === when) {
       const status = f.status ?? 400;
       throw new MetaCatalogApiError(`Meta Catalog API ${status} (code ${f.code ?? 100}): ${f.message ?? 'fixture error'}`, 'http', status, f.code ?? 100, status === 429 || status >= 500);
     }
   }
 
   async getCatalog(catalogId: string): Promise<{ id: string; name: string }> {
-    this.failIf('getCatalog');
-    const cat = this.fx.catalog;
+    const fx = await this.fixture();
+    this.failIf(fx, 'getCatalog');
+    const cat = fx.catalog;
     if (!cat || cat.id !== catalogId) {
       throw new MetaCatalogApiError(`Meta Catalog API 400 (code 100): Unsupported get request (${maskId(catalogId)})`, 'http', 400, 100, false);
     }
@@ -403,8 +445,9 @@ export class FakeMetaCatalogClient implements MetaCatalogClient {
   }
 
   async listItems(_catalogId: string): Promise<MetaRemoteCatalogItem[]> {
-    this.failIf('listItems');
-    return (this.fx.items ?? []).map((raw) => ({
+    const fx = await this.fixture();
+    this.failIf(fx, 'listItems');
+    return (fx.items ?? []).map((raw) => ({
       id: String(raw.id ?? ''),
       retailerId: String(raw.retailer_id ?? ''),
       name: String(raw.name ?? ''),
@@ -415,12 +458,15 @@ export class FakeMetaCatalogClient implements MetaCatalogClient {
       imageUrl: String(raw.image_url ?? ''),
       brand: String(raw.brand ?? ''),
       url: String(raw.url ?? ''),
+      condition: String(raw.condition ?? ''),
       productType: String(raw.product_type ?? ''),
     }));
   }
 
   async submitItemsBatch(catalogId: string, requests: CatalogBatchRequest[]): Promise<{ handles: string[] }> {
-    this.failIf('batch');
+    const fx = await this.fixture();
+    // Falla ANTES de aceptar: Meta rechazó la llamada y no escribió nada.
+    this.failIf(fx, 'batch', 'before_accept');
     // VALIDACIÓN ESTRICTA DEL CONTRATO: el fake anterior aceptaba cualquier forma y por eso
     // no detectó que el serializador mandaba `name`/`image_url` y la identidad fuera de
     // `data`. Ahora arma el MISMO body que el cliente real y lo valida entero, así el E2E
@@ -433,12 +479,51 @@ export class FakeMetaCatalogClient implements MetaCatalogClient {
       requests: requests.map((r) => ({ method: r.method, data: r.data })),
       at: Timestamp.now(),
     });
-    return { handles: this.fx.batchHandles ?? requests.map((_, i) => `fx-handle-${i}`) };
+    if (fx.applyBatchToFixture) await this.applyBatch(fx, requests);
+    // Falla DESPUÉS de aceptar: el escrito ya existe del lado de Meta y el llamador ve un
+    // timeout. Sin este caso, el camino ambiguo no se puede testear.
+    this.failIf(fx, 'batch', 'after_accept');
+    // Meta devuelve UN handle por batch, no uno por request.
+    return { handles: fx.batchHandles ?? [`fx-handle-${Date.now().toString(36)}`] };
   }
 
-  async getBatchStatus(_catalogId: string, _handle: string): Promise<{ errors: CatalogBatchItemError[] }> {
+  /** Aplica el batch sobre `items`, normalizando la URL igual que lo hace Meta. */
+  private async applyBatch(fx: CatalogFixture, requests: CatalogBatchRequest[]): Promise<void> {
+    const items = [...(fx.items ?? [])];
+    for (const r of requests) {
+      const data = r.data as Record<string, unknown>;
+      const rid = String(data.id ?? '');
+      const i = items.findIndex((it) => String(it.retailer_id ?? '') === rid);
+      const parche: Record<string, unknown> = {};
+      if (data.title !== undefined) parche.name = data.title;
+      if (data.description !== undefined) parche.description = data.description;
+      if (data.price !== undefined) parche.price = String(data.price).replace(/\s*[A-Z]{3}$/, '');
+      if (data.availability !== undefined) parche.availability = data.availability;
+      if (data.brand !== undefined) parche.brand = data.brand;
+      if (data.condition !== undefined) parche.condition = data.condition;
+      if (data.link !== undefined) {
+        // Meta NORMALIZA lo que recibe: host en minúsculas y barra final. Que el fake lo haga
+        // es lo que prueba que la comparación tolera la normalización.
+        try {
+          parche.url = new URL(String(data.link)).href;
+        } catch {
+          parche.url = String(data.link);
+        }
+      }
+      if (Array.isArray(data.image)) parche.image_url = String((data.image[0] as { url?: unknown })?.url ?? '');
+      if (i >= 0) items[i] = { ...items[i], ...parche };
+      else if (r.method === 'CREATE') items.push({ id: `itm-${rid}`, retailer_id: rid, ...parche });
+    }
+    await db().doc('metaTestFixtures/catalog').set({ items }, { merge: true });
+  }
+
+  async getBatchStatus(_catalogId: string, handle: string): Promise<{ errors: CatalogBatchItemError[] }> {
+    const fx = await this.fixture();
+    this.failIf(fx, 'batchStatus');
+    const porHandle = fx.batchStatus?.[handle];
+    const errores = porHandle?.errors ?? fx.batchStatusErrors ?? [];
     return {
-      errors: (this.fx.batchStatusErrors ?? []).map((e) => ({
+      errors: errores.map((e) => ({
         retailerId: typeof e.retailer_id === 'string' ? e.retailer_id : '',
         message: typeof e.message === 'string' ? e.message : 'error de item (fixture)',
       })),

@@ -172,6 +172,12 @@ export {
   metaCatalogSetSyncEnabled,
 } from './functions/meta/catalogReconcileCallables.js';
 
+// Outbox de escrituras hacia el Meta Catalog (META-CATALOG-OUTBOX-1): confirmar el plan ENCOLA
+// jobs persistidos; el mantenimiento los reclama con lease, los envía y los confirma contra el
+// catálogo real. Nada declara `synced` sin evidencia.
+export { metaCatalogOutboxMaintenance } from './functions/scheduled/metaCatalogOutbox.js';
+export { devRunMetaCatalogOutbox } from './functions/meta/devMetaCatalogOutbox.js';
+
 // Atribución (D5): anuncio → pedido → ganancia real, por campaña.
 export { devComputeAttribution } from './functions/meta/devComputeAttribution.js';
 

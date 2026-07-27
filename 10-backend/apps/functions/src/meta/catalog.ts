@@ -22,13 +22,12 @@
  */
 
 import { Timestamp } from 'firebase-admin/firestore';
-import type { Product, MetaCatalogSyncLog } from '@vpw/shared';
+import type { Product } from '@vpw/shared';
 import { db, paths } from '../lib/firebase.js';
 import { logger } from '../lib/logger.js';
 import { recordAudit } from '../audit/audit.js';
 import { normalizeCatalogSyncConfig, type CatalogSyncMode } from './catalogSyncConfig.js';
 import {
-  assertBatchRequestShape,
   getMetaCatalogClientForTenant,
   MetaCatalogApiError,
   type MetaCatalogClient,
@@ -54,8 +53,9 @@ import {
   type CreateBlocker,
   type UpdateBlocker,
 } from './catalogOutbound.js';
+import { verifyJobOutcome } from './catalogOutbox.js';
+import { enqueueCatalogPlan } from './catalogOutboxWorker.js';
 
-const BATCH_CHUNK = 100;
 const MAX_STORED_ENTRIES = 500; // techo del run doc (y de la respuesta al panel)
 const STATE_COMMIT_CHUNK = 200; // docs por commit al persistir meta* (lejos de los techos de Firestore)
 
@@ -223,6 +223,24 @@ function urlEquals(local: string, remoteUrl: string): boolean {
   return local === (canonicalHttpsUrl(remoteUrl) ?? remoteUrl);
 }
 
+/**
+ * Traduce la vista de LECTURA a los nombres del contrato de ESCRITURA, para poder confirmarla
+ * campo por campo con la verificación de tres estados. Un campo que el producto no tiene
+ * (sin URL, sin imagen) NO se proyecta: no se administra, así que no hay nada que confirmar.
+ */
+function writableProjection(view: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  if (view.name !== undefined) out.title = view.name;
+  if (view.description !== undefined) out.description = view.description;
+  if (view.price !== undefined) out.price = view.price;
+  if (view.availability !== undefined) out.availability = view.availability;
+  if (view.condition !== undefined) out.condition = view.condition;
+  if (view.brand !== undefined) out.brand = view.brand;
+  if (view.url) out.link = view.url;
+  if (view.image_url) out.image = [{ url: view.image_url }];
+  return out;
+}
+
 function diffPublicFields(payload: Record<string, unknown>, remote: MetaRemoteCatalogItem): string[] {
   const changed: string[] = [];
   if (String(payload.name) !== remote.name) changed.push('name');
@@ -330,7 +348,11 @@ export function planCatalogSync(products: Product[], remoteItems: MetaRemoteCata
           action: 'disable',
           blockedReasons: reasons,
           changedFields: ['availability'],
-          payload: { retailer_id: sku, availability: 'out of stock' },
+          // La vista pública COMPLETA, igual que cualquier otra entrada accionable: es el
+          // snapshot con el que el outbox detecta si el producto cambió desde el preview.
+          // Un payload reducido nunca coincidiría con el que recalcula el gate y este disable
+          // quedaría `stale` para siempre — es decir, el artículo nunca se apagaría en Meta.
+          payload: localPublicView(p),
           request: buildCatalogDisablePatch(p),
           remoteItemId: remote.id,
           note: 'disable_minimo_con_bloqueos',
@@ -437,7 +459,11 @@ export interface CatalogSyncActor {
 export interface CatalogSyncRunResult {
   runId: string;
   requestedMode: 'dry_run' | 'apply';
-  status: 'disabled' | 'apply_blocked' | 'error' | 'planned' | 'applied' | 'partial_failure';
+  /**
+   * `queued` reemplazó a `applied`: confirmar el plan ENCOLA el trabajo, no lo aplica. El
+   * resultado real lo declara la confirmación del outbox contra el catálogo de Meta.
+   */
+  status: 'disabled' | 'apply_blocked' | 'error' | 'planned' | 'queued' | 'partial_failure';
   configMode: CatalogSyncMode;
   reason?: 'mode_not_live' | 'missing_token' | 'catalog_unreachable' | 'batch_failed' | 'state_persist_failed';
   /** Detalle SANEADO (jamás token ni datos internos). */
@@ -450,8 +476,12 @@ export interface CatalogSyncRunResult {
   excludedNotManaged?: number;
   /** Artículos de Meta sin producto local que los reclame (candidatos de importación). */
   remoteOnly?: Array<{ retailerId: string; name: string }>;
-  appliedCount?: number;
-  failedCount?: number;
+  /** Jobs creados en el outbox. NO es "aplicado en Meta". */
+  queuedCount?: number;
+  /** Confirmaciones repetidas: el mismo cambio ya estaba encolado. */
+  deduplicatedCount?: number;
+  /** Productos cuyo request no cumple el contrato (quedan fuera, sin frenar a los demás). */
+  blockedCount?: number;
 }
 
 const newRunId = () => `mcs_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
@@ -608,182 +638,82 @@ export async function runCatalogSync(
     return planned;
   }
 
-  // 6) apply (config live verificada): upserts idempotentes por chunks. JAMÁS delete.
-  //    El run queda en 'applying' mientras corre (visible si la función muere a mitad).
-  await writeRunDoc(tenantId, runId, { status: 'applying' });
-  // Solo entradas accionables CON su request serializado. El filtro por `request` evita que
-  // el chunk y el array de requests se descoordinen (si faltara uno, los errores por item se
-  // atribuirían al producto equivocado).
-  const actionable = plan.entries.filter((e) => (e.action === 'create' || e.action === 'update' || e.action === 'disable') && !!e.request);
-  let batchError: string | undefined;
-  const appliedEntries: CatalogPlanEntry[] = [];
-  const failedEntries: CatalogPlanEntry[] = [];
-  const unprocessedEntries: CatalogPlanEntry[] = [];
-  /** Requests que no cumplen el contrato: se excluyen del lote, sin arrastrar a los demás. */
-  const invalidEntries: Array<{ entry: CatalogPlanEntry; detalle: string }> = [];
-  const handles: string[] = [];
 
-  for (let i = 0; i < actionable.length; i += BATCH_CHUNK) {
-    const bruto = actionable.slice(i, i + BATCH_CHUNK);
-    // VALIDACIÓN POR ITEM ANTES DEL LOTE: si un request no cumple el contrato, se descarta
-    // SOLO ese producto. Sin esto, el validador del transporte rechazaría el lote entero y
-    // un único dato malo dejaría en `failed` a los 100 del chunk y a todos los siguientes,
-    // de forma determinística — la sync del tenant quedaría muerta hasta encontrar al
-    // culpable, que ni siquiera se nombra en el error.
-    const chunk: CatalogPlanEntry[] = [];
-    for (const e of bruto) {
-      try {
-        assertBatchRequestShape(e.request as CatalogBatchRequest, `producto ${e.productId}`);
-        chunk.push(e);
-      } catch (err) {
-        const detalle = err instanceof Error ? err.message.slice(0, 300) : 'request inválido';
-        logger.warn('Producto excluido del lote por no cumplir el contrato', { tenantId, runId, productId: e.productId });
-        invalidEntries.push({ entry: e, detalle });
-      }
-    }
-    if (!chunk.length) continue;
-    const requests: CatalogBatchRequest[] = chunk.map((e) => e.request as CatalogBatchRequest);
-    try {
-      const res = await client.submitItemsBatch(cfg.catalogId, requests);
-      handles.push(...res.handles);
-      appliedEntries.push(...chunk);
-    } catch (e) {
-      batchError = e instanceof MetaCatalogApiError ? e.message : 'items_batch falló';
-      failedEntries.push(...chunk);
-      unprocessedEntries.push(...actionable.slice(i + BATCH_CHUNK));
-      break; // no seguir martillando la API con el resto de los chunks
-    }
-  }
-
-  // 7) Validación por item (best-effort): Meta procesa el batch asíncrono y reporta
-  //    errores por handle. Si el estado aún no está disponible, la verificación por
-  //    diff de abajo mantiene el producto en 'pending' (jamás un 'synced' falso).
-  const itemErrors = new Map<string, string>();
-  for (const h of handles) {
-    try {
-      for (const err of (await client.getBatchStatus(cfg.catalogId, h)).errors) {
-        if (err.retailerId) itemErrors.set(err.retailerId, err.message);
-      }
-    } catch {
-      // best-effort: sin estado del batch, el diff decide pending.
-    }
-  }
-
-  // 8) Verificación honesta: releer Meta y comparar campos públicos. Solo lo que ya
-  //    coincide queda 'synced'/'disabled'; lo demás 'pending' (converge en el próximo apply).
+  // 6) apply: NO se escribe en Meta acá. Cada acción del plan se convierte en un JOB
+  //    PERSISTIDO (META-CATALOG-OUTBOX-1) que un worker reclama, envía y confirma después.
   //
-  //    QUÉ SIGNIFICA `synced`: "ningún campo GESTIONADO difiere" — no "Meta es un espejo de
-  //    VendeyaPy". Los campos que este sistema no administra (categoría de Meta, product_type,
-  //    variantes, campos cargados a mano en Commerce Manager) pueden diferir y el producto
-  //    igual figura `synced`. Es la lectura correcta: la sync es de un subconjunto declarado,
-  //    no una réplica.
-  let verified = new Map<string, MetaRemoteCatalogItem>();
-  let verifyFailed = false;
-  try {
-    const after = await client.listItems(cfg.catalogId);
-    verified = new Map(after.filter((r) => r.retailerId).map((r) => [r.retailerId, r]));
-  } catch {
-    verifyFailed = true;
-    logger.warn('No se pudo releer el catálogo para verificar; los items quedan pending', { tenantId, runId });
-  }
+  //    POR QUÉ: `items_batch` es asíncrono y la función que atiende al panel no puede
+  //    sostener el ciclo completo (envío → estado del batch → relectura del catálogo). Antes
+  //    intentaba hacerlo en una sola invocación: si moría a mitad, no quedaba registro de qué
+  //    había salido, un error de red dejaba productos en un limbo irrecuperable y la respuesta
+  //    decía "aplicado" cuando Meta todavía no había confirmado nada.
+  //
+  //    Solo se encolan las entradas accionables CON su request serializado. Se usan las
+  //    entradas CRUDAS del plan (no `slimEntries`, que descarta `request` y `payload`: sin
+  //    ellos no habría ni qué enviar ni contra qué verificar).
+  const actionable = plan.entries.filter(
+    (e): e is CatalogPlanEntry & { request: CatalogBatchRequest; payload: Record<string, unknown> } =>
+      (e.action === 'create' || e.action === 'update' || e.action === 'disable') && !!e.request,
+  );
+  const encolado = await enqueueCatalogPlan(
+    tenantId,
+    runId,
+    actionable.map((e) => ({
+      productId: e.productId,
+      sku: e.sku,
+      action: e.action as 'create' | 'update' | 'disable',
+      request: e.request,
+      // Los `disable` con bloqueos no traen la vista pública completa: el snapshot es lo que
+      // haya (lo importante es que cambie si el producto cambia).
+      payload: e.payload ?? { retailer_id: e.sku, availability: 'out of stock' },
+      remoteItemId: e.remoteItemId ?? null,
+    })),
+    { catalogId: cfg.catalogId },
+    actor,
+  );
 
-  // 9) Estado meta* por producto + log por producto (Admin SDK, mismo tenant SIEMPRE).
+  // 7) Convergencia local (sin tocar Meta): un `unchanged` cuyo artículo remoto CONFIRMA los
+  //    campos gestionados ya está sincronizado. Se usa la verificación de tres estados: sin
+  //    evidencia (Meta no devolvió el campo) NO se marca `synced` — ese era el `synced` falso.
   const now = Timestamp.now();
-  const ops: Array<{ path: string; data: Record<string, unknown> }> = [];
-  const pushLog = (e: CatalogPlanEntry, status: 'success' | 'failed', itemId: string | null, errorMessage: string) => {
-    const log: MetaCatalogSyncLog = { id: `${runId}_${e.productId}`, tenantId, productId: e.productId, metaCatalogId: cfg.catalogId, metaProductItemId: itemId, action: e.action, status, errorMessage, createdAt: now };
-    ops.push({ path: paths.metaCatalogSyncLog(tenantId, log.id), data: log as unknown as Record<string, unknown> });
-  };
-
-  let appliedFailed = 0;
-  for (const e of appliedEntries) {
-    const after = verified.get(e.sku);
-    const itemErr = itemErrors.get(e.sku);
-    let metaSyncStatus: string;
-    let errMsg = '';
-    if (itemErr) {
-      metaSyncStatus = 'failed';
-      errMsg = itemErr.slice(0, 500);
-      appliedFailed++;
-    } else if (e.action === 'disable') {
-      metaSyncStatus = after && after.availability === 'out of stock' ? 'disabled' : 'pending';
-    } else {
-      metaSyncStatus = after && e.payload && diffPublicFields(e.payload, after).length === 0 ? 'synced' : 'pending';
-    }
-    const itemId = after?.id ?? e.remoteItemId ?? null;
-    ops.push({
-      path: paths.product(tenantId, e.productId),
-      // `syncToMeta` NO se escribe acá: el opt-in es una decisión administrativa explícita
-      // (metaCatalogSetSyncEnabled). Si el apply lo encendiera solo, el fail-closed dejaría de
-      // ser el estado por defecto de cualquier producto que alguna vez pasó por una sync.
-      data: { metaSyncStatus, metaCatalogId: cfg.catalogId, metaProductItemId: itemId, metaLastSyncAt: now, metaSyncError: errMsg, updatedAt: now },
-    });
-    pushLog(e, itemErr ? 'failed' : 'success', itemId, errMsg);
-  }
-  // Convergencia: un 'unchanged' con item remoto está CONFIRMADO en sync ⇒ se refresca su
-  // estado (esto saca de 'pending' a los creados/actualizados en applies anteriores).
+  const convergencia: Array<{ path: string; data: Record<string, unknown> }> = [];
+  const remotoPorId = new Map(remoteItems.filter((r) => r.retailerId).map((r) => [r.retailerId, r]));
   for (const e of plan.entries) {
-    if (e.action !== 'unchanged' || !e.remoteItemId) continue;
-    const metaSyncStatus = e.payload?.availability === 'out of stock' ? 'disabled' : 'synced';
-    ops.push({
+    if (e.action !== 'unchanged' || !e.remoteItemId || !e.payload) continue;
+    const remoto = remotoPorId.get(e.sku) ?? null;
+    if (verifyJobOutcome(writableProjection(e.payload), remoto).outcome !== 'confirmed_equal') continue;
+    convergencia.push({
       path: paths.product(tenantId, e.productId),
-      data: { metaSyncStatus, metaCatalogId: cfg.catalogId, metaProductItemId: e.remoteItemId, metaLastSyncAt: now, metaSyncError: '', updatedAt: now },
+      data: {
+        metaSyncStatus: e.payload.availability === 'out of stock' ? 'disabled' : 'synced',
+        metaCatalogId: cfg.catalogId,
+        metaProductItemId: e.remoteItemId,
+        metaLastSyncAt: now,
+        metaSyncError: '',
+        updatedAt: now,
+      },
     });
   }
-  for (const e of failedEntries) {
-    const msg = (batchError ?? 'items_batch falló').slice(0, 500);
-    ops.push({ path: paths.product(tenantId, e.productId), data: { metaSyncStatus: 'failed', metaSyncError: msg, updatedAt: now } });
-    pushLog(e, 'failed', e.remoteItemId ?? null, msg);
-  }
-  for (const e of unprocessedEntries) {
-    const msg = 'no procesado: falló un batch anterior de la misma corrida';
-    ops.push({ path: paths.product(tenantId, e.productId), data: { metaSyncStatus: 'failed', metaSyncError: msg, updatedAt: now } });
-    pushLog(e, 'failed', e.remoteItemId ?? null, msg);
-  }
-  for (const { entry, detalle } of invalidEntries) {
-    ops.push({ path: paths.product(tenantId, entry.productId), data: { metaSyncStatus: 'failed', metaSyncError: detalle.slice(0, 500), updatedAt: now } });
-    pushLog(entry, 'failed', entry.remoteItemId ?? null, detalle.slice(0, 500));
-  }
-  const statePersisted = await commitStateOps(tenantId, runId, ops);
-
-  const failedTotal = failedEntries.length + unprocessedEntries.length + invalidEntries.length + appliedFailed;
-  const appliedOk = appliedEntries.length - appliedFailed;
-  const finalStatus: CatalogSyncRunResult['status'] = failedTotal > 0 || !statePersisted ? 'partial_failure' : 'applied';
-  const reason: CatalogSyncRunResult['reason'] | undefined = !statePersisted
-    ? 'state_persist_failed'
-    : batchError || appliedFailed
-      ? 'batch_failed'
-      : undefined;
-  const errorDetail = !statePersisted
-    ? 'los cambios llegaron a Meta pero no se pudo guardar el estado meta* de los productos'
-    : batchError;
+  const convergenciaOk = await commitStateOps(tenantId, runId, convergencia);
 
   const result: CatalogSyncRunResult = {
     ...planned,
-    status: finalStatus,
-    appliedCount: appliedOk,
-    failedCount: failedTotal,
-    ...(reason ? { reason } : {}),
-    ...(errorDetail ? { errorDetail } : {}),
+    status: 'queued',
+    queuedCount: encolado.queued,
+    deduplicatedCount: encolado.deduplicated,
+    blockedCount: encolado.blocked,
+    ...(convergenciaOk ? {} : { reason: 'state_persist_failed' as const }),
   };
   await writeRunDoc(tenantId, runId, {
-    status: finalStatus,
-    appliedCount: appliedOk,
-    failedCount: failedTotal,
-    verifyFailed,
-    batchHandles: handles.slice(0, 50),
-    ...(errorDetail ? { errorDetail } : {}),
+    status: 'queued',
+    queuedCount: encolado.queued,
+    deduplicatedCount: encolado.deduplicated,
+    blockedCount: encolado.blocked,
+    // `appliedCount` y `lastSuccessfulSyncAt` NO se escriben acá: encolar no es aplicar. Los
+    // fija la confirmación, cuando Meta devuelve evidencia.
     finishedAt: Timestamp.now(),
   });
-  // lastSuccessfulSyncAt SOLO si todo se aplicó y el estado quedó persistido.
-  if (finalStatus === 'applied') {
-    try {
-      await db().doc(`tenants/${tenantId}/config/meta`).set({ catalogSync: { lastSuccessfulSyncAt: now } }, { merge: true });
-    } catch {
-      logger.warn('No se pudo actualizar lastSuccessfulSyncAt', { tenantId, runId });
-    }
-  }
   await auditRun(tenantId, runId, result, actor);
-  logger.info('Catalog sync aplicada', { tenantId, runId, applied: appliedOk, failed: failedTotal });
+  logger.info('Catalog sync encolada', { tenantId, runId, ...encolado });
   return result;
 }

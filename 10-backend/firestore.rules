@@ -346,6 +346,12 @@ service cloud.firestore {
       // Logs de sincronización del catálogo a Meta (D4): manager+ lee; escribe la sync.
       match /metaCatalogSyncLogs/{id} { allow read: if isTenantManager(tenantId) || isPlatformAdmin(); allow write: if false; }
 
+      // Outbox de escrituras hacia el catálogo de Meta (META-CATALOG-OUTBOX-1): CERRADO al
+      // cliente. Un job es una orden de escritura en Meta con su generación de fencing —
+      // tocarlo desde el navegador permitiría reenviar, revivir terminales o saltear los
+      // gates. El panel ve el estado a través de `metaSyncStatus` de cada producto.
+      match /metaCatalogOutboxJobs/{id} { allow read, write: if false; }
+
       // Eventos del negocio + Conversions API (D6): manager+ lee; escribe Cloud Functions.
       match /businessEvents/{id} { allow read: if isTenantManager(tenantId) || isPlatformAdmin(); allow write: if false; }
       match /metaConversionEvents/{id} { allow read: if isTenantManager(tenantId) || isPlatformAdmin(); allow write: if false; }

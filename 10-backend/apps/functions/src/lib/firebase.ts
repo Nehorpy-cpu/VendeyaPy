@@ -103,6 +103,9 @@ export const paths = {
   metaCatalogSyncLog: (tenantId: string, id: string) => `tenants/${tenantId}/metaCatalogSyncLogs/${id}`,
   metaCatalogSyncRuns: (tenantId: string) => `tenants/${tenantId}/metaCatalogSyncRuns`,
   metaCatalogSyncRun: (tenantId: string, runId: string) => `tenants/${tenantId}/metaCatalogSyncRuns/${runId}`,
+  /** Outbox de escrituras hacia el Meta Catalog (META-CATALOG-OUTBOX-1). Aislado por tenant. */
+  metaCatalogOutboxJobs: (tenantId: string) => `tenants/${tenantId}/metaCatalogOutboxJobs`,
+  metaCatalogOutboxJob: (tenantId: string, jobId: string) => `tenants/${tenantId}/metaCatalogOutboxJobs/${jobId}`,
   /** Lock de unicidad del retailer_id dentro del tenant (reconciliación con Meta). */
   metaRetailerLock: (tenantId: string, key: string) => `tenants/${tenantId}/metaRetailerLocks/${key}`,
   trackingSources: (tenantId: string) => `tenants/${tenantId}/trackingSources`,

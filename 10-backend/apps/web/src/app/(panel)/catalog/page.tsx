@@ -230,11 +230,20 @@ export default function CatalogPage() {
                 </ul>
               )}
 
-              {(syncRun.status === 'applied' || syncRun.status === 'partial_failure') && (
-                <p className={syncRun.status === 'applied' ? 'text-mint-700' : 'text-coral-700'}>
-                  Aplicados: {syncRun.appliedCount ?? 0} · Fallidos: {syncRun.failedCount ?? 0}
-                  {syncRun.errorDetail ? ` — ${syncRun.errorDetail}` : ''}
-                </p>
+              {(syncRun.status === 'queued' || syncRun.status === 'partial_failure') && (
+                <div className={syncRun.status === 'queued' ? 'text-mint-700' : 'text-coral-700'} role="status">
+                  <p>
+                    En cola: {syncRun.queuedCount ?? 0}
+                    {(syncRun.deduplicatedCount ?? 0) > 0 ? ` · Ya estaban en cola: ${syncRun.deduplicatedCount}` : ''}
+                    {(syncRun.blockedCount ?? 0) > 0 ? ` · Con problemas: ${syncRun.blockedCount}` : ''}
+                    {syncRun.errorDetail ? ` — ${syncRun.errorDetail}` : ''}
+                  </p>
+                  {/* Honestidad explícita: encolar NO es haber cambiado nada en Meta. */}
+                  <p className="mt-1 text-xs text-ink-500">
+                    Los cambios salen hacia Meta en los próximos minutos. Cada producto muestra su estado en la lista y
+                    solo dice <strong>Confirmado</strong> cuando Meta confirma que quedó igual que acá.
+                  </p>
+                </div>
               )}
 
               {syncRun.status === 'planned' && (
@@ -242,13 +251,13 @@ export default function CatalogPage() {
                   {syncRun.configMode === 'live' ? (
                     confirmApply ? (
                       <>
-                        <span className="text-xs text-ink-600">¿Aplicar estos cambios al catálogo real de Meta?</span>
+                        <span className="text-xs text-ink-600">¿Enviar estos cambios al catálogo real de Meta?</span>
                         <button
                           onClick={() => syncMut.mutate(true)}
                           disabled={syncMut.isPending}
                           className="rounded-lg bg-mint-600 px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-mint-700 disabled:opacity-60"
                         >
-                          {syncMut.isPending ? 'Aplicando…' : 'Sí, aplicar a Meta'}
+                          {syncMut.isPending ? 'Encolando…' : 'Sí, enviar a Meta'}
                         </button>
                         <button
                           onClick={() => setConfirmApply(false)}
@@ -262,7 +271,7 @@ export default function CatalogPage() {
                         onClick={() => setConfirmApply(true)}
                         className="rounded-lg border border-mint-600 px-3 py-1.5 text-xs font-semibold text-mint-700 transition-colors hover:bg-mint-50"
                       >
-                        Aplicar a Meta…
+                        Enviar a Meta…
                       </button>
                     )
                   ) : (
@@ -373,17 +382,7 @@ export default function CatalogPage() {
                     <td className="px-4 py-3">
                       <div className="flex flex-col items-start gap-1">
                         {p.syncToMeta === true ? (
-                          p.metaSyncStatus === 'synced' ? (
-                            <span className="inline-flex rounded-full bg-mint-50 px-2 py-0.5 text-xs font-semibold text-mint-700">Sincronizado</span>
-                          ) : p.metaSyncStatus === 'pending' ? (
-                            <span className="inline-flex rounded-full bg-amber-50 px-2 py-0.5 text-xs font-semibold text-amber-700">Pendiente</span>
-                          ) : p.metaSyncStatus === 'failed' ? (
-                            <span title={p.metaSyncError || undefined} className="inline-flex rounded-full bg-coral-50 px-2 py-0.5 text-xs font-semibold text-coral-600">Falló</span>
-                          ) : p.metaSyncStatus === 'disabled' ? (
-                            <span className="inline-flex rounded-full bg-ink-50 px-2 py-0.5 text-xs font-semibold text-ink-500">Oculto en Meta</span>
-                          ) : (
-                            <span className="inline-flex rounded-full bg-mint-50 px-2 py-0.5 text-xs font-semibold text-mint-700">Se sincroniza</span>
-                          )
+                          <SyncBadge status={p.metaSyncStatus} error={p.metaSyncError} />
                         ) : (
                           <span className="inline-flex rounded-full bg-ink-50 px-2 py-0.5 text-xs font-semibold text-ink-500">No se sincroniza</span>
                         )}
@@ -518,8 +517,8 @@ function syncTitle(run: CatalogSyncRun): string {
     case 'apply_blocked': return 'Aplicación bloqueada';
     case 'error': return 'Error al consultar Meta';
     case 'planned': return 'Dry-run del catálogo (sin escrituras en Meta)';
-    case 'applied': return 'Cambios aplicados en Meta';
-    case 'partial_failure': return 'Aplicación parcial (con fallas)';
+    case 'queued': return 'Cambios encolados hacia Meta';
+    case 'partial_failure': return 'Encolado parcial (con problemas)';
   }
 }
 
@@ -527,6 +526,33 @@ function syncErrorText(run: CatalogSyncRun): string {
   if (run.reason === 'missing_token') return 'No hay conexión con Meta configurada para esta empresa (falta el token).';
   if (run.reason === 'catalog_unreachable') return `No se pudo acceder al catálogo en Meta. ${run.errorDetail ?? ''}`.trim();
   return run.errorDetail ?? 'Error desconocido.';
+}
+
+/**
+ * Estado de sincronización de UN producto. META-CATALOG-OUTBOX-1: confirmar el plan encola
+ * trabajo, así que el vendedor tiene que poder distinguir "todavía no salió" de "Meta lo
+ * confirmó". `Sincronizado` significa CONFIRMADO contra Meta — nunca "lo mandamos".
+ */
+const SYNC_BADGE: Record<string, { label: string; clase: string; ayuda: string }> = {
+  queued: { label: 'En cola', clase: 'bg-amber-50 text-amber-700', ayuda: 'El cambio está esperando su turno para enviarse a Meta.' },
+  processing: { label: 'Procesando', clase: 'bg-amber-50 text-amber-700', ayuda: 'Ya salió hacia Meta. Falta que Meta lo confirme.' },
+  synced: { label: 'Confirmado', clase: 'bg-mint-50 text-mint-700', ayuda: 'Meta confirmó que el artículo quedó igual que acá.' },
+  disabled: { label: 'Oculto en Meta', clase: 'bg-ink-50 text-ink-500', ayuda: 'El artículo quedó sin stock en el catálogo de Meta.' },
+  needs_review: { label: 'Requiere revisión', clase: 'bg-amber-50 text-amber-800', ayuda: 'No se pudo confirmar solo: revisá el producto antes de reintentar.' },
+  failed: { label: 'Error', clase: 'bg-coral-50 text-coral-600', ayuda: 'Meta rechazó el cambio.' },
+  pending: { label: 'Procesando', clase: 'bg-amber-50 text-amber-700', ayuda: 'Ya salió hacia Meta. Falta que Meta lo confirme.' },
+};
+
+function SyncBadge({ status, error }: { status?: string; error?: string | null }) {
+  const s = status ? SYNC_BADGE[status] : undefined;
+  if (!s) {
+    return <span className="inline-flex rounded-full bg-mint-50 px-2 py-0.5 text-xs font-semibold text-mint-700">Se sincroniza</span>;
+  }
+  return (
+    <span title={error || s.ayuda} className={`inline-flex rounded-full px-2 py-0.5 text-xs font-semibold ${s.clase}`}>
+      {s.label}
+    </span>
+  );
 }
 
 function blockReasonLabel(r: string): string {

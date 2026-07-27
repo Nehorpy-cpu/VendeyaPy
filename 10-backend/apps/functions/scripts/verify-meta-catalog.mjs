@@ -31,6 +31,15 @@ async function call(name, token, data) {
   const body = await res.json().catch(() => ({}));
   return { result: body.result, err: body.error?.status ?? null };
 }
+/**
+ * Corre el mantenimiento del outbox (sweep + drenaje + confirmación) de UN tenant.
+ * `graceMs=0` saltea la ventana de gracia de la confirmación diferida (que en producción
+ * existe porque `items_batch` es asíncrono); la ventana se prueba aparte con `graceMs` real.
+ */
+async function drain(tenantId = T, graceMs = 0) {
+  const res = await fetch(`${BASE}/devRunMetaCatalogOutbox?tenantId=${encodeURIComponent(tenantId)}&graceMs=${graceMs}`, { headers: { 'x-dev-key': 'dev-local' } });
+  return (await res.json().catch(() => ({}))).result ?? null;
+}
 
 const now = Timestamp.now();
 const TS = { createdAt: now, updatedAt: now };
@@ -52,7 +61,9 @@ const remoteItem = (retailerId, over = {}) => ({
   id: `itm-${retailerId}`, retailer_id: retailerId, name: `Producto ${retailerId}`,
   description: `Descripción pública de ${retailerId}`, availability: 'in stock',
   // `url` espeja productUrl del producto local: la URL entra al diff y a la verificación.
-  price: '₲250.000', image_url: IMG, brand: 'MarcaE2E', url: `https://tienda.e2e.test/p/${retailerId}`, ...over,
+  // `condition` entra en la lectura: un CREATE lo manda, así que sin él la confirmación
+  // quedaría sin evidencia para ese campo (y el artículo nunca podría declararse sincronizado).
+  price: '₲250.000', image_url: IMG, brand: 'MarcaE2E', url: `https://tienda.e2e.test/p/${retailerId}`, condition: 'new', ...over,
 });
 
 const writesSnap = () => db.collection(`${FIXTURE}/writes`).get();
@@ -184,77 +195,287 @@ let dryRun;
   check('22. apply bloqueado tampoco escribió en Meta', (await writesSnap()).empty);
 }
 await setConfig({ ...VALID_CFG, mode: 'live' });
+const outboxCol = () => db.collection(`tenants/${T}/metaCatalogOutboxJobs`);
+const jobsOf = async () => (await outboxCol().get()).docs.map((d) => ({ id: d.id, ...d.data() }));
+const jobOfProduct = async (pid) => (await jobsOf()).find((j) => j.productId === pid) ?? null;
+const wipeOutbox = async () => { for (const d of (await outboxCol().get()).docs) await d.ref.delete(); };
+
 let applyRun;
 {
   const { result } = await call('runTenantJob', owner, { action: 'catalogSyncApply' });
   applyRun = result?.result;
-  check('23. apply con mode live ⇒ applied', applyRun?.status === 'applied', `status=${applyRun?.status} reason=${applyRun?.reason ?? ''}`);
+  check('OB-23. confirmar el plan ENCOLA (status queued), no "aplica"', applyRun?.status === 'queued' && applyRun?.queuedCount > 0, `status=${applyRun?.status} queued=${applyRun?.queuedCount}`);
+  check('OB-23b. NO se declara appliedCount ni lastSuccessfulSyncAt al encolar', applyRun?.appliedCount === undefined && !(await db.doc(`tenants/${T}/config/meta`).get()).data()?.catalogSync?.lastSuccessfulSyncAt);
+  check('OB-24. encolar NO escribe NADA en Meta', (await writesSnap()).empty);
 }
 {
-  const w = (await writesSnap()).docs.map((d) => d.data());
-  check('24. exactamente 1 batch enviado', w.length === 1, `batches=${w.length}`);
-  const reqs = w.flatMap((d) => d.requests ?? []);
-  check('25. métodos del contrato (CREATE/UPDATE); jamás DELETE', reqs.length > 0 && reqs.every((r) => r.method === 'CREATE' || r.method === 'UPDATE'));
-  const ids = reqs.map((r) => r.data?.id);
-  check('26. el batch incluye create+disable planeados (A, C, ARC)', ids.includes('MCE2E-A') && ids.includes('MCE2E-C') && ids.includes('MCE2E-ARC'));
-  check('27. los bloqueados NO viajaron a Meta', !ids.includes('MCE2E-DUP') && !ids.includes('') && !ids.some((i) => ['MCE2E-F', 'MCE2E-G'].includes(i)));
-  const json = JSON.stringify(reqs);
-  check('28. payloads SIN datos internos (aiNotes/aiFicha/costo)', !json.includes('SECRETO-INTERNO') && !json.includes('FICHA-INTERNA') && !/aiNotes|aiFicha|costPrice|margin/i.test(json));
-  const reqA = reqs.find((r) => r.data?.id === 'MCE2E-A');
-  check('29. CREATE con el contrato exacto: data.id + title + link + image[] (nunca name/image_url/retailer_id)', reqA?.method === 'CREATE' && reqA?.data?.id === 'MCE2E-A' && reqA?.data?.title === 'Producto MCE2E-A' && !!reqA?.data?.link && Array.isArray(reqA?.data?.image) && reqA?.data?.price === '250000 PYG' && reqA?.data?.condition === 'new' && reqA?.data?.brand === 'MarcaE2E' && !('name' in (reqA?.data ?? {})) && !('image_url' in (reqA?.data ?? {})) && !('retailer_id' in (reqA ?? {})), JSON.stringify(reqA ?? {}).slice(0, 200));
-  const reqC = reqs.find((r) => r.data?.id === 'MCE2E-C');
-  check('30. DISABLE mínimo: SOLO id + availability out of stock', reqC?.data?.id === 'MCE2E-C' && reqC?.data?.availability === 'out of stock' && Object.keys(reqC?.data ?? {}).sort().join(',') === 'availability,id', JSON.stringify(reqC?.data ?? {}));
-}
-{
+  const jobs = await jobsOf();
+  const porRetailer = new Map(jobs.map((j) => [j.retailerId, j]));
+  check('OB-25. un job por acción planeada (A create, C disable, ARC disable)', porRetailer.get('MCE2E-A')?.action === 'create' && porRetailer.get('MCE2E-C')?.action === 'disable' && porRetailer.get('MCE2E-ARC')?.action === 'disable', `jobs=${jobs.length}`);
+  check('OB-26. los bloqueados NO se encolaron', !porRetailer.has('MCE2E-DUP') && !porRetailer.has('') && !jobs.some((j) => ['MCE2E-F', 'MCE2E-G'].includes(j.productId)));
+  check('OB-27. todo job nace queued, sin handle y con intento 0', jobs.every((j) => j.status === 'queued' && j.batchHandle === null && j.attempts === 0));
+  check('OB-27b. el job congela patch + hash de contenido + snapshot del producto', jobs.every((j) => !!j.intendedPatch?.id && typeof j.intendedContentHash === 'string' && j.intendedContentHash.length === 64 && typeof j.productSnapshotHash === 'string'));
+  check('OB-27c. el job guarda el actor que confirmó', jobs.every((j) => typeof j.requestedByUid === 'string' && j.requestedByUid.length > 0));
+  const json = JSON.stringify(jobs);
+  check('OB-28. jobs SIN datos internos (aiNotes/aiFicha/costo/token)', !json.includes('SECRETO-INTERNO') && !json.includes('FICHA-INTERNA') && !/aiNotes|aiFicha|costPrice|margin|accessToken/i.test(json));
   const a = await productOf('MCE2E-A');
-  // El fake no "aplica" el batch al fixture ⇒ el create no aparece al releer: queda pending.
-  check('31. create no visible al releer ⇒ metaSyncStatus pending (verificación honesta)', a?.metaSyncStatus === 'pending' && a?.metaCatalogId === CATALOG_ID);
-  const c = await productOf('MCE2E-C');
-  // El fake no aplica el batch: al releer, el item sigue "in stock" ⇒ el disable NO se
-  // declara confirmado (queda pending y converge cuando Meta lo procese de verdad).
-  check('32. disable no confirmado al releer ⇒ pending (jamás un disabled falso)', c?.metaSyncStatus === 'pending' && c?.metaProductItemId === 'itm-MCE2E-C');
-  const b = await productOf('MCE2E-B');
-  check('33. unchanged con remoto converge a synced en apply', b?.metaSyncStatus === 'synced' && b?.metaProductItemId === 'itm-MCE2E-B');
-  const logA = (await db.doc(`tenants/${T}/metaCatalogSyncLogs/${applyRun?.runId}_MCE2E-A`).get()).data();
-  check('34. log por producto con id runId_productId', logA?.status === 'success' && logA?.action === 'create');
-  const cfgAfter = (await db.doc(`tenants/${T}/config/meta`).get()).data();
-  check('35. lastSuccessfulSyncAt sellado tras apply exitoso', !!cfgAfter?.catalogSync?.lastSuccessfulSyncAt);
+  check('OB-29. el producto encolado se muestra "en cola", nunca "sincronizado"', a?.metaSyncStatus === 'queued' && a?.metaCatalogId === CATALOG_ID);
 }
-
-// Idempotencia: segundo apply produce el mismo conjunto de upserts (sin drift ni deletes).
 {
-  const { result } = await call('runTenantJob', owner, { action: 'catalogSyncApply' });
-  check('36. segundo apply ⇒ applied (idempotente)', result?.result?.status === 'applied');
-  const w = (await writesSnap()).docs.map((d) => d.data());
-  const ids1 = (w[0]?.requests ?? []).map((r) => r.data?.id).sort();
-  const ids2 = (w[1]?.requests ?? []).map((r) => r.data?.id).sort();
-  check('37. mismos retailer_ids en ambos applies (upserts estables)', w.length === 2 && JSON.stringify(ids1) === JSON.stringify(ids2));
-}
-
-// ═══ F. Fallas de la API ═══
-await db.doc(FIXTURE).set({ catalog: { id: CATALOG_ID, name: 'Catálogo E2E' }, items: FIXTURE_ITEMS, failWith: { op: 'batch', status: 500, code: 1, message: 'transient' } });
-{
+  // IDEMPOTENCIA: la misma confirmación no duplica trabajo (id determinístico por contenido).
+  const antes = (await jobsOf()).length;
   const { result } = await call('runTenantJob', owner, { action: 'catalogSyncApply' });
   const r = result?.result;
-  check('38. batch 5xx ⇒ partial_failure con reason batch_failed', r?.status === 'partial_failure' && r?.reason === 'batch_failed');
+  check('OB-30. segunda confirmación idéntica ⇒ 0 nuevos, todos deduplicados', r?.queuedCount === 0 && r?.deduplicatedCount === antes, `queued=${r?.queuedCount} dedup=${r?.deduplicatedCount}`);
+  check('OB-30b. la cola no creció', (await jobsOf()).length === antes);
+  check('OB-30c. sigue sin haber escrituras en Meta', (await writesSnap()).empty);
+}
+
+// ═══ E2. Drenaje: recién acá se escribe en Meta ═══
+{
+  const r = await drain();
+  check('OB-31. el drenaje reclama y envía UN lote', r?.drain?.claimed > 0 && r?.drain?.submitted === r?.drain?.claimed, JSON.stringify(r?.drain ?? {}));
+  const w = (await writesSnap()).docs.map((d) => d.data());
+  check('OB-32. exactamente 1 batch enviado', w.length === 1, `batches=${w.length}`);
+  const reqs = w.flatMap((d) => d.requests ?? []);
+  check('OB-33. métodos del contrato (CREATE/UPDATE); jamás DELETE', reqs.length > 0 && reqs.every((x) => x.method === 'CREATE' || x.method === 'UPDATE'));
+  const reqA = reqs.find((x) => x.data?.id === 'MCE2E-A');
+  check('OB-34. CREATE con el contrato exacto: data.id + title + link + image[] (nunca name/image_url/retailer_id)', reqA?.method === 'CREATE' && reqA?.data?.title === 'Producto MCE2E-A' && !!reqA?.data?.link && Array.isArray(reqA?.data?.image) && reqA?.data?.price === '250000 PYG' && reqA?.data?.condition === 'new' && reqA?.data?.brand === 'MarcaE2E' && !('name' in (reqA?.data ?? {})) && !('image_url' in (reqA?.data ?? {})), JSON.stringify(reqA ?? {}).slice(0, 200));
+  const reqC = reqs.find((x) => x.data?.id === 'MCE2E-C');
+  check('OB-35. DISABLE mínimo: SOLO id + availability out of stock', reqC?.data?.availability === 'out of stock' && Object.keys(reqC?.data ?? {}).sort().join(',') === 'availability,id', JSON.stringify(reqC?.data ?? {}));
+  const jobA = await jobOfProduct('MCE2E-A');
+  check('OB-36. tras enviar, el job queda ENVIADO con handle — jamás "confirmado"', jobA?.status === 'submitted' && !!jobA?.batchHandle && !!jobA?.submittedAt, `status=${jobA?.status} handle=${jobA?.batchHandle}`);
   const a = await productOf('MCE2E-A');
-  check('39. productos del batch fallido quedan failed con error saneado', a?.metaSyncStatus === 'failed' && typeof a?.metaSyncError === 'string' && a.metaSyncError.length > 0);
+  check('OB-37. el usuario ve "procesando", no "sincronizado" (Meta aceptó ≠ Meta confirmó)', a?.metaSyncStatus === 'processing');
+}
+{
+  // El fixture NO aplicó el batch ⇒ la relectura no muestra el artículo: sin evidencia, nada
+  // se confirma. Es exactamente el `synced` falso que este programa vino a eliminar.
+  const r = await drain();
+  const jobA = await jobOfProduct('MCE2E-A');
+  const a = await productOf('MCE2E-A');
+  check('OB-38. sin evidencia en la relectura, el job NO pasa a confirmado', jobA?.status === 'submitted' && a?.metaSyncStatus === 'processing', `status=${jobA?.status}`);
+  check('OB-38b. tampoco se reenvía: sigue habiendo un solo batch', (await writesSnap()).size === 1 && r?.drain?.submitted === 0);
+}
+{
+  // Ahora el fake SÍ aplica el batch (como haría Meta) y normaliza la URL igual que Meta.
+  await db.doc(FIXTURE).set({ applyBatchToFixture: true }, { merge: true });
+  await wipeOutbox();
+  const { result } = await call('runTenantJob', owner, { action: 'catalogSyncApply' });
+  check('OB-39. re-confirmar tras limpiar la cola vuelve a encolar', result?.result?.status === 'queued' && result?.result?.queuedCount > 0);
+  await drain();
+  const jobA = await jobOfProduct('MCE2E-A');
+  const a = await productOf('MCE2E-A');
+  check('OB-40. con evidencia, el job queda CONFIRMADO y el producto sincronizado', jobA?.status === 'succeeded' && a?.metaSyncStatus === 'synced' && !!a?.metaLastSyncAt, `job=${jobA?.status} prod=${a?.metaSyncStatus}`);
+  const c = await productOf('MCE2E-C');
+  const jobC = await jobOfProduct('MCE2E-C');
+  check('OB-40b. un disable confirmado se muestra como oculto, no como sincronizado', jobC?.status === 'succeeded' && c?.metaSyncStatus === 'disabled');
+  const logA = (await db.doc(`tenants/${T}/metaCatalogSyncLogs/${jobA?.id}`).get()).data();
+  check('OB-40c. log por job (id determinístico: dos drenajes no duplican historial)', logA?.status === 'success' && logA?.action === 'create');
+}
+
+{
+  // EL CICLO DEL NEGOCIO: bajar el precio por promo, subirlo al terminar y volver a bajarlo
+  // produce EXACTAMENTE el mismo patch que la primera vez. Con la deduplicación mirando la
+  // historia, la segunda promo no llegaba nunca a Meta y el panel decía "ya estaba encolado".
+  const precioDe = async (p) => (await productOf(p))?.price;
+  await wipeOutbox();
+  await db.doc(FIXTURE).set({ catalog: { id: CATALOG_ID, name: 'Catálogo E2E' }, items: FIXTURE_ITEMS, applyBatchToFixture: true }, { merge: false });
+  await db.doc(`tenants/${T}/products/MCE2E-B`).set({ price: 200000 }, { merge: true }); // promo
+  await call('runTenantJob', owner, { action: 'catalogSyncApply' });
+  await drain();
+  const promo1 = await jobOfProduct('MCE2E-B');
+  await db.doc(`tenants/${T}/products/MCE2E-B`).set({ price: 250000 }, { merge: true }); // fin de promo
+  await call('runTenantJob', owner, { action: 'catalogSyncApply' });
+  await drain();
+  await wipe(`${FIXTURE}/writes`);
+  await db.doc(`tenants/${T}/products/MCE2E-B`).set({ price: 200000 }, { merge: true }); // SEGUNDA promo
+  const { result } = await call('runTenantJob', owner, { action: 'catalogSyncApply' });
+  check('OB-30d. repetir un cambio ya aplicado antes SÍ vuelve a encolarse', (result?.result?.queuedCount ?? 0) > 0, `queued=${result?.result?.queuedCount} dedup=${result?.result?.deduplicatedCount} precio=${await precioDe('MCE2E-B')} job1=${promo1?.status}`);
+  await drain();
+  const reqs = (await writesSnap()).docs.flatMap((d) => d.data().requests ?? []);
+  check('OB-30e. y el precio de la segunda promo LLEGA a Meta', reqs.some((x) => x.data?.id === 'MCE2E-B' && String(x.data?.price ?? '').startsWith('200000')), JSON.stringify(reqs.map((x) => [x.data?.id, x.data?.price])));
+  await db.doc(`tenants/${T}/products/MCE2E-B`).set({ price: 250000 }, { merge: true });
+  await wipeOutbox();
+}
+{
+  // La confirmación es DIFERIDA: con la ventana de gracia real, un envío recién hecho no se
+  // interpreta como divergencia solo porque Meta todavía no lo procesó.
+  await wipeOutbox();
+  await db.doc(FIXTURE).set({ catalog: { id: CATALOG_ID, name: 'Catálogo E2E' }, items: FIXTURE_ITEMS, applyBatchToFixture: false }, { merge: false });
+  await call('runTenantJob', owner, { action: 'catalogSyncApply' });
+  await drain(T, 60000); // ventana de gracia REAL
+  const j = await jobOfProduct('MCE2E-A');
+  check('OB-30f. un envío recién hecho NO se declara divergente por impaciencia', j?.status === 'submitted', `status=${j?.status}`);
+  await wipeOutbox();
+}
+
+// ═══ E3. Gates revalidados ENTRE el encolado y el envío ═══
+const reencolar = async () => {
+  await wipeOutbox();
+  await db.doc(FIXTURE).set({ catalog: { id: CATALOG_ID, name: 'Catálogo E2E' }, items: FIXTURE_ITEMS, applyBatchToFixture: false }, { merge: false });
+  await setConfig({ ...VALID_CFG, mode: 'live' });
+  await call('runTenantJob', owner, { action: 'catalogSyncApply' });
+  await wipe(`${FIXTURE}/writes`);
+};
+{
+  await reencolar();
+  await setConfig({ ...VALID_CFG, mode: 'dry_run' });
+  const r = await drain();
+  check('OB-41. config en dry_run entre el encolado y el envío ⇒ CERO escrituras', (await writesSnap()).empty && r?.drain?.submitted === 0, JSON.stringify(r?.drain ?? {}));
+  const retenido = await jobOfProduct('MCE2E-A');
+  // El gate barato corta ANTES de reclamar: el job ni se toca. Lo que importa es que quede
+  // RECUPERABLE — jamás cancelado ni fallido por haber apagado la sync un rato.
+  check('OB-41b. el job queda recuperable (ni cancelado ni fallido)', (retenido?.status === 'queued' || retenido?.status === 'held') && retenido?.attempts === 0, `status=${retenido?.status} attempts=${retenido?.attempts}`);
+  // Volver a `live` tiene que RECUPERAR lo retenido: un retenido sin salida sería trabajo
+  // perdido en silencio cada vez que alguien apaga la sync un rato.
+  await setConfig({ ...VALID_CFG, mode: 'live' });
+  await drain();
+  const recuperado = await jobOfProduct('MCE2E-A');
+  check('OB-41c. al volver a live, lo retenido se envía (no queda muerto)', recuperado?.status === 'submitted' || recuperado?.status === 'succeeded', `status=${recuperado?.status}`);
+}
+{
+  await reencolar();
+  await db.doc(`tenants/${T}/products/MCE2E-A`).set({ syncToMeta: false }, { merge: true });
+  await drain();
+  const jobA = await jobOfProduct('MCE2E-A');
+  const reqs = (await writesSnap()).docs.flatMap((d) => d.data().requests ?? []);
+  check('OB-42. opt-in revocado tras el encolado ⇒ job cancelado y el producto NO viaja', jobA?.status === 'cancelled' && jobA?.reason === 'sync_disabled' && !reqs.some((x) => x.data?.id === 'MCE2E-A'), `status=${jobA?.status}`);
+  await db.doc(`tenants/${T}/products/MCE2E-A`).set({ syncToMeta: true }, { merge: true });
+}
+{
+  await reencolar();
+  await db.doc(`tenants/${T}/products/MCE2E-A`).set({ price: 999000 }, { merge: true });
+  await drain();
+  const jobA = await jobOfProduct('MCE2E-A');
+  const reqs = (await writesSnap()).docs.flatMap((d) => d.data().requests ?? []);
+  check('OB-43. producto editado tras el preview ⇒ job STALE y el precio viejo JAMÁS viaja', jobA?.status === 'stale' && jobA?.reason === 'product_changed' && !reqs.some((x) => x.data?.id === 'MCE2E-A'), `status=${jobA?.status}`);
+  await db.doc(`tenants/${T}/products/MCE2E-A`).set({ price: 250000 }, { merge: true });
+}
+{
+  await reencolar();
+  await setConfig({ ...VALID_CFG, mode: 'live', catalogId: 'CAT-OTRO-9' });
+  const r = await drain();
+  const jobA = await jobOfProduct('MCE2E-A');
+  check('OB-44. catálogo cambiado ⇒ requiere revisión, sin escribir en el catálogo nuevo', jobA?.status === 'needs_action' && jobA?.reason === 'catalog_mismatch' && (await writesSnap()).empty, `status=${jobA?.status} drain=${JSON.stringify(r?.drain ?? {})}`);
+  await setConfig({ ...VALID_CFG, mode: 'live' });
+}
+
+// ═══ E4. Resultados ambiguos y errores ═══
+{
+  await reencolar();
+  // Meta ACEPTÓ el lote y el cliente vio un timeout: el escrito PUDO haber quedado y nadie lo
+  // sabe. El fixture todavía no muestra el artículo ⇒ la relectura tampoco puede confirmarlo.
+  await db.doc(FIXTURE).set({ failWith: { op: 'batch', when: 'after_accept', status: 500, code: 1, message: 'timeout tras aceptar' } }, { merge: true });
+  await drain();
+  const jobA = await jobOfProduct('MCE2E-A');
+  check('OB-45. timeout DESPUÉS de que Meta aceptó ⇒ AMBIGUO, jamás "fallido"', jobA?.status === 'needs_reconciliation' && jobA?.reason === 'submit_ambiguous', `status=${jobA?.status} reason=${jobA?.reason}`);
+  const batchesAntes = (await writesSnap()).size;
+  // Ahora se descubre que Meta SÍ lo había aplicado (aparece al releer el catálogo).
+  const items = (await db.doc(FIXTURE).get()).data()?.items ?? [];
+  await db.doc(FIXTURE).set({
+    failWith: null,
+    items: [...items, remoteItem('MCE2E-A')],
+  }, { merge: true });
+  await drain();
+  const jobA2 = await jobOfProduct('MCE2E-A');
+  check('OB-46. la ambigüedad se resuelve MIRANDO el catálogo: quedó confirmado', jobA2?.status === 'succeeded', `status=${jobA2?.status}`);
+  // El producto AMBIGUO no se reenvía. (Otros jobs del mismo lote sí pueden reintentarse: su
+  // ambigüedad se resolvió como "Meta no lo tiene", y ahí el reintento es seguro.)
+  const enviosA = (await writesSnap()).docs.flatMap((d) => d.data().requests ?? []).filter((x) => x.data?.id === 'MCE2E-A');
+  check('OB-46b. el artículo ambiguo NO se reenvió (cero reintentos a ciegas)', enviosA.length === 1, `envíos=${enviosA.length} batchesAntes=${batchesAntes}`);
+}
+{
+  await reencolar();
+  await db.doc(FIXTURE).set({ failWith: { op: 'batch', status: 400, code: 100, message: 'campo inválido' } }, { merge: true });
+  await drain();
+  const jobA = await jobOfProduct('MCE2E-A');
+  const a = await productOf('MCE2E-A');
+  check('OB-47. 4xx funcional ⇒ fallo confirmado (nada se escribió) con error saneado', jobA?.status === 'failed' && jobA?.reason === 'contract_violation' && a?.metaSyncStatus === 'failed' && String(a?.metaSyncError ?? '').length > 0, `status=${jobA?.status}`);
+}
+{
+  await reencolar();
+  await db.doc(FIXTURE).set({ failWith: { op: 'batch', status: 429, code: 4, message: 'rate limit' } }, { merge: true });
+  await drain();
+  const jobA = await jobOfProduct('MCE2E-A');
+  check('OB-48. rate limit ⇒ vuelve a la cola SIN consumir intentos ni marcar error definitivo', jobA?.status === 'queued' && jobA?.attempts === 0 && jobA?.reason === 'rate_limited', `status=${jobA?.status} attempts=${jobA?.attempts}`);
+}
+{
+  // Un job cerrado sin éxito NO puede dejar al producto sin forma de reintentar: el id es
+  // determinístico por contenido, así que sin esto la confirmación nueva caía siempre en el
+  // mismo job muerto y no pasaba nada.
+  await reencolar();
+  await db.doc(FIXTURE).set({ failWith: { op: 'batch', status: 400, code: 100, message: 'campo inválido' } }, { merge: true });
+  await drain();
+  const muerto = await jobOfProduct('MCE2E-A');
+  await db.doc(FIXTURE).set({ failWith: null }, { merge: true });
+  const { result } = await call('runTenantJob', owner, { action: 'catalogSyncApply' });
+  const revivido = await jobOfProduct('MCE2E-A');
+  check('OB-48b. una confirmación nueva REABRE un job cerrado sin éxito', muerto?.status === 'failed' && revivido?.status === 'queued' && revivido?.attempts === 0 && (result?.result?.queuedCount ?? 0) > 0, `antes=${muerto?.status} después=${revivido?.status}`);
+  check('OB-48c. y sigue habiendo UN solo job para ese producto (no se duplicó)', (await jobsOf()).filter((j) => j.productId === 'MCE2E-A').length === 1);
+  await drain();
+  const ok = await jobOfProduct('MCE2E-A');
+  check('OB-48d. el reintento explícito llega a enviarse', ok?.status === 'submitted' || ok?.status === 'succeeded' || ok?.status === 'needs_reconciliation', `status=${ok?.status}`);
+}
+{
+  await reencolar();
+  await db.doc(FIXTURE).set({ applyBatchToFixture: true, failWith: null, batchStatusErrors: [{ retailer_id: 'MCE2E-A', message: 'imagen rechazada por Meta' }] }, { merge: true });
+  await drain();
+  const jobA = await jobOfProduct('MCE2E-A');
+  const jobC = await jobOfProduct('MCE2E-C');
+  const a = await productOf('MCE2E-A');
+  check('OB-49. un item rechazado por Meta cae SOLO (el resto del lote se confirma igual)', jobA?.status === 'failed' && jobA?.reason === 'item_rejected' && String(a?.metaSyncError ?? '').includes('imagen rechazada') && jobC?.status === 'succeeded', `A=${jobA?.status} C=${jobC?.status}`);
+  await db.doc(FIXTURE).set({ batchStatusErrors: [] }, { merge: true });
+}
+{
+  // URL ausente en la relectura ⇒ unverifiable: NUNCA se declara sincronizado.
+  await reencolar();
+  await db.doc(FIXTURE).set({
+    applyBatchToFixture: false,
+    items: FIXTURE_ITEMS.map((i) => (i.retailer_id === 'MCE2E-C' ? { ...i, availability: 'out of stock', url: '' } : i)),
+  }, { merge: true });
+  await drain();
+  await drain();
+  const jobC = await jobOfProduct('MCE2E-C');
+  check('OB-50. sin `url` en la lectura de Meta, el disable igual se confirma (no manda link)', jobC?.status === 'succeeded', `status=${jobC?.status}`);
+  const jobA = await jobOfProduct('MCE2E-A');
+  check('OB-50b. un CREATE cuyo artículo no aparece al releer NUNCA queda confirmado', jobA?.status !== 'succeeded', `status=${jobA?.status}`);
+}
+{
+  // Dos drenajes CONCURRENTES: el claim transaccional garantiza un solo envío.
+  await reencolar();
+  await db.doc(FIXTURE).set({ applyBatchToFixture: true }, { merge: true });
+  await Promise.all([drain(), drain()]);
+  const reqs = (await writesSnap()).docs.flatMap((d) => d.data().requests ?? []);
+  const idsA = reqs.filter((x) => x.data?.id === 'MCE2E-A');
+  check('OB-51. dos drenajes concurrentes ⇒ el producto se envía UNA sola vez', idsA.length === 1, `envíos=${idsA.length}`);
+}
+{
+  // Worker zombi: un job "en vuelo" con lease vencido lo normaliza el sweep a ambiguo, y el
+  // worker viejo ya no puede asentar nada sobre él.
+  await reencolar();
+  const jobA = await jobOfProduct('MCE2E-A');
+  await db.doc(`tenants/${T}/metaCatalogOutboxJobs/${jobA.id}`).set({
+    status: 'processing', attempts: 1, leaseOwner: 'zombi', leaseUntil: Timestamp.fromMillis(Date.now() - 60_000),
+  }, { merge: true });
+  await drain();
+  const tras = await jobOfProduct('MCE2E-A');
+  check('OB-52. lease vencido ⇒ el job queda para reconciliar (nunca se reenvía a ciegas)', tras?.status === 'needs_reconciliation' || tras?.status === 'succeeded', `status=${tras?.status}`);
+  const antes = tras?.updatedAt?.toMillis?.() ?? 0;
+  await db.doc(`tenants/${T}/metaCatalogOutboxJobs/${jobA.id}`).set({ status: 'succeeded', attempts: 1 }, { merge: true });
+  const w1 = (await writesSnap()).size;
+  await drain();
+  check('OB-52b. un job terminal no se vuelve a tocar ni a enviar', (await writesSnap()).size === w1 && antes >= 0);
 }
 await db.doc(FIXTURE).set({ catalog: { id: CATALOG_ID, name: 'Catálogo E2E' }, items: FIXTURE_ITEMS, failWith: { op: 'getCatalog', status: 400, code: 100, message: 'Unsupported get request' } });
 {
   const { result } = await call('runTenantJob', owner, { action: 'catalogSync' });
   const r = result?.result;
-  check('40. catálogo inaccesible ⇒ error catalog_unreachable (sin crash)', r?.status === 'error' && r?.reason === 'catalog_unreachable');
-}
-await db.doc(FIXTURE).set({ catalog: { id: CATALOG_ID, name: 'Catálogo E2E' }, items: FIXTURE_ITEMS, batchStatusErrors: [{ retailer_id: 'MCE2E-A', message: 'imagen rechazada por Meta' }] });
-{
-  const { result } = await call('runTenantJob', owner, { action: 'catalogSyncApply' });
-  const r = result?.result;
-  check('40b. error por item del batch asíncrono ⇒ partial_failure', r?.status === 'partial_failure' && r?.reason === 'batch_failed');
-  const a = await productOf('MCE2E-A');
-  check('40c. el producto rechazado queda failed con el mensaje de Meta', a?.metaSyncStatus === 'failed' && String(a?.metaSyncError ?? '').includes('imagen rechazada'));
+  check('OB-53. catálogo inaccesible ⇒ error catalog_unreachable (sin crash)', r?.status === 'error' && r?.reason === 'catalog_unreachable');
 }
 await db.doc(FIXTURE).set({ catalog: { id: CATALOG_ID, name: 'Catálogo E2E' }, items: FIXTURE_ITEMS });
+await wipeOutbox();
+await wipe(`${FIXTURE}/writes`);
 
 // ═══ G. Aislamiento de tenant ═══
 {

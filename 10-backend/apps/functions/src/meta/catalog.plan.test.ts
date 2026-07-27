@@ -327,6 +327,24 @@ describe('planCatalogSync — matching y bloqueos', () => {
     expect(plan.entries[0].payload?.availability).toBe('out of stock');
   });
 
+  it('el disable MÍNIMO de un producto con bloqueos lleva el snapshot público COMPLETO', () => {
+    // El outbox usa `payload` como snapshot para detectar si el producto cambió desde el
+    // preview. Un payload reducido nunca coincidiría con el que recalcula el worker y el
+    // apagado quedaría `stale` para siempre: el artículo jamás se ocultaría en Meta.
+    const p = prod({
+      id: 'p1',
+      images: ['http://inseguro/x.jpg'], // bloquea create/update
+      inventory: { trackStock: true, stock: 0, lowStockThreshold: 1, sku: 'SKU-A' },
+    });
+    const plan = planCatalogSync([p], [remote()]);
+    const e = plan.entries[0]!;
+    expect(e.action).toBe('disable');
+    expect(e.note).toBe('disable_minimo_con_bloqueos');
+    expect(e.payload).toEqual(localPublicView(p));
+    // El REQUEST sigue siendo mínimo: el snapshot no cambia lo que viaja a Meta.
+    expect(Object.keys(e.request?.data ?? {}).sort()).toEqual(['availability', 'id']);
+  });
+
   it('ARCHIVED con item remoto ⇒ disable; ARCHIVED sin item remoto ⇒ se ignora', () => {
     const conRemoto = planCatalogSync([prod({ id: 'p1', status: 'ARCHIVED' })], [remote()]);
     expect(conRemoto.entries[0].action).toBe('disable');
@@ -361,8 +379,11 @@ describe('planCatalogSync — matching y bloqueos', () => {
     const plan = planCatalogSync([p], [remote()]);
     expect(plan.entries[0].action).toBe('disable');
     expect(plan.entries[0].blockedReasons).toContain('price_invalid');
-    // payload mínimo: solo la palanca de availability (nada de los campos bloqueados)
-    expect(plan.entries[0].payload).toEqual({ retailer_id: 'SKU-A', availability: 'out of stock' });
+    // Lo MÍNIMO es lo que VIAJA: el request lleva solo la palanca de availability, ningún
+    // campo bloqueado. (El `payload` no viaja: es el snapshot local con el que el outbox
+    // detecta si el producto cambió — por eso es la vista pública completa.)
+    expect(Object.keys(plan.entries[0].request?.data ?? {}).sort()).toEqual(['availability', 'id']);
+    expect(plan.entries[0].payload).toEqual(localPublicView(p));
   });
 
   it('SKU duplicado con remoto y sin stock ⇒ NO hay disable (identidad ambigua): sigue blocked', () => {

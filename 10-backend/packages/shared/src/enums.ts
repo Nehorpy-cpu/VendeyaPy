@@ -253,7 +253,11 @@ export const ATTRIBUTION_TYPE = ['direct_meta', 'utm_match', 'coupon_match', 'ma
 export type AttributionType = (typeof ATTRIBUTION_TYPE)[number];
 
 // Estado de sincronización de un producto con el Meta Catalog (D4).
-export const META_SYNC_STATUS = ['not_synced', 'pending', 'synced', 'failed', 'disabled'] as const;
+// META-CATALOG-OUTBOX-1 sumó los estados de COLA: `queued` (hay un job esperando),
+// `processing` (el worker lo reclamó o Meta ya aceptó el lote y falta confirmar) y
+// `needs_review` (requiere una decisión humana). `synced` sigue significando CONFIRMADO
+// contra Meta — jamás "lo mandamos".
+export const META_SYNC_STATUS = ['not_synced', 'pending', 'queued', 'processing', 'synced', 'needs_review', 'failed', 'disabled'] as const;
 export type MetaSyncStatus = (typeof META_SYNC_STATUS)[number];
 
 export const META_ASSET_TYPE = [
