@@ -23,8 +23,8 @@ Cuatro cosas estaban mal, y ninguna es cosmética:
    timeout después de que Meta aceptó significa que **el cambio PUDO haberse aplicado**:
    reintentarlo a ciegas, con `allow_upsert:false`, hace fallar el CREATE por id duplicado y
    deja marcado como roto un artículo que en realidad se creó bien.
-4. **El trabajo no se podía acotar.** El límite de Meta es de 100 llamadas por hora y por
-   catálogo; una invocación de panel no puede sostener un catálogo grande sin timeout.
+4. **El trabajo no se podía acotar.** Una invocación de panel no puede sostener un catálogo
+   grande sin timeout, y el consumo de llamadas a Meta crecía con la cola, sin techo.
 
 ## Decisión
 
@@ -40,16 +40,35 @@ El panel dice "Cambios encolados hacia Meta" y cada producto muestra *En cola �
 Confirmado / Requiere revisión / Error*. **`Confirmado` significa confirmado contra Meta**, no
 "lo mandamos".
 
-### 2. La identidad del job es determinística e inyectiva
+### 2. La INTENCIÓN se deduplica; el JOB es historia inmutable
 
-`jobId = sha256(len:tenantId · len:catalogId · len:retailerId · len:action · len:contentHash)`.
+Son dos identidades distintas y confundirlas fue el defecto más caro de este programa.
 
-- Dos confirmaciones idénticas producen **un solo job** (la segunda choca contra `create()` y
-  se cuenta como duplicada, sin tocar el job existente ni siquiera si es terminal).
-- Un cambio posterior cambia el `intendedContentHash` y por lo tanto el job.
-- **Cada componente va con su largo adelante.** Concatenar con un separador —el error clásico—
-  haría que `('a|b','c')` y `('a','b|c')` produjeran el mismo documento: dos confirmaciones
-  distintas pisándose.
+**`intentKey`** = `sha256(len:tenantId · len:catalogId · len:retailerId · len:action ·
+len:contentHash)`. Identifica *"este cambio exacto, sobre este artículo, en este catálogo"*.
+Cada componente va con su largo adelante: concatenar con un separador —el error clásico— haría
+que `('a|b','c')` y `('a','b|c')` colisionaran.
+
+**`jobId`** = `${intentKey}_c000001` — **una ejecución** de esa intención. El mismo cambio puede
+tener que ejecutarse muchas veces a lo largo del tiempo, y cada vez es un **ciclo** con su
+propio documento. Un job **nunca se reescribe una vez terminal**: es la evidencia de qué se
+envió y qué respondió Meta. El relleno de ceros hace que el orden lexicográfico —el que usa
+Firestore— coincida con el cronológico.
+
+La deduplicación vive en un **puntero transaccional** por intención
+(`metaCatalogOutboxIntents/{intentKey}`) que guarda `activeJobId` y `cycle`. Es lo único que se
+reescribe:
+
+- Dos confirmaciones concurrentes del mismo trabajo **pendiente** ⇒ un solo job (el puntero ya
+  apunta a un job no terminal).
+- El ciclo anterior ya terminó ⇒ la confirmación nueva crea un **job nuevo**, sin tocar el
+  anterior.
+- Los sync logs se identifican por `jobId`, así que también son únicos por ciclo.
+
+La versión anterior deduplicaba contra la HISTORIA y reabría el job terminal con `tx.set`. Eso
+rompía dos cosas a la vez: borraba la evidencia del ciclo anterior, y —cuando el estado terminal
+era `succeeded`— hacía que el ciclo más común del negocio no llegara nunca a Meta (bajar el
+precio por promo, subirlo al terminar y **volver a bajarlo** produce el mismo contenido).
 
 ### 3. El patch viaja CONGELADO
 
@@ -133,8 +152,8 @@ Cada 5 minutos, por tenant: `processing` con lease vencido ⇒ `needs_reconcilia
 `needs_reconciliation` de más de una hora ⇒ `needs_action` (ya no converge solo). Reejecutable:
 cada transición se re-verifica dentro de su propia transacción.
 
-Cadencia: cada corrida gasta como mucho 3 llamadas a Meta (submit + estado + relectura) contra
-un límite de 100/hora por catálogo. Un tenant sin cola no gasta ninguna: el gate de config y la
+Cadencia: cada corrida está acotada por el presupuesto de llamadas (§17), no por una suposición
+sobre los límites de Meta. Un tenant sin cola no gasta ninguna llamada: el gate de config y la
 query de `queued` cortan antes de tocar la red.
 
 ### 12. El fake modela el ciclo asíncrono real
@@ -203,6 +222,105 @@ Segunda tanda, tras la verificación adversarial de los hallazgos:
 - **El scheduler solo recorre tenants ACTIVE y no borrados**, y consulta el plan **sin
   auditar**: `assertFeatureEnabled` dejaba un registro de bloqueo cada 5 minutos en cada
   empresa que no usa el catálogo — incluida la que tiene que quedar intocada.
+
+### 14. Fencing del estado visible del producto
+
+Los jobs terminan en cualquier orden. El producto guarda `metaSyncCurrentJobId`: la generación
+del estado visible. **Toda** proyección (`queued` / `processing` / `synced` / `failed` /
+`needs_review`) se escribe en una transacción que primero verifica que ese job sigue siendo el
+vigente. Un job viejo conserva el derecho a cerrar **su propia** historia —su documento y su
+log— pero no puede tocar el estado, el error, el `metaProductItemId` ni el `metaLastSyncAt` del
+ciclo actual. Sin esto, una reconciliación tardía reemplazaba el resultado de un ciclo
+posterior ya confirmado.
+
+### 15. Revalidación transaccional inmediatamente antes del POST
+
+No alcanza con re-chequear la propiedad del claim. Justo antes de armar el lote, cada job pasa
+por una transacción que revalida **todo**: ownership y generación, estado del job, tenant,
+catálogo, existencia del producto, `syncToMeta`, `stockPendingReview` y el snapshot público. Lo
+que ya no corresponde se **excluye individualmente** con su motivo; el resto del lote sale
+igual. Un producto editado, borrado, desoptado o puesto en revisión después del claim no llega
+a Meta.
+
+**Límite inevitable y documentado:** entre ese commit y el POST externo hay una ventana de
+milisegundos. Un cambio hecho exactamente ahí puede llegar a Meta igual — es irreducible sin
+transacciones distribuidas con un sistema ajeno. Lo que se detecte después lo corrige el ciclo
+siguiente, y nada puede declararse confirmado sin evidencia.
+
+### 16. Recuperación humana de lo que el sistema no puede resolver
+
+`needs_action` necesitaba una salida real. Tres callables para TENANT_OWNER / PLATFORM_ADMIN,
+aislados por tenant, con la colección siempre cerrada al cliente por Rules:
+
+- **`metaCatalogOutboxIncidents`** — lista saneada: producto, acción, motivo en castellano y los
+  **nombres** de los campos que se intentaron cambiar. Nunca el contenido enviado, ni el lease,
+  ni nada que permita reconstruir credenciales.
+- **`metaCatalogOutboxReconcile`** — **mira Meta primero, siempre**. Igualdad confirmada ⇒
+  `succeeded`. Diferencia confirmada ⇒ encola un **ciclo nuevo** (el anterior queda registrado).
+  Sin evidencia ⇒ sigue en `needs_action`.
+- **`metaCatalogOutboxDiscard`** — cierra con un motivo obligatorio y auditado.
+
+**No existe un "reenviar"**: reenviar sin saber si el envío anterior llegó es exactamente lo que
+este outbox evita. En el panel, la tarjeta "Revisar sincronización" solo aparece cuando hay algo
+que revisar.
+
+### 17. Presupuesto de llamadas y procesamiento justo
+
+El cliente de Meta expone `callsMade`: cuenta **cada request**, incluidas las páginas de
+`listItems`. La confirmación tiene un techo por corrida (`MAX_META_CALLS_PER_RUN`) y consulta el
+estado de los batches en el orden de la cola —los más viejos primero—. Al agotarse el
+presupuesto, los jobs cuyo handle no se consultó quedan **intactos**: sin marca de error, sin
+consumo de intentos, para la corrida siguiente.
+
+El techo de consultas de estado es un contador **propio y absoluto**, no un resto del consumo
+total: derivarlo de las llamadas ya hechas significaba que un catálogo grande —cuyo `listItems`
+paginado consume todo el presupuesto— dejaba a los envíos sin confirmar **nunca**. La relectura
+del catálogo se paga siempre (es la evidencia; sin ella no se confirma nada) y solo se ejecuta
+si hay algo que evaluar: si todos los pendientes están dentro de su ventana de gracia, la
+corrida no gasta ni una llamada.
+
+El techo es una decisión **nuestra** de costo y previsibilidad. No se apoya en ningún límite
+publicado: los límites de rate de la Graph API cambian con el tiempo y con el tipo de asset, así
+que el sistema se acota solo en vez de asumir un número.
+
+### 18. Lo que salió del review adversarial de este endurecimiento
+
+Seis lentes (historia, carreras, fencing, aislamiento, presupuesto, recuperación) produjeron 54
+hallazgos; 22 sobrevivieron a la verificación. Lo que cambió por ellos, además de lo anterior:
+
+- **CRÍTICO — la confirmación asentaba el job sin precondición.** Entre la query y la escritura
+  el dueño podía descartar el job desde el panel; el `update` ciego lo resucitaba, borraba el
+  motivo auditado del descarte y —en la rama de reintento seguro— **reenviaba a Meta un cambio
+  que una persona acababa de descartar**. Ahora toda transición de la confirmación relee el job
+  en una transacción y aborta si su estado cambió.
+- La recuperación manual **no tocaba jobs en vuelo ni recién enviados**: cancelar un claim vivo
+  podía producir un segundo envío, y "revisar" a los dos segundos leía el estado viejo de Meta
+  como si fuera evidencia. Ambos casos ahora responden que hay que esperar.
+- **Descartar dice la verdad**: si el lote ya salió, el mensaje y el registro aclaran que el
+  cambio pudo haberse aplicado en Meta y que descartar solo deja de seguirlo.
+- Un job **terminal** ya no se reescribe ni siquiera para anotar que fue reemplazado: se marca
+  como *revisado* (`reviewedAt`), que saca la incidencia de la lista sin tocar la evidencia.
+  Eso también resolvió que `failed` y `stale` saturaran la lista de incidencias.
+- El **token de vigencia** se publica en la misma transacción que crea el job (antes había una
+  ventana donde el worker ya podía reclamarlo y el producto todavía no lo reconocía, así que
+  toda proyección se descartaba y el producto quedaba "En cola" para siempre).
+- El **log de cada ciclo** se escribe junto con su transición, no al final del bucle: una
+  corrida cortada perdía la historia de todo lo que ya había resuelto.
+- La cola de confirmación se ordena por **antigüedad**, no por id (que es un hash): había
+  inanición real con más de 50 pendientes.
+- La **convergencia local** de `runCatalogSync` respeta el fencing: no toca productos que tienen
+  un job vigente.
+- `proyectarEstado` dejó de reescribir `metaCatalogId` (revertía el catálogo vigente del
+  producto si la empresa lo había cambiado).
+- Un fallo de infraestructura en la revalidación pre-POST **devuelve el job a la cola con su
+  intento intacto** en vez de dejarlo varado hasta que el sweep lo declarara ambiguo.
+- El scheduler y el endpoint dev comparten el mismo fail-closed por tenant; la reconciliación
+  manual exige el mismo plan que el mantenimiento; y el encolado distingue "ya está en camino"
+  de "está esperando tu revisión" en vez de reportar todo como duplicado.
+
+**Caveat de la infraestructura de test**: el doble de Meta vive en un documento global y no
+distingue `catalogId`, así que el E2E prueba el aislamiento entre tenants a nivel Firestore y de
+gates, no a nivel del catálogo remoto.
 
 ## Semántica de entrega
 

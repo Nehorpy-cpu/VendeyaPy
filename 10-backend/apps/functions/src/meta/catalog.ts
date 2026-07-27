@@ -478,8 +478,10 @@ export interface CatalogSyncRunResult {
   remoteOnly?: Array<{ retailerId: string; name: string }>;
   /** Jobs creados en el outbox. NO es "aplicado en Meta". */
   queuedCount?: number;
-  /** Confirmaciones repetidas: el mismo cambio ya estaba encolado. */
+  /** Confirmaciones repetidas: ya hay trabajo pendiente para ese mismo cambio. */
   deduplicatedCount?: number;
+  /** De los repetidos, los que están TRABADOS esperando una revisión del dueño. */
+  awaitingReviewCount?: number;
   /** Productos cuyo request no cumple el contrato (quedan fuera, sin frenar a los demás). */
   blockedCount?: number;
 }
@@ -678,8 +680,14 @@ export async function runCatalogSync(
   const now = Timestamp.now();
   const convergencia: Array<{ path: string; data: Record<string, unknown> }> = [];
   const remotoPorId = new Map(remoteItems.filter((r) => r.retailerId).map((r) => [r.retailerId, r]));
+  // Productos con un job vigente: su estado lo gobierna ESE job (fencing). La convergencia
+  // solo habla de los que nadie está sincronizando en este momento.
+  const conJobVigente = new Set(
+    products.filter((p) => !!(p as Product & { metaSyncCurrentJobId?: string }).metaSyncCurrentJobId).map((p) => p.id),
+  );
   for (const e of plan.entries) {
     if (e.action !== 'unchanged' || !e.remoteItemId || !e.payload) continue;
+    if (conJobVigente.has(e.productId)) continue;
     const remoto = remotoPorId.get(e.sku) ?? null;
     if (verifyJobOutcome(writableProjection(e.payload), remoto).outcome !== 'confirmed_equal') continue;
     convergencia.push({
@@ -696,18 +704,21 @@ export async function runCatalogSync(
   }
   const convergenciaOk = await commitStateOps(tenantId, runId, convergencia);
 
+  const estadoOk = convergenciaOk && encolado.statePersisted;
   const result: CatalogSyncRunResult = {
     ...planned,
     status: 'queued',
     queuedCount: encolado.queued,
     deduplicatedCount: encolado.deduplicated,
+    awaitingReviewCount: encolado.awaitingReview,
     blockedCount: encolado.blocked,
-    ...(convergenciaOk ? {} : { reason: 'state_persist_failed' as const }),
+    ...(estadoOk ? {} : { reason: 'state_persist_failed' as const }),
   };
   await writeRunDoc(tenantId, runId, {
     status: 'queued',
     queuedCount: encolado.queued,
     deduplicatedCount: encolado.deduplicated,
+    awaitingReviewCount: encolado.awaitingReview,
     blockedCount: encolado.blocked,
     // `appliedCount` y `lastSuccessfulSyncAt` NO se escriben acá: encolar no es aplicar. Los
     // fija la confirmación, cuando Meta devuelve evidencia.

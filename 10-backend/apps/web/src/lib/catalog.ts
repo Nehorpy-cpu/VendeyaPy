@@ -164,6 +164,8 @@ export interface CatalogSyncRun {
   queuedCount?: number;
   /** Confirmaciones repetidas del mismo cambio: no generan trabajo nuevo. */
   deduplicatedCount?: number;
+  /** De los repetidos, los que están trabados esperando una revisión del dueño. */
+  awaitingReviewCount?: number;
   /** Productos cuyo cambio no cumple el contrato de Meta. */
   blockedCount?: number;
   failedCount?: number;
@@ -293,6 +295,56 @@ export async function setProductSyncEnabled(
   const call = httpsCallable(firebaseFunctions(), 'metaCatalogSetSyncEnabled');
   const res = await call({ tenantId, productId, enabled, confirmDiff: opts?.confirmDiff ?? false });
   return res.data as SetSyncEnabledResult;
+}
+
+// --- Recuperación de envíos trabados (META-CATALOG-OUTBOX-HARDEN-1) ----------
+
+/** Incidencia SANEADA del outbox: lo mínimo para entender y decidir. Sin payloads ni tokens. */
+export interface OutboxIncident {
+  jobId: string;
+  productId: string;
+  productName: string;
+  retailerId: string;
+  action: 'create' | 'update' | 'disable';
+  status: string;
+  reason: string | null;
+  cycle: number;
+  attempts: number;
+  /** Nombres de los campos que el envío pretendía cambiar (nunca sus valores). */
+  fields: string[];
+  error: string;
+}
+
+export async function listOutboxIncidents(tenantId: string): Promise<OutboxIncident[]> {
+  const call = httpsCallable(firebaseFunctions(), 'metaCatalogOutboxIncidents');
+  const res = await call({ tenantId });
+  return ((res.data as { incidents?: OutboxIncident[] }).incidents ?? []);
+}
+
+export interface ReconcileOutcome {
+  ok: boolean;
+  outcome: 'confirmed_equal' | 'confirmed_different' | 'unverifiable' | 'nothing_to_do';
+  status: string;
+  newJobId?: string;
+  message: string;
+}
+
+/**
+ * Revisa UN envío trabado contra el catálogo real de Meta. Nunca reenvía a ciegas: si Meta ya
+ * tiene el cambio lo cierra, si difiere encola un intento nuevo, y si no hay evidencia lo deja
+ * pendiente de revisión.
+ */
+export async function reconcileOutboxJob(tenantId: string, jobId: string): Promise<ReconcileOutcome> {
+  const call = httpsCallable(firebaseFunctions(), 'metaCatalogOutboxReconcile');
+  const res = await call({ tenantId, jobId });
+  return res.data as ReconcileOutcome;
+}
+
+/** Descarta un envío trabado. El motivo queda auditado. */
+export async function discardOutboxJob(tenantId: string, jobId: string, reason: string): Promise<{ ok: boolean; message: string }> {
+  const call = httpsCallable(firebaseFunctions(), 'metaCatalogOutboxDiscard');
+  const res = await call({ tenantId, jobId, reason });
+  return res.data as { ok: boolean; message: string };
 }
 
 /** Importa artículos de Meta como productos INACTIVE (sin costo ni stock inventados). */

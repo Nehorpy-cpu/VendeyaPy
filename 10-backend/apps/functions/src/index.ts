@@ -177,6 +177,12 @@ export {
 // catálogo real. Nada declara `synced` sin evidencia.
 export { metaCatalogOutboxMaintenance } from './functions/scheduled/metaCatalogOutbox.js';
 export { devRunMetaCatalogOutbox } from './functions/meta/devMetaCatalogOutbox.js';
+// Recuperación HUMANA de lo que el outbox no puede resolver solo (META-CATALOG-OUTBOX-HARDEN-1).
+export {
+  metaCatalogOutboxIncidents,
+  metaCatalogOutboxReconcile,
+  metaCatalogOutboxDiscard,
+} from './functions/meta/catalogOutboxCallables.js';
 
 // Atribución (D5): anuncio → pedido → ganancia real, por campaña.
 export { devComputeAttribution } from './functions/meta/devComputeAttribution.js';

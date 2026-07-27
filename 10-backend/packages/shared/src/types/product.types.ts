@@ -120,6 +120,12 @@ export interface Product {
    */
   syncToMeta?: boolean;
   metaSyncStatus?: MetaSyncStatus;
+  /**
+   * Job del outbox que "manda" sobre el estado visible (META-CATALOG-OUTBOX-HARDEN-1). Los
+   * jobs terminan en cualquier orden: sin esta generación, uno viejo que se reconcilia tarde
+   * reemplazaba el estado, el error y la fecha de sync de un ciclo posterior ya confirmado.
+   */
+  metaSyncCurrentJobId?: string | null;
   metaCatalogId?: string | null;
   /**
    * `retailer_id` del artículo en Meta: la identidad remota que NOSOTROS controlamos.

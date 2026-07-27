@@ -351,6 +351,8 @@ service cloud.firestore {
       // tocarlo desde el navegador permitiría reenviar, revivir terminales o saltear los
       // gates. El panel ve el estado a través de `metaSyncStatus` de cada producto.
       match /metaCatalogOutboxJobs/{id} { allow read, write: if false; }
+      // Puntero por intención (deduplicación del trabajo activo): mismo criterio.
+      match /metaCatalogOutboxIntents/{id} { allow read, write: if false; }
 
       // Eventos del negocio + Conversions API (D6): manager+ lee; escribe Cloud Functions.
       match /businessEvents/{id} { allow read: if isTenantManager(tenantId) || isPlatformAdmin(); allow write: if false; }

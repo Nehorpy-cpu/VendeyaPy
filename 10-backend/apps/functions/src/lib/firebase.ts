@@ -106,6 +106,11 @@ export const paths = {
   /** Outbox de escrituras hacia el Meta Catalog (META-CATALOG-OUTBOX-1). Aislado por tenant. */
   metaCatalogOutboxJobs: (tenantId: string) => `tenants/${tenantId}/metaCatalogOutboxJobs`,
   metaCatalogOutboxJob: (tenantId: string, jobId: string) => `tenants/${tenantId}/metaCatalogOutboxJobs/${jobId}`,
+  /**
+   * Puntero por INTENCIÓN: deduplica el trabajo ACTIVO sin tocar la historia. Los jobs son
+   * inmutables (uno por ciclo); esto es lo único que se reescribe.
+   */
+  metaCatalogOutboxIntent: (tenantId: string, intentKey: string) => `tenants/${tenantId}/metaCatalogOutboxIntents/${intentKey}`,
   /** Lock de unicidad del retailer_id dentro del tenant (reconciliación con Meta). */
   metaRetailerLock: (tenantId: string, key: string) => `tenants/${tenantId}/metaRetailerLocks/${key}`,
   trackingSources: (tenantId: string) => `tenants/${tenantId}/trackingSources`,

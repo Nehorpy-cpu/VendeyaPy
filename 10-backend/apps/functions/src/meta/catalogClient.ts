@@ -68,6 +68,12 @@ export interface CatalogBatchItemError {
 }
 
 export interface MetaCatalogClient {
+  /**
+   * Llamadas HTTP realizadas a Meta desde que se creó el cliente. Cuenta CADA request, no cada
+   * método: `listItems` de un catálogo grande consume una llamada por página. Es lo que
+   * permite acotar de verdad el consumo de una corrida del outbox.
+   */
+  readonly callsMade: number;
   /** Metadatos del catálogo (lanza MetaCatalogApiError si no existe o no hay permiso). */
   getCatalog(catalogId: string): Promise<{ id: string; name: string }>;
   /** Lista COMPLETA (paginada) de items del catálogo. Lanza si supera el tope soportado. */
@@ -139,6 +145,11 @@ export class HttpMetaCatalogClient implements MetaCatalogClient {
   private readonly base: string;
   private readonly transport: CatalogTransport;
   private readonly sleep: (ms: number) => Promise<void>;
+  /** Requests HTTP efectivamente emitidos (incluye reintentos y cada página de `listItems`). */
+  private llamadas = 0;
+  get callsMade(): number {
+    return this.llamadas;
+  }
 
   constructor(
     private readonly accessToken: string,
@@ -166,6 +177,7 @@ export class HttpMetaCatalogClient implements MetaCatalogClient {
     const maxAttempts = method === 'GET' ? MAX_ATTEMPTS : 1;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       let res: CatalogHttpResponse | null = null;
+      this.llamadas++;
       try {
         res = await this.transport({
           method,
@@ -308,6 +320,8 @@ export interface CatalogFixture {
   applyBatchToFixture?: boolean;
   /** Estado por handle: `queued`/`in_progress` = Meta todavía no terminó de procesar. */
   batchStatus?: Record<string, { status?: string; errors?: Array<{ retailer_id?: string; message?: string }> }>;
+  /** Páginas que "cuesta" un `listItems` (el cliente real gasta una llamada por página). */
+  pagesPerList?: number;
 }
 
 /**
@@ -413,6 +427,12 @@ export function assertBatchRequestShape(r: unknown, where = 'request'): void {
 export class FakeMetaCatalogClient implements MetaCatalogClient {
   constructor(private readonly seed: CatalogFixture) {}
 
+  /** Mismo contador que el cliente real: el E2E puede afirmar cuántas llamadas costó una corrida. */
+  private llamadas = 0;
+  get callsMade(): number {
+    return this.llamadas;
+  }
+
   /**
    * El fixture se RELEE en cada llamada. Congelarlo en el constructor hacía imposible el caso
    * central de un outbox asíncrono: mutar el estado remoto entre el envío y la relectura.
@@ -436,6 +456,7 @@ export class FakeMetaCatalogClient implements MetaCatalogClient {
 
   async getCatalog(catalogId: string): Promise<{ id: string; name: string }> {
     const fx = await this.fixture();
+    this.llamadas++;
     this.failIf(fx, 'getCatalog');
     const cat = fx.catalog;
     if (!cat || cat.id !== catalogId) {
@@ -446,6 +467,9 @@ export class FakeMetaCatalogClient implements MetaCatalogClient {
 
   async listItems(_catalogId: string): Promise<MetaRemoteCatalogItem[]> {
     const fx = await this.fixture();
+    // Una llamada por PÁGINA, igual que el cliente real: un catálogo grande no cuesta "una
+    // llamada" y el presupuesto de la corrida tiene que verlo.
+    this.llamadas += Math.max(1, fx.pagesPerList ?? 1);
     this.failIf(fx, 'listItems');
     return (fx.items ?? []).map((raw) => ({
       id: String(raw.id ?? ''),
@@ -465,6 +489,7 @@ export class FakeMetaCatalogClient implements MetaCatalogClient {
 
   async submitItemsBatch(catalogId: string, requests: CatalogBatchRequest[]): Promise<{ handles: string[] }> {
     const fx = await this.fixture();
+    this.llamadas++;
     // Falla ANTES de aceptar: Meta rechazó la llamada y no escribió nada.
     this.failIf(fx, 'batch', 'before_accept');
     // VALIDACIÓN ESTRICTA DEL CONTRATO: el fake anterior aceptaba cualquier forma y por eso
@@ -519,6 +544,7 @@ export class FakeMetaCatalogClient implements MetaCatalogClient {
 
   async getBatchStatus(_catalogId: string, handle: string): Promise<{ errors: CatalogBatchItemError[] }> {
     const fx = await this.fixture();
+    this.llamadas++;
     this.failIf(fx, 'batchStatus');
     const porHandle = fx.batchStatus?.[handle];
     const errores = porHandle?.errors ?? fx.batchStatusErrors ?? [];

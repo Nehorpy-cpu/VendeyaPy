@@ -4,8 +4,10 @@ import { MetaCatalogApiError } from './catalogClient.js';
 import {
   chunkJobsForBatch,
   classifySubmitError,
+  intentKeyOfJobId,
   isTerminalOutboxStatus,
   outboxGate,
+  outboxIntentKey,
   outboxJobId,
   productStatusForJob,
   stableHash,
@@ -69,9 +71,9 @@ const job = (over: Partial<MetaCatalogOutboxJob> = {}): MetaCatalogOutboxJob =>
 // 1. Identidad del job: determinística e INYECTIVA
 // ---------------------------------------------------------------------------
 
-describe('outboxJobId — idempotencia', () => {
-  it('la misma confirmación produce SIEMPRE el mismo id', () => {
-    expect(outboxJobId(CLAVE)).toBe(outboxJobId({ ...CLAVE }));
+describe('outboxIntentKey — identidad de la INTENCIÓN', () => {
+  it('la misma confirmación produce SIEMPRE la misma clave', () => {
+    expect(outboxIntentKey(CLAVE)).toBe(outboxIntentKey({ ...CLAVE }));
   });
 
   it.each([
@@ -80,21 +82,55 @@ describe('outboxJobId — idempotencia', () => {
     ['retailer', { retailerId: 'OTRO-1' }],
     ['acción', { action: 'disable' as const }],
     ['contenido', { intendedContentHash: 'h2' }],
-  ])('cambiar el %s cambia el id', (_l, over) => {
-    expect(outboxJobId({ ...CLAVE, ...over })).not.toBe(outboxJobId(CLAVE));
+  ])('cambiar el %s cambia la clave', (_l, over) => {
+    expect(outboxIntentKey({ ...CLAVE, ...over })).not.toBe(outboxIntentKey(CLAVE));
   });
 
-  it('NO es una concatenación ambigua: componentes que "se corren" dan ids distintos', () => {
-    const a = outboxJobId({ ...CLAVE, tenantId: 'a|b', catalogId: 'c' });
-    const b = outboxJobId({ ...CLAVE, tenantId: 'a', catalogId: 'b|c' });
+  it('NO es una concatenación ambigua: componentes que "se corren" dan claves distintas', () => {
+    const a = outboxIntentKey({ ...CLAVE, tenantId: 'a|b', catalogId: 'c' });
+    const b = outboxIntentKey({ ...CLAVE, tenantId: 'a', catalogId: 'b|c' });
     expect(a).not.toBe(b);
   });
 
   it('es un id de documento válido de Firestore', () => {
-    const id = outboxJobId({ ...CLAVE, retailerId: 'ARM/744646#5202' });
+    const id = outboxIntentKey({ ...CLAVE, retailerId: 'ARM/744646#5202' });
     expect(id).not.toContain('/');
     expect(id).not.toContain('.');
     expect(id.length).toBeGreaterThan(8);
+    expect(id.length).toBeLessThanOrEqual(120);
+  });
+});
+
+describe('outboxJobId — una EJECUCIÓN de la intención', () => {
+  const intent = outboxIntentKey(CLAVE);
+
+  it('cada ciclo tiene su propio id: la historia no se pisa', () => {
+    expect(outboxJobId(intent, 1)).not.toBe(outboxJobId(intent, 2));
+    expect(outboxJobId(intent, 2)).not.toBe(outboxJobId(intent, 3));
+  });
+
+  it('el mismo ciclo de la misma intención es siempre el mismo id', () => {
+    expect(outboxJobId(intent, 7)).toBe(outboxJobId(intent, 7));
+  });
+
+  it('el orden lexicográfico coincide con el cronológico (Firestore ordena por id)', () => {
+    const ids = [outboxJobId(intent, 10), outboxJobId(intent, 2), outboxJobId(intent, 1)];
+    expect([...ids].sort()).toEqual([outboxJobId(intent, 1), outboxJobId(intent, 2), outboxJobId(intent, 10)]);
+  });
+
+  it('se puede volver de un job a su intención', () => {
+    expect(intentKeyOfJobId(outboxJobId(intent, 42))).toBe(intent);
+    expect(intentKeyOfJobId(outboxJobId(intent, 1))).toBe(intent);
+  });
+
+  it('intenciones distintas jamás comparten id de job', () => {
+    const otra = outboxIntentKey({ ...CLAVE, intendedContentHash: 'h2' });
+    expect(outboxJobId(otra, 1)).not.toBe(outboxJobId(intent, 1));
+  });
+
+  it('sigue siendo un id de documento válido', () => {
+    const id = outboxJobId(outboxIntentKey({ ...CLAVE, retailerId: 'ARM/744646#5202' }), 3);
+    expect(id).not.toContain('/');
     expect(id.length).toBeLessThanOrEqual(120);
   });
 });

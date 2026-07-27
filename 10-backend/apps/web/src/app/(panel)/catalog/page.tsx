@@ -21,6 +21,7 @@ import {
 } from '@/lib/catalog';
 import { ProductForm } from '@/components/ProductForm';
 import { MetaReconciliation } from '@/components/MetaReconciliation';
+import { OutboxIncidents } from '@/components/OutboxIncidents';
 
 const gs = (n: number | null | undefined) =>
   n == null ? '—' : '₲ ' + n.toLocaleString('es-PY');
@@ -161,6 +162,9 @@ export default function CatalogPage() {
         </div>
       </div>
 
+      {/* Solo el dueño puede resolver un envío trabado (el backend lo restringe igual). */}
+      {puedeReconciliar && <OutboxIncidents tenantId={tenantId} />}
+
       <MetaReconciliation tenantId={tenantId} categories={categoriesQ.data ?? []} />
 
       {(syncMut.isError || syncRun) && (
@@ -235,6 +239,7 @@ export default function CatalogPage() {
                   <p>
                     En cola: {syncRun.queuedCount ?? 0}
                     {(syncRun.deduplicatedCount ?? 0) > 0 ? ` · Ya estaban en cola: ${syncRun.deduplicatedCount}` : ''}
+                    {(syncRun.awaitingReviewCount ?? 0) > 0 ? ` · Esperando tu revisión: ${syncRun.awaitingReviewCount}` : ''}
                     {(syncRun.blockedCount ?? 0) > 0 ? ` · Con problemas: ${syncRun.blockedCount}` : ''}
                     {syncRun.errorDetail ? ` — ${syncRun.errorDetail}` : ''}
                   </p>
@@ -535,12 +540,14 @@ function syncErrorText(run: CatalogSyncRun): string {
  */
 const SYNC_BADGE: Record<string, { label: string; clase: string; ayuda: string }> = {
   queued: { label: 'En cola', clase: 'bg-amber-50 text-amber-700', ayuda: 'El cambio está esperando su turno para enviarse a Meta.' },
-  processing: { label: 'Procesando', clase: 'bg-amber-50 text-amber-700', ayuda: 'Ya salió hacia Meta. Falta que Meta lo confirme.' },
+  // `processing` cubre desde que el worker toma el cambio hasta que Meta lo confirma: puede
+  // estar todavía preparando el envío, así que decir "ya salió" sería afirmar de más.
+  processing: { label: 'Procesando', clase: 'bg-amber-50 text-amber-700', ayuda: 'Lo estamos enviando a Meta. Falta la confirmación.' },
   synced: { label: 'Confirmado', clase: 'bg-mint-50 text-mint-700', ayuda: 'Meta confirmó que el artículo quedó igual que acá.' },
   disabled: { label: 'Oculto en Meta', clase: 'bg-ink-50 text-ink-500', ayuda: 'El artículo quedó sin stock en el catálogo de Meta.' },
   needs_review: { label: 'Requiere revisión', clase: 'bg-amber-50 text-amber-800', ayuda: 'No se pudo confirmar solo: revisá el producto antes de reintentar.' },
   failed: { label: 'Error', clase: 'bg-coral-50 text-coral-600', ayuda: 'Meta rechazó el cambio.' },
-  pending: { label: 'Procesando', clase: 'bg-amber-50 text-amber-700', ayuda: 'Ya salió hacia Meta. Falta que Meta lo confirme.' },
+  pending: { label: 'Procesando', clase: 'bg-amber-50 text-amber-700', ayuda: 'Lo estamos enviando a Meta. Falta la confirmación.' },
 };
 
 function SyncBadge({ status, error }: { status?: string; error?: string | null }) {

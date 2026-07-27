@@ -410,11 +410,12 @@ const reencolar = async () => {
   const muerto = await jobOfProduct('MCE2E-A');
   await db.doc(FIXTURE).set({ failWith: null }, { merge: true });
   const { result } = await call('runTenantJob', owner, { action: 'catalogSyncApply' });
-  const revivido = await jobOfProduct('MCE2E-A');
-  check('OB-48b. una confirmación nueva REABRE un job cerrado sin éxito', muerto?.status === 'failed' && revivido?.status === 'queued' && revivido?.attempts === 0 && (result?.result?.queuedCount ?? 0) > 0, `antes=${muerto?.status} después=${revivido?.status}`);
-  check('OB-48c. y sigue habiendo UN solo job para ese producto (no se duplicó)', (await jobsOf()).filter((j) => j.productId === 'MCE2E-A').length === 1);
+  const todos = (await jobsOf()).filter((j) => j.productId === 'MCE2E-A');
+  const nuevo = todos.find((j) => j.id !== muerto?.id);
+  check('OB-48b. una confirmación nueva crea un CICLO NUEVO tras un cierre sin éxito', muerto?.status === 'failed' && nuevo?.status === 'queued' && nuevo?.cycle === (muerto?.cycle ?? 0) + 1 && (result?.result?.queuedCount ?? 0) > 0, `antes=${muerto?.status}#${muerto?.cycle} nuevo=${nuevo?.status}#${nuevo?.cycle}`);
+  check('OB-48c. el intento fallido SIGUE existiendo con su historia (no se sobrescribió)', todos.length === 2 && todos.find((j) => j.id === muerto?.id)?.status === 'failed', `jobs=${todos.length}`);
   await drain();
-  const ok = await jobOfProduct('MCE2E-A');
+  const ok = (await jobsOf()).find((j) => j.id === nuevo?.id);
   check('OB-48d. el reintento explícito llega a enviarse', ok?.status === 'submitted' || ok?.status === 'succeeded' || ok?.status === 'needs_reconciliation', `status=${ok?.status}`);
 }
 {
@@ -467,6 +468,198 @@ const reencolar = async () => {
   await drain();
   check('OB-52b. un job terminal no se vuelve a tocar ni a enviar', (await writesSnap()).size === w1 && antes >= 0);
 }
+
+// ═══ E5. HARDEN: historia inmutable, fencing del producto y recuperación humana ═══
+const intentsCol = () => db.collection(`tenants/${T}/metaCatalogOutboxIntents`);
+const jobsDeProducto = async (pid) => (await jobsOf()).filter((j) => j.productId === pid).sort((a, b) => a.id.localeCompare(b.id));
+const wipeIntents = async () => { for (const d of (await intentsCol().get()).docs) await d.ref.delete(); };
+const limpio = async () => {
+  await wipeOutbox();
+  await wipeIntents();
+  await wipe(`${FIXTURE}/writes`);
+  await wipe(`tenants/${T}/metaCatalogSyncLogs`);
+  await db.doc(FIXTURE).set({ catalog: { id: CATALOG_ID, name: 'Catálogo E2E' }, items: FIXTURE_ITEMS, applyBatchToFixture: true }, { merge: false });
+  await setConfig({ ...VALID_CFG, mode: 'live' });
+};
+
+{
+  // EL DEFECTO CENTRAL: el ciclo A→B→A tiene que dejar TRES ejecuciones auditables, cada una
+  // con su documento y su log. La versión anterior reabría el job sobrescribiéndolo.
+  await limpio();
+  const precios = [200000, 250000, 200000];
+  for (const p of precios) {
+    await db.doc(`tenants/${T}/products/MCE2E-B`).set({ price: p }, { merge: true });
+    await call('runTenantJob', owner, { action: 'catalogSyncApply' });
+    await drain();
+  }
+  const jobs = await jobsDeProducto('MCE2E-B');
+  check('OB-60. el ciclo A→B→A deja TRES ejecuciones, no una sobrescrita', jobs.length === 3, `jobs=${jobs.length} ids=${jobs.map((j) => j.id.slice(-9)).join(',')}`);
+  // El CICLO es por INTENCIÓN: bajar a 200000 y volver a bajar a 200000 son el mismo cambio
+  // (ciclos 1 y 2 de una intención); subir a 250000 es otra intención distinta (su ciclo 1).
+  const porIntent = new Map();
+  for (const j of jobs) porIntent.set(j.intentKey, [...(porIntent.get(j.intentKey) ?? []), j.cycle]);
+  const repetida = [...porIntent.values()].find((cs) => cs.length === 2);
+  check('OB-60b. la intención repetida se ejecutó DOS veces, con ciclos 1 y 2', JSON.stringify((repetida ?? []).sort()) === '[1,2]', JSON.stringify([...porIntent.values()]));
+  check('OB-60c. tres ejecuciones sobre DOS intenciones distintas', porIntent.size === 2, `intenciones=${porIntent.size}`);
+  const logs = await db.collection(`tenants/${T}/metaCatalogSyncLogs`).get();
+  const logIds = logs.docs.map((d) => d.id).filter((id) => jobs.some((j) => j.id === id));
+  check('OB-60d. los logs son únicos por ciclo (la historia no se pisa)', new Set(logIds).size === logIds.length && logIds.length >= 2, `logs=${logIds.length}`);
+  const reqs = (await writesSnap()).docs.flatMap((d) => d.data().requests ?? []).filter((x) => x.data?.id === 'MCE2E-B');
+  check('OB-60e. las tres ejecuciones llegaron a Meta', reqs.length === 3, `envíos=${reqs.length}`);
+  await db.doc(`tenants/${T}/products/MCE2E-B`).set({ price: 250000 }, { merge: true });
+}
+{
+  // Doble click concurrente: un solo job ACTIVO para la misma intención.
+  await limpio();
+  await db.doc(`tenants/${T}/products/MCE2E-B`).set({ price: 210000 }, { merge: true });
+  const [r1, r2] = await Promise.all([
+    call('runTenantJob', owner, { action: 'catalogSyncApply' }),
+    call('runTenantJob', owner, { action: 'catalogSyncApply' }),
+  ]);
+  const jobs = await jobsDeProducto('MCE2E-B');
+  const queued = (r1.result?.result?.queuedCount ?? 0) + (r2.result?.result?.queuedCount ?? 0);
+  check('OB-61. doble confirmación concurrente ⇒ UN solo job para esa intención', jobs.length === 1, `jobs=${jobs.length} queuedTotal=${queued}`);
+  await db.doc(`tenants/${T}/products/MCE2E-B`).set({ price: 250000 }, { merge: true });
+}
+{
+  // FENCING: un job viejo que se reconcilia DESPUÉS de que otro fue encolado no puede pisar
+  // el estado visible del producto.
+  await limpio();
+  await db.doc(`tenants/${T}/products/MCE2E-B`).set({ price: 220000 }, { merge: true });
+  await call('runTenantJob', owner, { action: 'catalogSyncApply' });
+  const viejo = (await jobsDeProducto('MCE2E-B'))[0];
+  // El producto pasa a estar gobernado por OTRO job (simula un ciclo posterior ya encolado).
+  await db.doc(`tenants/${T}/products/MCE2E-B`).set({ metaSyncCurrentJobId: 'mco_otro_c000009', metaSyncStatus: 'queued' }, { merge: true });
+  await db.doc(`tenants/${T}/metaCatalogOutboxJobs/${viejo.id}`).set({ status: 'submitted', batchHandle: 'h-viejo', submittedAt: Timestamp.fromMillis(Date.now() - 120000) }, { merge: true });
+  await drain();
+  const p = await productOf('MCE2E-B');
+  check('OB-62. un job viejo NO pisa el estado visible de un ciclo nuevo', p?.metaSyncStatus === 'queued' && p?.metaSyncCurrentJobId === 'mco_otro_c000009', `status=${p?.metaSyncStatus} vigente=${p?.metaSyncCurrentJobId}`);
+  const cerrado = (await jobsDeProducto('MCE2E-B')).find((j) => j.id === viejo.id);
+  check('OB-62b. pero el job viejo SÍ cierra su propia historia', cerrado?.status !== 'submitted', `status=${cerrado?.status}`);
+  await db.doc(`tenants/${T}/products/MCE2E-B`).set({ price: 250000 }, { merge: true });
+}
+{
+  // Opt-out DESPUÉS del claim y ANTES del POST: el gate transaccional lo saca del lote.
+  await limpio();
+  await db.doc(FIXTURE).set({ holdAt: null }, { merge: true });
+  await db.doc(`tenants/${T}/_debug/catalogFixtures`).set({ holdAt: 'outbox_pre_submit', resume: false });
+  await db.doc(`tenants/${T}/products/MCE2E-A`).set({ syncToMeta: true }, { merge: true });
+  await call('runTenantJob', owner, { action: 'catalogSyncApply' });
+  const drenaje = drain();
+  // Esperar a que el worker llegue al punto de espera y recién ahí apagar el opt-in.
+  for (let i = 0; i < 60; i++) {
+    if ((await db.doc(`tenants/${T}/_debug/catalogHolds`).get()).data()?.point === 'outbox_pre_submit') break;
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  await db.doc(`tenants/${T}/products/MCE2E-A`).set({ syncToMeta: false }, { merge: true });
+  await db.doc(`tenants/${T}/_debug/catalogFixtures`).set({ holdAt: 'outbox_pre_submit', resume: true });
+  await drenaje;
+  const reqs = (await writesSnap()).docs.flatMap((d) => d.data().requests ?? []);
+  const jobA = await jobOfProduct('MCE2E-A');
+  check('OB-63. opt-out entre el claim y el POST ⇒ el producto NO viaja', !reqs.some((x) => x.data?.id === 'MCE2E-A') && jobA?.status === 'cancelled' && jobA?.reason === 'sync_disabled', `status=${jobA?.status} reason=${jobA?.reason}`);
+  await db.doc(`tenants/${T}/_debug/catalogFixtures`).delete().catch(() => {});
+  await db.doc(`tenants/${T}/products/MCE2E-A`).set({ syncToMeta: true }, { merge: true });
+}
+{
+  // PRESUPUESTO: muchos handles distintos no disparan una llamada por handle sin techo.
+  await limpio();
+  await db.doc(FIXTURE).set({ applyBatchToFixture: false, pagesPerList: 3 }, { merge: true });
+  await call('runTenantJob', owner, { action: 'catalogSyncApply' });
+  const jobs = await jobsOf();
+  // Se simulan 100 handles distintos, uno por job, todos ya enviados y fuera de la gracia.
+  let i = 0;
+  for (const j of jobs) {
+    await db.doc(`tenants/${T}/metaCatalogOutboxJobs/${j.id}`).set({
+      status: 'submitted', batchHandle: `h-${i++}`, submittedAt: Timestamp.fromMillis(Date.now() - 120000),
+    }, { merge: true });
+  }
+  const r = await drain();
+  const llamadas = r?.reconcile?.metaCalls ?? 0;
+  check('OB-64. la confirmación acota sus llamadas a Meta (incluidas las páginas)', llamadas > 0 && llamadas <= 25, `llamadas=${llamadas} handles=${jobs.length}`);
+  const intactos = (await jobsOf()).filter((j) => j.status === 'submitted').length;
+  check('OB-64b. lo que no entró en el presupuesto queda INTACTO para la próxima corrida', intactos + (r?.reconcile?.checked ?? 0) >= jobs.length - 1, `intactos=${intactos} revisados=${r?.reconcile?.checked} diferidos=${r?.reconcile?.deferredHandles}`);
+  await db.doc(FIXTURE).set({ pagesPerList: 1 }, { merge: true });
+}
+{
+  // RECUPERACIÓN HUMANA: los tres desenlaces + el descarte.
+  await limpio();
+  await db.doc(`tenants/${T}/products/MCE2E-B`).set({ price: 230000 }, { merge: true });
+  await call('runTenantJob', owner, { action: 'catalogSyncApply' });
+  const job = (await jobsDeProducto('MCE2E-B'))[0];
+  await db.doc(`tenants/${T}/metaCatalogOutboxJobs/${job.id}`).set({ status: 'needs_action', reason: 'submit_ambiguous' }, { merge: true });
+
+  const { result: lista } = await call('metaCatalogOutboxIncidents', owner, {});
+  check('OB-65. el dueño ve la incidencia saneada', lista?.ok === true && lista.incidents?.some((x) => x.jobId === job.id), `n=${lista?.incidents?.length}`);
+  const inc = (lista?.incidents ?? []).find((x) => x.jobId === job.id);
+  check('OB-65b. la incidencia NO expone el contenido enviado ni credenciales', !!inc && !('intendedPatch' in inc) && !JSON.stringify(inc).includes('230000') && Array.isArray(inc.fields), JSON.stringify(inc ?? {}).slice(0, 160));
+  const { err: errSeller } = await call('metaCatalogOutboxIncidents', seller, { tenantId: T });
+  check('OB-65c. SELLER denegado', errSeller === 'PERMISSION_DENIED', `err=${errSeller}`);
+
+  // (a) Meta DIFIERE ⇒ se encola un ciclo nuevo, el anterior queda registrado.
+  const { result: dif } = await call('metaCatalogOutboxReconcile', owner, { jobId: job.id });
+  check('OB-66. Meta difiere ⇒ ciclo NUEVO encolado (jamás un reenvío ciego)', dif?.outcome === 'confirmed_different' && !!dif?.newJobId && dif.newJobId !== job.id, JSON.stringify(dif ?? {}));
+  const tras = await jobsDeProducto('MCE2E-B');
+  check('OB-66b. el job original sigue existiendo con su historia', tras.length === 2 && tras.some((j) => j.id === job.id));
+
+  // (b) Meta YA coincide ⇒ se cierra como confirmado.
+  const nuevo = tras.find((j) => j.id !== job.id);
+  await db.doc(FIXTURE).set({ applyBatchToFixture: true }, { merge: true });
+  await drain();
+  const { result: eq } = await call('metaCatalogOutboxReconcile', owner, { jobId: nuevo.id });
+  check('OB-67. si Meta ya coincide, la revisión lo cierra como confirmado', eq?.outcome === 'confirmed_equal' || eq?.outcome === 'nothing_to_do', JSON.stringify(eq ?? {}));
+
+  // (c) Sin evidencia ⇒ queda pendiente, no se reenvía.
+  await limpio();
+  await db.doc(FIXTURE).set({ applyBatchToFixture: false }, { merge: true });
+  await db.doc(`tenants/${T}/products/MCE2E-A`).set({ syncToMeta: true }, { merge: true });
+  await call('runTenantJob', owner, { action: 'catalogSyncApply' });
+  const jobA = await jobOfProduct('MCE2E-A');
+  await db.doc(`tenants/${T}/metaCatalogOutboxJobs/${jobA.id}`).set({ status: 'needs_action', reason: 'submit_ambiguous' }, { merge: true });
+  const wAntes = (await writesSnap()).size;
+  const { result: unv } = await call('metaCatalogOutboxReconcile', owner, { jobId: jobA.id });
+  check('OB-68. sin evidencia en Meta ⇒ queda pendiente y NO se reenvía', unv?.outcome === 'unverifiable' && (await writesSnap()).size === wAntes, JSON.stringify(unv ?? {}));
+
+  // (d) Descarte con motivo auditado.
+  const { err: sinMotivo } = await call('metaCatalogOutboxDiscard', owner, { jobId: jobA.id, reason: '  ' });
+  check('OB-69. descartar exige un motivo', sinMotivo === 'INVALID_ARGUMENT', `err=${sinMotivo}`);
+  const { result: desc } = await call('metaCatalogOutboxDiscard', owner, { jobId: jobA.id, reason: 'lo corrijo a mano' });
+  const jobTrasDescarte = await jobOfProduct('MCE2E-A');
+  check('OB-69b. el descarte cierra el job y queda auditado', desc?.ok === true && jobTrasDescarte?.status === 'cancelled' && String(jobTrasDescarte?.error ?? '').includes('lo corrijo a mano'));
+  const { err: ajeno } = await call('metaCatalogOutboxReconcile', ownerBoutique, { tenantId: T, jobId: jobA.id });
+  check('OB-69c. un OWNER de otro tenant no alcanza un job ajeno', ajeno === 'NOT_FOUND' || ajeno === 'PERMISSION_DENIED', `err=${ajeno}`);
+}
+{
+  // dry_run: cero claims y cero POST, aunque haya cola.
+  await limpio();
+  await db.doc(`tenants/${T}/products/MCE2E-A`).set({ syncToMeta: true }, { merge: true });
+  await call('runTenantJob', owner, { action: 'catalogSyncApply' });
+  await setConfig({ ...VALID_CFG, mode: 'dry_run' });
+  const r = await drain();
+  const j = await jobOfProduct('MCE2E-A');
+  check('OB-70. en dry_run no hay claims ni POST', (await writesSnap()).empty && r?.drain?.claimed === 0 && j?.attempts === 0, `claimed=${r?.drain?.claimed} attempts=${j?.attempts}`);
+  await setConfig({ ...VALID_CFG, mode: 'live' });
+}
+{
+  // Dos mantenimientos concurrentes: el puntero no se rompe y no hay envíos dobles.
+  await limpio();
+  await db.doc(`tenants/${T}/products/MCE2E-A`).set({ syncToMeta: true }, { merge: true });
+  await call('runTenantJob', owner, { action: 'catalogSyncApply' });
+  await Promise.all([drain(), drain()]);
+  const reqs = (await writesSnap()).docs.flatMap((d) => d.data().requests ?? []).filter((x) => x.data?.id === 'MCE2E-A');
+  const intents = (await intentsCol().get()).docs.map((d) => d.data());
+  check('OB-71. dos mantenimientos concurrentes ⇒ un solo envío por producto', reqs.length === 1, `envíos=${reqs.length}`);
+  check('OB-71b. y el puntero de la intención queda consistente', intents.every((i) => typeof i.cycle === 'number' && i.cycle >= 1));
+}
+{
+  // Aislamiento estricto: drenar arfagi no puede tocar nada del otro tenant.
+  await limpio();
+  const antesX = await db.doc(`tenants/${T2}/products/MCE2E-X`).get();
+  await drain(T);
+  const despuesX = await db.doc(`tenants/${T2}/products/MCE2E-X`).get();
+  const jobsT2 = await db.collection(`tenants/${T2}/metaCatalogOutboxJobs`).get();
+  check('OB-72. drenar un tenant no toca los productos ni la cola del otro', jobsT2.empty && JSON.stringify(antesX.data()) === JSON.stringify(despuesX.data()));
+}
+await limpio();
 await db.doc(FIXTURE).set({ catalog: { id: CATALOG_ID, name: 'Catálogo E2E' }, items: FIXTURE_ITEMS, failWith: { op: 'getCatalog', status: 400, code: 100, message: 'Unsupported get request' } });
 {
   const { result } = await call('runTenantJob', owner, { action: 'catalogSync' });

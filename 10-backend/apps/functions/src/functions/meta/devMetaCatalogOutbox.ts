@@ -8,6 +8,7 @@
  */
 import { onRequest } from 'firebase-functions/v2/https';
 import { guardDevEndpoint } from '../../middleware/devGuard.js';
+import { db } from '../../lib/firebase.js';
 import { logger } from '../../lib/logger.js';
 import { localPublicView } from '../../meta/catalog.js';
 import { runCatalogOutboxForTenant } from '../../meta/catalogOutboxWorker.js';
@@ -21,8 +22,16 @@ export const devRunMetaCatalogOutbox = onRequest({ region: 'us-central1' }, asyn
     // existe porque `items_batch` es asíncrono. La ventana en sí se prueba aparte.
     const graciaMs = typeof req.query.graceMs === 'string' ? Number(req.query.graceMs) : undefined;
     if (tenantId) {
+      // MISMO fail-closed que el scheduler: un tenant suspendido o dado de baja no se drena ni
+      // siquiera desde el endpoint de desarrollo.
+      const t = await db().doc(`tenants/${tenantId}`).get();
+      const d = t.data() as { status?: string; deletedAt?: unknown } | undefined;
+      if (!t.exists || d?.status !== 'ACTIVE' || d?.deletedAt) {
+        res.status(200).json({ ok: true, skipped: 'tenant_not_active' });
+        return;
+      }
       const r = await runCatalogOutboxForTenant(tenantId, localPublicView, {
-        ...(Number.isFinite(graciaMs) ? { graciaMs: graciaMs as number } : {}),
+        ...(Number.isFinite(graciaMs) && (graciaMs as number) >= 0 ? { graciaMs: graciaMs as number } : {}),
       });
       res.status(200).json({ ok: true, result: r });
       return;

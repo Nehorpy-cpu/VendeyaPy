@@ -67,8 +67,27 @@ export function isTerminalOutboxStatus(s: MetaCatalogOutboxStatus): boolean {
   return TERMINALES.includes(s);
 }
 
+/**
+ * Puntero de una INTENCIÓN. Vive en `metaCatalogOutboxIntents/{intentKey}` y es lo único que
+ * se reescribe: dice cuál es el job ACTIVO (si hay) y cuántos ciclos se ejecutaron. Los jobs
+ * en sí nunca se pisan.
+ */
+export interface MetaCatalogOutboxIntent {
+  intentKey: string;
+  tenantId: string;
+  /** Job en curso, o null si el último ciclo ya terminó. */
+  activeJobId: string | null;
+  /** Último ciclo ejecutado. El próximo job será `cycle + 1`. */
+  cycle: number;
+  updatedAt: Timestamp;
+}
+
 export interface MetaCatalogOutboxJob {
   id: string;
+  /** Intención que este job ejecuta. Varios jobs (ciclos) comparten intención. */
+  intentKey: string;
+  /** Número de ejecución de esa intención, empezando en 1. */
+  cycle: number;
   tenantId: string;
   catalogId: string;
   productId: string;
@@ -144,15 +163,37 @@ export interface OutboxJobKey {
 }
 
 /**
- * Id de documento del job. Determinístico e INYECTIVO: cada componente va con su largo
- * adelante, así `('a|b','c')` y `('a','b|c')` jamás colisionan. Concatenar con un separador
- * (el error clásico) haría que dos claves distintas produjeran el mismo documento y una
- * confirmación pisara a otra.
+ * IDENTIDAD DE LA INTENCIÓN — "este cambio exacto, sobre este artículo, en este catálogo".
+ * Determinística e INYECTIVA: cada componente va con su largo adelante, así `('a|b','c')` y
+ * `('a','b|c')` jamás colisionan. Concatenar con un separador —el error clásico— haría que dos
+ * intenciones distintas compartieran clave y una pisara a la otra.
+ *
+ * NO es el id del job: es la clave con la que se deduplica el trabajo ACTIVO. El mismo cambio
+ * puede tener que ejecutarse muchas veces a lo largo del tiempo (bajar el precio por promo,
+ * subirlo, volver a bajarlo) y cada ejecución es un CICLO distinto con su propia historia.
  */
-export function outboxJobId(k: OutboxJobKey): string {
+export function outboxIntentKey(k: OutboxJobKey): string {
   const partes = [k.tenantId, k.catalogId, k.retailerId, k.action, k.intendedContentHash];
   const material = partes.map((p) => `${p.length}:${p}`).join('');
   return `mco_${createHash('sha256').update(material).digest('hex').slice(0, 40)}`;
+}
+
+/**
+ * Id del JOB: una ejecución concreta de una intención. Un job es INMUTABLE una vez terminal —
+ * su documento es evidencia de lo que se envió y de lo que Meta respondió, y reabrirlo
+ * sobrescribiendo esa evidencia borraría la historia. Cada nueva ejecución de la misma
+ * intención es un ciclo nuevo con id propio.
+ *
+ * El ciclo va con relleno de ceros para que el orden lexicográfico coincida con el cronológico
+ * (`_c000002` después de `_c000001`), que es como Firestore ordena por id.
+ */
+export function outboxJobId(intentKey: string, cycle: number): string {
+  return `${intentKey}_c${String(cycle).padStart(6, '0')}`;
+}
+
+/** Intención a la que pertenece un job (el prefijo antes del sufijo de ciclo). */
+export function intentKeyOfJobId(jobId: string): string {
+  return jobId.replace(/_c\d+$/, '');
 }
 
 // ---------------------------------------------------------------------------
