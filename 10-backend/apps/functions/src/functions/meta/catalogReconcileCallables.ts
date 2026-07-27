@@ -23,6 +23,7 @@ import { recordAudit } from '../../audit/audit.js';
 import { logger } from '../../lib/logger.js';
 import { normalizeCatalogSyncConfig } from '../../meta/catalogSyncConfig.js';
 import { getMetaCatalogClientForTenant, MetaCatalogApiError } from '../../meta/catalogClient.js';
+import { outboundId } from '../../meta/catalogOutbound.js';
 import {
   analyzeRemoteItems,
   buildImportedProduct,
@@ -369,7 +370,9 @@ export const metaCatalogSetSyncEnabled = onCall<{ tenantId?: string; productId?:
     // Habilitar exige catálogo configurado + TODOS los gates + confirmación del diff REAL.
     const catalogId = await requireCatalogId(tenantId);
     const remote = await readRemote(tenantId, catalogId);
-    const identity = (product.metaRetailerId ?? '').trim() || (product.inventory?.sku ?? '').trim();
+    // MISMA derivación que usa el planificador: una copia inline se desincroniza y el gate
+    // terminaría evaluando una identidad distinta de la que va a viajar a Meta.
+    const identity = outboundId(product);
     const remoteItem = remote.find((r) => r.retailerId === identity);
     const blockers = syncEnableBlockers(product, { remoteHasIdentity: !!remoteItem });
     if (blockers.length) {

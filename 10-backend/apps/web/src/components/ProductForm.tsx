@@ -54,6 +54,7 @@ export function ProductForm({ initial, initialCost, initialPriority, categories,
     featured: initial?.featured ?? false,
     emoji: initial?.emoji ?? '🌸',
     imageUrl: initial?.images?.[0] ?? '',
+    productUrl: initial?.productUrl ?? '',
     description: initial?.description ?? '',
     aiNotes: initial?.aiNotes ?? '',
     brand: pf?.brand ?? '',
@@ -150,6 +151,7 @@ export function ProductForm({ initial, initialCost, initialPriority, categories,
       sku: f.sku.trim() || f.name.trim().toLowerCase().replace(/\s+/g, '-'),
       status: f.status,
       featured: f.featured,
+      productUrl: f.productUrl.trim(),
       // Un producto genérico sigue siendo genérico al editarlo (si mandáramos el objeto
       // perfume, el badge de la lista pasaría a exigir las señales de perfumería).
       perfume: esPerfume ? {
@@ -267,6 +269,18 @@ export function ProductForm({ initial, initialCost, initialPriority, categories,
           <div>
             <label className={lbl}>Imagen (URL)</label>
             <input className={field} value={f.imageUrl} onChange={(e) => set('imageUrl', e.target.value)} placeholder="https://…" />
+          </div>
+          <div>
+            <label className={lbl} htmlFor="productUrl">Enlace al producto (URL)</label>
+            <input
+              id="productUrl"
+              className={field}
+              type="url"
+              value={f.productUrl}
+              onChange={(e) => set('productUrl', e.target.value)}
+              placeholder="https://tutienda.com/producto"
+            />
+            <p className="mt-1 text-xs text-ink-500">Meta lo exige para publicar el producto en el catálogo.</p>
           </div>
           <div className="sm:col-span-2">
             <label className={lbl}>Descripción</label>

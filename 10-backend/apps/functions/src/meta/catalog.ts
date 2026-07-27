@@ -28,6 +28,7 @@ import { logger } from '../lib/logger.js';
 import { recordAudit } from '../audit/audit.js';
 import { normalizeCatalogSyncConfig, type CatalogSyncMode } from './catalogSyncConfig.js';
 import {
+  assertBatchRequestShape,
   getMetaCatalogClientForTenant,
   MetaCatalogApiError,
   type MetaCatalogClient,
@@ -37,16 +38,21 @@ import {
   buildCatalogCreatePayload,
   buildCatalogDisablePatch,
   buildCatalogUpdatePatch,
+  canonicalHttpsUrl,
   createBlockers,
+  MAX_ID_LENGTH,
   outboundAvailability,
   outboundBrand,
   outboundDescription,
   outboundId,
   outboundImageUrl,
+  outboundLink,
   outboundPrice,
   outboundTitle,
+  updateBlockers,
   type CatalogBatchRequest,
   type CreateBlocker,
+  type UpdateBlocker,
 } from './catalogOutbound.js';
 
 const BATCH_CHUNK = 100;
@@ -100,6 +106,8 @@ export function localPublicView(p: Product): Record<string, unknown> {
     condition: 'new',
     availability: outboundAvailability(p),
     image_url: outboundImageUrl(p),
+    // `url` es el nombre del campo en el contrato de LECTURA (al escribir se llama `link`).
+    url: outboundLink(p),
     ...(brand ? { brand } : {}),
   };
 }
@@ -120,8 +128,11 @@ export type CatalogBlockReason =
   | 'name_conflict_requires_confirmation'
   // Obligatorios del contrato de CREACIÓN de Meta (solo aplican a la acción `create`).
   | 'product_url_missing'
+  | 'product_url_not_https'
+  | 'identity_too_long'
   | 'brand_missing'
   | 'description_missing'
+  | 'no_writable_change'
   /** El producto tiene datos que el contrato de Meta no admite: queda fuera, sin romper el plan. */
   | 'serialization_failed';
 
@@ -166,21 +177,24 @@ const priceDigits = (s: string) => s.replace(/\D+/g, '');
  * EXPLÍCITO (sin cast): si mañana el contrato agrega un bloqueo nuevo, TypeScript exige
  * decidir cómo se muestra en el panel en vez de dejar pasar un valor fuera de la unión.
  */
-function createBlockerToPlanReason(b: CreateBlocker): CatalogBlockReason {
+function createBlockerToPlanReason(b: CreateBlocker | UpdateBlocker): CatalogBlockReason {
   switch (b) {
     case 'identity_missing': return 'sku_missing';
+    case 'identity_too_long': return 'identity_too_long';
     case 'title_missing': return 'name_missing';
     case 'description_missing': return 'description_missing';
     case 'product_url_missing': return 'product_url_missing';
+    case 'product_url_not_https': return 'product_url_not_https';
     case 'price_invalid': return 'price_invalid';
     case 'currency_not_pyg': return 'currency_not_pyg';
     case 'brand_missing': return 'brand_missing';
     case 'image_missing': return 'image_not_https';
+    case 'no_writable_change': return 'no_writable_change';
   }
 }
 
 function toWritableFields(changed: readonly string[]): string[] {
-  const map: Record<string, string> = { name: 'title', image_url: 'image', description: 'description', price: 'price', availability: 'availability', brand: 'brand' };
+  const map: Record<string, string> = { name: 'title', image_url: 'image', url: 'link', description: 'description', price: 'price', availability: 'availability', brand: 'brand' };
   return [...new Set(changed.map((c) => map[c]).filter((c): c is string => !!c))];
 }
 
@@ -198,6 +212,17 @@ export function priceEquals(local: string, remote: string): boolean {
   return localDigits !== '' && remoteDigits === localDigits;
 }
 
+/**
+ * Compara la URL local (ya canónica) contra la remota, canonizando también el lado de Meta.
+ * Sin URL local ⇒ no se gestiona el campo. Sin URL remota ⇒ no se puede afirmar que difiere
+ * (Meta puede no exponerla en el GET): no se marca cambio para no entrar en un bucle.
+ */
+function urlEquals(local: string, remoteUrl: string): boolean {
+  if (!local) return true;
+  if (!remoteUrl) return true;
+  return local === (canonicalHttpsUrl(remoteUrl) ?? remoteUrl);
+}
+
 function diffPublicFields(payload: Record<string, unknown>, remote: MetaRemoteCatalogItem): string[] {
   const changed: string[] = [];
   if (String(payload.name) !== remote.name) changed.push('name');
@@ -205,6 +230,14 @@ function diffPublicFields(payload: Record<string, unknown>, remote: MetaRemoteCa
   if (String(payload.availability) !== remote.availability) changed.push('availability');
   if (!priceEquals(String(payload.price), remote.price)) changed.push('price');
   if (String(payload.image_url) !== remote.imageUrl) changed.push('image_url');
+  // La URL entra al diff y por lo tanto a la VERIFICACIÓN post-escritura: un artículo cuyo
+  // `link` remoto no coincide con el local no puede declararse `synced`.
+  //
+  // La comparación es entre formas CANÓNICAS de ambos lados: Meta normaliza lo que recibe
+  // (agrega la barra final, pasa el host a punycode, escapa el path). Comparar los strings
+  // crudos marcaría la URL como cambiada en cada corrida ⇒ un UPDATE perpetuo que nunca
+  // converge a `synced`. Si Meta no devuelve `url`, no se asume que cambió.
+  if (!urlEquals(String(payload.url ?? ''), remote.url ?? '')) changed.push('url');
   const brand = typeof payload.brand === 'string' ? payload.brand : '';
   if (brand && brand !== remote.brand) changed.push('brand');
   return changed;
@@ -279,6 +312,7 @@ export function planCatalogSync(products: Product[], remoteItems: MetaRemoteCata
 
     const reasons: CatalogBlockReason[] = [];
     if (!sku) reasons.push('sku_missing');
+    else if (sku.length > MAX_ID_LENGTH) reasons.push('identity_too_long'); // el contrato no admite truncar
     else if ((idCounts.get(sku) ?? 0) > 1) reasons.push(mapped ? 'retailer_id_duplicated' : 'sku_duplicated');
     if (!name) reasons.push('name_missing');
     if (p.currency !== 'PYG') reasons.push('currency_not_pyg');
@@ -288,7 +322,7 @@ export function planCatalogSync(products: Product[], remoteItems: MetaRemoteCata
       // La palanca de availability NO depende de los campos bloqueados: si el item vive
       // en Meta y acá dejó de ser vendible, se emite un disable MÍNIMO igual (salvo que
       // la identidad sea ambigua: SKU ausente o duplicado).
-      const identityOk = !reasons.includes('sku_missing') && !reasons.includes('sku_duplicated') && !reasons.includes('retailer_id_duplicated');
+      const identityOk = !reasons.includes('sku_missing') && !reasons.includes('sku_duplicated') && !reasons.includes('retailer_id_duplicated') && !reasons.includes('identity_too_long');
       const wantsOut = productAvailability(p) === 'out of stock';
       if (remote && identityOk && wantsOut && remote.availability !== 'out of stock') {
         entries.push({
@@ -351,6 +385,15 @@ export function planCatalogSync(products: Product[], remoteItems: MetaRemoteCata
       return;
     }
     const disabling = payload.availability === 'out of stock' && remote.availability !== 'out of stock';
+    if (!disabling) {
+      // Un campo cambiado cuyo valor local no es publicable (descripción vacía, URL
+      // inválida) bloquea SOLO a este producto, con el motivo exacto.
+      const impedimentos = updateBlockers(p, toWritableFields(changed));
+      if (impedimentos.length) {
+        entries.push({ ...base, action: 'blocked', blockedReasons: impedimentos.map(createBlockerToPlanReason), changedFields: changed, note: 'update_incompleto' });
+        return;
+      }
+    }
     entries.push({
       ...base,
       action: disabling ? 'disable' : 'update',
@@ -576,13 +619,29 @@ export async function runCatalogSync(
   const appliedEntries: CatalogPlanEntry[] = [];
   const failedEntries: CatalogPlanEntry[] = [];
   const unprocessedEntries: CatalogPlanEntry[] = [];
+  /** Requests que no cumplen el contrato: se excluyen del lote, sin arrastrar a los demás. */
+  const invalidEntries: Array<{ entry: CatalogPlanEntry; detalle: string }> = [];
   const handles: string[] = [];
 
   for (let i = 0; i < actionable.length; i += BATCH_CHUNK) {
-    const chunk = actionable.slice(i, i + BATCH_CHUNK);
-    // Los requests ya vienen serializados por los builders del contrato (CREATE / UPDATE
-    // parcial / DISABLE mínimo). Acá no se arma nada: solo se transportan. El índice de
-    // `requests` corresponde 1:1 con el de `chunk` (garantizado por el filtro de `actionable`).
+    const bruto = actionable.slice(i, i + BATCH_CHUNK);
+    // VALIDACIÓN POR ITEM ANTES DEL LOTE: si un request no cumple el contrato, se descarta
+    // SOLO ese producto. Sin esto, el validador del transporte rechazaría el lote entero y
+    // un único dato malo dejaría en `failed` a los 100 del chunk y a todos los siguientes,
+    // de forma determinística — la sync del tenant quedaría muerta hasta encontrar al
+    // culpable, que ni siquiera se nombra en el error.
+    const chunk: CatalogPlanEntry[] = [];
+    for (const e of bruto) {
+      try {
+        assertBatchRequestShape(e.request as CatalogBatchRequest, `producto ${e.productId}`);
+        chunk.push(e);
+      } catch (err) {
+        const detalle = err instanceof Error ? err.message.slice(0, 300) : 'request inválido';
+        logger.warn('Producto excluido del lote por no cumplir el contrato', { tenantId, runId, productId: e.productId });
+        invalidEntries.push({ entry: e, detalle });
+      }
+    }
+    if (!chunk.length) continue;
     const requests: CatalogBatchRequest[] = chunk.map((e) => e.request as CatalogBatchRequest);
     try {
       const res = await client.submitItemsBatch(cfg.catalogId, requests);
@@ -612,6 +671,12 @@ export async function runCatalogSync(
 
   // 8) Verificación honesta: releer Meta y comparar campos públicos. Solo lo que ya
   //    coincide queda 'synced'/'disabled'; lo demás 'pending' (converge en el próximo apply).
+  //
+  //    QUÉ SIGNIFICA `synced`: "ningún campo GESTIONADO difiere" — no "Meta es un espejo de
+  //    VendeyaPy". Los campos que este sistema no administra (categoría de Meta, product_type,
+  //    variantes, campos cargados a mano en Commerce Manager) pueden diferir y el producto
+  //    igual figura `synced`. Es la lectura correcta: la sync es de un subconjunto declarado,
+  //    no una réplica.
   let verified = new Map<string, MetaRemoteCatalogItem>();
   let verifyFailed = false;
   try {
@@ -675,9 +740,13 @@ export async function runCatalogSync(
     ops.push({ path: paths.product(tenantId, e.productId), data: { metaSyncStatus: 'failed', metaSyncError: msg, updatedAt: now } });
     pushLog(e, 'failed', e.remoteItemId ?? null, msg);
   }
+  for (const { entry, detalle } of invalidEntries) {
+    ops.push({ path: paths.product(tenantId, entry.productId), data: { metaSyncStatus: 'failed', metaSyncError: detalle.slice(0, 500), updatedAt: now } });
+    pushLog(entry, 'failed', entry.remoteItemId ?? null, detalle.slice(0, 500));
+  }
   const statePersisted = await commitStateOps(tenantId, runId, ops);
 
-  const failedTotal = failedEntries.length + unprocessedEntries.length + appliedFailed;
+  const failedTotal = failedEntries.length + unprocessedEntries.length + invalidEntries.length + appliedFailed;
   const appliedOk = appliedEntries.length - appliedFailed;
   const finalStatus: CatalogSyncRunResult['status'] = failedTotal > 0 || !statePersisted ? 'partial_failure' : 'applied';
   const reason: CatalogSyncRunResult['reason'] | undefined = !statePersisted

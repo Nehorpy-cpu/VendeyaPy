@@ -51,7 +51,8 @@ const prodDoc = (id, over = {}) => ({
 const remoteItem = (retailerId, over = {}) => ({
   id: `itm-${retailerId}`, retailer_id: retailerId, name: `Producto ${retailerId}`,
   description: `Descripción pública de ${retailerId}`, availability: 'in stock',
-  price: '₲250.000', image_url: IMG, brand: 'MarcaE2E', ...over,
+  // `url` espeja productUrl del producto local: la URL entra al diff y a la verificación.
+  price: '₲250.000', image_url: IMG, brand: 'MarcaE2E', url: `https://tienda.e2e.test/p/${retailerId}`, ...over,
 });
 
 const writesSnap = () => db.collection(`${FIXTURE}/writes`).get();
@@ -448,6 +449,23 @@ let importedId = null;
   const { result } = await call('metaCatalogSetSyncEnabled', owner, { productId: 'MCE2E-SKUCHOQUE', enabled: true });
   check('89. SKU que ya existe en Meta sin vínculo confirmado ⇒ unconfirmed_remote_match', result?.ok === false && result?.blockers?.includes('unconfirmed_remote_match'), JSON.stringify(result?.blockers ?? []));
   await db.doc(`tenants/${T}/products/MCE2E-SKUCHOQUE`).delete();
+}
+{
+  // ── URL: Meta normaliza lo que recibe (barra final, host en minúsculas, escapes).
+  // Comparar strings crudos produciría un UPDATE en CADA corrida que nunca converge.
+  const rid = 'MCE2E-URLNORM';
+  await db.doc(`tenants/${T}/products/${rid}`).set(prodDoc(rid, {
+    productUrl: 'https://TIENDA.e2e.test/p/uno dos', metaRetailerId: rid, inventory: INV(rid, 5),
+  }));
+  await db.doc(FIXTURE).set({
+    catalog: { id: CATALOG_ID, name: 'Catálogo E2E' },
+    items: [remoteItem(rid, { url: 'https://tienda.e2e.test/p/uno%20dos' })],
+  });
+  await setConfig(VALID_CFG);
+  const { result } = await call('runTenantJob', owner, { action: 'catalogSync' });
+  const e = entryOf(result?.result, rid);
+  check('90. una URL que Meta ya normalizó NO genera un update perpetuo', e?.action === 'unchanged', `action=${e?.action} changed=${JSON.stringify(e?.changedFields ?? [])}`);
+  await db.doc(`tenants/${T}/products/${rid}`).delete();
 }
 
 // ═══ Resultado ═══

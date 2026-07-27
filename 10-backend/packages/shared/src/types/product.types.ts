@@ -109,8 +109,6 @@ export interface Product {
    * Un UPDATE parcial (p.ej. solo precio) NO la requiere.
    */
   productUrl?: string;
-  /** Taxonomía del artículo en Meta (`product_type`). Informativa; opcional. */
-  metaProductType?: string;
   /** Ficha para recomendaciones del agente (CATALOG-ENRICHMENT-1). Opcional. */
   aiFicha?: ProductAiFicha | null;
   // --- Sincronización con el Meta Catalog (D4). Lo escribe la sync (Admin SDK). ---

@@ -79,10 +79,9 @@ describe('identidad del artículo', () => {
     expect(req).not.toHaveProperty('retailer_id');
   });
 
-  it('el id respeta el máximo de 100 caracteres del contrato', () => {
+  it('una identidad de más de 100 caracteres bloquea (jamás se trunca)', () => {
     const largo = 'X'.repeat(140);
-    const req = buildCatalogUpdatePatch(prod({ id: 'p1', metaRetailerId: largo }), ['price']);
-    expect(String(req.data.id).length).toBeLessThanOrEqual(100);
+    expect(() => buildCatalogUpdatePatch(prod({ id: 'p1', metaRetailerId: largo }), ['price'])).toThrow(/identity_too_long/);
   });
 });
 
@@ -149,12 +148,10 @@ describe('CREATE — obligatorios del contrato (fail-closed)', () => {
     expect(() => buildCatalogCreatePayload(sinMarca)).toThrow();
   });
 
-  it('la descripción vacía CAE AL TÍTULO (mismo fallback que la vista de lectura)', () => {
-    // Sin este fallback compartido, el diff marcaría `description` como cambiada en cada
-    // corrida y el UPDATE resultante quedaría vacío ⇒ el plan entero explotaba.
+  it('la descripción vacía BLOQUEA: no se inventa a partir del título', () => {
     const sinDesc = prod({ id: 'p1', description: '   ' });
-    expect(createBlockers(sinDesc)).not.toContain('description_missing');
-    expect(buildCatalogCreatePayload(sinDesc).data.description).toBe('Armaf Odyssey Mega');
+    expect(createBlockers(sinDesc)).toContain('description_missing');
+    expect(() => buildCatalogCreatePayload(sinDesc)).toThrow();
   });
 
   it.each([
@@ -248,7 +245,7 @@ describe('allow_upsert y semántica de creación', () => {
     expect(buildCatalogCreatePayload(prod({ id: 'p1' })).method).toBe('CREATE');
   });
 
-  it('los tres builders devuelven métodos tipados y distinguibles', () => {
+  it('los tres builders devuelven métodos tipados y distinguibles (nunca DELETE)', () => {
     const c: CatalogBatchRequest = buildCatalogCreatePayload(prod({ id: 'p1' }));
     const u: CatalogBatchRequest = buildCatalogUpdatePatch(prod({ id: 'p1' }), ['price']);
     const d: CatalogBatchRequest = buildCatalogDisablePatch(prod({ id: 'p1' }));

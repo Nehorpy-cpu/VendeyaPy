@@ -39,6 +39,12 @@ const SYNC_BLOCKER_LABEL: Record<string, string> = {
   not_sellable_now: 'hoy no es vendible (sin stock)',
   unconfirmed_remote_match: 'su código ya existe en Meta: vinculalo desde la reconciliación antes de sincronizar',
   no_identity: 'falta el SKU o el vínculo con Meta',
+  identity_too_long: 'el código supera los 100 caracteres que admite Meta',
+  // Solo aparecen cuando el artículo todavía NO existe en Meta: crearlo exige estos datos.
+  description_missing: 'falta la descripción (Meta la exige para crear el artículo)',
+  brand_missing: 'falta la marca (Meta la exige para crear el artículo)',
+  product_url_missing: 'falta el enlace al producto (editá el producto y cargá su URL)',
+  product_url_not_https: 'el enlace al producto debe empezar con https://',
 };
 
 export default function CatalogPage() {
@@ -532,6 +538,14 @@ function blockReasonLabel(r: string): string {
     case 'price_invalid': return 'precio inválido';
     case 'image_not_https': return 'sin imagen HTTPS';
     case 'name_conflict_requires_confirmation': return 'coincide por nombre con un item de Meta (requiere confirmación)';
+    case 'retailer_id_duplicated': return 'dos productos reclaman el mismo artículo de Meta';
+    case 'identity_too_long': return 'el identificador supera los 100 caracteres que admite Meta';
+    case 'description_missing': return 'sin descripción';
+    case 'brand_missing': return 'sin marca';
+    case 'product_url_missing': return 'sin enlace al producto';
+    case 'product_url_not_https': return 'el enlace al producto no es HTTPS';
+    case 'no_writable_change': return 'no hay cambios publicables';
+    case 'serialization_failed': return 'los datos del producto no entran en el formato de Meta';
     default: return r;
   }
 }

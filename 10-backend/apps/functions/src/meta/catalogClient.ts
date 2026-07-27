@@ -23,7 +23,7 @@ import { Timestamp } from 'firebase-admin/firestore';
 import { db, paths } from '../lib/firebase.js';
 import { getSecretStore } from '../lib/secretStore.js';
 import { logger } from '../lib/logger.js';
-import { ITEMS_BATCH_ALLOW_UPSERT, ITEMS_BATCH_ITEM_TYPE, type CatalogBatchRequest } from './catalogOutbound.js';
+import { canonicalHttpsUrl, ITEMS_BATCH_ALLOW_UPSERT, ITEMS_BATCH_ITEM_TYPE, MAX_ID_LENGTH, type CatalogBatchRequest } from './catalogOutbound.js';
 
 const DEFAULT_GRAPH_VERSION = 'v23.0';
 const TIMEOUT_MS = 10_000;
@@ -232,13 +232,18 @@ export class HttpMetaCatalogClient implements MetaCatalogClient {
   }
 
   async submitItemsBatch(catalogId: string, requests: CatalogBatchRequest[]): Promise<{ handles: string[] }> {
-    const data = ((await this.request('POST', `${this.base}/${catalogId}/items_batch`, {
+    const body = {
       item_type: ITEMS_BATCH_ITEM_TYPE,
       // EXPLÍCITO: el default de Meta es true (un UPDATE crearía el item si no existe).
       // Apagarlo obliga a que crear sea una decisión declarada (`method: 'CREATE'`).
       allow_upsert: ITEMS_BATCH_ALLOW_UPSERT,
       requests,
-    })) ?? {}) as { handles?: unknown[] };
+    };
+    // ÚLTIMA BARRERA ANTES DE LA RED: el mismo validador que usa el fake corre también acá.
+    // Si una regresión (o un cast) armara un request fuera del contrato —un DELETE, un campo
+    // interno, una identidad de más de 100 caracteres—, no llega a salir.
+    assertItemsBatchBody(body);
+    const data = ((await this.request('POST', `${this.base}/${catalogId}/items_batch`, body)) ?? {}) as { handles?: unknown[] };
     return { handles: (data.handles ?? []).map(String) };
   }
 
@@ -292,6 +297,31 @@ const CREATE_REQUIRED = ['id', 'title', 'description', 'link', 'price', 'availab
  * Valida que un request cumpla el contrato de escritura de `items_batch`. Lanza con un
  * mensaje explícito ante cualquier desvío — así el E2E falla igual que fallaría Meta.
  */
+/** Máximo de requests por llamada según el contrato (recomendado por Meta: 3000). */
+const MAX_REQUESTS_PER_BATCH = 5000;
+
+/**
+ * Valida el BODY completo de `items_batch` antes de enviarlo: `item_type`, el
+ * `allow_upsert` explícito, el tamaño del lote y cada request. Corre tanto en el cliente
+ * HTTP real como en el fake, así que el emulador ejercita exactamente la misma barrera.
+ */
+export function assertItemsBatchBody(body: unknown): void {
+  const b = body as { item_type?: unknown; allow_upsert?: unknown; requests?: unknown };
+  if (b?.item_type !== ITEMS_BATCH_ITEM_TYPE) {
+    throw new MetaCatalogApiError(`items_batch: item_type debe ser "${ITEMS_BATCH_ITEM_TYPE}"`, 'http', 400, 100, false);
+  }
+  if (b?.allow_upsert !== ITEMS_BATCH_ALLOW_UPSERT) {
+    throw new MetaCatalogApiError('items_batch: allow_upsert debe declararse explícitamente en false (crear es una decisión del planner)', 'http', 400, 100, false);
+  }
+  if (!Array.isArray(b?.requests) || b.requests.length === 0) {
+    throw new MetaCatalogApiError('items_batch: requests vacío', 'http', 400, 100, false);
+  }
+  if (b.requests.length > MAX_REQUESTS_PER_BATCH) {
+    throw new MetaCatalogApiError(`items_batch: el lote supera el límite de ${MAX_REQUESTS_PER_BATCH} requests`, 'http', 400, 100, false);
+  }
+  for (const [i, r] of b.requests.entries()) assertBatchRequestShape(r, `requests[${i}]`);
+}
+
 export function assertBatchRequestShape(r: unknown, where = 'request'): void {
   const req = r as { method?: unknown; data?: unknown } & Record<string, unknown>;
   if (!req || typeof req !== 'object') throw new MetaCatalogApiError(`${where}: request inválido`, 'http', 400, 100, false);
@@ -312,7 +342,9 @@ export function assertBatchRequestShape(r: unknown, where = 'request'): void {
   if (typeof data.id !== 'string' || !data.id.trim()) {
     throw new MetaCatalogApiError(`${where}: falta data.id (identidad del artículo)`, 'http', 400, 100, false);
   }
-  if (String(data.id).length > 100) throw new MetaCatalogApiError(`${where}: data.id supera los 100 caracteres`, 'http', 400, 100, false);
+  if (String(data.id).length > MAX_ID_LENGTH) {
+    throw new MetaCatalogApiError(`${where}: data.id supera los ${MAX_ID_LENGTH} caracteres`, 'http', 400, 100, false);
+  }
   for (const campo of Object.keys(data)) {
     if (WRITE_ALLOWED_FIELDS.has(campo)) continue;
     if (READ_ONLY_FIELD_NAMES.includes(campo)) {
@@ -334,8 +366,10 @@ export function assertBatchRequestShape(r: unknown, where = 'request'): void {
   if (data.price !== undefined && !/^\d+ [A-Z]{3}$/.test(String(data.price))) {
     throw new MetaCatalogApiError(`${where}: price debe ser "<monto> <ISO>" (p.ej. "250000 PYG")`, 'http', 400, 100, false);
   }
-  if (data.link !== undefined && !String(data.link).startsWith('https://')) {
-    throw new MetaCatalogApiError(`${where}: link debe ser una URL https`, 'http', 400, 100, false);
+  // Mismo predicado que usa el serializador: validar con dos criterios distintos hacía que
+  // un valor aceptado al construir (p.ej. "HTTPS://x") explotara recién en el transporte.
+  if (data.link !== undefined && canonicalHttpsUrl(data.link) !== String(data.link)) {
+    throw new MetaCatalogApiError(`${where}: link debe ser una URL https en forma canónica`, 'http', 400, 100, false);
   }
   if (data.title !== undefined && String(data.title).length > 100) {
     throw new MetaCatalogApiError(`${where}: title supera los 100 caracteres`, 'http', 400, 100, false);
@@ -377,6 +411,7 @@ export class FakeMetaCatalogClient implements MetaCatalogClient {
       description: String(raw.description ?? ''),
       availability: String(raw.availability ?? ''),
       price: String(raw.price ?? ''),
+      currency: String(raw.currency ?? ''),
       imageUrl: String(raw.image_url ?? ''),
       brand: String(raw.brand ?? ''),
       url: String(raw.url ?? ''),
@@ -388,11 +423,10 @@ export class FakeMetaCatalogClient implements MetaCatalogClient {
     this.failIf('batch');
     // VALIDACIÓN ESTRICTA DEL CONTRATO: el fake anterior aceptaba cualquier forma y por eso
     // no detectó que el serializador mandaba `name`/`image_url` y la identidad fuera de
-    // `data`. Ahora rechaza lo que Meta rechazaría.
-    for (const [i, r] of requests.entries()) {
-      const where = `requests[${i}]`;
-      assertBatchRequestShape(r, where);
-    }
+    // `data`. Ahora arma el MISMO body que el cliente real y lo valida entero, así el E2E
+    // del emulador ejercita también las invariantes de nivel body (item_type, allow_upsert,
+    // tamaño del lote) y no solo la forma de cada request.
+    assertItemsBatchBody({ item_type: ITEMS_BATCH_ITEM_TYPE, allow_upsert: ITEMS_BATCH_ALLOW_UPSERT, requests });
     await db().collection('metaTestFixtures/catalog/writes').add({
       catalogId,
       requestCount: requests.length,

@@ -75,10 +75,30 @@ describe('parseRemotePriceGs', () => {
 
 describe('retailerIdLockKey', () => {
   it('sanea caracteres que romperían un doc path', () => {
-    expect(retailerIdLockKey('ARM/744646#5202')).toBe('ARM_744646_5202');
+    expect(retailerIdLockKey('ARM/744646#5202')).toMatch(/^ARM_744646_5202~[0-9a-f]{12}$/);
   });
   it('es estable para el mismo retailer_id (idempotencia de la importación)', () => {
     expect(retailerIdLockKey('ARM-744646-5202')).toBe(retailerIdLockKey('ARM-744646-5202'));
+  });
+
+  it('un id ya seguro queda TAL CUAL (no huerfaniza locks ni productos ya importados)', () => {
+    expect(retailerIdLockKey('ARM-744646-5202')).toBe('ARM-744646-5202');
+    expect(retailerIdLockKey('  sku_1.2-3  ')).toBe('sku_1.2-3');
+  });
+
+  it('dos retailer_id DISTINTOS jamás comparten clave', () => {
+    // Colapsarlos dejaba al segundo artículo "ya vinculado a otro producto" para siempre.
+    expect(retailerIdLockKey('ARM/1')).not.toBe(retailerIdLockKey('ARM#1'));
+    expect(retailerIdLockKey('ARM/1')).not.toBe(retailerIdLockKey('ARM_1'));
+    const largoA = `${'X'.repeat(400)}A`;
+    const largoB = `${'X'.repeat(400)}B`;
+    expect(retailerIdLockKey(largoA)).not.toBe(retailerIdLockKey(largoB));
+  });
+
+  it('la clave saneada sigue siendo un id de doc válido', () => {
+    const k = retailerIdLockKey('ARM/744646#5202');
+    expect(k).not.toContain('/');
+    expect(k.length).toBeLessThanOrEqual(400);
   });
 });
 
@@ -234,9 +254,40 @@ describe('buildImportedProduct — invariantes de importación', () => {
 });
 
 describe('syncEnableBlockers — gates de habilitación', () => {
-  const ok = prod({ id: 'p1', metaRetailerId: 'ARM-1', perfume: { brand: 'Armaf' } as Product['perfume'] });
+  const ok = prod({ id: 'p1', metaRetailerId: 'ARM-1', perfume: { brand: 'Armaf' } as Product['perfume'], productUrl: 'https://arfagi.com/p/1' });
 
   it('un producto completo y ACTIVO no tiene bloqueos', () => expect(syncEnableBlockers(ok)).toEqual([]));
+
+  // -------------------------------------------------------------------------
+  // El gate y el planificador tienen que coincidir: habilitar un producto que el
+  // planificador va a bloquear para siempre es prometerle al dueño algo que no va a pasar.
+  // -------------------------------------------------------------------------
+
+  it.each([
+    ['sin URL de producto', { productUrl: undefined }, 'product_url_missing'],
+    ['URL no https', { productUrl: 'http://arfagi.com/p/1' }, 'product_url_not_https'],
+    ['sin descripción', { description: '   ' }, 'description_missing'],
+    ['sin marca', { perfume: null }, 'brand_missing'],
+  ])('CREAR en Meta exige los obligatorios del contrato: %s ⇒ %s', (_l, over, expected) => {
+    const p = prod({ id: 'p1', metaRetailerId: 'ARM-NUEVO', perfume: { brand: 'Armaf' } as Product['perfume'], productUrl: 'https://arfagi.com/p/1', ...over });
+    expect(syncEnableBlockers(p, { remoteHasIdentity: false })).toContain(expected as never);
+  });
+
+  it.each([
+    ['sin URL de producto', { productUrl: undefined }],
+    ['sin descripción', { description: '   ' }],
+    ['sin marca', { perfume: null }],
+  ])('ACTUALIZAR un artículo que YA existe en Meta no exige obligatorios de creación: %s', (_l, over) => {
+    // El artículo ya está publicado en Meta con esos datos: un UPDATE parcial no los manda.
+    const p = prod({ id: 'p1', metaRetailerId: 'ARM-1', perfume: { brand: 'Armaf' } as Product['perfume'], productUrl: 'https://arfagi.com/p/1', ...over });
+    expect(syncEnableBlockers(p, { remoteHasIdentity: true })).toEqual([]);
+  });
+
+  it('una identidad de más de 100 caracteres bloquea en AMBOS caminos', () => {
+    const p = prod({ id: 'p1', metaRetailerId: 'X'.repeat(101), perfume: { brand: 'Armaf' } as Product['perfume'], productUrl: 'https://arfagi.com/p/1' });
+    expect(syncEnableBlockers(p, { remoteHasIdentity: false })).toContain('identity_too_long');
+    expect(syncEnableBlockers(p, { remoteHasIdentity: true })).toContain('identity_too_long');
+  });
 
   it('EL GATE ANTI-APAGADO: sin vínculo confirmado pero con el SKU ya en Meta ⇒ bloqueado', () => {
     // Escenario: el SKU local coincide con un retailer_id vivo de Meta por casualidad (o
@@ -253,8 +304,25 @@ describe('syncEnableBlockers — gates de habilitación', () => {
     expect(syncEnableBlockers(agotado)).toContain('not_sellable_now');
   });
 
-  it('la marca ya NO es un requisito (no se hardcodea el rubro)', () => {
-    expect(syncEnableBlockers(prod({ id: 'p1', metaRetailerId: 'ARM-1', perfume: null }))).toEqual([]);
+  it('la marca no se exige por rubro, sino porque Meta la pide para CREAR', () => {
+    // Nada acá conoce "perfumería": el requisito viene del contrato de escritura, y solo
+    // cuando el artículo todavía no existe en Meta.
+    const sinMarca = prod({ id: 'p1', metaRetailerId: 'ARM-1', perfume: null, productUrl: 'https://arfagi.com/p/1' });
+    expect(syncEnableBlockers(sinMarca, { remoteHasIdentity: true })).toEqual([]);
+  });
+
+  it('el importado trae el enlace que Meta ya publica (no se inventa)', () => {
+    const imp = buildImportedProduct(
+      analyzeRemoteItems([remote({ retailerId: 'ARM-9', url: 'https://ARFAGI.com/?producto_id=258' })])[0]!,
+      { productId: 'x', tenantId: 't1', categoryId: 'perfumes', catalogId: 'C', position: 0 },
+    );
+    expect(imp.productUrl).toBe('https://arfagi.com/?producto_id=258');
+    // Sin url remota queda vacío: el gate lo pedirá antes de habilitar la sincronización.
+    const sinUrl = buildImportedProduct(
+      analyzeRemoteItems([remote({ retailerId: 'ARM-9', url: '' })])[0]!,
+      { productId: 'x', tenantId: 't1', categoryId: 'perfumes', catalogId: 'C', position: 0 },
+    );
+    expect(sinUrl.productUrl).toBe('');
   });
 
   it('un producto recién importado NUNCA se puede habilitar solo', () => {

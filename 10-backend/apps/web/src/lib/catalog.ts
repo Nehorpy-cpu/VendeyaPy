@@ -47,6 +47,8 @@ export interface ProductInput {
   sku: string;
   status: Product['status'];
   featured: boolean;
+  /** URL pública del producto. Meta la exige (`link`) para CREAR el artículo en el catálogo. */
+  productUrl: string;
   perfume: Product['perfume'];
   /** Ficha para recomendaciones del agente (CAT-1). */
   aiFicha: Product['aiFicha'];
@@ -78,6 +80,9 @@ export async function upsertProduct(tenantId: string, input: ProductInput): Prom
     perfume: input.perfume,
     aiFicha: input.aiFicha ?? null,
   };
+  // Se manda siempre (el form lo precarga del producto): vaciar el campo tiene que BORRAR el
+  // enlace, no ser un no-op silencioso. Sin este campo ningún producto puede crearse en Meta.
+  data.productUrl = input.productUrl.trim();
   // En CREATE seteamos `position` para que el producto aparezca en listProducts
   // (que ordena por `position`; un doc sin ese campo quedaría fuera del orderBy).
   if (!input.id) data.position = 999;
@@ -250,7 +255,13 @@ export type SyncEnableBlocker =
   | 'stock_pending_review'
   | 'not_sellable_now'
   | 'unconfirmed_remote_match'
-  | 'no_identity';
+  | 'no_identity'
+  | 'identity_too_long'
+  // Obligatorios que Meta exige para CREAR el artículo (no aplican si ya existe allá).
+  | 'description_missing'
+  | 'brand_missing'
+  | 'product_url_missing'
+  | 'product_url_not_https';
 
 export interface SetSyncEnabledResult {
   ok: boolean;

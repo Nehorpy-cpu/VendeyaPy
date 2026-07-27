@@ -52,13 +52,14 @@ const remote = (over: Partial<MetaRemoteCatalogItem> = {}): MetaRemoteCatalogIte
   price: '₲250.000',
   imageUrl: 'https://cdn.example.com/a.jpg',
   brand: 'MarcaTest', // espeja la marca del producto base: si difiere, el diff marca `brand`
+  url: 'https://tienda.test/p/sku-a', // espeja productUrl: la URL entra al diff
   ...over,
 });
 
 describe('localPublicView — vista de LECTURA para el diff (solo campos públicos)', () => {
   it('contiene EXACTAMENTE los campos públicos permitidos, con precio "N PYG" y condition new', () => {
     const payload = localPublicView(prod({ id: 'p1', perfume: null }));
-    expect(Object.keys(payload).sort()).toEqual(['availability', 'condition', 'description', 'image_url', 'name', 'price', 'retailer_id']);
+    expect(Object.keys(payload).sort()).toEqual(['availability', 'condition', 'description', 'image_url', 'name', 'price', 'retailer_id', 'url']);
     expect(payload).toMatchObject({
       retailer_id: 'SKU-A',
       name: 'Perfume A',
@@ -204,10 +205,11 @@ describe('identidad efectiva: metaRetailerId manda, SKU es fallback', () => {
 });
 
 describe('resiliencia y coherencia con el contrato de escritura', () => {
-  it('un producto con descripción vacía NO rompe el plan (converge con el fallback al nombre)', () => {
+  it('un producto con descripción vacía se BLOQUEA sin romper el plan (no se inventa)', () => {
     const sinDesc = prod({ id: 'p1', description: '' });
-    const plan = planCatalogSync([sinDesc], [remote({ description: 'Perfume A' })]);
-    expect(plan.entries[0]!.action).toBe('unchanged'); // el diff usa el mismo fallback
+    const plan = planCatalogSync([sinDesc], [remote({ description: 'descripción vieja' })]);
+    expect(plan.entries[0]!.action).toBe('blocked');
+    expect(plan.entries[0]!.blockedReasons).toContain('description_missing');
   });
 
   it('un producto roto se marca bloqueado SIN cancelar el plan de los demás', () => {
@@ -234,11 +236,12 @@ describe('resiliencia y coherencia con el contrato de escritura', () => {
     expect(plan.entries[0]!.request?.data).toEqual({ id: 'ARM-1', price: '250000 PYG' });
   });
 
-  it('el identificador del plan y el que viaja a Meta son el MISMO (mismo tope)', () => {
+  it('una identidad de más de 100 caracteres BLOQUEA (jamás se trunca)', () => {
     const skuLargo = 'X'.repeat(140);
     const plan = planCatalogSync([prod({ id: 'p1', metaRetailerId: skuLargo })], []);
-    expect(plan.entries[0]!.sku).toBe(plan.entries[0]!.request?.data.id ?? plan.entries[0]!.sku);
-    expect(plan.entries[0]!.sku.length).toBeLessThanOrEqual(100);
+    expect(plan.entries[0]!.action).toBe('blocked');
+    expect(plan.entries[0]!.blockedReasons).toContain('identity_too_long');
+    expect(plan.entries[0]!.sku).toBe(skuLargo); // se reporta la identidad REAL
   });
 
   it('un nombre largo no genera updates perpetuos (mismo truncado en el diff y en el envío)', () => {

@@ -22,6 +22,24 @@ function reqStr(v: unknown, f: string, max = 1000): string {
   if (!s.trim()) throw new Error(`Campo "${f}" requerido.`);
   return s;
 }
+/**
+ * URL pública ABSOLUTA con esquema https. Cadena vacía = limpiar el campo. Cualquier otro
+ * esquema (`http:`, `javascript:`, `data:`) o una ruta relativa se rechazan: esta URL se
+ * publica en el catálogo de Meta y la ven clientes finales.
+ */
+function httpsUrl(v: unknown, f: string, max = 2000): string {
+  const raw = str(v, f, max).trim();
+  if (!raw) return '';
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    throw new Error(`${f} debe ser una dirección web completa (empezando con https://).`);
+  }
+  if (parsed.protocol !== 'https:') throw new Error(`${f} debe usar https:// (recibido "${parsed.protocol}").`);
+  return raw;
+}
+
 function strOrNull(v: unknown, f: string, max = 1000): string | null {
   return v === null ? null : str(v, f, max);
 }
@@ -130,8 +148,9 @@ export function validateProductPatch(data: unknown, opts: { requireName: boolean
   if (d.images !== undefined) out.images = strArray(d.images, 12, 'images');
   // URL pública del producto (`link` del contrato de Meta). Editable desde el panel: sin
   // este camino, ningún producto podría crearse en el catálogo de Meta (el contrato la
-  // exige y jamás se inventa). META-CATALOG-OUTBOUND-CONTRACT-1.
-  if (d.productUrl !== undefined) out.productUrl = str(d.productUrl, 'productUrl', 2000);
+  // exige y jamás se inventa). Solo HTTPS absoluta: `http:`, `javascript:`, `data:` y las
+  // rutas relativas se rechazan acá, antes de llegar al catálogo.
+  if (d.productUrl !== undefined) out.productUrl = httpsUrl(d.productUrl, 'productUrl');
   if (d.inventory !== undefined) out.inventory = validateInventory(d.inventory);
   if (d.externalIds !== undefined) out.externalIds = validateExternalIds(d.externalIds);
   if (d.perfume !== undefined) out.perfume = d.perfume === null ? null : validatePerfume(d.perfume);

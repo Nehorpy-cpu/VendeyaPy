@@ -11,8 +11,10 @@
  * Nada de esto escribe en Meta ni en Firestore: eso lo hacen los callables.
  */
 
+import { createHash } from 'node:crypto';
 import type { Product } from '@vpw/shared';
 import type { MetaRemoteCatalogItem } from './catalogClient.js';
+import { canonicalHttpsUrl, createBlockers, MAX_ID_LENGTH, outboundId } from './catalogOutbound.js';
 
 // ---------------------------------------------------------------------------
 // Normalización compartida
@@ -62,9 +64,22 @@ export function parseRemotePriceGs(raw: string, currency?: string): number {
   return digits ? Number(digits) : 0;
 }
 
-/** Clave de doc segura para un retailer_id (los ids de Firestore no admiten '/'). */
+/**
+ * Clave de doc segura para un retailer_id (los ids de Firestore no admiten '/').
+ *
+ * Sanear PIERDE información: `ARM/1` y `ARM#1` colapsaban en la misma clave, de modo que el
+ * lock del primero declaraba al segundo "ya vinculado a otro producto" —para siempre y sin
+ * forma de desvincularlo— y su importación fallaba con id de producto duplicado. Cuando el
+ * id ya es seguro y entra en el largo (el caso de todo el catálogo actual) la clave es el id
+ * TAL CUAL, idéntica a la histórica: cambiarla huerfanaría locks y productos ya importados.
+ * Solo los ids que requieren saneo llevan un sufijo hash que restituye la inyectividad.
+ */
 export function retailerIdLockKey(retailerId: string): string {
-  return retailerId.trim().replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 400) || '_vacio';
+  const raw = retailerId.trim();
+  if (!raw) return '_vacio';
+  const safe = raw.replace(/[^A-Za-z0-9._-]/g, '_');
+  if (safe === raw && raw.length <= 400) return raw;
+  return `${safe.slice(0, 380)}~${createHash('sha1').update(raw).digest('hex').slice(0, 12)}`;
 }
 
 /** Identidad de negocio del artículo (producto_id del sitio del tenant), si viene en la url. */
@@ -97,6 +112,8 @@ export interface RemoteCandidate {
   imageUrl: string;
   description: string;
   productType: string;
+  /** URL pública del artículo en el sitio del tenant (`link` del contrato de escritura). */
+  url: string;
   businessId: string | null;
   flags: RemoteQualityFlag[];
   /** retailer_ids con los que probablemente esté duplicado. */
@@ -163,6 +180,7 @@ export function analyzeRemoteItems(items: MetaRemoteCatalogItem[]): RemoteCandid
       imageUrl: String(it.imageUrl ?? ''),
       description: String(it.description ?? ''),
       productType: String(it.productType ?? ''),
+      url: String(it.url ?? ''),
       businessId: remoteBusinessId(it),
       flags,
       ...(duplicateOf.length ? { duplicateOf } : {}),
@@ -302,6 +320,7 @@ export function genderFromProductType(productType: string): 'Femenino' | 'Mascul
  *  - `syncToMeta: false` ⇒ queda FUERA del plan de sync: no puede modificar ni apagar Meta.
  *  - `metaRetailerId` conservado ⇒ identidad remota estable, sin tocar el SKU interno.
  *  - stock 0 SIN trackStock ⇒ no se inventa cantidad; `stockPendingReview` lo marca.
+ *  - `productUrl` = el `url` que ya publica Meta (canónico), o vacío si no lo expone.
  *  - JAMÁS se arma productFinancials: el costo queda desconocido, no en 0.
  */
 export function buildImportedProduct(
@@ -334,6 +353,9 @@ export function buildImportedProduct(
       ? { brand: item.brand, gender: gender ?? 'Unisex', olfactiveFamily: '', styleTags: [], notes: { top: [], heart: [], base: [] }, priceRange: 'MID', sizeMl: null, isNew: false }
       : null,
     aiFicha: null,
+    // El enlace lo trae el propio artículo de Meta: no se inventa, y si no viene queda vacío
+    // (el gate lo pedirá antes de habilitar la sincronización).
+    productUrl: canonicalHttpsUrl(item.url) ?? '',
     // Vínculo confirmado por la importación + opt-in de sync APAGADO.
     syncToMeta: false,
     metaSyncStatus: 'not_synced',
@@ -360,7 +382,14 @@ export type SyncEnableBlocker =
   | 'stock_pending_review'
   | 'not_sellable_now'
   | 'unconfirmed_remote_match'
-  | 'no_identity';
+  | 'no_identity'
+  | 'identity_too_long'
+  // Obligatorios del contrato de ESCRITURA, exigidos solo cuando el artículo todavía no
+  // existe en Meta (la primera sincronización sería un CREATE).
+  | 'description_missing'
+  | 'brand_missing'
+  | 'product_url_missing'
+  | 'product_url_not_https';
 
 /**
  * Requisitos para habilitar `syncToMeta` en un producto. PURO. Devuelve la lista de
@@ -388,7 +417,20 @@ export function syncEnableBlockers(
   // "sin stock" (o apague su artículo): el stock se resuelve antes de sincronizar, no después.
   if (p.status === 'ACTIVE' && p.inventory?.trackStock && (p.inventory?.stock ?? 0) <= 0) out.push('not_sellable_now');
   if (ctx.remoteHasIdentity && !(p.metaRetailerId ?? '').trim()) out.push('unconfirmed_remote_match');
-  const identity = (p.metaRetailerId ?? '').trim() || (p.inventory?.sku ?? '').trim();
+  const identity = outboundId(p);
   if (!identity) out.push('no_identity');
+  else if (identity.length > MAX_ID_LENGTH) out.push('identity_too_long');
+
+  // Si el artículo NO existe todavía en Meta, la primera sincronización será un CREATE y
+  // Meta exige los nueve obligatorios. Sin este gate el panel prometía "se va a crear" y el
+  // planificador dejaba el producto `blocked` para siempre, sin que nadie se enterara.
+  // Se reusan LOS MISMOS bloqueos del contrato: una segunda lista se desincroniza.
+  if (!ctx.remoteHasIdentity) {
+    for (const b of createBlockers(p)) {
+      if (b === 'description_missing' || b === 'brand_missing' || b === 'product_url_missing' || b === 'product_url_not_https') {
+        out.push(b);
+      }
+    }
+  }
   return out;
 }
