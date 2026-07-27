@@ -103,6 +103,8 @@ export const paths = {
   metaCatalogSyncLog: (tenantId: string, id: string) => `tenants/${tenantId}/metaCatalogSyncLogs/${id}`,
   metaCatalogSyncRuns: (tenantId: string) => `tenants/${tenantId}/metaCatalogSyncRuns`,
   metaCatalogSyncRun: (tenantId: string, runId: string) => `tenants/${tenantId}/metaCatalogSyncRuns/${runId}`,
+  /** Lock de unicidad del retailer_id dentro del tenant (reconciliación con Meta). */
+  metaRetailerLock: (tenantId: string, key: string) => `tenants/${tenantId}/metaRetailerLocks/${key}`,
   trackingSources: (tenantId: string) => `tenants/${tenantId}/trackingSources`,
   trackingSource: (tenantId: string, id: string) => `tenants/${tenantId}/trackingSources/${id}`,
   businessEvents: (tenantId: string) => `tenants/${tenantId}/businessEvents`,

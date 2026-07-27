@@ -105,12 +105,32 @@ export interface Product {
   /** Ficha para recomendaciones del agente (CATALOG-ENRICHMENT-1). Opcional. */
   aiFicha?: ProductAiFicha | null;
   // --- Sincronización con el Meta Catalog (D4). Lo escribe la sync (Admin SDK). ---
+  /**
+   * OPT-IN EXPLÍCITO de sincronización (META-CATALOG-RECONCILIATION-1). Fail-closed:
+   * SOLO los productos con `syncToMeta === true` participan del plan de sync — ausente o
+   * false ⇒ el producto queda COMPLETAMENTE fuera (ni create, ni update, ni disable).
+   * Lo habilita una acción administrativa explícita, jamás una importación.
+   */
   syncToMeta?: boolean;
   metaSyncStatus?: MetaSyncStatus;
   metaCatalogId?: string | null;
+  /**
+   * `retailer_id` del artículo en Meta: la identidad remota que NOSOTROS controlamos.
+   * Separado a propósito de `inventory.sku` (identidad interna, que jamás se toca para
+   * adaptarla a Meta) y de `metaProductItemId` (el id opaco que asigna Meta).
+   * Inmutable por las operaciones normales de catálogo: `validateProductPatch` no lo
+   * acepta; solo lo escriben los callables administrativos de reconciliación.
+   */
+  metaRetailerId?: string | null;
   metaProductItemId?: string | null;
   metaLastSyncAt?: Timestamp | null;
   metaSyncError?: string;
+  /**
+   * Producto importado desde Meta cuyo STOCK todavía no fue validado por una persona.
+   * No se inventa cantidad en la importación: este flag bloquea la habilitación de sync
+   * hasta que alguien revise el inventario real.
+   */
+  stockPendingReview?: boolean;
   createdAt: Timestamp;
   updatedAt: Timestamp;
 }

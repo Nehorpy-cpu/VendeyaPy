@@ -5,6 +5,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import type { Product } from '@vpw/shared';
 import { aiFichaQuality } from '@vpw/shared';
 import { useActiveCompany } from '@/lib/active-company';
+import { useAuth } from '@/lib/auth-context';
 import {
   listProducts,
   listCategories,
@@ -13,16 +14,36 @@ import {
   deleteProduct,
   productMargin,
   syncCatalogToMeta,
+  setProductSyncEnabled,
   type CatalogSyncRun,
   type ProductInput,
+  type SetSyncEnabledResult,
 } from '@/lib/catalog';
 import { ProductForm } from '@/components/ProductForm';
+import { MetaReconciliation } from '@/components/MetaReconciliation';
 
 const gs = (n: number | null | undefined) =>
   n == null ? '—' : '₲ ' + n.toLocaleString('es-PY');
 
+/** Habilitar la sincronización con Meta es una acción de dueño (el backend la restringe igual). */
+const ROLES_RECONCILIACION = new Set(['TENANT_OWNER', 'PLATFORM_ADMIN']);
+
+const SYNC_BLOCKER_LABEL: Record<string, string> = {
+  not_active: 'el producto no está activo',
+  name_missing: 'falta el nombre',
+  price_invalid: 'el precio no es válido',
+  currency_not_pyg: 'la moneda no es PYG',
+  image_not_https: 'falta una imagen segura (https)',
+  category_missing: 'falta la categoría',
+  stock_pending_review: 'falta revisar el stock (editá el producto y guardá su inventario)',
+  not_sellable_now: 'hoy no es vendible (sin stock)',
+  unconfirmed_remote_match: 'su código ya existe en Meta: vinculalo desde la reconciliación antes de sincronizar',
+  no_identity: 'falta el SKU o el vínculo con Meta',
+};
+
 export default function CatalogPage() {
   const { tenantId, loading: companyLoading } = useActiveCompany();
+  const { claims } = useAuth();
   const qc = useQueryClient();
   const [search, setSearch] = useState('');
   const [editing, setEditing] = useState<Product | null | undefined>(undefined); // undefined = cerrado
@@ -66,6 +87,24 @@ export default function CatalogPage() {
   // "Aplicar" solo aparece si el backend confirma config en modo live, y con confirmación.
   const [syncRun, setSyncRun] = useState<CatalogSyncRun | null>(null);
   const [confirmApply, setConfirmApply] = useState(false);
+  // META-CATALOG-RECONCILIATION-1: opt-in de sincronización por producto (fail-closed).
+  const puedeReconciliar = !!claims.role && ROLES_RECONCILIACION.has(claims.role);
+  const [confirmSync, setConfirmSync] = useState<Product | null>(null);
+  const [syncPreview, setSyncPreview] = useState<SetSyncEnabledResult | null>(null);
+  const syncFlagMut = useMutation({
+    mutationFn: (v: { productId: string; enabled: boolean; confirmDiff?: boolean }) =>
+      setProductSyncEnabled(tenantId!, v.productId, v.enabled, { confirmDiff: v.confirmDiff }),
+    onSuccess: (res, v) => {
+      if (res.ok) {
+        setConfirmSync(null);
+        setSyncPreview(null);
+        qc.invalidateQueries({ queryKey: ['products', tenantId] });
+      } else if (v.enabled) {
+        // El backend devuelve el diff a confirmar o la lista de requisitos que faltan.
+        setSyncPreview(res);
+      }
+    },
+  });
   const syncMut = useMutation({
     mutationFn: (apply: boolean) => syncCatalogToMeta(tenantId!, { apply }),
     onSuccess: (run) => {
@@ -116,6 +155,8 @@ export default function CatalogPage() {
         </div>
       </div>
 
+      <MetaReconciliation tenantId={tenantId} categories={categoriesQ.data ?? []} />
+
       {(syncMut.isError || syncRun) && (
         <div role="status" aria-live="polite" className="rounded-2xl border border-ink-100 bg-white p-4 shadow-soft">
           {syncMut.isError ? (
@@ -149,14 +190,22 @@ export default function CatalogPage() {
               )}
 
               {syncRun.summary && (
-                <div className="flex flex-wrap gap-2 text-xs">
-                  <SyncChip label="Crear" n={syncRun.summary.create} tone="mint" />
-                  <SyncChip label="Actualizar" n={syncRun.summary.update} tone="mint" />
-                  <SyncChip label="Deshabilitar" n={syncRun.summary.disable} tone="amber" />
-                  <SyncChip label="Sin cambios" n={syncRun.summary.unchanged} tone="ink" />
-                  <SyncChip label="Bloqueados" n={syncRun.summary.blocked} tone="coral" />
-                  <SyncChip label="Solo en Meta" n={syncRun.summary.remoteOnly} tone="ink" />
-                </div>
+                <>
+                  <div className="flex flex-wrap gap-2 text-xs">
+                    <SyncChip label="Crear" n={syncRun.summary.create} tone="mint" />
+                    <SyncChip label="Actualizar" n={syncRun.summary.update} tone="mint" />
+                    <SyncChip label="Deshabilitar" n={syncRun.summary.disable} tone="amber" />
+                    <SyncChip label="Sin cambios" n={syncRun.summary.unchanged} tone="ink" />
+                    <SyncChip label="Bloqueados" n={syncRun.summary.blocked} tone="coral" />
+                    <SyncChip label="Solo en Meta" n={syncRun.summary.remoteOnly} tone="ink" />
+                  </div>
+                  {(syncRun.excludedNotManaged ?? 0) > 0 && (
+                    <p className="text-xs text-ink-500">
+                      {syncRun.excludedNotManaged} producto{syncRun.excludedNotManaged === 1 ? '' : 's'} sin sincronización habilitada:
+                      quedan fuera de esta corrida (no se crean, no se actualizan ni se dan de baja en Meta).
+                    </p>
+                  )}
+                </>
               )}
 
               {(syncRun.entries ?? []).some((e) => e.action === 'blocked') && (
@@ -316,17 +365,33 @@ export default function CatalogPage() {
                       </span>
                     </td>
                     <td className="px-4 py-3">
-                      {p.metaSyncStatus === 'synced' ? (
-                        <span className="inline-flex rounded-full bg-mint-50 px-2 py-0.5 text-xs font-semibold text-mint-700">Sincronizado</span>
-                      ) : p.metaSyncStatus === 'pending' ? (
-                        <span className="inline-flex rounded-full bg-amber-50 px-2 py-0.5 text-xs font-semibold text-amber-700">Pendiente</span>
-                      ) : p.metaSyncStatus === 'failed' ? (
-                        <span title={p.metaSyncError || undefined} className="inline-flex rounded-full bg-coral-50 px-2 py-0.5 text-xs font-semibold text-coral-600">Falló</span>
-                      ) : p.metaSyncStatus === 'disabled' ? (
-                        <span className="inline-flex rounded-full bg-ink-50 px-2 py-0.5 text-xs font-semibold text-ink-500">Oculto</span>
-                      ) : (
-                        <span className="text-xs text-ink-400">—</span>
-                      )}
+                      <div className="flex flex-col items-start gap-1">
+                        {p.syncToMeta === true ? (
+                          p.metaSyncStatus === 'synced' ? (
+                            <span className="inline-flex rounded-full bg-mint-50 px-2 py-0.5 text-xs font-semibold text-mint-700">Sincronizado</span>
+                          ) : p.metaSyncStatus === 'pending' ? (
+                            <span className="inline-flex rounded-full bg-amber-50 px-2 py-0.5 text-xs font-semibold text-amber-700">Pendiente</span>
+                          ) : p.metaSyncStatus === 'failed' ? (
+                            <span title={p.metaSyncError || undefined} className="inline-flex rounded-full bg-coral-50 px-2 py-0.5 text-xs font-semibold text-coral-600">Falló</span>
+                          ) : p.metaSyncStatus === 'disabled' ? (
+                            <span className="inline-flex rounded-full bg-ink-50 px-2 py-0.5 text-xs font-semibold text-ink-500">Oculto en Meta</span>
+                          ) : (
+                            <span className="inline-flex rounded-full bg-mint-50 px-2 py-0.5 text-xs font-semibold text-mint-700">Se sincroniza</span>
+                          )
+                        ) : (
+                          <span className="inline-flex rounded-full bg-ink-50 px-2 py-0.5 text-xs font-semibold text-ink-500">No se sincroniza</span>
+                        )}
+                        {p.metaRetailerId && <span className="text-[11px] text-ink-400">↔ {p.metaRetailerId}</span>}
+                        {puedeReconciliar && (
+                          <button
+                            onClick={() => (p.syncToMeta === true ? syncFlagMut.mutate({ productId: p.id, enabled: false }) : setConfirmSync(p))}
+                            disabled={syncFlagMut.isPending}
+                            className="text-[11px] font-medium text-mint-700 underline-offset-2 hover:underline disabled:opacity-50"
+                          >
+                            {p.syncToMeta === true ? 'Dejar de sincronizar' : 'Sincronizar con Meta…'}
+                          </button>
+                        )}
+                      </div>
                     </td>
                     <td className="px-4 py-3 text-right">
                       <button onClick={() => setEditing(p)} className="mr-3 font-medium text-mint-700 hover:text-mint-600">Editar</button>
@@ -351,6 +416,57 @@ export default function CatalogPage() {
           saving={saveMut.isPending}
           error={saveMut.isError ? errMsg(saveMut.error) : null}
         />
+      )}
+
+      {confirmSync && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink-950/40 p-4" onClick={() => { setConfirmSync(null); setSyncPreview(null); }}>
+          <div role="dialog" aria-modal="true" aria-labelledby="sync-title" className="w-full max-w-md rounded-2xl border border-ink-100 bg-white p-6 shadow-float" onClick={(e) => e.stopPropagation()}>
+            <h3 id="sync-title" className="text-base font-semibold text-ink-900">Sincronizar este producto con Meta</h3>
+            <p className="mt-2 text-sm text-ink-600">
+              <span className="font-medium text-ink-800">{confirmSync.name}</span>
+            </p>
+
+            {!syncPreview && (
+              <p className="mt-3 text-sm text-ink-600">
+                Vamos a revisar si cumple los requisitos y a mostrarte exactamente qué se enviaría a Meta.
+              </p>
+            )}
+
+            {syncPreview && syncPreview.blockers.length > 0 && (
+              <div className="mt-3 rounded-lg bg-coral-50 px-3 py-2 text-sm text-coral-700">
+                <p className="font-medium">Todavía no se puede sincronizar:</p>
+                <ul className="mt-1 space-y-0.5 text-xs">
+                  {syncPreview.blockers.map((b) => <li key={b}>• {SYNC_BLOCKER_LABEL[b] ?? b}</li>)}
+                </ul>
+              </div>
+            )}
+
+            {syncPreview?.requiresConfirmation && (
+              <div className="mt-3 rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-800">
+                <p className="font-medium">{syncPreview.intent === 'update' ? 'Se va a ACTUALIZAR un artículo existente' : 'Se va a CREAR un artículo nuevo'}</p>
+                <p className="mt-1 text-xs">{syncPreview.message}</p>
+                <p className="mt-1 text-xs">Código en Meta: <strong>{syncPreview.retailerId}</strong></p>
+              </div>
+            )}
+
+            {syncFlagMut.isError && <p role="alert" className="mt-3 rounded-lg bg-coral-50 px-3 py-2 text-sm text-coral-700">{errMsg(syncFlagMut.error)}</p>}
+
+            <div className="mt-5 flex justify-end gap-3">
+              <button onClick={() => { setConfirmSync(null); setSyncPreview(null); }} className="rounded-lg border border-ink-200 px-4 py-2 text-sm font-medium text-ink-700 transition-colors hover:bg-ink-50">
+                {syncPreview && syncPreview.blockers.length > 0 ? 'Entendido' : 'Cancelar'}
+              </button>
+              {(!syncPreview || syncPreview.requiresConfirmation) && (
+                <button
+                  onClick={() => syncFlagMut.mutate({ productId: confirmSync.id, enabled: true, confirmDiff: !!syncPreview?.requiresConfirmation })}
+                  disabled={syncFlagMut.isPending}
+                  className="rounded-lg bg-mint-600 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-mint-700 disabled:opacity-60"
+                >
+                  {syncFlagMut.isPending ? 'Verificando…' : syncPreview?.requiresConfirmation ? 'Sí, sincronizar' : 'Revisar requisitos'}
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
       )}
 
       {confirmDelete && (

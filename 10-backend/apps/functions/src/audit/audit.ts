@@ -71,6 +71,11 @@ export const AUDIT_ACTIONS = [
   'meta.disconnected',
   // META-CATALOG-LIVE-1: cada corrida de sync de catálogo (dry_run o apply) con su runId.
   'meta.catalog_sync',
+  // META-CATALOG-RECONCILIATION-1: reconciliación con un catálogo de Meta preexistente.
+  'meta.catalog_mapping_confirmed',
+  'meta.catalog_items_imported',
+  'meta.catalog_sync_enabled',
+  'meta.catalog_sync_disabled',
   'whatsapp.activation_requested',
   'whatsapp.activation_completed',
   'whatsapp.activation_cancelled',

@@ -26,6 +26,9 @@ const prod = (over: Partial<Product> & { id: string }): Product =>
     images: ['https://cdn.example.com/a.jpg'],
     emoji: '🌸',
     inventory: { trackStock: true, stock: 5, lowStockThreshold: 1, sku: 'SKU-A' },
+    // Opt-in explícito: sin esto el producto queda FUERA del plan (fail-closed). Los tests
+    // de este archivo prueban el comportamiento de los productos YA gestionados.
+    syncToMeta: true,
     status: 'ACTIVE',
     featured: false,
     position: 0,
@@ -84,6 +87,130 @@ describe('buildCatalogItemPayload (solo campos públicos)', () => {
     expect(productAvailability(prod({ id: 'p4', status: 'ARCHIVED' }))).toBe('out of stock');
     // Sin tracking de stock, ACTIVE alcanza.
     expect(productAvailability(prod({ id: 'p5', inventory: { trackStock: false, stock: 0, lowStockThreshold: 1, sku: 'S' } }))).toBe('in stock');
+  });
+});
+
+describe('GATE FAIL-CLOSED: solo participan los productos con syncToMeta === true', () => {
+  it('un producto SIN opt-in queda totalmente fuera del plan (ni create, ni update, ni disable)', () => {
+    const sinOptIn = prod({ id: 'p1', syncToMeta: undefined });
+    const plan = planCatalogSync([sinOptIn], [remote()]);
+    expect(plan.entries).toHaveLength(0);
+    expect(plan.excludedNotManaged).toBe(1);
+    expect(plan.summary).toMatchObject({ create: 0, update: 0, disable: 0, unchanged: 0, blocked: 0 });
+  });
+
+  it('syncToMeta:false explícito ⇒ misma exclusión total', () => {
+    const plan = planCatalogSync([prod({ id: 'p1', syncToMeta: false })], [remote()]);
+    expect(plan.entries).toHaveLength(0);
+    expect(plan.excludedNotManaged).toBe(1);
+  });
+
+  it('EL INVARIANTE CRÍTICO: un importado INACTIVE + syncToMeta:false JAMÁS produce disable', () => {
+    // Escenario real: se importan los artículos vivos de Meta como INACTIVE. Sin el gate,
+    // el plan los vería "no vendibles" y apagaría el catálogo productivo del negocio.
+    const importados = Array.from({ length: 5 }, (_, i) =>
+      prod({
+        id: `imp${i}`,
+        status: 'INACTIVE',
+        syncToMeta: false,
+        metaRetailerId: `RID-${i}`,
+        inventory: { trackStock: false, stock: 0, lowStockThreshold: 0, sku: `RID-${i}` },
+      }),
+    );
+    const remotos = Array.from({ length: 5 }, (_, i) => remote({ id: `itm-${i}`, retailerId: `RID-${i}`, availability: 'in stock' }));
+    const plan = planCatalogSync(importados, remotos);
+    expect(plan.entries).toHaveLength(0);
+    expect(plan.summary.disable).toBe(0);
+    expect(plan.excludedNotManaged).toBe(5);
+  });
+
+  it('DEFENSA EN PROFUNDIDAD: syncToMeta:true forzado a mano pero stock sin validar ⇒ igual excluido', () => {
+    // Escenario: alguien pone syncToMeta:true desde la consola de Firebase sobre un importado.
+    // El segundo gate (stockPendingReview) evita que su artículo vivo termine en disable.
+    const forzado = prod({
+      id: 'imp',
+      status: 'INACTIVE',
+      syncToMeta: true,
+      stockPendingReview: true,
+      metaRetailerId: 'RID-1',
+      inventory: { trackStock: false, stock: 0, lowStockThreshold: 0, sku: 'RID-1' },
+    });
+    const plan = planCatalogSync([forzado], [remote({ retailerId: 'RID-1', availability: 'in stock' })]);
+    expect(plan.entries).toHaveLength(0);
+    expect(plan.summary.disable).toBe(0);
+    expect(plan.excludedNotManaged).toBe(1);
+  });
+
+  it('mezcla: solo el habilitado genera acción; los demás ni aparecen', () => {
+    const plan = planCatalogSync(
+      [
+        prod({ id: 'gestionado' }),
+        prod({ id: 'importado', status: 'INACTIVE', syncToMeta: false, metaRetailerId: 'OTRO', inventory: { trackStock: false, stock: 0, lowStockThreshold: 0, sku: 'OTRO' } }),
+      ],
+      [remote(), remote({ id: 'itm-otro', retailerId: 'OTRO' })],
+    );
+    expect(plan.entries.map((e) => e.productId)).toEqual(['gestionado']);
+    expect(plan.excludedNotManaged).toBe(1);
+  });
+
+  it('habilitar el opt-in produce la acción correcta (update sobre su artículo mapeado)', () => {
+    const habilitado = prod({ id: 'p1', syncToMeta: true, metaRetailerId: 'ARM-744646-5202', description: 'nueva descripción' });
+    const plan = planCatalogSync([habilitado], [remote({ retailerId: 'ARM-744646-5202' })]);
+    expect(plan.entries[0]).toMatchObject({ action: 'update', sku: 'ARM-744646-5202', mapped: true });
+  });
+});
+
+describe('identidad efectiva: metaRetailerId manda, SKU es fallback', () => {
+  it('un producto MAPEADO matchea por metaRetailerId aunque su SKU sea otro', () => {
+    const p = prod({ id: 'p1', metaRetailerId: 'ARM-744646-5202', inventory: { trackStock: true, stock: 5, lowStockThreshold: 1, sku: 'armaf-odyssey-mega' } });
+    const plan = planCatalogSync([p], [remote({ retailerId: 'ARM-744646-5202' })]);
+    expect(plan.entries[0]!.action).toBe('unchanged');
+    expect(plan.entries[0]!.sku).toBe('ARM-744646-5202');
+    expect(plan.entries[0]!.internalSku).toBe('armaf-odyssey-mega');
+    expect(plan.entries[0]!.mapped).toBe(true);
+  });
+
+  it('cambiar el SKU interno NO rompe el vínculo confirmado', () => {
+    const antes = prod({ id: 'p1', metaRetailerId: 'ARM-1', inventory: { trackStock: true, stock: 5, lowStockThreshold: 1, sku: 'viejo' } });
+    const despues = prod({ id: 'p1', metaRetailerId: 'ARM-1', inventory: { trackStock: true, stock: 5, lowStockThreshold: 1, sku: 'nuevo-sku' } });
+    const r = [remote({ retailerId: 'ARM-1' })];
+    expect(planCatalogSync([antes], r)[0 as never] ?? planCatalogSync([antes], r).entries[0]!.sku).toBe('ARM-1');
+    expect(planCatalogSync([despues], r).entries[0]!.sku).toBe('ARM-1');
+  });
+
+  it('sin vínculo, el SKU sigue siendo la identidad (producto nuevo a crear)', () => {
+    const plan = planCatalogSync([prod({ id: 'p1' })], []);
+    expect(plan.entries[0]).toMatchObject({ action: 'create', sku: 'SKU-A', mapped: false });
+  });
+
+  it('colisión metaRetailerId de A == SKU de B ⇒ ambos bloqueados, jamás auto-vinculan', () => {
+    const a = prod({ id: 'a', metaRetailerId: 'CHOQUE', inventory: { trackStock: true, stock: 5, lowStockThreshold: 1, sku: 'sku-a' } });
+    const b = prod({ id: 'b', name: 'Otro', inventory: { trackStock: true, stock: 5, lowStockThreshold: 1, sku: 'CHOQUE' } });
+    const plan = planCatalogSync([a, b], [remote({ retailerId: 'CHOQUE' })]);
+    expect(plan.entries.map((e) => e.action)).toEqual(['blocked', 'blocked']);
+    expect(plan.entries[0]!.blockedReasons).toContain('retailer_id_duplicated');
+    expect(plan.entries[1]!.blockedReasons).toContain('sku_duplicated');
+  });
+
+  it('mapeado cuyo artículo remoto desapareció ⇒ bloqueado, NO se re-crea a ciegas', () => {
+    const plan = planCatalogSync([prod({ id: 'p1', metaRetailerId: 'FANTASMA' })], []);
+    expect(plan.entries[0]!.action).toBe('blocked');
+    expect(plan.entries[0]!.note).toBe('mapeado_sin_item_remoto');
+    expect(plan.summary.create).toBe(0);
+  });
+});
+
+describe('remoteOnly excluye lo ya vinculado', () => {
+  it('un artículo con vínculo confirmado deja de ser candidato de importación', () => {
+    const mapeado = prod({ id: 'p1', syncToMeta: false, metaRetailerId: 'ARM-1', inventory: { trackStock: true, stock: 1, lowStockThreshold: 1, sku: 'interno' } });
+    const plan = planCatalogSync([mapeado], [remote({ retailerId: 'ARM-1' }), remote({ id: 'itm-x', retailerId: 'LIBRE' })]);
+    expect(plan.remoteOnly.map((r) => r.retailerId)).toEqual(['LIBRE']);
+  });
+
+  it('el SKU de un producto NO habilitado no reclama artículos remotos', () => {
+    const sinOptIn = prod({ id: 'p1', syncToMeta: false });
+    const plan = planCatalogSync([sinOptIn], [remote({ retailerId: 'SKU-A' })]);
+    expect(plan.remoteOnly.map((r) => r.retailerId)).toEqual(['SKU-A']);
   });
 });
 

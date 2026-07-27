@@ -44,7 +44,7 @@ import { derivarPorIaNoDisponible, esConsultaDerivable } from './aiUnavailable.j
 import { esConsultaCobertura, RESPUESTA_COBERTURA_SEGURA } from './coverageGuard.js';
 import { gateCoberturaCheckout, clasificarTextoEnEspera, manejarTurnoEnEsperaUbicacion, actualizarUbicacionEnRevision } from './coverage.js';
 import type { CoverageSessionPointer } from '@vpw/shared';
-import { createPendingOrder } from '../orders/createPendingOrder.js';
+import { createPendingOrder, ProductNoVendibleError } from '../orders/createPendingOrder.js';
 import { resolveCheckoutReuse } from '../orders/checkoutReuse.js';
 import { getCheckoutConfig, formatTransferInstructions } from '../orders/checkoutConfig.js';
 import { captureTrackingCode } from '../tracking/tracking.js';
@@ -477,7 +477,20 @@ export async function decidirRespuesta(
         nextState: 'CART',
       };
     }
-    const order = await createPendingOrder(tenantId, customerId, prev.cart);
+    let order: Awaited<ReturnType<typeof createPendingOrder>>;
+    try {
+      order = await createPendingOrder(tenantId, customerId, prev.cart);
+    } catch (e) {
+      // El carrito quedó con algo que ya no se puede vender (desactivado / sin stock desde que
+      // se armó). Respuesta honesta, SIN crear pedido ni prometer disponibilidad.
+      if (e instanceof ProductNoVendibleError) {
+        return {
+          reply: `Uy, ${e.productNames.length === 1 ? 'un producto de tu carrito ya no está disponible' : 'algunos productos de tu carrito ya no están disponibles'} 😕 Te paso con alguien del equipo para resolverlo.`,
+          nextState: 'CART',
+        };
+      }
+      throw e;
+    }
     // Medición 1:1 con la creación EXITOSA (va después de createPendingOrder; si la creación lanza, no
     // se incrementa ordersThisMonth). No bloqueante: el metering nunca rompe el pago.
     await meterUsage(tenantId, 'orders').catch(() => { /* metering no crítico */ });

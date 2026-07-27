@@ -122,8 +122,24 @@ export async function searchCatalog(
   return componerResultados(activos, filters, finMap);
 }
 
-/** Trae un producto por su id (SKU). null si no existe. */
+/**
+ * Trae un producto VENDIBLE por su id. null si no existe o si dejó de ser ofrecible.
+ *
+ * El gate de `status === 'ACTIVE'` vive acá y no solo en las queries de búsqueda: los ids
+ * llegan desde el estado de la sesión (`pendingCart`, `lastShownSkus`), que puede haberse
+ * armado antes de que el producto se desactivara. Sin este filtro, un producto desactivado
+ * a mitad de conversación —o un producto importado de Meta que nunca debió ofrecerse—
+ * podría entrar al carrito. (META-CATALOG-RECONCILIATION-1)
+ */
 export async function getProductById(tenantId: string, productId: string): Promise<Product | null> {
+  const doc = await db().doc(paths.product(tenantId, productId)).get();
+  if (!doc.exists) return null;
+  const p = doc.data() as Product;
+  return p.status === 'ACTIVE' ? p : null;
+}
+
+/** Lectura CRUDA por id, sin gate de status. Para paneles/administración, nunca para el bot. */
+export async function getProductByIdRaw(tenantId: string, productId: string): Promise<Product | null> {
   const doc = await db().doc(paths.product(tenantId, productId)).get();
   return doc.exists ? (doc.data() as Product) : null;
 }
@@ -138,7 +154,12 @@ export async function findProductByName(tenantId: string, text: string): Promise
     .collection(paths.products(tenantId))
     .where('status', '==', 'ACTIVE')
     .get();
-  const productos = snap.docs.map((d) => d.data() as Product);
+  // Mismo criterio de vendibilidad que searchCatalog: pedir un producto por su nombre exacto
+  // no puede saltearse el stock (un importado de Meta activado sin inventario real entraría
+  // al carrito por esta puerta). META-CATALOG-RECONCILIATION-1.
+  const productos = snap.docs
+    .map((d) => d.data() as Product)
+    .filter((p) => !p.inventory?.trackStock || (p.inventory?.stock ?? 0) > 0);
   // requireNameToken: marca sola ("sumale algo de armaf") NO agrega un producto arbitrario
   // al carrito; hace falta al menos un token exacto del NOMBRE ("agregá la belle").
   return bestNameMatch(text, productos, { requireNameToken: true });

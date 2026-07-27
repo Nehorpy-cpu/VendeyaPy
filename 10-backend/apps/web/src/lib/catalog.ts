@@ -131,7 +131,10 @@ export interface CatalogSyncSummary {
 }
 export interface CatalogSyncEntry {
   productId: string;
+  /** Identidad remota efectiva (vínculo confirmado o SKU como fallback). */
   sku: string;
+  internalSku?: string;
+  mapped?: boolean;
   productName: string;
   action: 'create' | 'update' | 'disable' | 'unchanged' | 'blocked';
   blockedReasons?: string[];
@@ -148,8 +151,143 @@ export interface CatalogSyncRun {
   errorDetail?: string;
   summary?: CatalogSyncSummary;
   entries?: CatalogSyncEntry[];
+  /** Productos sin opt-in de sincronización: quedan fuera del plan (fail-closed). */
+  excludedNotManaged?: number;
+  remoteOnly?: Array<{ retailerId: string; name: string }>;
   appliedCount?: number;
   failedCount?: number;
+}
+
+// --- Reconciliación con un catálogo de Meta preexistente ---------------------
+
+export type RemoteQualityFlag =
+  | 'generic_name'
+  | 'probable_duplicate'
+  | 'missing_brand'
+  | 'out_of_stock'
+  | 'name_description_mismatch'
+  | 'invalid_price'
+  | 'image_not_https';
+
+export interface RemoteCandidateItem {
+  retailerId: string;
+  metaItemId: string;
+  name: string;
+  brand: string;
+  priceGs: number;
+  priceRaw: string;
+  availability: string;
+  imageUrl: string;
+  description: string;
+  productType: string;
+  businessId: string | null;
+  flags: RemoteQualityFlag[];
+  duplicateOf?: string[];
+  importable: boolean;
+}
+
+export interface MappingCandidate {
+  retailerId: string;
+  name: string;
+  brand: string;
+  priceGs: number;
+  availability: string;
+  score: number;
+  confidence: 'alta' | 'media' | 'baja';
+  reasons: string[];
+}
+
+export interface ReconcilePlan {
+  ok: boolean;
+  catalogIdMasked: string;
+  totals: {
+    remoteItems: number;
+    linked: number;
+    unlinked: number;
+    importable: number;
+    genericName: number;
+    probableDuplicate: number;
+    missingBrand: number;
+    outOfStock: number;
+    nameDescriptionMismatch: number;
+    blocked: number;
+  };
+  linked: Array<{ retailerId: string; productId: string; productName: string }>;
+  unlinked: RemoteCandidateItem[];
+  page: { offset: number; limit: number; total: number; hasMore: boolean };
+  suggestions: Array<{ productId: string; productName: string; internalSku: string; candidates: MappingCandidate[] }>;
+}
+
+/** Plan de reconciliación (read-only). Requiere rol dueño de la empresa. */
+export async function fetchReconcilePlan(tenantId: string, opts?: { offset?: number; limit?: number }): Promise<ReconcilePlan> {
+  const call = httpsCallable(firebaseFunctions(), 'metaCatalogReconcilePlan');
+  const res = await call({ tenantId, offset: opts?.offset ?? 0, limit: opts?.limit ?? 200 });
+  return res.data as ReconcilePlan;
+}
+
+/** Vincula un producto local con un artículo de Meta. Irreversible por diseño. */
+export async function confirmMetaMapping(tenantId: string, productId: string, retailerId: string): Promise<{ ok: boolean; alreadyMapped: boolean }> {
+  const call = httpsCallable(firebaseFunctions(), 'metaCatalogConfirmMapping');
+  const res = await call({ tenantId, productId, retailerId });
+  return res.data as { ok: boolean; alreadyMapped: boolean };
+}
+
+export interface ImportResult {
+  ok: boolean;
+  dryRun?: boolean;
+  imported?: Array<{ productId: string; retailerId: string; name: string; flags: string[] }>;
+  wouldImport?: Array<{ retailerId: string; name: string; flags: string[] }>;
+  blocked: Array<{ retailerId: string; reason: string }>;
+}
+
+export type SyncEnableBlocker =
+  | 'not_active'
+  | 'name_missing'
+  | 'price_invalid'
+  | 'currency_not_pyg'
+  | 'image_not_https'
+  | 'category_missing'
+  | 'stock_pending_review'
+  | 'not_sellable_now'
+  | 'unconfirmed_remote_match'
+  | 'no_identity';
+
+export interface SetSyncEnabledResult {
+  ok: boolean;
+  enabled: boolean;
+  blockers: SyncEnableBlocker[];
+  requiresConfirmation?: boolean;
+  intent?: 'create' | 'update';
+  retailerId?: string;
+  message?: string;
+}
+
+/**
+ * Habilita o apaga la sincronización con Meta de UN producto. Habilitar exige que el
+ * producto cumpla todos los requisitos y una confirmación explícita del cambio que se
+ * enviará a Meta (`confirmDiff`).
+ */
+export async function setProductSyncEnabled(
+  tenantId: string,
+  productId: string,
+  enabled: boolean,
+  opts?: { confirmDiff?: boolean },
+): Promise<SetSyncEnabledResult> {
+  const call = httpsCallable(firebaseFunctions(), 'metaCatalogSetSyncEnabled');
+  const res = await call({ tenantId, productId, enabled, confirmDiff: opts?.confirmDiff ?? false });
+  return res.data as SetSyncEnabledResult;
+}
+
+/** Importa artículos de Meta como productos INACTIVE (sin costo ni stock inventados). */
+export async function importMetaItems(
+  tenantId: string,
+  retailerIds: string[],
+  categoryId: string,
+  opts?: { dryRun?: boolean },
+): Promise<ImportResult> {
+  const call = httpsCallable(firebaseFunctions(), 'metaCatalogImportItems');
+  const res = await call({ tenantId, retailerIds, categoryId, dryRun: opts?.dryRun ?? false });
+  return res.data as ImportResult;
 }
 
 /**

@@ -50,7 +50,7 @@ import { recordAudit } from '../audit/audit.js';
 import { coverageSettings } from './coverage.js';
 import { coverageHold } from './coverageTestHooks.js';
 import { getCheckoutConfig, formatTransferInstructions } from '../orders/checkoutConfig.js';
-import { createPendingOrder } from '../orders/createPendingOrder.js';
+import { createPendingOrder, ProductNoVendibleError } from '../orders/createPendingOrder.js';
 import { getWhatsAppClient } from '../messaging/whatsappClient.js';
 import { appendMessage } from './messages.js';
 
@@ -794,6 +794,36 @@ export async function processCoverageResumeJob(tenantId: string, jobId: string):
     await setResume(tenantId, req.id, final, orderId);
     logger.info('Cobertura: checkout reanudado', { tenantId, requestId: req.id, orderId, envio });
   } catch (e) {
+    // META-CATALOG-RECONCILIATION-1: un producto del carrito dejó de ser vendible (se
+    // desactivó o se quedó sin stock entre la solicitud y la aprobación). Es un error
+    // PERMANENTE: reintentar no lo arregla. Se deja el job para revisión humana en vez de
+    // consumir los `attempts` en un loop que siempre va a fallar.
+    if (e instanceof ProductNoVendibleError) {
+      logger.warn('Cobertura: reanudación detenida, producto no vendible en el carrito', { tenantId, jobId, cantidad: e.productNames.length });
+      await db().doc(paths.session(tenantId, customerId)).set({ context: { coverageResumeInProgress: null }, updatedAt: Timestamp.now() }, { merge: true }).catch(() => {});
+      await setJob(tenantId, jobId, { status: 'held_by_seller' }).catch(() => {});
+      // El espejo del request debe reflejar el mismo estado terminal que el job (si no, el
+      // panel muestra "reanudando" para siempre).
+      await setResume(tenantId, req.id, 'held_by_seller', null).catch(() => {});
+      // Y AVISAR: el cliente mandó su ubicación, se le aprobó la cobertura y su pedido no se
+      // puede crear. Sin campana esto queda invisible hasta que el cliente vuelva a escribir.
+      const notifId = `covstock-${customerId}-${req.id}`;
+      await db().doc(`${paths.notifications(tenantId)}/${notifId}`).create({
+        id: notifId,
+        tenantId,
+        category: 'handoff',
+        type: 'handoff_coverage_stale',
+        title: '🛒 Un pedido con cobertura aprobada no se pudo crear',
+        body: `El carrito del cliente …${customerId.slice(-4)} tiene ${e.productNames.length === 1 ? 'un producto que ya no está disponible' : 'productos que ya no están disponibles'}. Revisá la conversación y resolvelo a mano.`,
+        dedupeKey: notifId,
+        customerId,
+        read: false,
+        readAt: null,
+        severity: 'high',
+        createdAt: Timestamp.now(),
+      }).catch(() => { /* ya existe: la campana es idempotente por dedupeKey */ });
+      return;
+    }
     // Degradación recuperable: el lease vence y un retrigger re-procesa (attempts acotados).
     // La marca anti-doble-checkout se limpia SIEMPRE (review: jamás debe quedar colgada).
     logger.error('Cobertura: error procesando la reanudación', e, { tenantId, jobId });

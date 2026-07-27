@@ -56,13 +56,24 @@ const firstHttpsImage = (p: Product): string | null => {
 };
 
 /**
+ * Identidad remota EFECTIVA de un producto: el `metaRetailerId` confirmado manda; el SKU
+ * interno es fallback SOLO para productos habilitados que todavía no tienen vínculo (o sea,
+ * productos nuevos que se van a crear en Meta). El SKU jamás se modifica para adaptarlo a Meta.
+ */
+export function effectiveRetailerId(p: Product): string {
+  const mapped = (p.metaRetailerId ?? '').trim();
+  if (mapped) return mapped;
+  return (p.inventory?.sku ?? '').trim();
+}
+
+/**
  * Construye el item público para items_batch. PURO: no toca red ni DB.
- * Precondición: el producto pasó los bloqueos (SKU válido, PYG, precio > 0, imagen HTTPS).
+ * Precondición: el producto pasó los bloqueos (identidad válida, PYG, precio > 0, imagen HTTPS).
  * Nota: retailer_id se incluye para identidad/tests; al armar el request de batch se
  * quita del `data` (viaja en el nivel del request, como pide el formato de Meta).
  */
 export function buildCatalogItemPayload(p: Product): Record<string, unknown> {
-  const sku = (p.inventory?.sku ?? '').trim();
+  const sku = effectiveRetailerId(p);
   const brand = p.perfume?.brand?.trim();
   const name = (p.name ?? '').trim();
   return {
@@ -86,6 +97,7 @@ export type CatalogPlanAction = 'create' | 'update' | 'disable' | 'unchanged' | 
 export type CatalogBlockReason =
   | 'sku_missing'
   | 'sku_duplicated'
+  | 'retailer_id_duplicated'
   | 'name_missing'
   | 'currency_not_pyg'
   | 'price_invalid'
@@ -94,7 +106,12 @@ export type CatalogBlockReason =
 
 export interface CatalogPlanEntry {
   productId: string;
+  /** Identidad remota efectiva (metaRetailerId confirmado, o el SKU como fallback). */
   sku: string;
+  /** SKU interno real del producto (nunca se altera para Meta). Informativo. */
+  internalSku?: string;
+  /** true si la identidad viene de un mapping confirmado y no del SKU. */
+  mapped?: boolean;
   productName: string;
   action: CatalogPlanAction;
   blockedReasons?: CatalogBlockReason[];
@@ -110,8 +127,10 @@ export interface CatalogSyncPlan {
   entries: CatalogPlanEntry[];
   /** Items que existen en Meta sin producto local con ese SKU. Solo se REPORTAN. */
   remoteOnly: Array<{ retailerId: string; name: string }>;
-  /** ARCHIVED sin presencia remota (o con SKU reclamado por un producto vivo). */
+  /** ARCHIVED sin presencia remota (o con identidad reclamada por un producto vivo). */
   ignoredArchived: number;
+  /** Productos SIN opt-in (`syncToMeta !== true`): quedan totalmente fuera del plan. */
+  excludedNotManaged: number;
   summary: Record<CatalogPlanAction | 'remoteOnly', number>;
 }
 
@@ -150,33 +169,48 @@ export function planCatalogSync(products: Product[], remoteItems: MetaRemoteCata
   const remoteByName = new Map<string, MetaRemoteCatalogItem>();
   for (const r of remoteItems) if (r.name) remoteByName.set(normName(r.name), r);
 
-  // SOLO productos vivos: un ARCHIVED no debe bloquear el reuso de su SKU
-  // (soft-delete + reemplazo con el mismo SKU es flujo normal del comerciante).
-  const skuCounts = new Map<string, number>();
-  for (const p of products) {
+  // ═══ GATE FAIL-CLOSED (META-CATALOG-RECONCILIATION-1) ═══
+  // SOLO los productos con opt-in explícito `syncToMeta === true` participan del plan.
+  // Todo lo demás (importados, no revisados, legacy) queda COMPLETAMENTE fuera: sin
+  // create, sin update y —lo crítico— SIN DISABLE. Sin este gate, importar el catálogo
+  // como INACTIVE apagaría los artículos vivos que el negocio ya vende en Meta.
+  // DEFENSA EN PROFUNDIDAD: además del opt-in, se excluye todo producto con el stock aún sin
+  // validar (importado de Meta). Si alguien pusiera `syncToMeta:true` por fuera de los
+  // callables — consola de Firebase, script con Admin SDK —, el importado seguiría fuera del
+  // plan y su artículo vivo no correría riesgo de disable.
+  const gestionados = products.filter((p) => p.syncToMeta === true && p.stockPendingReview !== true);
+  const excluidos = products.length - gestionados.length;
+
+  // Duplicados sobre la IDENTIDAD EFECTIVA (no sobre el SKU): con el fallback, el
+  // metaRetailerId confirmado de un producto puede chocar con el SKU de otro.
+  const idCounts = new Map<string, number>();
+  for (const p of gestionados) {
     if (p.status === 'ARCHIVED') continue;
-    const sku = (p.inventory?.sku ?? '').trim();
-    if (sku) skuCounts.set(sku, (skuCounts.get(sku) ?? 0) + 1);
+    const rid = effectiveRetailerId(p);
+    if (rid) idCounts.set(rid, (idCounts.get(rid) ?? 0) + 1);
   }
 
   const entries: CatalogPlanEntry[] = [];
   let ignoredArchived = 0;
 
-  for (const p of products) {
-    const sku = (p.inventory?.sku ?? '').trim();
+  for (const p of gestionados) {
+    const sku = effectiveRetailerId(p);
+    const internalSku = (p.inventory?.sku ?? '').trim();
+    const mapped = !!(p.metaRetailerId ?? '').trim();
     const remote = sku ? remoteByRetailerId.get(sku) : undefined;
     const name = (p.name ?? '').trim();
+    const base = { productId: p.id, sku, internalSku, mapped, productName: name };
 
-    // ARCHIVED: sin rastro remoto no hay nada que hacer; si un producto VIVO reclama el
-    // mismo SKU, el item remoto le pertenece a ese reemplazo (el archivado se ignora).
-    if (p.status === 'ARCHIVED' && (!remote || (skuCounts.get(sku) ?? 0) > 0)) {
+    // ARCHIVED: sin rastro remoto no hay nada que hacer; si un producto VIVO reclama la
+    // misma identidad, el item remoto le pertenece a ese reemplazo (el archivado se ignora).
+    if (p.status === 'ARCHIVED' && (!remote || (idCounts.get(sku) ?? 0) > 0)) {
       ignoredArchived++;
       continue;
     }
 
     const reasons: CatalogBlockReason[] = [];
     if (!sku) reasons.push('sku_missing');
-    else if ((skuCounts.get(sku) ?? 0) > 1) reasons.push('sku_duplicated');
+    else if ((idCounts.get(sku) ?? 0) > 1) reasons.push(mapped ? 'retailer_id_duplicated' : 'sku_duplicated');
     if (!name) reasons.push('name_missing');
     if (p.currency !== 'PYG') reasons.push('currency_not_pyg');
     if (!Number.isFinite(p.price) || p.price <= 0) reasons.push('price_invalid');
@@ -185,13 +219,11 @@ export function planCatalogSync(products: Product[], remoteItems: MetaRemoteCata
       // La palanca de availability NO depende de los campos bloqueados: si el item vive
       // en Meta y acá dejó de ser vendible, se emite un disable MÍNIMO igual (salvo que
       // la identidad sea ambigua: SKU ausente o duplicado).
-      const identityOk = !reasons.includes('sku_missing') && !reasons.includes('sku_duplicated');
+      const identityOk = !reasons.includes('sku_missing') && !reasons.includes('sku_duplicated') && !reasons.includes('retailer_id_duplicated');
       const wantsOut = productAvailability(p) === 'out of stock';
       if (remote && identityOk && wantsOut && remote.availability !== 'out of stock') {
         entries.push({
-          productId: p.id,
-          sku,
-          productName: name,
+          ...base,
           action: 'disable',
           blockedReasons: reasons,
           changedFields: ['availability'],
@@ -201,20 +233,25 @@ export function planCatalogSync(products: Product[], remoteItems: MetaRemoteCata
         });
         continue;
       }
-      entries.push({ productId: p.id, sku, productName: name, action: 'blocked', blockedReasons: reasons });
+      entries.push({ ...base, action: 'blocked', blockedReasons: reasons });
       continue;
     }
 
     const payload = buildCatalogItemPayload(p);
 
     if (!remote) {
+      // Un producto MAPEADO cuyo item remoto no aparece: identidad confirmada que Meta no
+      // devuelve (item borrado del lado de Meta, o catálogo equivocado). Jamás se re-crea a
+      // ciegas: requiere revisión humana.
+      if (mapped) {
+        entries.push({ ...base, action: 'blocked', blockedReasons: ['name_conflict_requires_confirmation'], note: 'mapeado_sin_item_remoto' });
+        continue;
+      }
       // Matching por nombre = solo SUGERENCIA: crear igual duplicaría el item ⇒ bloquea.
       const nameMatch = remoteByName.get(normName(name));
       if (nameMatch && nameMatch.retailerId !== sku) {
         entries.push({
-          productId: p.id,
-          sku,
-          productName: name,
+          ...base,
           action: 'blocked',
           blockedReasons: ['name_conflict_requires_confirmation'],
           suggestion: { remoteRetailerId: nameMatch.retailerId, remoteName: nameMatch.name },
@@ -223,24 +260,22 @@ export function planCatalogSync(products: Product[], remoteItems: MetaRemoteCata
       }
       if (payload.availability === 'out of stock') {
         // No vendible y no existe en Meta: no se crea un item oculto.
-        entries.push({ productId: p.id, sku, productName: name, action: 'unchanged', note: 'no_vendible_sin_item_remoto', remoteItemId: null });
+        entries.push({ ...base, action: 'unchanged', note: 'no_vendible_sin_item_remoto', remoteItemId: null });
         continue;
       }
-      entries.push({ productId: p.id, sku, productName: name, action: 'create', payload, remoteItemId: null });
+      entries.push({ ...base, action: 'create', payload, remoteItemId: null });
       continue;
     }
 
     const changed = diffPublicFields(payload, remote);
     if (!changed.length) {
       // payload presente: el apply usa availability para confirmar synced/disabled.
-      entries.push({ productId: p.id, sku, productName: name, action: 'unchanged', payload, remoteItemId: remote.id });
+      entries.push({ ...base, action: 'unchanged', payload, remoteItemId: remote.id });
       continue;
     }
     const disabling = payload.availability === 'out of stock' && remote.availability !== 'out of stock';
     entries.push({
-      productId: p.id,
-      sku,
-      productName: name,
+      ...base,
       action: disabling ? 'disable' : 'update',
       changedFields: changed,
       payload,
@@ -248,19 +283,24 @@ export function planCatalogSync(products: Product[], remoteItems: MetaRemoteCata
     });
   }
 
-  const localSkus = new Set<string>();
+  // remoteOnly = artículos de Meta que NINGÚN producto local reclama. Un vínculo confirmado
+  // (metaRetailerId) reclama su artículo aunque el producto todavía no esté habilitado para
+  // sincronizar: si no, un item ya mapeado seguiría ofreciéndose como "candidato a importar".
+  const reclamados = new Set<string>();
   for (const p of products) {
-    const sku = (p.inventory?.sku ?? '').trim();
-    if (sku) localSkus.add(sku);
+    const mappedId = (p.metaRetailerId ?? '').trim();
+    if (mappedId) reclamados.add(mappedId);
+    const internal = (p.inventory?.sku ?? '').trim();
+    if (internal && p.syncToMeta === true) reclamados.add(internal);
   }
   const remoteOnly = remoteItems
-    .filter((r) => r.retailerId && !localSkus.has(r.retailerId))
+    .filter((r) => r.retailerId && !reclamados.has(r.retailerId))
     .map((r) => ({ retailerId: r.retailerId, name: r.name }));
 
   const summary: CatalogSyncPlan['summary'] = { create: 0, update: 0, disable: 0, unchanged: 0, blocked: 0, remoteOnly: remoteOnly.length };
   for (const e of entries) summary[e.action]++;
 
-  return { entries, remoteOnly, ignoredArchived, summary };
+  return { entries, remoteOnly, ignoredArchived, excludedNotManaged: excluidos, summary };
 }
 
 // ---------------------------------------------------------------------------
@@ -284,6 +324,10 @@ export interface CatalogSyncRunResult {
   summary?: CatalogSyncPlan['summary'];
   entries?: Array<Pick<CatalogPlanEntry, 'productId' | 'sku' | 'productName' | 'action' | 'blockedReasons' | 'changedFields' | 'suggestion' | 'note'>>;
   ignoredArchived?: number;
+  /** Productos sin opt-in de sync: excluidos del plan (fail-closed). */
+  excludedNotManaged?: number;
+  /** Artículos de Meta sin producto local que los reclame (candidatos de importación). */
+  remoteOnly?: Array<{ retailerId: string; name: string }>;
   appliedCount?: number;
   failedCount?: number;
 }
@@ -417,6 +461,9 @@ export async function runCatalogSync(
     summary: plan.summary,
     entries: slimEntries(plan.entries),
     ignoredArchived: plan.ignoredArchived,
+    excludedNotManaged: plan.excludedNotManaged,
+    // El panel necesita la LISTA para ofrecer la importación (las Rules no exponen los runs).
+    remoteOnly: plan.remoteOnly.slice(0, MAX_STORED_ENTRIES),
   };
   await writeRunDoc(tenantId, runId, {
     status: 'planned',
@@ -425,6 +472,7 @@ export async function runCatalogSync(
     catalogId: cfg.catalogId,
     summary: plan.summary,
     ignoredArchived: plan.ignoredArchived,
+    excludedNotManaged: plan.excludedNotManaged,
     remoteOnly: plan.remoteOnly.slice(0, MAX_STORED_ENTRIES),
     entries: planned.entries,
     actorUid: actor?.uid ?? null,
@@ -520,7 +568,10 @@ export async function runCatalogSync(
     const itemId = after?.id ?? e.remoteItemId ?? null;
     ops.push({
       path: paths.product(tenantId, e.productId),
-      data: { syncToMeta: true, metaSyncStatus, metaCatalogId: cfg.catalogId, metaProductItemId: itemId, metaLastSyncAt: now, metaSyncError: errMsg, updatedAt: now },
+      // `syncToMeta` NO se escribe acá: el opt-in es una decisión administrativa explícita
+      // (metaCatalogSetSyncEnabled). Si el apply lo encendiera solo, el fail-closed dejaría de
+      // ser el estado por defecto de cualquier producto que alguna vez pasó por una sync.
+      data: { metaSyncStatus, metaCatalogId: cfg.catalogId, metaProductItemId: itemId, metaLastSyncAt: now, metaSyncError: errMsg, updatedAt: now },
     });
     pushLog(e, itemErr ? 'failed' : 'success', itemId, errMsg);
   }
@@ -531,7 +582,7 @@ export async function runCatalogSync(
     const metaSyncStatus = e.payload?.availability === 'out of stock' ? 'disabled' : 'synced';
     ops.push({
       path: paths.product(tenantId, e.productId),
-      data: { syncToMeta: true, metaSyncStatus, metaCatalogId: cfg.catalogId, metaProductItemId: e.remoteItemId, metaLastSyncAt: now, metaSyncError: '', updatedAt: now },
+      data: { metaSyncStatus, metaCatalogId: cfg.catalogId, metaProductItemId: e.remoteItemId, metaLastSyncAt: now, metaSyncError: '', updatedAt: now },
     });
   }
   for (const e of failedEntries) {

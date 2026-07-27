@@ -15,6 +15,17 @@ import { db, paths } from '../lib/firebase.js';
 import { logger } from '../lib/logger.js';
 import { getProductCost } from '../catalog/financials.js';
 
+/**
+ * El carrito contiene productos que ya no se pueden vender (desactivados o sin stock desde
+ * que se armó). El motor la captura y responde con honestidad, sin crear el pedido.
+ */
+export class ProductNoVendibleError extends Error {
+  constructor(readonly productNames: string[]) {
+    super(`Productos no disponibles: ${productNames.join(', ')}`);
+    this.name = 'ProductNoVendibleError';
+  }
+}
+
 // Dirección vacía: la recolección de domicilio es de la fase de logística (futuro).
 function emptyAddress(): Address {
   return {
@@ -74,6 +85,24 @@ export async function createPendingOrder(
   if (opts.orderId) {
     const existente = await db().doc(paths.order(tenantId, orderId)).get();
     if (existente.exists) return existente.data() as Order;
+  }
+
+  // REVALIDACIÓN DE VENDIBILIDAD (META-CATALOG-RECONCILIATION-1): el carrito puede haberse
+  // armado antes de que un producto se desactivara o quedara sin stock. Un pedido jamás debe
+  // nacer con algo que ya no se puede vender (y un producto importado de Meta, INACTIVE por
+  // definición, nunca puede llegar acá).
+  const noVendibles: string[] = [];
+  await Promise.all(
+    cart.items.map(async (i) => {
+      const snap = await db().doc(paths.product(tenantId, i.productId)).get();
+      const p = snap.data() as { status?: string; inventory?: { trackStock?: boolean; stock?: number }; name?: string } | undefined;
+      const vendible = !!p && p.status === 'ACTIVE' && (!p.inventory?.trackStock || (p.inventory?.stock ?? 0) > 0);
+      if (!vendible) noVendibles.push(i.name || i.productId);
+    }),
+  );
+  if (noVendibles.length) {
+    logger.warn('Checkout bloqueado: producto no vendible en el carrito', { tenantId, customerId, cantidad: noVendibles.length });
+    throw new ProductNoVendibleError(noVendibles);
   }
 
   // El costo (privado) se lee de productFinancials y se "congela" en orderFinancials.

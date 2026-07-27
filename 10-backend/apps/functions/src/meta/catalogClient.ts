@@ -31,7 +31,7 @@ const PAGE_LIMIT = 100;
 const MAX_PAGES = 50; // 5000 items: techo del propio items_batch de Meta
 
 /** Campos PÚBLICOS que leemos de Meta para el diff. Nada interno viaja ni vuelve. */
-export const REMOTE_ITEM_FIELDS = 'id,retailer_id,name,description,availability,price,image_url,brand';
+export const REMOTE_ITEM_FIELDS = 'id,retailer_id,name,description,availability,price,currency,image_url,brand,url,product_type';
 
 export interface MetaRemoteCatalogItem {
   /** ID del item en Meta (product item id). */
@@ -42,8 +42,14 @@ export interface MetaRemoteCatalogItem {
   availability: string;
   /** Precio formateado por Meta (p.ej. "₲30.000" / "PYG30,000"): comparar solo dígitos. */
   price: string;
+  /** Moneda ISO declarada por Meta para el artículo. Vacía si no la expone. */
+  currency?: string;
   imageUrl: string;
   brand: string;
+  /** URL pública del artículo (identidad de negocio del sitio del tenant). */
+  url?: string;
+  /** Taxonomía del artículo ("Perfumes > Perfume > Femenino"): género/tipo sugeridos. */
+  productType?: string;
 }
 
 export interface CatalogBatchRequest {
@@ -201,8 +207,11 @@ export class HttpMetaCatalogClient implements MetaCatalogClient {
           description: String(raw.description ?? ''),
           availability: String(raw.availability ?? ''),
           price: String(raw.price ?? ''),
+          currency: String(raw.currency ?? ''),
           imageUrl: String(raw.image_url ?? ''),
           brand: String(raw.brand ?? ''),
+          url: String(raw.url ?? ''),
+          productType: String(raw.product_type ?? ''),
         });
       }
       const next = data.paging?.next ?? null; // paging.next NO trae el token (va por header)
@@ -294,6 +303,8 @@ export class FakeMetaCatalogClient implements MetaCatalogClient {
       price: String(raw.price ?? ''),
       imageUrl: String(raw.image_url ?? ''),
       brand: String(raw.brand ?? ''),
+      url: String(raw.url ?? ''),
+      productType: String(raw.product_type ?? ''),
     }));
   }
 

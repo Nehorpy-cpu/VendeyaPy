@@ -54,8 +54,12 @@ export const productUpsert = onCall<{ tenantId?: string; id?: string; data?: unk
     }
 
     // Actualizar → no suma productos (sin cuota).
+    // Editar el inventario ES la revisión de stock que pide un producto importado de Meta:
+    // se limpia `stockPendingReview` para que pueda habilitarse la sincronización.
+    // (META-CATALOG-RECONCILIATION-1; sin esto el importado quedaba en un callejón sin salida.)
+    const revisóStock = product.inventory !== undefined ? { stockPendingReview: false } : {};
     const batch = db().batch();
-    batch.set(db().doc(paths.product(tenantId, id)), { ...product, id, tenantId, updatedAt: now }, { merge: true });
+    batch.set(db().doc(paths.product(tenantId, id)), { ...product, ...revisóStock, id, tenantId, updatedAt: now }, { merge: true });
     if (hasFinancials) batch.set(db().doc(paths.productFinancial(tenantId, id)), { ...financials, productId: id, tenantId, updatedAt: now }, { merge: true });
     await batch.commit();
     await recordAudit({ tenantId, action: 'product.updated', actorUid: req.auth?.uid ?? null, targetType: 'product', targetId: id, summary: 'Producto actualizado (callable)', metadata: { hasFinancials } });
