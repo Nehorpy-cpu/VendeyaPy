@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import type { Product } from '@vpw/shared';
-import { buildCatalogItemPayload, planCatalogSync, priceEquals, productAvailability } from './catalog.js';
+import { localPublicView, planCatalogSync, priceEquals, productAvailability } from './catalog.js';
 import type { MetaRemoteCatalogItem } from './catalogClient.js';
 
 /**
@@ -33,7 +33,10 @@ const prod = (over: Partial<Product> & { id: string }): Product =>
     featured: false,
     position: 0,
     externalIds: { facebook: null, instagram: null, tiktok: null },
-    perfume: null,
+    // Marca y URL: obligatorias del contrato de CREACIÓN de Meta. Sin ellas todo `create`
+    // queda bloqueado (META-CATALOG-OUTBOUND-CONTRACT-1), así que el producto base las trae.
+    perfume: { brand: 'MarcaTest' },
+    productUrl: 'https://tienda.test/p/sku-a',
     aiFicha: { cuandoRecomendar: 'FICHA-INTERNA' },
     createdAt: TS,
     updatedAt: TS,
@@ -48,13 +51,13 @@ const remote = (over: Partial<MetaRemoteCatalogItem> = {}): MetaRemoteCatalogIte
   availability: 'in stock',
   price: '₲250.000',
   imageUrl: 'https://cdn.example.com/a.jpg',
-  brand: '',
+  brand: 'MarcaTest', // espeja la marca del producto base: si difiere, el diff marca `brand`
   ...over,
 });
 
-describe('buildCatalogItemPayload (solo campos públicos)', () => {
+describe('localPublicView — vista de LECTURA para el diff (solo campos públicos)', () => {
   it('contiene EXACTAMENTE los campos públicos permitidos, con precio "N PYG" y condition new', () => {
-    const payload = buildCatalogItemPayload(prod({ id: 'p1' }));
+    const payload = localPublicView(prod({ id: 'p1', perfume: null }));
     expect(Object.keys(payload).sort()).toEqual(['availability', 'condition', 'description', 'image_url', 'name', 'price', 'retailer_id']);
     expect(payload).toMatchObject({
       retailer_id: 'SKU-A',
@@ -68,12 +71,12 @@ describe('buildCatalogItemPayload (solo campos públicos)', () => {
   });
 
   it('agrega brand solo si el producto tiene marca', () => {
-    const payload = buildCatalogItemPayload(prod({ id: 'p1', perfume: { brand: 'Armaf' } as Product['perfume'] }));
+    const payload = localPublicView(prod({ id: 'p1', perfume: { brand: 'Armaf' } as Product['perfume'] }));
     expect(payload.brand).toBe('Armaf');
   });
 
   it('JAMÁS filtra datos internos: ni aiNotes, ni aiFicha, ni costo/margen', () => {
-    const payload = buildCatalogItemPayload(prod({ id: 'p1' }));
+    const payload = localPublicView(prod({ id: 'p1', perfume: null }));
     const json = JSON.stringify(payload);
     expect(json).not.toContain('NOTA-INTERNA');
     expect(json).not.toContain('FICHA-INTERNA');
@@ -197,6 +200,53 @@ describe('identidad efectiva: metaRetailerId manda, SKU es fallback', () => {
     expect(plan.entries[0]!.action).toBe('blocked');
     expect(plan.entries[0]!.note).toBe('mapeado_sin_item_remoto');
     expect(plan.summary.create).toBe(0);
+  });
+});
+
+describe('resiliencia y coherencia con el contrato de escritura', () => {
+  it('un producto con descripción vacía NO rompe el plan (converge con el fallback al nombre)', () => {
+    const sinDesc = prod({ id: 'p1', description: '' });
+    const plan = planCatalogSync([sinDesc], [remote({ description: 'Perfume A' })]);
+    expect(plan.entries[0]!.action).toBe('unchanged'); // el diff usa el mismo fallback
+  });
+
+  it('un producto roto se marca bloqueado SIN cancelar el plan de los demás', () => {
+    // El precio NaN sobrevive a los chequeos previos y hace fallar la serialización.
+    const roto = { ...prod({ id: 'roto' }), price: Number.NaN } as Product;
+    const sano = prod({ id: 'sano', name: 'Perfume B', inventory: { trackStock: true, stock: 3, lowStockThreshold: 1, sku: 'SKU-B' } });
+    const plan = planCatalogSync([roto, sano], []);
+    expect(plan.entries).toHaveLength(2);
+    expect(plan.entries.find((e) => e.productId === 'sano')?.action).toBe('create');
+    expect(plan.entries.find((e) => e.productId === 'roto')?.action).toBe('blocked');
+  });
+
+  it('crear exige los obligatorios del contrato de Meta: sin URL del producto queda bloqueado', () => {
+    const plan = planCatalogSync([prod({ id: 'p1', productUrl: undefined })], []);
+    expect(plan.entries[0]!.action).toBe('blocked');
+    expect(plan.entries[0]!.blockedReasons).toContain('product_url_missing');
+    expect(plan.summary.create).toBe(0);
+  });
+
+  it('ACTUALIZAR un artículo existente NO exige URL ni marca (caso Odyssey: solo precio)', () => {
+    const odyssey = prod({ id: 'p1', productUrl: undefined, perfume: null, metaRetailerId: 'ARM-1', price: 250000 });
+    const plan = planCatalogSync([odyssey], [remote({ retailerId: 'ARM-1', price: '₲130.000', brand: '' })]);
+    expect(plan.entries[0]!.action).toBe('update');
+    expect(plan.entries[0]!.request?.data).toEqual({ id: 'ARM-1', price: '250000 PYG' });
+  });
+
+  it('el identificador del plan y el que viaja a Meta son el MISMO (mismo tope)', () => {
+    const skuLargo = 'X'.repeat(140);
+    const plan = planCatalogSync([prod({ id: 'p1', metaRetailerId: skuLargo })], []);
+    expect(plan.entries[0]!.sku).toBe(plan.entries[0]!.request?.data.id ?? plan.entries[0]!.sku);
+    expect(plan.entries[0]!.sku.length).toBeLessThanOrEqual(100);
+  });
+
+  it('un nombre largo no genera updates perpetuos (mismo truncado en el diff y en el envío)', () => {
+    const nombreLargo = 'A'.repeat(150);
+    const p = prod({ id: 'p1', name: nombreLargo, metaRetailerId: 'ARM-1' });
+    // El remoto tiene el nombre YA truncado por Meta a 100.
+    const plan = planCatalogSync([p], [remote({ retailerId: 'ARM-1', name: nombreLargo.slice(0, 100) })]);
+    expect(plan.entries[0]!.action).toBe('unchanged');
   });
 });
 

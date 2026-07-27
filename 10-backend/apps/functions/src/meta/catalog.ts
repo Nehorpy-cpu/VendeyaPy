@@ -13,7 +13,9 @@
  *    (disable mínimo), salvo ambigüedad de identidad (SKU duplicado/ausente).
  *  - Config fail-closed por tenant (catalogSyncConfig.ts): sin config ⇒ NO sincroniza.
  *  - dry_run: CERO escrituras en Meta y CERO cambios en products; solo run log + audit.
- *  - apply: SOLO con mode:'live'; upserts idempotentes vía items_batch (method UPDATE).
+ *  - apply: SOLO con mode:'live'. Los requests siguen el contrato de escritura de Meta
+ *    (ADR-0012): CREATE explícito con obligatorios, UPDATE parcial, disable mínimo.
+ *    `allow_upsert:false` — un UPDATE jamás crea por accidente.
  *    items_batch es ASÍNCRONO en Meta: la verificación relee el catálogo y compara los
  *    campos públicos — solo lo confirmado queda 'synced'/'disabled'; lo demás 'pending'
  *    y CONVERGE en el próximo apply (los 'unchanged' con item remoto se re-confirman).
@@ -28,10 +30,24 @@ import { normalizeCatalogSyncConfig, type CatalogSyncMode } from './catalogSyncC
 import {
   getMetaCatalogClientForTenant,
   MetaCatalogApiError,
-  type CatalogBatchRequest,
   type MetaCatalogClient,
   type MetaRemoteCatalogItem,
 } from './catalogClient.js';
+import {
+  buildCatalogCreatePayload,
+  buildCatalogDisablePatch,
+  buildCatalogUpdatePatch,
+  createBlockers,
+  outboundAvailability,
+  outboundBrand,
+  outboundDescription,
+  outboundId,
+  outboundImageUrl,
+  outboundPrice,
+  outboundTitle,
+  type CatalogBatchRequest,
+  type CreateBlocker,
+} from './catalogOutbound.js';
 
 const BATCH_CHUNK = 100;
 const MAX_STORED_ENTRIES = 500; // techo del run doc (y de la respuesta al panel)
@@ -43,17 +59,14 @@ const STATE_COMMIT_CHUNK = 200; // docs por commit al persistir meta* (lejos de 
 
 export type CatalogAvailability = 'in stock' | 'out of stock';
 
-/** Disponibilidad pública: vendible solo si está ACTIVE y con stock (si trackea). */
-export function productAvailability(p: Product): CatalogAvailability {
-  // Optional chaining defensivo: docs históricos podrían no tener inventory completo.
-  const sellable = p.status === 'ACTIVE' && (!p.inventory?.trackStock || (p.inventory?.stock ?? 0) > 0);
-  return sellable ? 'in stock' : 'out of stock';
-}
+/**
+ * Disponibilidad pública: vendible solo si está ACTIVE y con stock (si trackea).
+ * Alias de la derivación canónica del contrato — una sola implementación para el diff y
+ * para lo que se envía.
+ */
+export const productAvailability = outboundAvailability;
 
-const firstHttpsImage = (p: Product): string | null => {
-  const img = (p.images ?? []).find((u) => typeof u === 'string' && u.startsWith('https://'));
-  return img ?? null;
-};
+const firstHttpsImage = (p: Product): string | null => outboundImageUrl(p) || null;
 
 /**
  * Identidad remota EFECTIVA de un producto: el `metaRetailerId` confirmado manda; el SKU
@@ -61,31 +74,33 @@ const firstHttpsImage = (p: Product): string | null => {
  * productos nuevos que se van a crear en Meta). El SKU jamás se modifica para adaptarlo a Meta.
  */
 export function effectiveRetailerId(p: Product): string {
-  const mapped = (p.metaRetailerId ?? '').trim();
-  if (mapped) return mapped;
-  return (p.inventory?.sku ?? '').trim();
+  // Delega en `outboundId` para que la clave del plan sea EXACTAMENTE la que viaja a Meta
+  // (incluido el tope de 100 caracteres). Si el plan usara una identidad más larga que la
+  // enviada, la verificación post-apply y los errores por item nunca matchearían.
+  return outboundId(p);
 }
 
 /**
- * Construye el item público para items_batch. PURO: no toca red ni DB.
- * Precondición: el producto pasó los bloqueos (identidad válida, PYG, precio > 0, imagen HTTPS).
- * Nota: retailer_id se incluye para identidad/tests; al armar el request de batch se
- * quita del `data` (viaja en el nivel del request, como pide el formato de Meta).
+ * Vista pública LOCAL en los términos del contrato de **LECTURA** de Meta (`name`,
+ * `image_url`, …). Se usa EXCLUSIVAMENTE para comparar contra lo que devuelve un GET y
+ * decidir qué cambió. **No es lo que se envía**: el contrato de escritura vive en
+ * `catalogOutbound.ts` y usa `title`/`image`/`link`. Mantenerlos separados es lo que evita
+ * mandar nombres de campo del lado equivocado.
  */
-export function buildCatalogItemPayload(p: Product): Record<string, unknown> {
-  const sku = effectiveRetailerId(p);
-  const brand = p.perfume?.brand?.trim();
-  const name = (p.name ?? '').trim();
+export function localPublicView(p: Product): Record<string, unknown> {
+  // Los valores salen de las MISMAS derivaciones que usa el serializador de escritura: si
+  // difirieran (otro truncado, otro fallback), el diff marcaría el campo como cambiado en
+  // cada corrida y el producto nunca convergería a `synced`.
+  const brand = outboundBrand(p);
   return {
-    retailer_id: sku,
-    name: name.slice(0, 200),
-    description: ((p.description ?? '').trim() || name).slice(0, 5000),
-    // Formato documentado de items_batch: precio como string "N PYG" (PYG sin decimales).
-    price: `${Math.round(p.price)} PYG`,
+    retailer_id: outboundId(p),
+    name: outboundTitle(p),
+    description: outboundDescription(p),
+    price: outboundPrice(p),
     condition: 'new',
-    availability: productAvailability(p),
-    image_url: firstHttpsImage(p) ?? '',
-    ...(brand ? { brand: brand.slice(0, 100) } : {}),
+    availability: outboundAvailability(p),
+    image_url: outboundImageUrl(p),
+    ...(brand ? { brand } : {}),
   };
 }
 
@@ -102,7 +117,13 @@ export type CatalogBlockReason =
   | 'currency_not_pyg'
   | 'price_invalid'
   | 'image_not_https'
-  | 'name_conflict_requires_confirmation';
+  | 'name_conflict_requires_confirmation'
+  // Obligatorios del contrato de CREACIÓN de Meta (solo aplican a la acción `create`).
+  | 'product_url_missing'
+  | 'brand_missing'
+  | 'description_missing'
+  /** El producto tiene datos que el contrato de Meta no admite: queda fuera, sin romper el plan. */
+  | 'serialization_failed';
 
 export interface CatalogPlanEntry {
   productId: string;
@@ -118,7 +139,10 @@ export interface CatalogPlanEntry {
   /** Coincidencia por NOMBRE con otro retailer_id: sugerencia, jamás auto-vincula. */
   suggestion?: { remoteRetailerId: string; remoteName: string };
   changedFields?: string[];
+  /** Vista LOCAL en términos de lectura (para el diff y para confirmar la convergencia). */
   payload?: Record<string, unknown>;
+  /** Request de ESCRITURA ya serializado según el contrato. Solo en acciones accionables. */
+  request?: CatalogBatchRequest;
   remoteItemId?: string | null;
   note?: string;
 }
@@ -136,6 +160,29 @@ export interface CatalogSyncPlan {
 
 const normName = (s: string) => s.trim().toLowerCase().replace(/\s+/g, ' ');
 const priceDigits = (s: string) => s.replace(/\D+/g, '');
+
+/**
+ * Traduce un bloqueo del contrato de creación al vocabulario de motivos del plan. Mapeo
+ * EXPLÍCITO (sin cast): si mañana el contrato agrega un bloqueo nuevo, TypeScript exige
+ * decidir cómo se muestra en el panel en vez de dejar pasar un valor fuera de la unión.
+ */
+function createBlockerToPlanReason(b: CreateBlocker): CatalogBlockReason {
+  switch (b) {
+    case 'identity_missing': return 'sku_missing';
+    case 'title_missing': return 'name_missing';
+    case 'description_missing': return 'description_missing';
+    case 'product_url_missing': return 'product_url_missing';
+    case 'price_invalid': return 'price_invalid';
+    case 'currency_not_pyg': return 'currency_not_pyg';
+    case 'brand_missing': return 'brand_missing';
+    case 'image_missing': return 'image_not_https';
+  }
+}
+
+function toWritableFields(changed: readonly string[]): string[] {
+  const map: Record<string, string> = { name: 'title', image_url: 'image', description: 'description', price: 'price', availability: 'availability', brand: 'brand' };
+  return [...new Set(changed.map((c) => map[c]).filter((c): c is string => !!c))];
+}
 
 /**
  * Compara el precio local ("250000 PYG") contra el formateado por Meta ("₲250.000",
@@ -194,6 +241,28 @@ export function planCatalogSync(products: Product[], remoteItems: MetaRemoteCata
   let ignoredArchived = 0;
 
   for (const p of gestionados) {
+    // AISLAMIENTO POR PRODUCTO: serializar puede lanzar (datos que el contrato de Meta no
+    // admite). Un producto roto NO puede cancelar el plan de todo el tenant: se registra
+    // como bloqueado con su motivo y la corrida sigue.
+    try {
+      planOne(p);
+    } catch (e) {
+      const detalle = e instanceof Error ? e.message.slice(0, 200) : 'error serializando';
+      logger.warn('Producto excluido del plan por error de serialización', { productId: p.id, detalle });
+      entries.push({
+        productId: p.id,
+        sku: effectiveRetailerId(p),
+        internalSku: (p.inventory?.sku ?? '').trim(),
+        mapped: !!(p.metaRetailerId ?? '').trim(),
+        productName: (p.name ?? '').trim(),
+        action: 'blocked',
+        blockedReasons: ['serialization_failed'],
+        note: detalle,
+      });
+    }
+  }
+
+  function planOne(p: Product): void {
     const sku = effectiveRetailerId(p);
     const internalSku = (p.inventory?.sku ?? '').trim();
     const mapped = !!(p.metaRetailerId ?? '').trim();
@@ -205,7 +274,7 @@ export function planCatalogSync(products: Product[], remoteItems: MetaRemoteCata
     // misma identidad, el item remoto le pertenece a ese reemplazo (el archivado se ignora).
     if (p.status === 'ARCHIVED' && (!remote || (idCounts.get(sku) ?? 0) > 0)) {
       ignoredArchived++;
-      continue;
+      return;
     }
 
     const reasons: CatalogBlockReason[] = [];
@@ -228,16 +297,17 @@ export function planCatalogSync(products: Product[], remoteItems: MetaRemoteCata
           blockedReasons: reasons,
           changedFields: ['availability'],
           payload: { retailer_id: sku, availability: 'out of stock' },
+          request: buildCatalogDisablePatch(p),
           remoteItemId: remote.id,
           note: 'disable_minimo_con_bloqueos',
         });
-        continue;
+        return;
       }
       entries.push({ ...base, action: 'blocked', blockedReasons: reasons });
-      continue;
+      return;
     }
 
-    const payload = buildCatalogItemPayload(p);
+    const payload = localPublicView(p);
 
     if (!remote) {
       // Un producto MAPEADO cuyo item remoto no aparece: identidad confirmada que Meta no
@@ -245,7 +315,7 @@ export function planCatalogSync(products: Product[], remoteItems: MetaRemoteCata
       // ciegas: requiere revisión humana.
       if (mapped) {
         entries.push({ ...base, action: 'blocked', blockedReasons: ['name_conflict_requires_confirmation'], note: 'mapeado_sin_item_remoto' });
-        continue;
+        return;
       }
       // Matching por nombre = solo SUGERENCIA: crear igual duplicaría el item ⇒ bloquea.
       const nameMatch = remoteByName.get(normName(name));
@@ -256,22 +326,29 @@ export function planCatalogSync(products: Product[], remoteItems: MetaRemoteCata
           blockedReasons: ['name_conflict_requires_confirmation'],
           suggestion: { remoteRetailerId: nameMatch.retailerId, remoteName: nameMatch.name },
         });
-        continue;
+        return;
       }
       if (payload.availability === 'out of stock') {
         // No vendible y no existe en Meta: no se crea un item oculto.
         entries.push({ ...base, action: 'unchanged', note: 'no_vendible_sin_item_remoto', remoteItemId: null });
-        continue;
+        return;
       }
-      entries.push({ ...base, action: 'create', payload, remoteItemId: null });
-      continue;
+      // CREAR exige TODOS los obligatorios del contrato de Meta (link, marca, descripción,
+      // imagen…). Falta alguno ⇒ bloqueado con el motivo exacto; jamás se inventa un valor.
+      const faltantes = createBlockers(p).map(createBlockerToPlanReason);
+      if (faltantes.length) {
+        entries.push({ ...base, action: 'blocked', blockedReasons: faltantes, note: 'create_incompleto' });
+        return;
+      }
+      entries.push({ ...base, action: 'create', payload, request: buildCatalogCreatePayload(p), remoteItemId: null });
+      return;
     }
 
     const changed = diffPublicFields(payload, remote);
     if (!changed.length) {
       // payload presente: el apply usa availability para confirmar synced/disabled.
       entries.push({ ...base, action: 'unchanged', payload, remoteItemId: remote.id });
-      continue;
+      return;
     }
     const disabling = payload.availability === 'out of stock' && remote.availability !== 'out of stock';
     entries.push({
@@ -279,6 +356,8 @@ export function planCatalogSync(products: Product[], remoteItems: MetaRemoteCata
       action: disabling ? 'disable' : 'update',
       changedFields: changed,
       payload,
+      // El request lleva SOLO lo que cambió (o solo availability si es un apagado).
+      request: disabling ? buildCatalogDisablePatch(p) : buildCatalogUpdatePatch(p, toWritableFields(changed)),
       remoteItemId: remote.id,
     });
   }
@@ -489,7 +568,10 @@ export async function runCatalogSync(
   // 6) apply (config live verificada): upserts idempotentes por chunks. JAMÁS delete.
   //    El run queda en 'applying' mientras corre (visible si la función muere a mitad).
   await writeRunDoc(tenantId, runId, { status: 'applying' });
-  const actionable = plan.entries.filter((e) => e.action === 'create' || e.action === 'update' || e.action === 'disable');
+  // Solo entradas accionables CON su request serializado. El filtro por `request` evita que
+  // el chunk y el array de requests se descoordinen (si faltara uno, los errores por item se
+  // atribuirían al producto equivocado).
+  const actionable = plan.entries.filter((e) => (e.action === 'create' || e.action === 'update' || e.action === 'disable') && !!e.request);
   let batchError: string | undefined;
   const appliedEntries: CatalogPlanEntry[] = [];
   const failedEntries: CatalogPlanEntry[] = [];
@@ -498,12 +580,10 @@ export async function runCatalogSync(
 
   for (let i = 0; i < actionable.length; i += BATCH_CHUNK) {
     const chunk = actionable.slice(i, i + BATCH_CHUNK);
-    const requests: CatalogBatchRequest[] = chunk.map((e) => {
-      // retailer_id viaja en el nivel del request (formato items_batch), no en data.
-      const data = { ...(e.payload ?? {}) } as Record<string, unknown>;
-      delete data.retailer_id;
-      return { method: 'UPDATE', retailer_id: e.sku, data };
-    });
+    // Los requests ya vienen serializados por los builders del contrato (CREATE / UPDATE
+    // parcial / DISABLE mínimo). Acá no se arma nada: solo se transportan. El índice de
+    // `requests` corresponde 1:1 con el de `chunk` (garantizado por el filtro de `actionable`).
+    const requests: CatalogBatchRequest[] = chunk.map((e) => e.request as CatalogBatchRequest);
     try {
       const res = await client.submitItemsBatch(cfg.catalogId, requests);
       handles.push(...res.handles);

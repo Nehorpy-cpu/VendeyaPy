@@ -155,15 +155,18 @@ describe('HttpMetaCatalogClient — transporte y saneamiento', () => {
     expect(st.errors[1].retailerId).toBe(''); // entrada malformada no rompe
   });
 
-  it('submitItemsBatch postea item_type PRODUCT_ITEM + requests UPDATE y devuelve handles', async () => {
+  it('submitItemsBatch postea item_type + allow_upsert EXPLÍCITO + requests, y devuelve handles', async () => {
     const { c, calls } = client([ok({ handles: ['h1'] })]);
-    const res = await c.submitItemsBatch('42', [{ method: 'UPDATE', retailer_id: 'SKU-A', data: { name: 'A', price: '1000 PYG' } }]);
+    const req = { method: 'UPDATE' as const, data: { id: 'SKU-A', price: '1000 PYG' } };
+    const res = await c.submitItemsBatch('42', [req]);
     expect(res.handles).toEqual(['h1']);
     expect(calls[0].method).toBe('POST');
     expect(calls[0].url).toBe('https://graph.facebook.com/v23.0/42/items_batch');
     expect(calls[0].data).toEqual({
       item_type: 'PRODUCT_ITEM',
-      requests: [{ method: 'UPDATE', retailer_id: 'SKU-A', data: { name: 'A', price: '1000 PYG' } }],
+      // El default de Meta es true: lo apagamos para que un UPDATE nunca cree por accidente.
+      allow_upsert: false,
+      requests: [req],
     });
   });
 });

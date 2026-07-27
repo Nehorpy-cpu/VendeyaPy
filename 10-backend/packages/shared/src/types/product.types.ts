@@ -102,6 +102,15 @@ export interface Product {
   externalIds: ProductExternalIds;
   /** Atributos de perfumería. null para productos que no son perfumes. */
   perfume: PerfumeAttributes | null;
+  /**
+   * URL pública del producto (`link` del contrato de escritura de Meta). OPCIONAL: los
+   * productos existentes no la tienen. Es OBLIGATORIA para CREAR un artículo en Meta —
+   * sin ella el create queda bloqueado con `product_url_missing`; jamás se inventa.
+   * Un UPDATE parcial (p.ej. solo precio) NO la requiere.
+   */
+  productUrl?: string;
+  /** Taxonomía del artículo en Meta (`product_type`). Informativa; opcional. */
+  metaProductType?: string;
   /** Ficha para recomendaciones del agente (CATALOG-ENRICHMENT-1). Opcional. */
   aiFicha?: ProductAiFicha | null;
   // --- Sincronización con el Meta Catalog (D4). Lo escribe la sync (Admin SDK). ---

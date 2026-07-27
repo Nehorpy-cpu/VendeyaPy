@@ -128,6 +128,10 @@ export function validateProductPatch(data: unknown, opts: { requireName: boolean
   if (d.position !== undefined) out.position = num(d.position, 'position');
   if (d.featured !== undefined) out.featured = bool(d.featured, 'featured');
   if (d.images !== undefined) out.images = strArray(d.images, 12, 'images');
+  // URL pública del producto (`link` del contrato de Meta). Editable desde el panel: sin
+  // este camino, ningún producto podría crearse en el catálogo de Meta (el contrato la
+  // exige y jamás se inventa). META-CATALOG-OUTBOUND-CONTRACT-1.
+  if (d.productUrl !== undefined) out.productUrl = str(d.productUrl, 'productUrl', 2000);
   if (d.inventory !== undefined) out.inventory = validateInventory(d.inventory);
   if (d.externalIds !== undefined) out.externalIds = validateExternalIds(d.externalIds);
   if (d.perfume !== undefined) out.perfume = d.perfume === null ? null : validatePerfume(d.perfume);

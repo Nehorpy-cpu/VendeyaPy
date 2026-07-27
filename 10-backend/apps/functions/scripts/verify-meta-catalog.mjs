@@ -43,12 +43,15 @@ const prodDoc = (id, over = {}) => ({
   price: 250000, compareAtPrice: null, aiNotes: `SECRETO-INTERNO-${id}`, currency: 'PYG',
   categoryId: 'perfumes', images: [IMG], emoji: '🌸', inventory: INV(id),
   status: 'ACTIVE', featured: false, position: 90, externalIds: { facebook: null, instagram: null, tiktok: null },
-  perfume: null, aiFicha: { cuandoRecomendar: `FICHA-INTERNA-${id}` }, syncToMeta: true, ...TS, ...over,
+  // marca + productUrl: obligatorias del contrato de CREACIÓN de Meta
+  // (META-CATALOG-OUTBOUND-CONTRACT-1). Sin ellas, todo `create` queda bloqueado.
+  perfume: { brand: 'MarcaE2E' }, productUrl: `https://tienda.e2e.test/p/${id}`,
+  aiFicha: { cuandoRecomendar: `FICHA-INTERNA-${id}` }, syncToMeta: true, ...TS, ...over,
 });
 const remoteItem = (retailerId, over = {}) => ({
   id: `itm-${retailerId}`, retailer_id: retailerId, name: `Producto ${retailerId}`,
   description: `Descripción pública de ${retailerId}`, availability: 'in stock',
-  price: '₲250.000', image_url: IMG, brand: '', ...over,
+  price: '₲250.000', image_url: IMG, brand: 'MarcaE2E', ...over,
 });
 
 const writesSnap = () => db.collection(`${FIXTURE}/writes`).get();
@@ -87,7 +90,7 @@ await db.doc(`tenants/${T}`).set({
 await db.doc(`tenants/${T2}`).set({ name: 'Boutique E2E', slug: T2, status: 'ACTIVE', planId: 'growth', subscription: { status: 'active', currentPeriodStart: now }, updatedAt: now }, { merge: true });
 
 // Productos controlados MCE2E-* (los del seed load-catalog, si existen, no participan de los asserts).
-await db.doc(`tenants/${T}/products/MCE2E-A`).set(prodDoc('MCE2E-A', { perfume: { brand: 'Armaf' } }));      // create
+await db.doc(`tenants/${T}/products/MCE2E-A`).set(prodDoc('MCE2E-A'));                                        // create
 await db.doc(`tenants/${T}/products/MCE2E-B`).set(prodDoc('MCE2E-B'));                                       // unchanged (remoto idéntico)
 await db.doc(`tenants/${T}/products/MCE2E-C`).set(prodDoc('MCE2E-C', { inventory: INV('MCE2E-C', 0) }));      // disable (sin stock, remoto visible)
 await db.doc(`tenants/${T}/products/MCE2E-D1`).set(prodDoc('MCE2E-D1', { inventory: INV('MCE2E-DUP') }));     // blocked sku_duplicated
@@ -190,16 +193,16 @@ let applyRun;
   const w = (await writesSnap()).docs.map((d) => d.data());
   check('24. exactamente 1 batch enviado', w.length === 1, `batches=${w.length}`);
   const reqs = w.flatMap((d) => d.requests ?? []);
-  check('25. todos los requests son UPDATE (upsert); jamás DELETE', reqs.length > 0 && reqs.every((r) => r.method === 'UPDATE'));
-  const ids = reqs.map((r) => r.retailer_id);
+  check('25. métodos del contrato (CREATE/UPDATE); jamás DELETE', reqs.length > 0 && reqs.every((r) => r.method === 'CREATE' || r.method === 'UPDATE'));
+  const ids = reqs.map((r) => r.data?.id);
   check('26. el batch incluye create+disable planeados (A, C, ARC)', ids.includes('MCE2E-A') && ids.includes('MCE2E-C') && ids.includes('MCE2E-ARC'));
   check('27. los bloqueados NO viajaron a Meta', !ids.includes('MCE2E-DUP') && !ids.includes('') && !ids.some((i) => ['MCE2E-F', 'MCE2E-G'].includes(i)));
   const json = JSON.stringify(reqs);
   check('28. payloads SIN datos internos (aiNotes/aiFicha/costo)', !json.includes('SECRETO-INTERNO') && !json.includes('FICHA-INTERNA') && !/aiNotes|aiFicha|costPrice|margin/i.test(json));
-  const reqA = reqs.find((r) => r.retailer_id === 'MCE2E-A');
-  check('29. payload público exacto con precio "N PYG" y condition new (retailer_id fuera del data)', reqA?.data?.price === '250000 PYG' && reqA?.data?.condition === 'new' && reqA?.data?.brand === 'Armaf' && reqA?.data?.availability === 'in stock' && !('retailer_id' in (reqA?.data ?? {})));
-  const reqC = reqs.find((r) => r.retailer_id === 'MCE2E-C');
-  check('30. disable viaja como availability "out of stock" (no delete)', reqC?.data?.availability === 'out of stock');
+  const reqA = reqs.find((r) => r.data?.id === 'MCE2E-A');
+  check('29. CREATE con el contrato exacto: data.id + title + link + image[] (nunca name/image_url/retailer_id)', reqA?.method === 'CREATE' && reqA?.data?.id === 'MCE2E-A' && reqA?.data?.title === 'Producto MCE2E-A' && !!reqA?.data?.link && Array.isArray(reqA?.data?.image) && reqA?.data?.price === '250000 PYG' && reqA?.data?.condition === 'new' && reqA?.data?.brand === 'MarcaE2E' && !('name' in (reqA?.data ?? {})) && !('image_url' in (reqA?.data ?? {})) && !('retailer_id' in (reqA ?? {})), JSON.stringify(reqA ?? {}).slice(0, 200));
+  const reqC = reqs.find((r) => r.data?.id === 'MCE2E-C');
+  check('30. DISABLE mínimo: SOLO id + availability out of stock', reqC?.data?.id === 'MCE2E-C' && reqC?.data?.availability === 'out of stock' && Object.keys(reqC?.data ?? {}).sort().join(',') === 'availability,id', JSON.stringify(reqC?.data ?? {}));
 }
 {
   const a = await productOf('MCE2E-A');
@@ -222,8 +225,8 @@ let applyRun;
   const { result } = await call('runTenantJob', owner, { action: 'catalogSyncApply' });
   check('36. segundo apply ⇒ applied (idempotente)', result?.result?.status === 'applied');
   const w = (await writesSnap()).docs.map((d) => d.data());
-  const ids1 = (w[0]?.requests ?? []).map((r) => r.retailer_id).sort();
-  const ids2 = (w[1]?.requests ?? []).map((r) => r.retailer_id).sort();
+  const ids1 = (w[0]?.requests ?? []).map((r) => r.data?.id).sort();
+  const ids2 = (w[1]?.requests ?? []).map((r) => r.data?.id).sort();
   check('37. mismos retailer_ids en ambos applies (upserts estables)', w.length === 2 && JSON.stringify(ids1) === JSON.stringify(ids2));
 }
 
