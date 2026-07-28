@@ -113,13 +113,25 @@ export default function CatalogPage() {
     },
   });
   const syncMut = useMutation({
-    mutationFn: (apply: boolean) => syncCatalogToMeta(tenantId!, { apply }),
+    // META-CATALOG-PREVIEW-BINDING-1: el envío real viaja ATADO a la previsualización
+    // aprobada (runId + planHash). Si algo cambió desde entonces, el backend responde
+    // failed-precondition y NO encola nada: hay que previsualizar de nuevo.
+    mutationFn: (apply: boolean) =>
+      syncCatalogToMeta(tenantId!, {
+        apply,
+        ...(apply && syncRun?.planHash ? { preview: { runId: syncRun.runId, planHash: syncRun.planHash } } : {}),
+      }),
     onSuccess: (run) => {
       setSyncRun(run);
       setConfirmApply(false);
       if (run.requestedMode === 'apply') qc.invalidateQueries({ queryKey: ['products', tenantId] });
     },
-    onError: () => setConfirmApply(false),
+    onError: (_e, apply) => {
+      setConfirmApply(false);
+      // La evidencia quedó inválida (vencida/consumida/desactualizada): el plan mostrado ya
+      // no es aplicable — se limpia para forzar una previsualización fresca.
+      if (apply) setSyncRun(null);
+    },
   });
 
   // Ocultamos los productos dados de baja (status ARCHIVED, por el soft-delete del callable).
@@ -154,7 +166,7 @@ export default function CatalogPage() {
         </div>
         <div className="flex gap-2">
           <button onClick={() => syncMut.mutate(false)} disabled={syncMut.isPending} className="inline-flex items-center gap-1.5 rounded-lg border border-ink-200 px-3 py-2 text-sm font-medium text-ink-700 transition-colors hover:bg-ink-50 disabled:opacity-50">
-            {syncMut.isPending ? 'Analizando…' : 'Sincronizar a Meta'}
+            {syncMut.isPending ? 'Previsualizando…' : 'Previsualizar cambios'}
           </button>
           <button onClick={() => setEditing(null)} className="rounded-lg bg-mint-600 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-mint-700">
             + Nuevo producto
@@ -254,15 +266,23 @@ export default function CatalogPage() {
               {syncRun.status === 'planned' && (
                 <div className="flex flex-wrap items-center gap-3 border-t border-ink-100 pt-3">
                   {syncRun.configMode === 'live' ? (
-                    confirmApply ? (
+                    // El envío real solo se ofrece con evidencia (planHash) y con algo para
+                    // enviar: va atado a ESTA previsualización, con cantidad y producto a la vista.
+                    !syncRun.planHash || applySummary(syncRun).count === 0 ? (
+                      <p className="text-xs text-ink-400">
+                        {applySummary(syncRun).count === 0
+                          ? 'No hay cambios para enviar: todo está igual que en Meta o excluido del plan.'
+                          : 'Esta previsualización no es utilizable para enviar. Previsualizá de nuevo.'}
+                      </p>
+                    ) : confirmApply ? (
                       <>
-                        <span className="text-xs text-ink-600">¿Enviar estos cambios al catálogo real de Meta?</span>
+                        <span className="text-xs text-ink-600">{applySummary(syncRun).confirm}</span>
                         <button
                           onClick={() => syncMut.mutate(true)}
                           disabled={syncMut.isPending}
                           className="rounded-lg bg-mint-600 px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-mint-700 disabled:opacity-60"
                         >
-                          {syncMut.isPending ? 'Encolando…' : 'Sí, enviar a Meta'}
+                          {syncMut.isPending ? 'Encolando…' : 'Sí, enviar'}
                         </button>
                         <button
                           onClick={() => setConfirmApply(false)}
@@ -276,12 +296,12 @@ export default function CatalogPage() {
                         onClick={() => setConfirmApply(true)}
                         className="rounded-lg border border-mint-600 px-3 py-1.5 text-xs font-semibold text-mint-700 transition-colors hover:bg-mint-50"
                       >
-                        Enviar a Meta…
+                        {applySummary(syncRun).label}
                       </button>
                     )
                   ) : (
                     <p className="text-xs text-ink-400">
-                      Modo dry-run: este análisis no escribió nada en Meta. Para aplicar cambios reales, la plataforma debe activar el modo live.
+                      Modo dry-run: esta previsualización no escribió nada en Meta. Para aplicar cambios reales, la plataforma debe activar el modo live.
                     </p>
                   )}
                 </div>
@@ -521,7 +541,7 @@ function syncTitle(run: CatalogSyncRun): string {
     case 'disabled': return 'Sincronización con Meta desactivada';
     case 'apply_blocked': return 'Aplicación bloqueada';
     case 'error': return 'Error al consultar Meta';
-    case 'planned': return 'Dry-run del catálogo (sin escrituras en Meta)';
+    case 'planned': return 'Previsualización del catálogo (sin escrituras en Meta)';
     case 'queued': return 'Cambios encolados hacia Meta';
     case 'partial_failure': return 'Encolado parcial (con problemas)';
   }
@@ -531,6 +551,22 @@ function syncErrorText(run: CatalogSyncRun): string {
   if (run.reason === 'missing_token') return 'No hay conexión con Meta configurada para esta empresa (falta el token).';
   if (run.reason === 'catalog_unreachable') return `No se pudo acceder al catálogo en Meta. ${run.errorDetail ?? ''}`.trim();
   return run.errorDetail ?? 'Error desconocido.';
+}
+
+/**
+ * META-CATALOG-PREVIEW-BINDING-1: la acción real dice EXACTAMENTE qué manda — cantidad y,
+ * si es un solo cambio, el producto. "Enviar 1 cambio a Meta (Armaf Odyssey Mega)" en vez
+ * de un genérico "Enviar a Meta".
+ */
+function applySummary(run: CatalogSyncRun): { count: number; label: string; confirm: string } {
+  const s = run.summary;
+  const count = (s?.create ?? 0) + (s?.update ?? 0) + (s?.disable ?? 0);
+  if (count === 1) {
+    const entry = (run.entries ?? []).find((e) => e.action === 'create' || e.action === 'update' || e.action === 'disable');
+    const quien = entry ? ` (${entry.productName})` : '';
+    return { count, label: `Enviar 1 cambio a Meta${quien}…`, confirm: `¿Enviar 1 cambio al catálogo real de Meta${quien}?` };
+  }
+  return { count, label: `Enviar ${count} cambios a Meta…`, confirm: `¿Enviar ${count} cambios al catálogo real de Meta?` };
 }
 
 /**

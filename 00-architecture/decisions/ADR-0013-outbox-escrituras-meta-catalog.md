@@ -386,6 +386,71 @@ cuando la relectura muestra que el artículo no está.
 - Índice nuevo: `metaCatalogOutboxJobs (status, updatedAt)` — **hay que crearlo antes de
   desplegar el scheduler**, o el sweep falla.
 
+## Vínculo apply ↔ preview (META-CATALOG-PREVIEW-BINDING-1)
+
+La auditoría del canary detectó que `catalogSyncApply` re-planificaba desde cero sin vincularse
+al preview que el dueño había confirmado: entre el "Previsualizar" y el click de confirmar, un
+cambio local o remoto podía encolar una acción DISTINTA de la mostrada. Este programa cierra ese
+hueco:
+
+- **Evidencia**: el dry_run calcula `planHash` — huella determinística (`stableHash`) de
+  `{tenantId, catalogId, entries}` con TODAS las entradas del plan (también `unchanged` y
+  `blocked`) ordenadas por producto, cada una con acción, identidad efectiva, `remoteItemId`,
+  `changedFields`, bloqueos, el `request` congelado **y el snapshot crudo del item remoto
+  afectado** (`remoteSnapshot`: la misma superficie que compara el diff — name, description,
+  availability, price, currency, image_url, url, brand). Así, "Meta modificado" invalida el
+  preview AUNQUE el cambio remoto no altere la acción ni el request (p. ej. alguien tocó en
+  Commerce Manager un campo que YA difería): el dueño aprueba contra un remoto concreto, no
+  solo contra lo que se va a enviar. `remoteOnly` NO participa (candidatos informativos sin
+  acción — un alta externa que el plan no toca no invalida la evidencia). La huella se
+  persiste en el run doc y viaja al panel.
+- **Apply exige la evidencia** `{previewRunId, planHash}`: sin ella, o con un preview
+  inexistente/no utilizable/de otro catálogo/de otro actor/vencido (**TTL 10 minutos**,
+  `PREVIEW_TTL_MS`) o ya consumido ⇒ `apply_blocked` con motivo `preview_*`, que el callable
+  responde como **`failed-precondition`** y el outbox queda intacto (cero jobs/intents).
+  El fail-fast corre ANTES de tocar Meta; `mode_not_live` sigue cortando antes que todo.
+- **Coincidencia exacta**: el apply replanifica contra el catálogo fresco y compara huellas;
+  cualquier discrepancia ⇒ `preview_mismatch` (el run doc del apply bloqueado guarda ambas
+  huellas y el plan fresco para diagnóstico). Lo que se encola es el MISMO plan en memoria que
+  acaba de coincidir.
+- **Consumo transaccional anti-replay**: antes de encolar, una transacción re-valida TODO el
+  binding y marca el preview con `consumedAt`/`consumedByRunId`. Dos applies concurrentes con
+  la misma evidencia: exactamente uno encola. Se consume ANTES de encolar a propósito: si el
+  encolado muere a mitad, el preview no es reutilizable — lo correcto es previsualizar de
+  nuevo, jamás repetir a ciegas (los jobs ya creados son idempotentes por intención).
+- **Panel**: el botón dice "Previsualizar cambios" y la acción real declara cantidad y
+  producto ("Enviar 1 cambio a Meta (Armaf Odyssey Mega)"); un `failed-precondition` limpia el
+  plan mostrado y obliga a previsualizar de nuevo.
+- **Actor**: aplica quien previsualizó (uid exacto). Un preview de un owner no lo puede
+  confirmar otro; sin uid no hay binding posible.
+
+Verificación: 19 unit (huella y validador puro, incluida la frontera exacta del TTL y la
+sensibilidad al snapshot remoto) y PB-91..99 + PB-95b/95c en el E2E de emulador (camino
+válido, replay, sin evidencia, cambio local, cambio remoto que altera el plan, cambio remoto
+que NO altera el request — solo el snapshot —, acción adicional, catálogo/tenant ajeno,
+vencido, carrera de applies) — todos con la comprobación de outbox 0/0 ante discrepancia.
+E2E total: 194/194. Review adversarial (4 dimensiones + refutación): cero CRÍTICO/ALTO/MEDIO.
+
+Límites conocidos del binding (review adversarial, todos fail-closed — jamás una escritura
+indebida):
+
+- **La transacción de consumo no relee la config**: `catalogId`/`mode` se validan contra la
+  config leída al inicio del apply. Si un admin cambia la config DURANTE la relectura paginada
+  del catálogo, el preview se consume y los jobs nacen igual — pero el gate del claim relee la
+  config y los deriva a `needs_action` (catalog_mismatch) o los retiene (`mode_not_live`):
+  cero escrituras equivocadas. El costo real es un preview consumido de más.
+- **Crash entre consumo y encolado**: el preview queda consumido y el run doc del apply queda
+  en `planned` para siempre (sin marca de la falla). Decisión deliberada — la dirección segura
+  es "previsualizar de nuevo", jamás repetir a ciegas. Diagnóstico: cruzar `consumedByRunId`
+  del preview con el run huérfano.
+- **`retailer_id` duplicado en el catálogo remoto** (creable por fuera): el matching last-wins
+  puede alternar entre corridas ⇒ `preview_mismatch` perpetuo para ese tenant hasta depurar el
+  duplicado en Commerce Manager. El run doc del bloqueo guarda ambas huellas, pero las entries
+  slim no revelan la causa.
+- **La huella no cubre metadata sin efecto de escritura** (`productName` de entradas
+  bloqueadas, `suggestion`, contadores): verificado que todo campo que determina una escritura
+  SÍ participa.
+
 ## Pendiente (fuera de este programa)
 
 - **Alertas de calidad por producto** (requisito obligatorio de G1/G2/G3): observaciones

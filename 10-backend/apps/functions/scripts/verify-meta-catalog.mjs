@@ -29,8 +29,23 @@ const signIn = async (email) => (await (await fetch(AUTH, { method: 'POST', head
 async function call(name, token, data) {
   const res = await fetch(`${BASE}/${name}`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify({ data }) });
   const body = await res.json().catch(() => ({}));
-  return { result: body.result, err: body.error?.status ?? null };
+  return { result: body.result, err: body.error?.status ?? null, errMsg: body.error?.message ?? null };
 }
+/**
+ * META-CATALOG-PREVIEW-BINDING-1: todo apply real viaja ATADO a un preview aprobado
+ * ({previewRunId, planHash}). Este helper hace la danza completa previsualizar→aplicar;
+ * los tests de la evidencia en sí (PB-*) llaman `call` directo para violarla a propósito.
+ */
+async function aplicar(token, data = {}) {
+  const prev = await call('runTenantJob', token, { action: 'catalogSync', ...data });
+  const p = prev.result?.result;
+  if (!p?.planHash) return { result: prev.result, err: prev.err ?? 'PREVIEW_SIN_HASH', preview: p };
+  const res = await call('runTenantJob', token, {
+    action: 'catalogSyncApply', ...data, args: { previewRunId: p.runId, planHash: p.planHash },
+  });
+  return { ...res, preview: p };
+}
+
 /**
  * Corre el mantenimiento del outbox (sweep + drenaje + confirmación) de UN tenant.
  * `graceMs=0` saltea la ventana de gracia de la confirmación diferida (que en producción
@@ -190,7 +205,7 @@ let dryRun;
 
 // ═══ E. Apply gateado por mode live ═══
 {
-  const { result } = await call('runTenantJob', owner, { action: 'catalogSyncApply' });
+  const { result } = await aplicar(owner);
   check('21. apply con config dry_run ⇒ apply_blocked (mode_not_live)', result?.result?.status === 'apply_blocked' && result?.result?.reason === 'mode_not_live');
   check('22. apply bloqueado tampoco escribió en Meta', (await writesSnap()).empty);
 }
@@ -202,7 +217,7 @@ const wipeOutbox = async () => { for (const d of (await outboxCol().get()).docs)
 
 let applyRun;
 {
-  const { result } = await call('runTenantJob', owner, { action: 'catalogSyncApply' });
+  const { result } = await aplicar(owner);
   applyRun = result?.result;
   check('OB-23. confirmar el plan ENCOLA (status queued), no "aplica"', applyRun?.status === 'queued' && applyRun?.queuedCount > 0, `status=${applyRun?.status} queued=${applyRun?.queuedCount}`);
   check('OB-23b. NO se declara appliedCount ni lastSuccessfulSyncAt al encolar', applyRun?.appliedCount === undefined && !(await db.doc(`tenants/${T}/config/meta`).get()).data()?.catalogSync?.lastSuccessfulSyncAt);
@@ -224,7 +239,7 @@ let applyRun;
 {
   // IDEMPOTENCIA: la misma confirmación no duplica trabajo (id determinístico por contenido).
   const antes = (await jobsOf()).length;
-  const { result } = await call('runTenantJob', owner, { action: 'catalogSyncApply' });
+  const { result } = await aplicar(owner);
   const r = result?.result;
   check('OB-30. segunda confirmación idéntica ⇒ 0 nuevos, todos deduplicados', r?.queuedCount === 0 && r?.deduplicatedCount === antes, `queued=${r?.queuedCount} dedup=${r?.deduplicatedCount}`);
   check('OB-30b. la cola no creció', (await jobsOf()).length === antes);
@@ -261,7 +276,7 @@ let applyRun;
   // Ahora el fake SÍ aplica el batch (como haría Meta) y normaliza la URL igual que Meta.
   await db.doc(FIXTURE).set({ applyBatchToFixture: true }, { merge: true });
   await wipeOutbox();
-  const { result } = await call('runTenantJob', owner, { action: 'catalogSyncApply' });
+  const { result } = await aplicar(owner);
   check('OB-39. re-confirmar tras limpiar la cola vuelve a encolar', result?.result?.status === 'queued' && result?.result?.queuedCount > 0);
   await drain();
   const jobA = await jobOfProduct('MCE2E-A');
@@ -282,15 +297,15 @@ let applyRun;
   await wipeOutbox();
   await db.doc(FIXTURE).set({ catalog: { id: CATALOG_ID, name: 'Catálogo E2E' }, items: FIXTURE_ITEMS, applyBatchToFixture: true }, { merge: false });
   await db.doc(`tenants/${T}/products/MCE2E-B`).set({ price: 200000 }, { merge: true }); // promo
-  await call('runTenantJob', owner, { action: 'catalogSyncApply' });
+  await aplicar(owner);
   await drain();
   const promo1 = await jobOfProduct('MCE2E-B');
   await db.doc(`tenants/${T}/products/MCE2E-B`).set({ price: 250000 }, { merge: true }); // fin de promo
-  await call('runTenantJob', owner, { action: 'catalogSyncApply' });
+  await aplicar(owner);
   await drain();
   await wipe(`${FIXTURE}/writes`);
   await db.doc(`tenants/${T}/products/MCE2E-B`).set({ price: 200000 }, { merge: true }); // SEGUNDA promo
-  const { result } = await call('runTenantJob', owner, { action: 'catalogSyncApply' });
+  const { result } = await aplicar(owner);
   check('OB-30d. repetir un cambio ya aplicado antes SÍ vuelve a encolarse', (result?.result?.queuedCount ?? 0) > 0, `queued=${result?.result?.queuedCount} dedup=${result?.result?.deduplicatedCount} precio=${await precioDe('MCE2E-B')} job1=${promo1?.status}`);
   await drain();
   const reqs = (await writesSnap()).docs.flatMap((d) => d.data().requests ?? []);
@@ -303,7 +318,7 @@ let applyRun;
   // interpreta como divergencia solo porque Meta todavía no lo procesó.
   await wipeOutbox();
   await db.doc(FIXTURE).set({ catalog: { id: CATALOG_ID, name: 'Catálogo E2E' }, items: FIXTURE_ITEMS, applyBatchToFixture: false }, { merge: false });
-  await call('runTenantJob', owner, { action: 'catalogSyncApply' });
+  await aplicar(owner);
   await drain(T, 60000); // ventana de gracia REAL
   const j = await jobOfProduct('MCE2E-A');
   check('OB-30f. un envío recién hecho NO se declara divergente por impaciencia', j?.status === 'submitted', `status=${j?.status}`);
@@ -315,7 +330,7 @@ const reencolar = async () => {
   await wipeOutbox();
   await db.doc(FIXTURE).set({ catalog: { id: CATALOG_ID, name: 'Catálogo E2E' }, items: FIXTURE_ITEMS, applyBatchToFixture: false }, { merge: false });
   await setConfig({ ...VALID_CFG, mode: 'live' });
-  await call('runTenantJob', owner, { action: 'catalogSyncApply' });
+  await aplicar(owner);
   await wipe(`${FIXTURE}/writes`);
 };
 {
@@ -409,7 +424,7 @@ const reencolar = async () => {
   await drain();
   const muerto = await jobOfProduct('MCE2E-A');
   await db.doc(FIXTURE).set({ failWith: null }, { merge: true });
-  const { result } = await call('runTenantJob', owner, { action: 'catalogSyncApply' });
+  const { result } = await aplicar(owner);
   const todos = (await jobsOf()).filter((j) => j.productId === 'MCE2E-A');
   const nuevo = todos.find((j) => j.id !== muerto?.id);
   check('OB-48b. una confirmación nueva crea un CICLO NUEVO tras un cierre sin éxito', muerto?.status === 'failed' && nuevo?.status === 'queued' && nuevo?.cycle === (muerto?.cycle ?? 0) + 1 && (result?.result?.queuedCount ?? 0) > 0, `antes=${muerto?.status}#${muerto?.cycle} nuevo=${nuevo?.status}#${nuevo?.cycle}`);
@@ -489,7 +504,7 @@ const limpio = async () => {
   const precios = [200000, 250000, 200000];
   for (const p of precios) {
     await db.doc(`tenants/${T}/products/MCE2E-B`).set({ price: p }, { merge: true });
-    await call('runTenantJob', owner, { action: 'catalogSyncApply' });
+    await aplicar(owner);
     await drain();
   }
   const jobs = await jobsDeProducto('MCE2E-B');
@@ -513,8 +528,8 @@ const limpio = async () => {
   await limpio();
   await db.doc(`tenants/${T}/products/MCE2E-B`).set({ price: 210000 }, { merge: true });
   const [r1, r2] = await Promise.all([
-    call('runTenantJob', owner, { action: 'catalogSyncApply' }),
-    call('runTenantJob', owner, { action: 'catalogSyncApply' }),
+    aplicar(owner),
+    aplicar(owner),
   ]);
   const jobs = await jobsDeProducto('MCE2E-B');
   const queued = (r1.result?.result?.queuedCount ?? 0) + (r2.result?.result?.queuedCount ?? 0);
@@ -526,7 +541,7 @@ const limpio = async () => {
   // el estado visible del producto.
   await limpio();
   await db.doc(`tenants/${T}/products/MCE2E-B`).set({ price: 220000 }, { merge: true });
-  await call('runTenantJob', owner, { action: 'catalogSyncApply' });
+  await aplicar(owner);
   const viejo = (await jobsDeProducto('MCE2E-B'))[0];
   // El producto pasa a estar gobernado por OTRO job (simula un ciclo posterior ya encolado).
   await db.doc(`tenants/${T}/products/MCE2E-B`).set({ metaSyncCurrentJobId: 'mco_otro_c000009', metaSyncStatus: 'queued' }, { merge: true });
@@ -544,7 +559,7 @@ const limpio = async () => {
   await db.doc(FIXTURE).set({ holdAt: null }, { merge: true });
   await db.doc(`tenants/${T}/_debug/catalogFixtures`).set({ holdAt: 'outbox_pre_submit', resume: false });
   await db.doc(`tenants/${T}/products/MCE2E-A`).set({ syncToMeta: true }, { merge: true });
-  await call('runTenantJob', owner, { action: 'catalogSyncApply' });
+  await aplicar(owner);
   const drenaje = drain();
   // Esperar a que el worker llegue al punto de espera y recién ahí apagar el opt-in.
   for (let i = 0; i < 60; i++) {
@@ -564,7 +579,7 @@ const limpio = async () => {
   // PRESUPUESTO: muchos handles distintos no disparan una llamada por handle sin techo.
   await limpio();
   await db.doc(FIXTURE).set({ applyBatchToFixture: false, pagesPerList: 3 }, { merge: true });
-  await call('runTenantJob', owner, { action: 'catalogSyncApply' });
+  await aplicar(owner);
   const jobs = await jobsOf();
   // Se simulan 100 handles distintos, uno por job, todos ya enviados y fuera de la gracia.
   let i = 0;
@@ -584,7 +599,7 @@ const limpio = async () => {
   // RECUPERACIÓN HUMANA: los tres desenlaces + el descarte.
   await limpio();
   await db.doc(`tenants/${T}/products/MCE2E-B`).set({ price: 230000 }, { merge: true });
-  await call('runTenantJob', owner, { action: 'catalogSyncApply' });
+  await aplicar(owner);
   const job = (await jobsDeProducto('MCE2E-B'))[0];
   await db.doc(`tenants/${T}/metaCatalogOutboxJobs/${job.id}`).set({ status: 'needs_action', reason: 'submit_ambiguous', attentionRequired: true }, { merge: true });
 
@@ -612,7 +627,7 @@ const limpio = async () => {
   await limpio();
   await db.doc(FIXTURE).set({ applyBatchToFixture: false }, { merge: true });
   await db.doc(`tenants/${T}/products/MCE2E-A`).set({ syncToMeta: true }, { merge: true });
-  await call('runTenantJob', owner, { action: 'catalogSyncApply' });
+  await aplicar(owner);
   const jobA = await jobOfProduct('MCE2E-A');
   await db.doc(`tenants/${T}/metaCatalogOutboxJobs/${jobA.id}`).set({ status: 'needs_action', reason: 'submit_ambiguous', attentionRequired: true }, { merge: true });
   const wAntes = (await writesSnap()).size;
@@ -632,7 +647,7 @@ const limpio = async () => {
   // dry_run: cero claims y cero POST, aunque haya cola.
   await limpio();
   await db.doc(`tenants/${T}/products/MCE2E-A`).set({ syncToMeta: true }, { merge: true });
-  await call('runTenantJob', owner, { action: 'catalogSyncApply' });
+  await aplicar(owner);
   await setConfig({ ...VALID_CFG, mode: 'dry_run' });
   const r = await drain();
   const j = await jobOfProduct('MCE2E-A');
@@ -643,7 +658,7 @@ const limpio = async () => {
   // Dos mantenimientos concurrentes: el puntero no se rompe y no hay envíos dobles.
   await limpio();
   await db.doc(`tenants/${T}/products/MCE2E-A`).set({ syncToMeta: true }, { merge: true });
-  await call('runTenantJob', owner, { action: 'catalogSyncApply' });
+  await aplicar(owner);
   await Promise.all([drain(), drain()]);
   const reqs = (await writesSnap()).docs.flatMap((d) => d.data().requests ?? []).filter((x) => x.data?.id === 'MCE2E-A');
   const intents = (await intentsCol().get()).docs.map((d) => d.data());
@@ -677,7 +692,7 @@ const waitHold = async (point) => {
   // pierde el CAS, responde nothing_to_do y JAMÁS resucita el job descartado.
   await limpio();
   await db.doc(`tenants/${T}/products/MCE2E-B`).set({ price: 240000 }, { merge: true });
-  await call('runTenantJob', owner, { action: 'catalogSyncApply' });
+  await aplicar(owner);
   const job = (await jobsDeProducto('MCE2E-B'))[0];
   await db.doc(`tenants/${T}/metaCatalogOutboxJobs/${job.id}`).set({ status: 'needs_action', reason: 'submit_ambiguous', attentionRequired: true }, { merge: true });
   await db.doc(FIXTURE).set({ applyBatchToFixture: true }, { merge: true });
@@ -700,7 +715,7 @@ const waitHold = async (point) => {
   // A2. Dos reconciliaciones manuales SIMULTÁNEAS: una sola transición, un solo log.
   await limpio();
   await db.doc(`tenants/${T}/products/MCE2E-B`).set({ price: 235000 }, { merge: true });
-  await call('runTenantJob', owner, { action: 'catalogSyncApply' });
+  await aplicar(owner);
   const job = (await jobsDeProducto('MCE2E-B'))[0];
   await drain(); // sale hacia Meta y el fixture lo aplica
   await db.doc(`tenants/${T}/metaCatalogOutboxJobs/${job.id}`).set({ status: 'needs_action', reason: 'submit_ambiguous', attentionRequired: true, submittedAt: Timestamp.fromMillis(Date.now() - 120000) }, { merge: true });
@@ -719,7 +734,7 @@ const waitHold = async (point) => {
   // declaran un éxito que no le pertenece.
   await limpio();
   await db.doc(`tenants/${T}/products/MCE2E-B`).set({ price: 232000 }, { merge: true });
-  await call('runTenantJob', owner, { action: 'catalogSyncApply' });
+  await aplicar(owner);
   const job = (await jobsDeProducto('MCE2E-B'))[0];
   await drain();
   await db.doc(`tenants/${T}/metaCatalogOutboxJobs/${job.id}`).set({ status: 'needs_reconciliation', reason: 'submit_ambiguous', attentionRequired: true, submittedAt: Timestamp.fromMillis(Date.now() - 120000) }, { merge: true });
@@ -740,7 +755,7 @@ const waitHold = async (point) => {
   await limpio();
   await db.doc(FIXTURE).set({ applyBatchToFixture: true }, { merge: true });
   await db.doc(`tenants/${T}/products/MCE2E-B`).set({ price: 228000 }, { merge: true });
-  await call('runTenantJob', owner, { action: 'catalogSyncApply' });
+  await aplicar(owner);
   const job = (await jobsDeProducto('MCE2E-B'))[0];
   await drain();
   const cerrado = (await jobsDeProducto('MCE2E-B')).find((j) => j.id === job.id);
@@ -753,7 +768,7 @@ const waitHold = async (point) => {
   // acotados; ningún job cambia de estado; las llamadas HTTP quedan acotadas.
   await limpio();
   await db.doc(FIXTURE).set({ applyBatchToFixture: false, failWith: { op: 'batchStatus', status: 500, code: 1, message: 'status caído' } }, { merge: true });
-  await call('runTenantJob', owner, { action: 'catalogSyncApply' });
+  await aplicar(owner);
   const jobs = await jobsOf();
   let i = 0;
   for (const j of jobs) {
@@ -800,7 +815,7 @@ const waitHold = async (point) => {
     });
   }
   await db.doc(`tenants/${T}/products/MCE2E-B`).set({ price: 226000 }, { merge: true });
-  await call('runTenantJob', owner, { action: 'catalogSyncApply' });
+  await aplicar(owner);
   const nuevo = (await jobsDeProducto('MCE2E-B'))[0];
   await db.doc(`tenants/${T}/metaCatalogOutboxJobs/${nuevo.id}`).set({ status: 'needs_action', reason: 'submit_ambiguous', attentionRequired: true }, { merge: true });
   const { result: lista } = await call('metaCatalogOutboxIncidents', owner, {});
@@ -828,7 +843,7 @@ const waitHold = async (point) => {
   await limpio();
   await db.doc(FIXTURE).set({ applyBatchToFixture: false }, { merge: true });
   await db.doc(`tenants/${T}/products/MCE2E-B`).set({ price: 222000 }, { merge: true });
-  await call('runTenantJob', owner, { action: 'catalogSyncApply' });
+  await aplicar(owner);
   await drain(); // envía y, en la misma corrida, evalúa: different pero submitted FRESCO
   const jobB1 = (await jobsDeProducto('MCE2E-B'))[0];
   check('OB-87. submitted fresco + remoto distinto ⇒ pendiente de reconciliar, NO revisión humana', jobB1?.status === 'needs_reconciliation', `status=${jobB1?.status}`);
@@ -864,14 +879,14 @@ const waitHold = async (point) => {
   await limpio();
   await db.doc(FIXTURE).set({ applyBatchToFixture: true }, { merge: true });
   await db.doc(`tenants/${T}/products/MCE2E-B`).set({ price: 218000 }, { merge: true });
-  await call('runTenantJob', owner, { action: 'catalogSyncApply' });
+  await aplicar(owner);
   await drain(); // envía + confirma: succeeded ⇒ vigencia liberada
   const p1 = await productOf('MCE2E-B');
   check('OB-89. el cierre terminal libera la vigencia del producto', p1?.metaSyncStatus === 'synced' && (p1?.metaSyncCurrentJobId ?? null) === null, `status=${p1?.metaSyncStatus} vigente=${p1?.metaSyncCurrentJobId}`);
   // Se fuerza un estado visible incorrecto y se corre un apply SIN cambios: la convergencia
   // (que antes quedaba muerta para siempre) lo corrige.
   await db.doc(`tenants/${T}/products/MCE2E-B`).set({ metaSyncStatus: 'failed', metaSyncError: 'estado viejo' }, { merge: true });
-  await call('runTenantJob', owner, { action: 'catalogSyncApply' });
+  await aplicar(owner);
   const p2 = await productOf('MCE2E-B');
   check('OB-89b. la convergencia vuelve a corregir el estado de un producto sin ciclo activo', p2?.metaSyncStatus === 'synced', `status=${p2?.metaSyncStatus}`);
   await db.doc(`tenants/${T}/products/MCE2E-B`).set({ price: 250000 }, { merge: true });
@@ -881,7 +896,7 @@ const waitHold = async (point) => {
   // confirmación NUEVA del mismo producto llega inválida.
   await limpio();
   await db.doc(`tenants/${T}/products/MCE2E-B`).set({ price: 224000 }, { merge: true });
-  await call('runTenantJob', owner, { action: 'catalogSyncApply' });
+  await aplicar(owner);
   const jobA = (await jobsDeProducto('MCE2E-B'))[0];
   const antes = await productOf('MCE2E-B');
   // Encolado directo de una entrada INVÁLIDA para el mismo producto (simula una validación
@@ -1116,6 +1131,124 @@ let importedId = null;
   const e = entryOf(result?.result, rid);
   check('90. una URL que Meta ya normalizó NO genera un update perpetuo', e?.action === 'unchanged', `action=${e?.action} changed=${JSON.stringify(e?.changedFields ?? [])}`);
   await db.doc(`tenants/${T}/products/${rid}`).delete();
+}
+
+// ═══ PB. META-CATALOG-PREVIEW-BINDING-1: el apply va ATADO al preview aprobado ═══
+// Contrato: apply recibe {previewRunId, planHash}, valida vigencia/pertenencia/estado,
+// REPLANIFICA y solo encola si el plan coincide EXACTAMENTE. Cualquier discrepancia ⇒
+// failed-precondition con el outbox intacto (cero jobs/intents nuevos).
+const intentsCount = async () => (await db.collection(`tenants/${T}/metaCatalogOutboxIntents`).get()).size;
+const applyCon = (p, extra = {}) =>
+  call('runTenantJob', owner, { action: 'catalogSyncApply', args: { previewRunId: p.runId, planHash: p.planHash }, ...extra });
+const previewDe = async (token = owner, data = {}) => (await call('runTenantJob', token, { action: 'catalogSync', ...data })).result?.result;
+
+{
+  // Camino válido + consumo + replay.
+  await limpio();
+  const p = await previewDe();
+  check('PB-91. el preview devuelve planHash (la evidencia del binding)', typeof p?.planHash === 'string' && p.planHash.length >= 16, `hash=${(p?.planHash ?? '').slice(0, 12)}…`);
+  const { result } = await applyCon(p);
+  const r = result?.result;
+  check('PB-91b. apply con evidencia vigente ⇒ queued, atado al preview', r?.status === 'queued' && r?.previewRunId === p.runId, `status=${r?.status} preview=${r?.previewRunId}`);
+  const prevDoc = await runDocOf(T, p.runId);
+  check('PB-91c. el preview quedó consumido (consumedAt + consumedByRunId del apply)', !!prevDoc?.consumedAt && prevDoc?.consumedByRunId === r?.runId);
+  const antes = (await jobsOf()).length;
+  const rep = await applyCon(p);
+  check('PB-92. replay de la misma evidencia ⇒ failed-precondition', rep.err === 'FAILED_PRECONDITION' && /ya se usó/.test(rep.errMsg ?? ''), `err=${rep.err} msg=${rep.errMsg}`);
+  check('PB-92b. y la cola NO creció', (await jobsOf()).length === antes);
+}
+{
+  // Sin evidencia no hay apply (en live; con mode dry_run el gate de mode corta antes).
+  await limpio();
+  const { err, errMsg } = await call('runTenantJob', owner, { action: 'catalogSyncApply' });
+  check('PB-93. apply SIN evidencia en live ⇒ failed-precondition', err === 'FAILED_PRECONDITION' && /previsualiz/i.test(errMsg ?? ''), `err=${err}`);
+  check('PB-93b. cero jobs y cero intents', (await jobsOf()).length === 0 && (await intentsCount()) === 0);
+}
+{
+  // Cambio LOCAL entre preview y apply.
+  await limpio();
+  const p = await previewDe();
+  await db.doc(`tenants/${T}/products/MCE2E-B`).set({ price: 199000 }, { merge: true });
+  const { err } = await applyCon(p);
+  check('PB-94. producto modificado tras el preview ⇒ failed-precondition y cero encolado', err === 'FAILED_PRECONDITION' && (await jobsOf()).length === 0 && (await intentsCount()) === 0, `err=${err}`);
+  const runs = await db.collection(`tenants/${T}/metaCatalogSyncRuns`).where('requestedMode', '==', 'apply').get();
+  const bloqueado = runs.docs.map((d) => d.data()).find((x) => x.reason === 'preview_mismatch' && x.previewRunId === p.runId);
+  check('PB-94b. el bloqueo queda auditado con motivo y AMBAS huellas', !!bloqueado && bloqueado.expectedPlanHash === p.planHash && typeof bloqueado.freshPlanHash === 'string' && bloqueado.freshPlanHash !== p.planHash);
+  await db.doc(`tenants/${T}/products/MCE2E-B`).set({ price: 250000 }, { merge: true });
+}
+{
+  // Cambio REMOTO (Meta) que altera el diff entre preview y apply.
+  await limpio();
+  const p = await previewDe();
+  // OJO: el fake espeja el Graph API — la clave es `retailer_id` (snake_case), no `retailerId`.
+  const items2 = FIXTURE_ITEMS.map((i) => (i.retailer_id === 'MCE2E-B' ? { ...i, price: '₲111.111' } : i));
+  await db.doc(FIXTURE).set({ catalog: { id: CATALOG_ID, name: 'Catálogo E2E' }, items: items2, applyBatchToFixture: true }, { merge: false });
+  const { err } = await applyCon(p);
+  check('PB-95. el catálogo remoto cambió el plan ⇒ failed-precondition y cero encolado', err === 'FAILED_PRECONDITION' && (await jobsOf()).length === 0 && (await intentsCount()) === 0, `err=${err}`);
+}
+{
+  // Cambio REMOTO que NO altera lo que se enviaría (el campo YA difería y el request lleva
+  // el valor LOCAL): el binding corta igual, porque el dueño aprobó contra un remoto
+  // concreto — el snapshot remoto del item afectado participa de la huella. Sin ese
+  // snapshot en la huella, este apply pasaría en silencio.
+  await limpio();
+  const conPrecio = (precio) => FIXTURE_ITEMS.map((i) => (i.retailer_id === 'MCE2E-B' ? { ...i, price: precio } : i));
+  await db.doc(FIXTURE).set({ catalog: { id: CATALOG_ID, name: 'Catálogo E2E' }, items: conPrecio('₲111.111'), applyBatchToFixture: true }, { merge: false });
+  const p = await previewDe();
+  const entradaB = (p?.entries ?? []).find((e) => e.sku === 'MCE2E-B');
+  check('PB-95b(pre). el preview ve a MCE2E-B como update de precio', entradaB?.action === 'update', `action=${entradaB?.action}`);
+  await db.doc(FIXTURE).set({ catalog: { id: CATALOG_ID, name: 'Catálogo E2E' }, items: conPrecio('₲122.222'), applyBatchToFixture: true }, { merge: false });
+  const { err } = await applyCon(p);
+  check('PB-95c. Meta modificado SIN alterar el request ⇒ igual failed-precondition (snapshot remoto en la huella)', err === 'FAILED_PRECONDITION' && (await jobsOf()).length === 0 && (await intentsCount()) === 0, `err=${err}`);
+}
+{
+  // Acción ADICIONAL: aparece un gestionado nuevo entre preview y apply.
+  await limpio();
+  const p = await previewDe();
+  await db.doc(`tenants/${T}/products/MCE2E-PBX`).set(prodDoc('MCE2E-PBX'));
+  const { err } = await applyCon(p);
+  check('PB-96. una acción adicional tras el preview ⇒ failed-precondition y cero encolado', err === 'FAILED_PRECONDITION' && (await jobsOf()).length === 0, `err=${err}`);
+  await db.doc(`tenants/${T}/products/MCE2E-PBX`).delete();
+}
+{
+  // Pertenencia: catálogo cambiado y evidencia de OTRO tenant.
+  await limpio();
+  const p = await previewDe();
+  await setConfig({ ...VALID_CFG, mode: 'live', catalogId: 'CAT-OTRO' });
+  const { err: e1, errMsg: m1 } = await applyCon(p);
+  check('PB-97. el catalogId ya no es el previsualizado ⇒ failed-precondition', e1 === 'FAILED_PRECONDITION' && /configuración del catálogo/.test(m1 ?? ''), `err=${e1}`);
+  await setConfig({ ...VALID_CFG, mode: 'live' });
+  // T2 con config live propia: la evidencia de T no existe bajo T2 (la ruta es del tenant).
+  await db.doc(`tenants/${T2}/config/meta`).set({ catalogSync: { ...VALID_CFG, mode: 'live' } }, { merge: true });
+  const pT2 = await previewDe(ownerBoutique, { tenantId: T2 });
+  check('PB-97b. (pre) T2 puede previsualizar con su propia config', pT2?.status === 'planned', `status=${pT2?.status}`);
+  const { err: e2, errMsg: m2 } = await call('runTenantJob', ownerBoutique, { action: 'catalogSyncApply', tenantId: T2, args: { previewRunId: p.runId, planHash: p.planHash } });
+  check('PB-97c. evidencia de OTRO tenant ⇒ failed-precondition y outbox de T2 intacto', e2 === 'FAILED_PRECONDITION' && /no existe/.test(m2 ?? '') && (await db.collection(`tenants/${T2}/metaCatalogOutboxJobs`).get()).empty, `err=${e2}`);
+  // T2 vuelve a quedar SIN sync configurada (análogo credipower) y sin rastros.
+  await db.doc(`tenants/${T2}/config/meta`).delete();
+  await wipe(`tenants/${T2}/metaCatalogSyncRuns`);
+}
+{
+  // Vigencia: el preview vence a los 10 minutos.
+  await limpio();
+  const p = await previewDe();
+  const viejo = Timestamp.fromMillis(Date.now() - 11 * 60_000);
+  await db.doc(`tenants/${T}/metaCatalogSyncRuns/${p.runId}`).set({ startedAt: viejo, finishedAt: viejo }, { merge: true });
+  const { err, errMsg } = await applyCon(p);
+  check('PB-98. preview vencido (TTL 10 min) ⇒ failed-precondition', err === 'FAILED_PRECONDITION' && /venció/.test(errMsg ?? ''), `err=${err} msg=${errMsg}`);
+  check('PB-98b. cero jobs y cero intents', (await jobsOf()).length === 0 && (await intentsCount()) === 0);
+}
+{
+  // Carrera: dos applies CONCURRENTES con la MISMA evidencia — el consumo transaccional
+  // deja pasar exactamente a uno.
+  await limpio();
+  const p = await previewDe();
+  const [a1, a2] = await Promise.all([applyCon(p), applyCon(p)]);
+  const ganadores = [a1, a2].filter((x) => x.result?.result?.status === 'queued');
+  const perdedores = [a1, a2].filter((x) => x.err === 'FAILED_PRECONDITION');
+  check('PB-99. applies concurrentes con la misma evidencia ⇒ exactamente UNO encola', ganadores.length === 1 && perdedores.length === 1, `ok=${ganadores.length} fp=${perdedores.length}`);
+  const jobs = await jobsOf();
+  check('PB-99b. la cola tiene exactamente lo del apply ganador', jobs.length === (ganadores[0]?.result?.result?.queuedCount ?? -1), `jobs=${jobs.length} queued=${ganadores[0]?.result?.result?.queuedCount}`);
 }
 
 // ═══ Resultado ═══

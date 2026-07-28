@@ -29,7 +29,23 @@ function authorizeTenant(req: CallableRequest<unknown>, requestedTenantId?: stri
 
 // timeoutSeconds: la sync de catálogo (META-CATALOG-LIVE-1) lee Meta paginado con
 // retries + Retry-After y verifica releyendo: el default de 60s puede cortarla a mitad.
-export const runTenantJob = onCall<{ action?: string; tenantId?: string }>(
+/**
+ * META-CATALOG-PREVIEW-BINDING-1: un apply bloqueado por su evidencia de preview responde
+ * `failed-precondition` (contrato del programa), con un mensaje accionable y sin exponer
+ * detalle interno. `mode_not_live` NO entra acá: sigue siendo un resultado normal del panel.
+ */
+const PREVIEW_BLOCK_MESSAGES: Record<string, string> = {
+  preview_required: 'Para enviar cambios primero previsualizá: el envío va atado a esa previsualización.',
+  preview_not_found: 'La previsualización referida no existe para esta empresa. Previsualizá de nuevo.',
+  preview_not_usable: 'La previsualización referida no es utilizable. Previsualizá de nuevo.',
+  preview_mismatch: 'Los datos cambiaron desde la previsualización: el plan ya no es el aprobado. Previsualizá de nuevo.',
+  preview_wrong_catalog: 'La configuración del catálogo cambió desde la previsualización. Previsualizá de nuevo.',
+  preview_actor_mismatch: 'El envío debe hacerlo la misma persona que previsualizó. Previsualizá de nuevo.',
+  preview_expired: 'La previsualización venció. Previsualizá de nuevo y confirmá dentro de los 10 minutos.',
+  preview_consumed: 'Esa previsualización ya se usó. Previsualizá de nuevo para un nuevo envío.',
+};
+
+export const runTenantJob = onCall<{ action?: string; tenantId?: string; args?: { previewRunId?: string; planHash?: string } }>(
   { region: 'us-central1', timeoutSeconds: 300 },
   async (req) => {
     const action = req.data?.action;
@@ -44,7 +60,21 @@ export const runTenantJob = onCall<{ action?: string; tenantId?: string }>(
     try {
       // El actor va a la auditoría del job (quién disparó la acción, con qué rol).
       const actorRole = (req.auth?.token as { role?: string } | undefined)?.role ?? null;
-      const result = await runPanelJob(action, tenantId, { uid: req.auth?.uid ?? null, role: actorRole });
+      const args = req.data?.args && typeof req.data.args === 'object' ? (req.data.args as Record<string, unknown>) : undefined;
+      const result = await runPanelJob(action, tenantId, { uid: req.auth?.uid ?? null, role: actorRole }, args);
+      const previewBlock =
+        action === 'catalogSyncApply' &&
+        result &&
+        typeof result === 'object' &&
+        (result as { status?: string }).status === 'apply_blocked' &&
+        typeof (result as { reason?: string }).reason === 'string' &&
+        (result as { reason: string }).reason.startsWith('preview')
+          ? (result as { reason: string }).reason
+          : null;
+      if (previewBlock) {
+        // El run doc ya registró el bloqueo (auditable); al cliente le llega el contrato.
+        throw new HttpsError('failed-precondition', PREVIEW_BLOCK_MESSAGES[previewBlock] ?? PREVIEW_BLOCK_MESSAGES['preview_required']!, { reason: previewBlock });
+      }
       await meterUsage(tenantId, jobReq.meter).catch(() => { /* metering no crítico */ });
       logger.info('Panel job ejecutado', { tenantId, action });
       return { ok: true, action, tenantId, result };

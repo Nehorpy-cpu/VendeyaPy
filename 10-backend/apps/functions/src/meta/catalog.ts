@@ -53,11 +53,18 @@ import {
   type CreateBlocker,
   type UpdateBlocker,
 } from './catalogOutbound.js';
-import { verifyJobOutcome } from './catalogOutbox.js';
+import { stableHash, verifyJobOutcome } from './catalogOutbox.js';
 import { enqueueCatalogPlan } from './catalogOutboxWorker.js';
 
 const MAX_STORED_ENTRIES = 500; // techo del run doc (y de la respuesta al panel)
 const STATE_COMMIT_CHUNK = 200; // docs por commit al persistir meta* (lejos de los techos de Firestore)
+/**
+ * Vigencia de un preview (META-CATALOG-PREVIEW-BINDING-1): tiempo máximo entre la
+ * previsualización aprobada y el apply que la referencia. Corto a propósito — el binding
+ * garantiza que lo encolado sea EXACTAMENTE lo previsualizado, pero cuanto más vieja la
+ * foto, más probable que el replan difiera y el dueño tenga que previsualizar de nuevo.
+ */
+export const PREVIEW_TTL_MS = 10 * 60_000;
 
 // ---------------------------------------------------------------------------
 // Payload público (PURO, testeable): lo ÚNICO que puede viajar a Meta.
@@ -156,6 +163,30 @@ export interface CatalogPlanEntry {
   request?: CatalogBatchRequest;
   remoteItemId?: string | null;
   note?: string;
+  /**
+   * Snapshot del ITEM REMOTO tal como lo vio ESTA corrida — exactamente la superficie que
+   * compara `diffPublicFields`. Participa de la huella del plan
+   * (META-CATALOG-PREVIEW-BINDING-1): un cambio en Meta sobre un artículo afectado invalida
+   * el preview AUNQUE no altere la acción, los `changedFields` ni el request (p. ej. alguien
+   * tocó en Commerce Manager un campo que YA difería). `null` si la entrada no matcheó item.
+   */
+  remoteSnapshot?: CatalogRemoteSnapshot | null;
+}
+
+/**
+ * Superficie remota para la huella del preview (cruda, tal como la devolvió el Graph API):
+ * lo que compara el diff + `remoteItemId` + `currency` (estrictez extra, ver `snapshotRemoto`).
+ */
+export interface CatalogRemoteSnapshot {
+  remoteItemId: string;
+  name: string;
+  description: string;
+  availability: string;
+  price: string;
+  currency: string;
+  imageUrl: string;
+  url: string;
+  brand: string;
 }
 
 export interface CatalogSyncPlan {
@@ -241,6 +272,27 @@ function writableProjection(view: Record<string, unknown>): Record<string, unkno
   return out;
 }
 
+/**
+ * Snapshot crudo del item remoto para la huella del preview: la superficie que compara
+ * `diffPublicFields` MÁS `remoteItemId` (la identidad sobre la que se aprueba el UPDATE) y
+ * `currency` (el diff la parsea desde el string `price`; acá va aparte, a propósito). Los
+ * extras solo agregan ESTRICTEZ — pueden producir un `preview_mismatch` de más (se vuelve a
+ * previsualizar), jamás una aceptación indebida.
+ */
+function snapshotRemoto(r: MetaRemoteCatalogItem): CatalogRemoteSnapshot {
+  return {
+    remoteItemId: r.id,
+    name: r.name,
+    description: r.description,
+    availability: r.availability,
+    price: r.price,
+    currency: r.currency ?? '',
+    imageUrl: r.imageUrl,
+    url: r.url ?? '',
+    brand: r.brand,
+  };
+}
+
 function diffPublicFields(payload: Record<string, unknown>, remote: MetaRemoteCatalogItem): string[] {
   const changed: string[] = [];
   if (String(payload.name) !== remote.name) changed.push('name');
@@ -309,6 +361,7 @@ export function planCatalogSync(products: Product[], remoteItems: MetaRemoteCata
         action: 'blocked',
         blockedReasons: ['serialization_failed'],
         note: detalle,
+        remoteSnapshot: null,
       });
     }
   }
@@ -319,7 +372,9 @@ export function planCatalogSync(products: Product[], remoteItems: MetaRemoteCata
     const mapped = !!(p.metaRetailerId ?? '').trim();
     const remote = sku ? remoteByRetailerId.get(sku) : undefined;
     const name = (p.name ?? '').trim();
-    const base = { productId: p.id, sku, internalSku, mapped, productName: name };
+    // `remoteSnapshot` viaja en TODAS las entradas de este producto: la huella del preview
+    // debe cambiar si el item remoto afectado cambia, sea cual sea la acción resultante.
+    const base = { productId: p.id, sku, internalSku, mapped, productName: name, remoteSnapshot: remote ? snapshotRemoto(remote) : null };
 
     // ARCHIVED: sin rastro remoto no hay nada que hacer; si un producto VIVO reclama la
     // misma identidad, el item remoto le pertenece a ese reemplazo (el archivado se ignora).
@@ -456,6 +511,21 @@ export interface CatalogSyncActor {
   role?: string | null;
 }
 
+/**
+ * META-CATALOG-PREVIEW-BINDING-1: motivos por los que un apply queda bloqueado por su
+ * evidencia de preview. TODOS terminan en `failed-precondition` en el callable y con el
+ * outbox intacto (cero jobs/intents nuevos).
+ */
+export type PreviewBlockReason =
+  | 'preview_required' // apply sin evidencia {previewRunId, planHash}
+  | 'preview_not_found' // el runId no existe EN ESTE TENANT (cubre evidencia de otro tenant)
+  | 'preview_not_usable' // no es un dry_run 'planned' con planHash (p. ej. un run de error)
+  | 'preview_mismatch' // el hash provisto ≠ almacenado, o el replan ya no coincide
+  | 'preview_wrong_catalog' // la config apunta a otro catalogId que el previsualizado
+  | 'preview_actor_mismatch' // quien aplica no es quien previsualizó
+  | 'preview_expired' // pasó PREVIEW_TTL_MS desde que terminó el preview
+  | 'preview_consumed'; // ya se usó (replay o carrera de applies concurrentes)
+
 export interface CatalogSyncRunResult {
   runId: string;
   requestedMode: 'dry_run' | 'apply';
@@ -465,7 +535,7 @@ export interface CatalogSyncRunResult {
    */
   status: 'disabled' | 'apply_blocked' | 'error' | 'planned' | 'queued' | 'partial_failure';
   configMode: CatalogSyncMode;
-  reason?: 'mode_not_live' | 'missing_token' | 'catalog_unreachable' | 'batch_failed' | 'state_persist_failed';
+  reason?: 'mode_not_live' | 'missing_token' | 'catalog_unreachable' | 'batch_failed' | 'state_persist_failed' | PreviewBlockReason;
   /** Detalle SANEADO (jamás token ni datos internos). */
   errorDetail?: string;
   catalogId?: string;
@@ -484,9 +554,104 @@ export interface CatalogSyncRunResult {
   awaitingReviewCount?: number;
   /** Productos cuyo request no cumple el contrato (quedan fuera, sin frenar a los demás). */
   blockedCount?: number;
+  /**
+   * Huella determinística del plan (dry_run). Es la evidencia que un apply posterior debe
+   * presentar junto con el runId: sin ella no hay forma de encolar nada.
+   */
+  planHash?: string;
+  /** En un apply: qué preview lo autorizó (trazabilidad del binding). */
+  previewRunId?: string;
 }
 
 const newRunId = () => `mcs_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+
+// ---------------------------------------------------------------------------
+// META-CATALOG-PREVIEW-BINDING-1 — huella del plan y validación de la evidencia.
+// ---------------------------------------------------------------------------
+
+/**
+ * Huella determinística de un plan: tenant + catálogo + TODAS las entradas (también las
+ * `unchanged`/`blocked` — un bloqueo nuevo o un unchanged que aparece también es un plan
+ * DISTINTO) con su request congelado Y el snapshot remoto del item afectado. Dos corridas
+ * con el mismo estado local y remoto producen la misma huella; cualquier cambio que altere
+ * el plan — o el item remoto sobre el que se aprobó, aunque el request no cambie — la cambia.
+ *
+ * NO incluye `remoteOnly`: son candidatos informativos sin acción — un alta externa en el
+ * catálogo no invalida un plan que no la toca.
+ */
+export function planFingerprint(tenantId: string, catalogId: string, plan: CatalogSyncPlan): string {
+  const entries = plan.entries
+    .map((e) => ({
+      productId: e.productId,
+      sku: e.sku,
+      action: e.action,
+      remoteItemId: e.remoteItemId ?? null,
+      changedFields: e.changedFields ? [...e.changedFields].sort() : null,
+      blockedReasons: e.blockedReasons ? [...e.blockedReasons].sort() : null,
+      request: e.request ?? null,
+      // Snapshot remoto del item afectado: "Meta modificado" invalida el preview aunque el
+      // request a enviar no cambie (el dueño aprueba contra un remoto concreto).
+      remoteSnapshot: e.remoteSnapshot ?? null,
+    }))
+    // El orden del plan es determinístico, pero la huella no debe depender de él.
+    .sort((a, b) => (a.productId < b.productId ? -1 : a.productId > b.productId ? 1 : 0));
+  return stableHash({ v: 1, tenantId, catalogId, entries });
+}
+
+/** Evidencia que el apply debe presentar (viene del resultado del dry_run). */
+export interface PreviewEvidence {
+  runId: string;
+  planHash: string;
+}
+
+/** Formatos estrictos: el runId viaja a una ruta de doc y el hash es hex de stableHash. */
+const PREVIEW_RUN_ID_RE = /^mcs_[a-z0-9_]{1,60}$/;
+const PLAN_HASH_RE = /^[a-f0-9]{16,128}$/;
+
+export function normalizePreviewEvidence(raw: unknown): PreviewEvidence | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const r = raw as { runId?: unknown; planHash?: unknown };
+  const runId = typeof r.runId === 'string' ? r.runId.trim() : '';
+  const planHash = typeof r.planHash === 'string' ? r.planHash.trim().toLowerCase() : '';
+  if (!PREVIEW_RUN_ID_RE.test(runId) || !PLAN_HASH_RE.test(planHash)) return null;
+  return { runId, planHash };
+}
+
+/** Lo que el validador necesita del doc del preview (subset del run doc persistido). */
+export interface PreviewDocData {
+  requestedMode?: string;
+  status?: string;
+  planHash?: string;
+  catalogId?: string;
+  actorUid?: string | null;
+  finishedAt?: Timestamp | null;
+  startedAt?: Timestamp | null;
+  consumedAt?: Timestamp | null;
+}
+
+/**
+ * Validación PURA de la evidencia contra el doc del preview. Se corre dos veces: antes de
+ * tocar Meta (fail-fast barato) y DE NUEVO dentro de la transacción de consumo (el estado
+ * pudo cambiar mientras se releía el catálogo). `null` = utilizable.
+ */
+export function evaluatePreviewBinding(
+  doc: PreviewDocData | null,
+  ctx: { evidence: PreviewEvidence; catalogId: string; actorUid: string | null; now: Timestamp },
+): PreviewBlockReason | null {
+  if (!doc) return 'preview_not_found';
+  if (doc.requestedMode !== 'dry_run' || doc.status !== 'planned' || typeof doc.planHash !== 'string' || !doc.planHash) {
+    return 'preview_not_usable';
+  }
+  if (doc.planHash !== ctx.evidence.planHash) return 'preview_mismatch';
+  if ((doc.catalogId ?? '') !== ctx.catalogId) return 'preview_wrong_catalog';
+  // Ligado al actor: aplica quien previsualizó. Sin uid de ambos lados no hay binding posible.
+  if (!ctx.actorUid || (doc.actorUid ?? null) !== ctx.actorUid) return 'preview_actor_mismatch';
+  if (doc.consumedAt) return 'preview_consumed';
+  const ancla = doc.finishedAt ?? doc.startedAt;
+  if (!ancla) return 'preview_not_usable';
+  if (ctx.now.toMillis() - ancla.toMillis() > PREVIEW_TTL_MS) return 'preview_expired';
+  return null;
+}
 
 /** Recorte del plan para persistir/devolver: sin payloads (auditables por producto). */
 function slimEntries(entries: CatalogPlanEntry[]): NonNullable<CatalogSyncRunResult['entries']> {
@@ -547,9 +712,16 @@ async function commitStateOps(tenantId: string, runId: string, ops: Array<{ path
   return true;
 }
 
+/** Error interno del consumo del preview: transporta el motivo a través de la transacción. */
+class PreviewBindingError extends Error {
+  constructor(readonly blockReason: PreviewBlockReason) {
+    super(`preview binding: ${blockReason}`);
+  }
+}
+
 export async function runCatalogSync(
   tenantId: string,
-  opts: { mode: 'dry_run' | 'apply'; actor?: CatalogSyncActor },
+  opts: { mode: 'dry_run' | 'apply'; actor?: CatalogSyncActor; preview?: unknown },
 ): Promise<CatalogSyncRunResult> {
   const runId = newRunId();
   const startedAt = Timestamp.now();
@@ -571,6 +743,39 @@ export async function runCatalogSync(
     await writeRunDoc(tenantId, runId, { status: res.status, requestedMode: opts.mode, configMode: cfg.mode, reason: res.reason, actorUid: actor?.uid ?? null, startedAt, finishedAt: Timestamp.now() });
     await auditRun(tenantId, runId, res, actor);
     return res;
+  }
+
+  // 2b) META-CATALOG-PREVIEW-BINDING-1: un apply SOLO corre atado a un preview aprobado.
+  //     La evidencia se valida ACÁ (antes de tocar Meta: fail-fast barato) y se re-valida
+  //     dentro de la transacción de consumo, que es la única autoridad anti-replay.
+  const applyBloqueadoPorPreview = async (reason: PreviewBlockReason, extra?: Record<string, unknown>): Promise<CatalogSyncRunResult> => {
+    const res: CatalogSyncRunResult = { ...base, status: 'apply_blocked', reason };
+    await writeRunDoc(tenantId, runId, {
+      status: res.status,
+      requestedMode: opts.mode,
+      configMode: cfg.mode,
+      reason,
+      ...(extra ?? {}),
+      actorUid: actor?.uid ?? null,
+      startedAt,
+      finishedAt: Timestamp.now(),
+    });
+    await auditRun(tenantId, runId, res, actor);
+    return res;
+  };
+  let evidence: PreviewEvidence | null = null;
+  if (opts.mode === 'apply') {
+    evidence = normalizePreviewEvidence(opts.preview);
+    if (!evidence) return applyBloqueadoPorPreview('preview_required');
+    // La ruta es del MISMO tenant: evidencia de otro tenant simplemente no existe acá.
+    const prevSnap = await db().doc(paths.metaCatalogSyncRun(tenantId, evidence.runId)).get();
+    const bloqueo = evaluatePreviewBinding(prevSnap.exists ? (prevSnap.data() as PreviewDocData) : null, {
+      evidence,
+      catalogId: cfg.catalogId,
+      actorUid: actor?.uid ?? null,
+      now: Timestamp.now(),
+    });
+    if (bloqueo) return applyBloqueadoPorPreview(bloqueo, { previewRunId: evidence.runId });
   }
 
   // 3) Cliente + lecturas remotas (read-only hasta acá, siempre).
@@ -608,6 +813,8 @@ export async function runCatalogSync(
   const snap = await db().collection(paths.products(tenantId)).get();
   const products = snap.docs.map((d) => ({ ...(d.data() as Product), id: d.id }));
   const plan = planCatalogSync(products, remoteItems);
+  // Huella del plan COMPLETO (pre-truncado): la evidencia que un apply futuro debe presentar.
+  const planHash = planFingerprint(tenantId, cfg.catalogId, plan);
 
   const planned: CatalogSyncRunResult = {
     ...base,
@@ -618,6 +825,7 @@ export async function runCatalogSync(
     excludedNotManaged: plan.excludedNotManaged,
     // El panel necesita la LISTA para ofrecer la importación (las Rules no exponen los runs).
     remoteOnly: plan.remoteOnly.slice(0, MAX_STORED_ENTRIES),
+    planHash,
   };
   await writeRunDoc(tenantId, runId, {
     status: 'planned',
@@ -629,6 +837,7 @@ export async function runCatalogSync(
     excludedNotManaged: plan.excludedNotManaged,
     remoteOnly: plan.remoteOnly.slice(0, MAX_STORED_ENTRIES),
     entries: planned.entries,
+    planHash,
     actorUid: actor?.uid ?? null,
     startedAt,
     finishedAt: Timestamp.now(),
@@ -638,6 +847,43 @@ export async function runCatalogSync(
   if (opts.mode === 'dry_run') {
     await auditRun(tenantId, runId, planned, actor);
     return planned;
+  }
+
+  // 5b) BINDING EXACTO: el replan recién hecho debe coincidir con lo previsualizado. Un
+  //     producto editado, un cambio remoto que altere el diff, una acción de más o de menos
+  //     — cualquiera cambia la huella y acá se corta SIN encolar nada.
+  if (planHash !== evidence!.planHash) {
+    return applyBloqueadoPorPreview('preview_mismatch', {
+      previewRunId: evidence!.runId,
+      expectedPlanHash: evidence!.planHash,
+      freshPlanHash: planHash,
+      freshSummary: plan.summary,
+      freshEntries: slimEntries(plan.entries),
+    });
+  }
+
+  // 5c) CONSUMO transaccional del preview: única autoridad anti-replay y anti-carrera. Se
+  //     re-valida TODO adentro de la tx (pudo vencer, consumirse o cambiar mientras se releía
+  //     el catálogo). Consumir ANTES de encolar: si el encolado muere a mitad, el preview ya
+  //     no es reutilizable — lo correcto es previsualizar de nuevo, jamás repetir a ciegas.
+  const previewRef = db().doc(paths.metaCatalogSyncRun(tenantId, evidence!.runId));
+  try {
+    await db().runTransaction(async (tx) => {
+      const fresh = await tx.get(previewRef);
+      const bloqueo = evaluatePreviewBinding(fresh.exists ? (fresh.data() as PreviewDocData) : null, {
+        evidence: evidence!,
+        catalogId: cfg.catalogId,
+        actorUid: actor?.uid ?? null,
+        now: Timestamp.now(),
+      });
+      if (bloqueo) throw new PreviewBindingError(bloqueo);
+      tx.update(previewRef, { consumedAt: Timestamp.now(), consumedByRunId: runId, consumedByUid: actor?.uid ?? null });
+    });
+  } catch (e) {
+    if (e instanceof PreviewBindingError) {
+      return applyBloqueadoPorPreview(e.blockReason, { previewRunId: evidence!.runId });
+    }
+    throw e;
   }
 
 
@@ -712,6 +958,7 @@ export async function runCatalogSync(
     deduplicatedCount: encolado.deduplicated,
     awaitingReviewCount: encolado.awaitingReview,
     blockedCount: encolado.blocked,
+    previewRunId: evidence!.runId,
     ...(estadoOk ? {} : { reason: 'state_persist_failed' as const }),
   };
   await writeRunDoc(tenantId, runId, {
@@ -720,6 +967,7 @@ export async function runCatalogSync(
     deduplicatedCount: encolado.deduplicated,
     awaitingReviewCount: encolado.awaitingReview,
     blockedCount: encolado.blocked,
+    previewRunId: evidence!.runId,
     // `appliedCount` y `lastSuccessfulSyncAt` NO se escriben acá: encolar no es aplicar. Los
     // fija la confirmación, cuando Meta devuelve evidencia.
     finishedAt: Timestamp.now(),

@@ -169,6 +169,13 @@ export interface CatalogSyncRun {
   /** Productos cuyo cambio no cumple el contrato de Meta. */
   blockedCount?: number;
   failedCount?: number;
+  /**
+   * Huella del plan previsualizado (META-CATALOG-PREVIEW-BINDING-1). Es la evidencia que el
+   * envío real debe presentar: sin ella el backend rechaza con failed-precondition.
+   */
+  planHash?: string;
+  /** En un envío: qué previsualización lo autorizó. */
+  previewRunId?: string;
 }
 
 // --- Reconciliación con un catálogo de Meta preexistente ---------------------
@@ -369,10 +376,19 @@ export async function importMetaItems(
 /**
  * Corre la sync de catálogo. Por defecto DRY-RUN (plan, cero escrituras en Meta);
  * `apply` solo tiene efecto si la config del tenant está en mode 'live' (el backend
- * lo rechaza fail-closed si no).
+ * lo rechaza fail-closed si no) y EXIGE la evidencia de la previsualización aprobada
+ * ({runId, planHash} del dry-run): el backend replanifica y solo encola si el plan
+ * coincide EXACTAMENTE; si algo cambió responde failed-precondition.
  */
-export async function syncCatalogToMeta(tenantId: string, opts?: { apply?: boolean }): Promise<CatalogSyncRun> {
+export async function syncCatalogToMeta(
+  tenantId: string,
+  opts?: { apply?: boolean; preview?: { runId: string; planHash: string } },
+): Promise<CatalogSyncRun> {
   const call = httpsCallable(firebaseFunctions(), 'runTenantJob');
-  const res = await call({ action: opts?.apply ? 'catalogSyncApply' : 'catalogSync', tenantId });
+  const res = await call({
+    action: opts?.apply ? 'catalogSyncApply' : 'catalogSync',
+    tenantId,
+    ...(opts?.apply && opts.preview ? { args: { previewRunId: opts.preview.runId, planHash: opts.preview.planHash } } : {}),
+  });
   return (res.data as { result: CatalogSyncRun }).result;
 }
