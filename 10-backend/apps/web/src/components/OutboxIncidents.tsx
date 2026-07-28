@@ -77,7 +77,8 @@ export function OutboxIncidents({ tenantId }: { tenantId: string }) {
     },
   });
 
-  const incidencias = incidentsQ.data ?? [];
+  const incidencias = incidentsQ.data?.incidents ?? [];
+  const hayMas = incidentsQ.data?.truncated === true;
   // Nada que revisar: no se ocupa espacio con una tarjeta vacía.
   if (!incidentsQ.isLoading && !incidentsQ.isError && incidencias.length === 0) return null;
 
@@ -100,6 +101,12 @@ export function OutboxIncidents({ tenantId }: { tenantId: string }) {
         <p className="mt-1 text-sm text-ink-600">
           {incidencias.length === 1 ? 'Un cambio quedó' : `${incidencias.length} cambios quedaron`} sin confirmar.
           Al revisarlos consultamos Meta primero: nunca reenviamos algo sin saber si ya llegó.
+        </p>
+      )}
+
+      {hayMas && (
+        <p role="status" className="mt-2 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-800">
+          Hay más envíos pendientes que los que se muestran acá. A medida que resuelvas estos van a ir apareciendo los demás.
         </p>
       )}
 

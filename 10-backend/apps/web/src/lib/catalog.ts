@@ -315,10 +315,17 @@ export interface OutboxIncident {
   error: string;
 }
 
-export async function listOutboxIncidents(tenantId: string): Promise<OutboxIncident[]> {
+export interface OutboxIncidentList {
+  incidents: OutboxIncident[];
+  /** true si hay MÁS incidencias abiertas que las devueltas: el panel no puede ocultarlo. */
+  truncated: boolean;
+}
+
+export async function listOutboxIncidents(tenantId: string): Promise<OutboxIncidentList> {
   const call = httpsCallable(firebaseFunctions(), 'metaCatalogOutboxIncidents');
   const res = await call({ tenantId });
-  return ((res.data as { incidents?: OutboxIncident[] }).incidents ?? []);
+  const data = res.data as { incidents?: OutboxIncident[]; truncated?: boolean };
+  return { incidents: data.incidents ?? [], truncated: data.truncated === true };
 }
 
 export interface ReconcileOutcome {

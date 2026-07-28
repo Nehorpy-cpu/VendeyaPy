@@ -7,10 +7,12 @@
  *   2. DRENAJE    reclama, revalida y envía UN lote.
  *   3. CONFIRMACIÓN releé el catálogo y declara `succeeded` solo con evidencia.
  *
- * Cadencia: cada 5 minutos. El límite de Meta es de 100 llamadas por hora y por catálogo, y
- * cada corrida gasta como mucho 3 (submit + estado del batch + relectura) — queda margen de
- * sobra incluso con varios tenants. Un tenant sin cola no gasta ninguna: el gate de config y
- * la query de `queued` cortan antes de tocar la red.
+ * Cadencia: cada 5 minutos. El consumo por corrida y por tenant está acotado por diseño —un
+ * submit por drenaje, la relectura del catálogo (una llamada por página) y hasta
+ * `MAX_BATCH_STATUS_PER_RUN` consultas de estado, cada una con sus reintentos internos de
+ * GET—; el peor caso real lo reporta `reconcile.metaCalls`. No se asume ningún límite
+ * publicado por Meta. Un tenant sin cola no gasta ninguna llamada: el gate de config y la
+ * query de `queued` cortan antes de tocar la red.
  *
  * Fail-closed por tenant: sin config, con `mode` distinto de `live` o sin el plan que habilita
  * marketing, la corrida no escribe nada. Un error en un tenant JAMÁS frena a los demás.
@@ -47,7 +49,9 @@ export async function runMetaCatalogOutboxMaintenance(): Promise<void> {
 }
 
 export const metaCatalogOutboxMaintenance = onSchedule(
-  { schedule: '*/5 * * * *', timeZone: 'America/Asuncion', region: 'us-central1' },
+  // timeout explícito por debajo de la cadencia: una corrida colgada no puede solaparse con
+  // la siguiente indefinidamente (el claim/lease ya protege, pero el techo corta el gasto).
+  { schedule: '*/5 * * * *', timeZone: 'America/Asuncion', region: 'us-central1', timeoutSeconds: 240 },
   async () => {
     await runMetaCatalogOutboxMaintenance();
   },

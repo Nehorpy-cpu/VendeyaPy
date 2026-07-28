@@ -67,6 +67,22 @@ export function isTerminalOutboxStatus(s: MetaCatalogOutboxStatus): boolean {
   return TERMINALES.includes(s);
 }
 
+/** Estados que necesitan una decisión humana. El resto lo resuelve el mantenimiento solo. */
+const ATENCION: readonly MetaCatalogOutboxStatus[] = ['needs_action', 'needs_reconciliation', 'failed', 'stale'];
+
+/**
+ * ¿Este estado deja al job en la bandeja de incidencias del dueño?
+ *
+ * Es un campo PERSISTIDO y consultable (`attentionRequired`), no un filtro en memoria: la
+ * bandeja se consulta con `where('attentionRequired','==',true)`. Filtrar después de un
+ * `limit()` hacía que los registros ya revisados ocuparan el cupo de la consulta y taparan
+ * incidencias abiertas. TODA escritura de `status` debe recalcularlo con este helper (y la
+ * marca de revisado lo apaga sin tocar el estado).
+ */
+export function attentionRequiredFor(s: MetaCatalogOutboxStatus): boolean {
+  return ATENCION.includes(s);
+}
+
 /**
  * Puntero de una INTENCIÓN. Vive en `metaCatalogOutboxIntents/{intentKey}` y es lo único que
  * se reescribe: dice cuál es el job ACTIVO (si hay) y cuántos ciclos se ejecutaron. Los jobs
@@ -114,6 +130,16 @@ export interface MetaCatalogOutboxJob {
   reason: OutboxReason | null;
   /** Detalle SANEADO del error. Jamás token ni datos internos. */
   error: string;
+  /**
+   * true ⇔ el estado actual necesita una decisión humana y NADIE lo marcó como revisado.
+   * Derivado de `status` en cada transición (`attentionRequiredFor`); es el campo que consulta
+   * la bandeja de incidencias.
+   */
+  attentionRequired: boolean;
+  /** Marca de "ya lo vi": apaga `attentionRequired` sin tocar el resultado del job. */
+  reviewedAt: Timestamp | null;
+  /** Motivo que dejó quien lo marcó como revisado. */
+  reviewedReason: string | null;
   createdAt: Timestamp;
   updatedAt: Timestamp;
   submittedAt: Timestamp | null;
@@ -252,9 +278,13 @@ export function verifyManagedField(field: string, sent: unknown, remote: MetaRem
     const monedaLocal = esperado.match(/[A-Z]{3}\s*$/)?.[0]?.trim();
     const monedaRemota = (remote.currency ?? '').trim();
     if (monedaLocal && monedaRemota && monedaLocal !== monedaRemota) return 'confirmed_different';
-    // Meta formatea el precio ("₲250.000", "PYG250,000"): la comparación es por dígitos.
+    // Meta formatea el precio ("₲250.000", "PYG250,000.00"): la comparación es por dígitos y
+    // con LA MISMA regla de decimales que usa el planificador (`priceEquals`): PYG no lleva
+    // decimales, así que un sufijo ",00"/".00" del formateo se descarta. Con dos reglas
+    // distintas, un precio correcto planificaba "sin cambios" pero verificaba "distinto" — un
+    // artículo imposible de confirmar.
     const a = soloDigitos(esperado);
-    const b = soloDigitos(obtenido);
+    const b = soloDigitos(obtenido.replace(/[.,]00(?!\d)/, ''));
     if (!a || !b) return 'unverifiable';
     return a === b ? 'confirmed_equal' : 'confirmed_different';
   }

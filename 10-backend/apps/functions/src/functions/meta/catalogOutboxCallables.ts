@@ -1,7 +1,7 @@
 /**
  * functions/meta/catalogOutboxCallables.ts — Recuperación HUMANA del outbox de catálogo
  * =====================================================================================
- * (META-CATALOG-OUTBOX-HARDEN-1) El outbox manda a `needs_action` lo que no puede resolver
+ * (META-CATALOG-OUTBOX-HARDEN-1/2) El outbox manda a `needs_action` lo que no puede resolver
  * solo: un envío cuya suerte no se pudo determinar, un artículo que Meta dejó distinto, un
  * catálogo que cambió. Sin una salida humana, esos jobs quedaban atrapados — la colección está
  * cerrada al cliente por Rules (y tiene que seguir así: un job es una orden de escritura con su
@@ -16,6 +16,11 @@
  * NUNCA se ofrece "reenviar": reenviar a ciegas es exactamente lo que este outbox existe para
  * evitar. La única forma de que algo vuelva a salir es que la evidencia muestre que Meta no lo
  * tiene, y aun así se ejecuta como un CICLO NUEVO (historia intacta).
+ *
+ * TODA escritura de estado es un CAS: se relee el job DENTRO de la transacción y la
+ * precondición decide. Perder la carrera devuelve `nothing_to_do` con el estado vigente —
+ * nunca se afirma una transición que hizo otro, nunca se resucita un descartado, y un descarte
+ * jamás pisa un cierre `succeeded`/`failed` ajeno (se preserva y solo se marca revisado).
  */
 import { onCall, HttpsError, type CallableRequest } from 'firebase-functions/v2/https';
 import { Timestamp } from 'firebase-admin/firestore';
@@ -27,22 +32,21 @@ import { assertFeatureEnabled } from '../../entitlements/entitlements.js';
 import { resolveOwnerAuth } from '../../panel/auth.js';
 import { normalizeCatalogSyncConfig } from '../../meta/catalogSyncConfig.js';
 import { getMetaCatalogClientForTenant, MetaCatalogApiError, type MetaRemoteCatalogItem } from '../../meta/catalogClient.js';
+import { catalogHold } from '../../meta/catalogTestHooks.js';
+import { cerrarTerminalConLog } from '../../meta/catalogOutboxWorker.js';
 import {
+  attentionRequiredFor,
   isTerminalOutboxStatus,
   outboxJobId,
   verifyJobOutcome,
   type MetaCatalogOutboxIntent,
   type MetaCatalogOutboxJob,
-  type MetaCatalogOutboxStatus,
 } from '../../meta/catalogOutbox.js';
 
 const REGION = 'us-central1';
 const MAX_INCIDENTS = 100;
 /** Igual que la ventana de gracia del mantenimiento: `items_batch` es asíncrono. */
 const GRACIA_MS = 60_000;
-
-/** Estados que requieren una decisión humana. El resto lo resuelve el mantenimiento solo. */
-const REQUIEREN_ATENCION: MetaCatalogOutboxStatus[] = ['needs_action', 'needs_reconciliation', 'failed', 'stale'];
 
 function authorizeOwner(req: CallableRequest<unknown>, requestedTenantId?: string): string {
   if (!req.auth) throw new HttpsError('unauthenticated', 'Iniciá sesión para continuar.');
@@ -83,6 +87,9 @@ function incidentOf(job: MetaCatalogOutboxJob, producto: Product | null) {
 async function jobDeTenant(tenantId: string, jobId: string): Promise<MetaCatalogOutboxJob> {
   const id = String(jobId ?? '').trim();
   if (!id) throw new HttpsError('invalid-argument', 'Falta el identificador del envío.');
+  // Los ids de job son `mco_<hex>_c<n>`: cualquier otra cosa (por ejemplo un '/') rompería el
+  // path del documento con un error interno en vez de un rechazo limpio.
+  if (!/^[A-Za-z0-9_-]{1,200}$/.test(id)) throw new HttpsError('invalid-argument', 'El identificador del envío no es válido.');
   const snap = await db().doc(paths.metaCatalogOutboxJob(tenantId, id)).get();
   const job = snap.exists ? (snap.data() as MetaCatalogOutboxJob) : null;
   // AISLAMIENTO: la ruta ya es del tenant, pero el campo se verifica igual — un job con
@@ -99,19 +106,22 @@ export const metaCatalogOutboxIncidents = onCall<{ tenantId?: string }>(
   { region: REGION },
   async (req) => {
     const tenantId = authorizeOwner(req, req.data?.tenantId);
+    // La bandeja consulta un campo PERSISTIDO (`attentionRequired`), no un filtro en memoria:
+    // filtrar después de un `limit()` dejaba que los registros ya revisados ocuparan el cupo
+    // de la consulta y taparan incidencias abiertas. `limit(MAX+1)` permite calcular
+    // `truncated` con honestidad: sabemos que hay más, no adivinamos.
     const snap = await db()
       .collection(paths.metaCatalogOutboxJobs(tenantId))
-      .where('status', 'in', REQUIEREN_ATENCION)
-      .limit(MAX_INCIDENTS)
+      .where('attentionRequired', '==', true)
+      .orderBy('updatedAt', 'desc')
+      .limit(MAX_INCIDENTS + 1)
       .get();
 
-    // Lo ya revisado no vuelve a ocupar la lista: si no, los cerrados se acumulan y tapan las
-    // incidencias nuevas.
     const jobs = snap.docs
-      .map((d) => d.data() as MetaCatalogOutboxJob & { reviewedAt?: unknown })
-      .filter((j) => j.tenantId === tenantId && !j.reviewedAt);
-    // Truncar en silencio haría que el panel afirmara un número que no es el real.
-    const truncated = snap.size >= MAX_INCIDENTS;
+      .slice(0, MAX_INCIDENTS)
+      .map((d) => d.data() as MetaCatalogOutboxJob)
+      .filter((j) => j.tenantId === tenantId);
+    const truncated = snap.size > MAX_INCIDENTS;
     const productos = new Map<string, Product>();
     for (const j of jobs) {
       if (productos.has(j.productId)) continue;
@@ -183,25 +193,49 @@ export const metaCatalogOutboxReconcile = onCall<{ tenantId?: string; jobId?: st
     const verif = verifyJobOutcome(job.intendedPatch, remoto);
     const a = actorOf(req);
     const now = Timestamp.now();
-    const ref = db().doc(paths.metaCatalogOutboxJob(tenantId, job.id));
+
+    // Punto de pausa SOLO-EMULADOR: acá es donde una acción concurrente (un descarte, otra
+    // reconciliación, el mantenimiento) puede ganar la carrera. Los tests lo explotan.
+    await catalogHold(tenantId, 'manual_pre_cas');
+
+    /**
+     * Si el CAS pierde —el job cambió entre nuestra lectura y la transacción—, se relee el
+     * resultado VIGENTE y se responde `nothing_to_do`: esta llamada NO hizo ninguna
+     * transición y no puede afirmar lo contrario. El estado que quedó lo escribió quien ganó.
+     */
+    const perderCarrera = async () => {
+      const vigente = (await db().doc(paths.metaCatalogOutboxJob(tenantId, job.id)).get()).data() as MetaCatalogOutboxJob | undefined;
+      return {
+        ok: true,
+        outcome: 'nothing_to_do' as const,
+        status: vigente?.status ?? job.status,
+        message: 'Otra acción resolvió este envío mientras lo revisábamos. Mirá su estado actual: esta revisión no cambió nada.',
+      };
+    };
 
     if (verif.outcome === 'confirmed_equal') {
-      // Meta YA tiene lo que este envío pretendía: el trabajo está hecho.
-      await ref.update({ status: 'succeeded', reason: null, error: '', reconciledAt: now, updatedAt: now });
+      // Meta YA tiene lo que este envío pretendía. El cierre usa EL MISMO contrato que el
+      // mantenimiento: transición terminal + sync log en una sola transacción, con la
+      // precondición releída adentro. Una reconciliación manual jamás resucita un descartado.
+      const cerrado = await cerrarTerminalConLog(tenantId, job, {
+        precondicion: (fresco) => fresco.status === job.status && !isTerminalOutboxStatus(fresco.status),
+        status: 'succeeded',
+        reason: null,
+        error: '',
+        logStatus: 'success',
+        itemId: remoto?.id ?? null,
+      });
+      if (!cerrado) return perderCarrera();
       await liberarIntentSiVigente(tenantId, job);
       await proyectarSiVigente(tenantId, job.productId, job.id, {
         metaSyncStatus: job.action === 'disable' ? 'disabled' : 'synced',
+        // El ciclo terminó: libera la vigencia para que la convergencia futura pueda hablar.
+        metaSyncCurrentJobId: null,
         metaSyncError: '',
         ...(remoto ? { metaProductItemId: remoto.id } : {}),
         metaLastSyncAt: now,
         updatedAt: now,
       });
-      // La historia por ciclo queda completa: un cierre manual también deja su log.
-      await db().doc(paths.metaCatalogSyncLog(tenantId, job.id)).set({
-        id: job.id, tenantId, productId: job.productId, metaCatalogId: job.catalogId,
-        metaProductItemId: remoto?.id ?? null, action: job.action, status: 'success',
-        errorMessage: '', createdAt: now,
-      }, { merge: true });
       await recordAudit({
         tenantId, action: 'meta.catalog_sync', actorUid: a.uid, actorRole: a.role,
         targetType: 'metaCatalogOutbox', targetId: job.id,
@@ -215,9 +249,16 @@ export const metaCatalogOutboxReconcile = onCall<{ tenantId?: string; jobId?: st
       // rechaza por id duplicado. La creación se aplicó; lo que difiere es materia de un UPDATE
       // que va a planificar la próxima confirmación desde el catálogo.
       if (job.action === 'create' && remoto) {
-        await db().doc(paths.metaCatalogOutboxJob(tenantId, job.id)).update({
-          status: 'needs_action', reason: 'remote_differs', reconciledAt: now, updatedAt: now,
-        });
+        const marcado = await db().runTransaction(async (tx) => {
+          const ref = db().doc(paths.metaCatalogOutboxJob(tenantId, job.id));
+          const fresco = (await tx.get(ref)).data() as MetaCatalogOutboxJob | undefined;
+          // MISMA precondición que todo lo demás: si otra acción lo movió (descarte incluido),
+          // esta revisión no escribe nada.
+          if (!fresco || fresco.status !== job.status || isTerminalOutboxStatus(fresco.status)) return false;
+          tx.update(ref, { status: 'needs_action', reason: 'remote_differs', attentionRequired: true, reconciledAt: now, updatedAt: now });
+          return true;
+        }).catch(() => false);
+        if (!marcado) return perderCarrera();
         return {
           ok: true,
           outcome: 'confirmed_different' as const,
@@ -227,10 +268,9 @@ export const metaCatalogOutboxReconcile = onCall<{ tenantId?: string; jobId?: st
       }
       // Hay evidencia de que Meta NO tiene lo nuestro. Recién acá es seguro volver a intentar,
       // y se hace como un CICLO NUEVO: el job actual queda cerrado con su historia intacta.
+      // `reencolarCicloNuevo` ya es transaccional y aborta si el job cambió de estado.
       const nuevo = await reencolarCicloNuevo(tenantId, job, a);
-      if (!nuevo) {
-        return { ok: true, outcome: 'nothing_to_do' as const, status: job.status, message: 'Ya hay otro intento en curso para este mismo cambio: esperá a que termine.' };
-      }
+      if (!nuevo) return perderCarrera();
       await recordAudit({
         tenantId, action: 'meta.catalog_sync', actorUid: a.uid, actorRole: a.role,
         targetType: 'metaCatalogOutbox', targetId: job.id,
@@ -265,47 +305,72 @@ export const metaCatalogOutboxDiscard = onCall<{ tenantId?: string; jobId?: stri
     const job = await jobDeTenant(tenantId, String(req.data?.jobId ?? ''));
     const motivo = String(req.data?.reason ?? '').trim().slice(0, 300);
     if (!motivo) throw new HttpsError('invalid-argument', 'Escribí por qué se descarta este envío (queda registrado).');
-    if (isTerminalOutboxStatus(job.status)) {
-      // Un terminal NO se reescribe: solo se marca como REVISADO para que deje de ocupar la
-      // lista. El estado, el error y el patch —la evidencia— quedan exactamente como están.
-      const now = Timestamp.now();
-      await db().doc(paths.metaCatalogOutboxJob(tenantId, job.id)).update({ reviewedAt: now, reviewedReason: motivo, updatedAt: now });
-      const a = actorOf(req);
+
+    await catalogHold(tenantId, 'manual_pre_cas');
+
+    /**
+     * TODA la decisión adentro de UNA transacción, con el documento FRESCO. La lectura de
+     * afuera solo sirvió para validar el pedido: entre esa lectura y acá el mantenimiento pudo
+     * cerrar el job como succeeded/failed, un worker pudo reclamarlo, u otra persona pudo
+     * descartarlo. Cada rama se decide con lo que el job ES ahora, no con lo que era:
+     *  - terminal ⇒ el resultado se PRESERVA; solo se agrega la metadata de revisión;
+     *  - processing con lease vivo ⇒ no se toca (el worker está escribiendo en Meta);
+     *  - resto ⇒ cancelled, con la honestidad de `yaSalio` calculada sobre el fresco.
+     */
+    const now = Timestamp.now();
+    const resultado = await db().runTransaction(async (tx) => {
+      const ref = db().doc(paths.metaCatalogOutboxJob(tenantId, job.id));
+      const fresco = (await tx.get(ref)).data() as MetaCatalogOutboxJob | undefined;
+      if (!fresco) return { r: 'desaparecido' as const };
+      if (isTerminalOutboxStatus(fresco.status)) {
+        // Un descarte JAMÁS convierte en cancelado un job que otro worker ya cerró: el
+        // resultado real se preserva y esto solo lo saca de la bandeja.
+        tx.update(ref, { reviewedAt: now, reviewedReason: motivo, attentionRequired: false, updatedAt: now });
+        return { r: 'revisado' as const, status: fresco.status, gano: fresco.status !== job.status };
+      }
+      if (fresco.status === 'processing' && (fresco.leaseUntil?.toMillis?.() ?? 0) > now.toMillis()) {
+        return { r: 'en_vuelo' as const };
+      }
+      // Un 'processing' con el lease vencido es genuinamente ambiguo: su worker murió y el
+      // POST PUDO haber salido antes del crash. Se trata como 'ya salió' para no afirmar de más.
+      const yaSalio = fresco.status === 'submitted' || fresco.status === 'processing' || !!fresco.batchHandle || !!fresco.submittedAt;
+      const detalle = yaSalio
+        ? `descartado por el dueño (el envío YA había salido hacia Meta; esto solo deja de seguirlo): ${motivo}`
+        : `descartado por el dueño: ${motivo}`;
+      tx.update(ref, { status: 'cancelled', reason: null, error: detalle, attentionRequired: false, updatedAt: now });
+      return { r: 'descartado' as const, yaSalio };
+    });
+
+    if (resultado.r === 'desaparecido') throw new HttpsError('not-found', 'Ese envío ya no existe.');
+    if (resultado.r === 'en_vuelo') {
+      throw new HttpsError('failed-precondition', 'Este envío se está procesando ahora mismo. Esperá un momento antes de descartarlo.');
+    }
+    const a = actorOf(req);
+    if (resultado.r === 'revisado') {
       await recordAudit({
         tenantId, action: 'meta.catalog_sync', actorUid: a.uid, actorRole: a.role,
         targetType: 'metaCatalogOutbox', targetId: job.id,
         summary: 'Envío cerrado marcado como revisado', metadata: { jobId: job.id, productId: job.productId, motivo },
       });
-      return { ok: true, status: job.status, message: 'Marcado como revisado. El registro de lo que pasó queda intacto.' };
+      return {
+        ok: true,
+        status: resultado.status,
+        message: resultado.gano
+          ? `Mientras lo revisabas, este envío se resolvió solo (quedó "${resultado.status}"). Lo marcamos como revisado sin tocar ese resultado.`
+          : 'Marcado como revisado. El registro de lo que pasó queda intacto.',
+      };
     }
-    // EN VUELO con el claim vivo: descartarlo dejaría al worker escribiendo en Meta contra un
-    // job ya "cancelado". Se espera a que termine (o a que el sweep lo normalice).
-    if (job.status === 'processing' && (job.leaseUntil?.toMillis?.() ?? 0) > Date.now()) {
-      throw new HttpsError('failed-precondition', 'Este envío se está procesando ahora mismo. Esperá un momento antes de descartarlo.');
-    }
-
-    const now = Timestamp.now();
-    // HONESTIDAD: si el lote YA salió hacia Meta, descartarlo no lo deshace — solo deja de
-    // seguirlo. El texto guardado lo dice, para que nadie lea "cancelado" como "no pasó nada".
-    const yaSalio = job.status === 'submitted' || !!job.batchHandle;
-    const detalle = yaSalio
-      ? `descartado por el dueño (el envío YA había salido hacia Meta; esto solo deja de seguirlo): ${motivo}`
-      : `descartado por el dueño: ${motivo}`;
-    await db().doc(paths.metaCatalogOutboxJob(tenantId, job.id)).update({
-      status: 'cancelled', reason: null, error: detalle, updatedAt: now,
-    });
     await liberarIntentSiVigente(tenantId, job);
-    await proyectarSiVigente(tenantId, job.productId, job.id, { metaSyncStatus: 'not_synced', metaSyncError: '', updatedAt: now });
-    const a = actorOf(req);
+    await proyectarSiVigente(tenantId, job.productId, job.id, { metaSyncStatus: 'not_synced', metaSyncCurrentJobId: null, metaSyncError: '', updatedAt: now });
     await recordAudit({
       tenantId, action: 'meta.catalog_sync', actorUid: a.uid, actorRole: a.role,
       targetType: 'metaCatalogOutbox', targetId: job.id,
-      summary: 'Envío de catálogo descartado por el dueño', metadata: { jobId: job.id, productId: job.productId, motivo, yaSalio },
+      summary: 'Envío de catálogo descartado por el dueño', metadata: { jobId: job.id, productId: job.productId, motivo, yaSalio: resultado.yaSalio },
     });
     return {
       ok: true,
       status: 'cancelled' as const,
-      message: yaSalio
+      message: resultado.yaSalio
         ? 'Dejamos de seguir este envío. Ojo: ya había salido hacia Meta, así que el cambio pudo haberse aplicado allá.'
         : 'Envío descartado. Queda registrado con tu motivo.',
     };
@@ -347,6 +412,7 @@ async function reencolarCicloNuevo(
   job: MetaCatalogOutboxJob,
   actor: { uid: string | null; role: string | null },
 ): Promise<string | null> {
+  if (!job.intentKey) return null; // job legado sin intención: no hay puntero que gobernar
   const now = Timestamp.now();
   const intentRef = db().doc(paths.metaCatalogOutboxIntent(tenantId, job.intentKey));
   const productRef = db().doc(paths.product(tenantId, job.productId));
@@ -378,6 +444,9 @@ async function reencolarCicloNuevo(
       batchHandle: null,
       reason: null,
       error: '',
+      attentionRequired: attentionRequiredFor('queued'),
+      reviewedAt: null,
+      reviewedReason: null,
       requestedByUid: actor.uid,
       requestedByRole: actor.role,
       createdAt: now,
@@ -390,7 +459,7 @@ async function reencolarCicloNuevo(
     // reescribe ni siquiera para anotar que fue reemplazado.
     if (!isTerminalOutboxStatus(actual.status)) {
       tx.update(db().doc(paths.metaCatalogOutboxJob(tenantId, job.id)), {
-        status: 'cancelled', error: 'reemplazado por un intento nuevo tras la revisión manual', updatedAt: now,
+        status: 'cancelled', error: 'reemplazado por un intento nuevo tras la revisión manual', attentionRequired: false, updatedAt: now,
       });
     }
     tx.set(intentRef, { intentKey: job.intentKey, tenantId, activeJobId: nuevoId, cycle, updatedAt: now } satisfies MetaCatalogOutboxIntent);

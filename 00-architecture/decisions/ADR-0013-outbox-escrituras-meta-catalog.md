@@ -267,10 +267,13 @@ que revisar.
 ### 17. Presupuesto de llamadas y procesamiento justo
 
 El cliente de Meta expone `callsMade`: cuenta **cada request**, incluidas las páginas de
-`listItems`. La confirmación tiene un techo por corrida (`MAX_META_CALLS_PER_RUN`) y consulta el
-estado de los batches en el orden de la cola —los más viejos primero—. Al agotarse el
-presupuesto, los jobs cuyo handle no se consultó quedan **intactos**: sin marca de error, sin
-consumo de intentos, para la corrida siguiente.
+`listItems` y los reintentos internos de los GET. La confirmación tiene un techo de consultas
+de estado por corrida (`MAX_BATCH_STATUS_PER_RUN`, aplicado sobre los **intentos**, no sobre
+las respuestas) y consulta los batches en el orden de la cola —los más viejos primero—. Al
+agotarse el tope, los jobs cuyo handle no se consultó quedan **intactos**: sin marca de error,
+sin consumo de intentos, para la corrida siguiente. Un `submitted` que no logra confirmarse en
+una hora —API caída, handle que nunca responde— lo escala el **sweep** (que no necesita a
+Meta) a revisión humana: la evidencia inaccesible no congela jobs para siempre.
 
 El techo de consultas de estado es un contador **propio y absoluto**, no un resto del consumo
 total: derivarlo de las llamadas ya hechas significaba que un catálogo grande —cuyo `listItems`
@@ -321,6 +324,47 @@ hallazgos; 22 sobrevivieron a la verificación. Lo que cambió por ellos, ademá
 **Caveat de la infraestructura de test**: el doble de Meta vive en un documento global y no
 distingue `catalogId`, así que el E2E prueba el aislamiento entre tenants a nivel Firestore y de
 gates, no a nivel del catálogo remoto.
+
+### 19. Cierre de release (META-CATALOG-OUTBOX-HARDEN-2)
+
+El último follow-up antes del release candidate cerró las carreras que quedaban y la
+observabilidad:
+
+- **CAS en TODAS las acciones humanas.** `metaCatalogOutboxReconcile` y
+  `metaCatalogOutboxDiscard` decidían con la lectura inicial y escribían con `update` directo.
+  Ahora cada rama relee el job DENTRO de una transacción con precondición de estado: el cierre
+  por `confirmed_equal` usa el mismo `cerrarTerminalConLog` que el mantenimiento; la rama del
+  CREATE ya existente y el descarte también son transaccionales. Quien pierde la carrera relee
+  el resultado vigente y responde `nothing_to_do` — jamás afirma una transición que no hizo,
+  jamás resucita un descartado, y un descarte jamás convierte en `cancelled` un job que otro
+  worker cerró como `succeeded`/`failed` (el resultado se preserva y solo se agrega la metadata
+  de revisión).
+- **Cierre terminal + sync log ATÓMICOS.** `cerrarTerminalConLog` escribe la transición
+  `succeeded`/`failed` y crea el log del ciclo en la MISMA transacción, con `tx.create` para no
+  sobrescribir un log existente (un replay conserva el original). Nunca más un terminal
+  `succeeded`/`failed` sin su historia. **Qué estados generan log**: `succeeded` y `failed`
+  (automáticos o manuales). `cancelled` y `stale` NO llevan log — son cierres administrativos
+  sin resultado de Meta, y así queda documentado.
+- **Contadores honestos.** `succeeded`/`failed`/`requeued`/`unresolved` se incrementan
+  DESPUÉS de que la transición se aplicó; una corrida que pierde el CAS no cuenta ni audita el
+  resultado de otra.
+- **Tope de consultas por INTENTOS.** `handlesIntentados` se consume ANTES de llamar; una API
+  de estado caída ya no permite intentar la cola entera. Un intento fallido no habilita a
+  evaluar sus jobs ("sin datos" ≠ "sin errores"). El reporte separa `handlesAttempted`,
+  `handlesAnswered`, `deferredHandles` y `metaCalls` (requests HTTP reales, incluidos los
+  reintentos internos de los GET y las páginas de `listItems`). Máximo teórico por corrida:
+  `páginas_de_listItems × reintentos + tope_de_intentos × reintentos`.
+- **Bandeja sin ocultamiento.** `attentionRequired` es un campo PERSISTIDO que toda transición
+  recalcula (`attentionRequiredFor`); la bandeja consulta
+  `where('attentionRequired','==',true).orderBy('updatedAt','desc').limit(N+1)` — los revisados
+  ya no ocupan el cupo y `truncated` se calcula con evidencia, no adivinando. El panel muestra
+  un aviso accesible cuando hay más incidencias que las listadas. Índice nuevo:
+  `metaCatalogOutboxJobs (attentionRequired ASC, updatedAt DESC)`.
+- **Fencing también en los errores de validación.** Un intento que ni siquiera se encoló
+  (request inválido, fallo de infraestructura) ya no pisa `metaSyncStatus` de un producto con
+  ciclo vigente: el error se reporta en el run.
+- El estado visible del producto se escribe en la MISMA transacción que crea su job (ya no hay
+  commit diferido que pueda fallar en silencio).
 
 ## Semántica de entrega
 

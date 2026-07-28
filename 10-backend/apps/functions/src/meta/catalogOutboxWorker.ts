@@ -41,6 +41,7 @@ import {
 import type { CatalogBatchRequest } from './catalogOutbound.js';
 import { catalogHold } from './catalogTestHooks.js';
 import {
+  attentionRequiredFor,
   chunkJobsForBatch,
   classifySubmitError,
   isTerminalOutboxStatus,
@@ -94,8 +95,6 @@ const MAX_BATCH_STATUS_PER_RUN = 10;
  * con el tiempo y con el tipo de asset, así que el sistema se acota solo en vez de asumir un
  * número que mañana podría ser falso.
  */
-const STATE_COMMIT_CHUNK = 200;
-
 const jobRef = (tenantId: string, jobId: string) => db().doc(paths.metaCatalogOutboxJob(tenantId, jobId));
 const jobsCol = (tenantId: string) => db().collection(paths.metaCatalogOutboxJobs(tenantId));
 
@@ -155,6 +154,12 @@ async function proyectarEstado(
       if (!snap.exists) return false;
       const vigente = (snap.data() as { metaSyncCurrentJobId?: string }).metaSyncCurrentJobId;
       if (vigente !== job.id) return false;
+      // Un CIERRE TERMINAL libera la vigencia: el ciclo terminó y ya no gobierna el futuro
+      // del producto. Sin esto, la convergencia del planificador (que corrige el estado
+      // visible sin encolar trabajo) quedaba muerta para siempre en todo producto que alguna
+      // vez tuvo un job — un descarte con el cambio ya aplicado en Meta dejaba el badge
+      // clavado en "No sincronizado" sin ninguna salida.
+      const liberarVigencia = isTerminalOutboxStatus(job.status) ? { metaSyncCurrentJobId: null } : {};
       // `metaCatalogId` NO se reescribe acá: lo fija el encolado. Reponerlo desde el job
       // revertiría el catálogo vigente del producto si la empresa cambió de catálogo.
       tx.set(
@@ -163,6 +168,7 @@ async function proyectarEstado(
           metaSyncStatus: productStatusForJob(job),
           metaSyncError: job.error.slice(0, 500),
           updatedAt: Timestamp.now(),
+          ...liberarVigencia,
           ...extra,
         },
         { merge: true },
@@ -175,36 +181,88 @@ async function proyectarEstado(
   }
 }
 
-async function commitOps(tenantId: string, ops: Array<{ path: string; data: Record<string, unknown> }>): Promise<boolean> {
-  for (let i = 0; i < ops.length; i += STATE_COMMIT_CHUNK) {
-    const writer = db().batch();
-    for (const op of ops.slice(i, i + STATE_COMMIT_CHUNK)) writer.set(db().doc(op.path), op.data, { merge: true });
-    try {
-      await writer.commit();
-    } catch (e) {
-      logger.error('Outbox de catálogo: no se pudo persistir el estado de los productos', e, { tenantId, desde: i });
-      return false;
-    }
+/**
+ * Escribe `metaSyncStatus:'failed'` en un producto SOLO si no hay un ciclo vigente que gobierne
+ * su estado. Es el fencing de los errores de VALIDACIÓN: un intento que ni siquiera llegó a
+ * encolarse no puede pisar visualmente lo que el ciclo anterior (activo o ya confirmado) dice.
+ * El error igual queda reportado en el run (`blockedCount` + entries del plan).
+ */
+async function proyectarErrorSinCicloVigente(tenantId: string, productId: string, detalle: string): Promise<void> {
+  const ref = db().doc(paths.product(tenantId, productId));
+  try {
+    await db().runTransaction(async (tx) => {
+      const snap = await tx.get(ref);
+      if (!snap.exists) return;
+      const vigente = (snap.data() as { metaSyncCurrentJobId?: string | null }).metaSyncCurrentJobId;
+      if (vigente) return; // el estado visible lo gobierna ese ciclo, no este error
+      tx.set(ref, { metaSyncStatus: 'failed', metaSyncError: detalle.slice(0, 500), updatedAt: Timestamp.now() }, { merge: true });
+    });
+  } catch (e) {
+    logger.warn('Outbox de catálogo: no se pudo proyectar el error de validación', { tenantId, productId, error: e instanceof Error ? e.message : 'desconocido' });
   }
-  return true;
 }
 
-function syncLogOp(tenantId: string, job: MetaCatalogOutboxJob, status: 'success' | 'failed', itemId: string | null) {
-  // Un log por CICLO: el id del job ya incluye el número de ejecución, así que la historia de
-  // los ciclos anteriores nunca se sobrescribe.
-  const log: MetaCatalogSyncLog = {
-    id: job.id,
-    tenantId,
-    productId: job.productId,
-    metaCatalogId: job.catalogId,
-    metaProductItemId: itemId,
-    action: job.action,
-    status,
-    errorMessage: job.error.slice(0, 500),
-    createdAt: Timestamp.now(),
-  };
-  return { path: paths.metaCatalogSyncLog(tenantId, log.id), data: log as unknown as Record<string, unknown> };
+/**
+ * Cierra un job en un estado TERMINAL y crea su sync log EN LA MISMA transacción. La
+ * precondición se re-evalúa adentro con el documento fresco: si el job cambió (una persona lo
+ * descartó, otro worker lo cerró), NO se escribe nada — ni transición, ni log — y el llamador
+ * no debe contar ni proyectar. El log usa el id del ciclo y JAMÁS se sobrescribe: si ya existe
+ * (un replay), se conserva el original.
+ *
+ * Devuelve el job actualizado si la transición se aplicó, o null si perdió la carrera.
+ */
+export async function cerrarTerminalConLog(
+  tenantId: string,
+  job: MetaCatalogOutboxJob,
+  opts: {
+    precondicion: (fresco: MetaCatalogOutboxJob) => boolean;
+    status: Extract<MetaCatalogOutboxStatus, 'succeeded' | 'failed'>;
+    reason: OutboxReason | null;
+    error: string;
+    logStatus: 'success' | 'failed';
+    itemId: string | null;
+    extraPatch?: Record<string, unknown>;
+  },
+): Promise<MetaCatalogOutboxJob | null> {
+  const ref = jobRef(tenantId, job.id);
+  const logRef = db().doc(paths.metaCatalogSyncLog(tenantId, job.id));
+  try {
+    return await db().runTransaction(async (tx) => {
+      const fresco = (await tx.get(ref)).data() as MetaCatalogOutboxJob | undefined;
+      const logExistente = await tx.get(logRef);
+      if (!fresco || !opts.precondicion(fresco)) return null;
+      const now = Timestamp.now();
+      tx.update(ref, {
+        status: opts.status,
+        reason: opts.reason,
+        error: opts.error,
+        attentionRequired: attentionRequiredFor(opts.status),
+        reconciledAt: now,
+        updatedAt: now,
+        ...(opts.extraPatch ?? {}),
+      });
+      if (!logExistente.exists) {
+        const log: MetaCatalogSyncLog = {
+          id: job.id,
+          tenantId,
+          productId: job.productId,
+          metaCatalogId: job.catalogId,
+          metaProductItemId: opts.itemId,
+          action: job.action,
+          status: opts.logStatus,
+          errorMessage: opts.error.slice(0, 500),
+          createdAt: now,
+        };
+        tx.create(logRef, log as unknown as Record<string, unknown>);
+      }
+      return { ...job, status: opts.status, reason: opts.reason, error: opts.error };
+    });
+  } catch (e) {
+    logger.warn('Outbox de catálogo: no se pudo cerrar un job con su log', { tenantId, jobId: job.id, error: e instanceof Error ? e.message : 'desconocido' });
+    return null;
+  }
 }
+
 
 // ---------------------------------------------------------------------------
 // 1) Encolado
@@ -235,9 +293,11 @@ export interface EnqueueResult {
 
 /**
  * Crea un job por entrada accionable. La identidad del documento es determinística
- * (`outboxJobId`), así que **dos confirmaciones idénticas producen un solo job**: la segunda
- * choca contra el `create()` y se cuenta como duplicada, SIN tocar el job existente (que puede
- * estar en cualquier estado, incluso terminal).
+ * La identidad tiene DOS niveles: la `intentKey` determinística identifica "este cambio
+ * exacto" y se deduplica SOLO contra el trabajo activo (vía el puntero transaccional en
+ * `metaCatalogOutboxIntents`); cada ejecución es un CICLO con `jobId` propio e inmutable una
+ * vez terminal. Dos confirmaciones del mismo trabajo pendiente ⇒ un solo job; si el ciclo
+ * anterior ya terminó, la confirmación nueva crea un job nuevo sin tocar el anterior.
  *
  * Recibe las entradas CRUDAS del plan: el recorte que persiste el run doc (`slimEntries`) tira
  * `request` y `payload`, y sin ellos no habría ni qué enviar ni contra qué verificar.
@@ -254,7 +314,6 @@ export async function enqueueCatalogPlan(
   let deduplicated = 0;
   let awaitingReview = 0;
   let blocked = 0;
-  const productOps: Array<{ path: string; data: Record<string, unknown> }> = [];
 
   for (const e of entries) {
     // Última barrera de contrato ANTES de persistir: un patch inválido no llega ni al outbox.
@@ -264,10 +323,11 @@ export async function enqueueCatalogPlan(
       blocked++;
       const detalle = err instanceof Error ? err.message.slice(0, 300) : 'request inválido';
       logger.warn('Outbox de catálogo: producto excluido del encolado por contrato', { tenantId, runId, productId: e.productId });
-      productOps.push({
-        path: paths.product(tenantId, e.productId),
-        data: { metaSyncStatus: 'failed', metaSyncError: detalle, updatedAt: now },
-      });
+      // CON FENCING: este error pertenece a un intento que NI SIQUIERA se encoló. Si el
+      // producto tiene un ciclo vigente (en curso o ya confirmado), su estado visible lo
+      // gobierna ese ciclo — el error de la validación nueva se reporta en el run
+      // (`blockedCount` + entries), no pisando lo que el vendedor ve.
+      await proyectarErrorSinCicloVigente(tenantId, e.productId, detalle);
       continue;
     }
 
@@ -325,6 +385,9 @@ export async function enqueueCatalogPlan(
         batchHandle: null,
         reason: null,
         error: '',
+        attentionRequired: attentionRequiredFor('queued'),
+        reviewedAt: null,
+        reviewedReason: null,
         createdAt: now,
         updatedAt: now,
         submittedAt: null,
@@ -356,20 +419,17 @@ export async function enqueueCatalogPlan(
       // Un fallo de infraestructura NO es una deduplicación: contarlo como tal habría
       // reportado "ya estaba encolado" para trabajo que no existe en ninguna parte.
       blocked++;
-      productOps.push({
-        path: paths.product(tenantId, e.productId),
-        data: { metaSyncStatus: 'failed', metaSyncError: 'no se pudo encolar el cambio', updatedAt: now },
-      });
+      await proyectarErrorSinCicloVigente(tenantId, e.productId, 'no se pudo encolar el cambio');
     } else {
       // El estado visible del producto ya lo escribió la MISMA transacción que creó el job.
       queued++;
     }
   }
 
-  // El resultado del commit NO se descarta: si falla, los jobs existen igual y el estado
-  // visible de esos productos quedó viejo. El run lo reporta en vez de callarlo.
-  const statePersisted = await commitOps(tenantId, productOps);
-  return { queued, deduplicated, awaitingReview, blocked, statePersisted };
+  // El estado visible de cada producto se escribe DENTRO de la transacción que crea su job:
+  // no queda ningún commit diferido que pueda fallar en silencio. Un fallo por producto ya se
+  // contó como `blocked` y se reporta en el run.
+  return { queued, deduplicated, awaitingReview, blocked, statePersisted: true };
 }
 
 // ---------------------------------------------------------------------------
@@ -403,7 +463,7 @@ async function claimJob(
       if (lease > now.toMillis()) return { rechazado: 'ocupado' as const };
       // Lease vencido: el worker anterior murió. Queda AMBIGUO —pudo haber enviado— y lo
       // resuelve la reconciliación mirando el catálogo, jamás un reintento ciego.
-      tx.update(snap.ref, { status: 'needs_reconciliation', reason: 'submit_ambiguous', leaseUntil: null, leaseOwner: null, updatedAt: now });
+      tx.update(snap.ref, { status: 'needs_reconciliation', reason: 'submit_ambiguous', attentionRequired: true, leaseUntil: null, leaseOwner: null, updatedAt: now });
       return { rechazado: 'needs_reconciliation' as const };
     }
     // `held` (config apagada al momento de intentarlo) vuelve a ser candidato: el gate de acá
@@ -416,18 +476,19 @@ async function claimJob(
     const cfg = normalizeCatalogSyncConfig((cfgSnap.data() as { catalogSync?: unknown } | undefined)?.catalogSync);
     const gate = outboxGate(job, gateContextOf(tenantId, cfg, product, publicView));
     if (!gate.go) {
-      tx.update(snap.ref, { status: gate.status, reason: gate.reason, leaseUntil: null, leaseOwner: null, updatedAt: now });
+      tx.update(snap.ref, { status: gate.status, reason: gate.reason, attentionRequired: attentionRequiredFor(gate.status), leaseUntil: null, leaseOwner: null, updatedAt: now });
       return { rechazado: gate.status };
     }
 
     // `attempts` es la GENERACIÓN inmutable de este claim: todo settlement posterior la exige.
     const gen = (job.attempts ?? 0) + 1;
     if (gen > MAX_ATTEMPTS) {
-      tx.update(snap.ref, { status: 'needs_action', reason: 'submit_ambiguous', leaseUntil: null, leaseOwner: null, updatedAt: now });
+      tx.update(snap.ref, { status: 'needs_action', reason: 'submit_ambiguous', attentionRequired: true, leaseUntil: null, leaseOwner: null, updatedAt: now });
       return { rechazado: 'needs_action' as const };
     }
     tx.update(snap.ref, {
       status: 'processing',
+      attentionRequired: false,
       attempts: gen,
       leaseOwner: owner,
       leaseUntil: Timestamp.fromMillis(now.toMillis() + LEASE_MS),
@@ -505,25 +566,29 @@ export async function drainCatalogOutbox(
   const liberar = (r: ClaimOutcome) =>
     settleIfOwner(jobRef(tenantId, r.job.id), r.gen, 'processing', {
       status: 'queued',
+      attentionRequired: false,
       attempts: Math.max(0, r.gen - 1),
       leaseUntil: null,
       leaseOwner: null,
     });
 
+  // Los contadores reflejan settles PROPIOS: un `liberar` que perdió el ownership (el sweep o
+  // una persona ya movieron el job) no liberó nada y no puede contarse.
   let released = 0;
   for (const r of reclamados) {
     if (enLote.has(r.job.id)) continue;
-    await liberar(r);
-    released++;
+    if ((await liberar(r)).propio) released++;
   }
 
   let client: MetaCatalogClient;
   try {
     client = await (opts.clientFactory ?? getMetaCatalogClientForTenant)(tenantId);
   } catch (e) {
-    for (const r of reclamados.filter((x) => enLote.has(x.job.id))) await liberar(r);
+    for (const r of reclamados.filter((x) => enLote.has(x.job.id))) {
+      if ((await liberar(r)).propio) released++;
+    }
     logger.warn('Outbox de catálogo: sin cliente de Meta; los jobs vuelven a la cola', { tenantId, error: e instanceof Error ? e.message : 'desconocido' });
-    return { ...vacio, released: reclamados.length, skipped: 'client_unavailable' };
+    return { ...vacio, released, skipped: 'client_unavailable' };
   }
 
   await catalogHold(tenantId, 'outbox_pre_submit');
@@ -532,9 +597,11 @@ export async function drainCatalogOutbox(
   // y este punto alguien pudo apagar la sync o cambiar el catálogo, y el claim ya no vale.
   const cfgPre = await readConfig(tenantId);
   if (!cfgPre.enabled || cfgPre.mode !== 'live' || cfgPre.catalogId !== cfg0.catalogId) {
-    for (const r of reclamados.filter((x) => enLote.has(x.job.id))) await liberar(r);
+    for (const r of reclamados.filter((x) => enLote.has(x.job.id))) {
+      if ((await liberar(r)).propio) released++;
+    }
     logger.info('Outbox de catálogo: la configuración cambió antes del envío; nada salió', { tenantId });
-    return { ...vacio, released: reclamados.length, skipped: !cfgPre.enabled ? 'config_disabled' : 'mode_not_live' };
+    return { ...vacio, released, skipped: !cfgPre.enabled ? 'config_disabled' : 'mode_not_live' };
   }
 
   // REVALIDACIÓN TRANSACCIONAL COMPLETA, JOB POR JOB, INMEDIATAMENTE ANTES DE ARMAR EL LOTE.
@@ -568,20 +635,37 @@ export async function drainCatalogOutbox(
     const clase = classifySubmitError(e);
     const detalle = e instanceof Error ? e.message.slice(0, 300) : 'items_batch falló';
     await catalogHold(tenantId, 'outbox_post_submit');
+    let failed = 0;
     for (const r of vigentes) {
       if (clase === 'confirmed_not_applied') {
-        // Meta rechazó la llamada: NADA se escribió. Es un fallo determinístico del contrato.
-        await settleIfOwner(jobRef(tenantId, r.job.id), r.gen, 'processing', { status: 'failed', reason: 'contract_violation', error: detalle, leaseUntil: null, leaseOwner: null });
+        // Meta rechazó la llamada: NADA se escribió. Es un fallo determinístico del contrato,
+        // y como es TERMINAL, la transición y su sync log van en la MISMA transacción: un
+        // `failed` sin log sería una historia incompleta. Se cuenta SOLO si el CAS aplicó.
+        const cerrado = await cerrarTerminalConLog(tenantId, r.job, {
+          precondicion: (fresco) => fresco.status === 'processing' && (fresco.attempts ?? 0) === r.gen,
+          status: 'failed',
+          reason: 'contract_violation',
+          error: detalle,
+          logStatus: 'failed',
+          itemId: null,
+          extraPatch: { leaseUntil: null, leaseOwner: null },
+        });
+        if (cerrado) failed++;
       } else if (clase === 'rate_limited') {
         // Tampoco se escribió, pero conviene esperar: vuelve a la cola sin consumir intentos.
-        await settleIfOwner(jobRef(tenantId, r.job.id), r.gen, 'processing', { status: 'queued', reason: 'rate_limited', error: detalle, attempts: Math.max(0, r.gen - 1), leaseUntil: null, leaseOwner: null });
+        await settleIfOwner(jobRef(tenantId, r.job.id), r.gen, 'processing', { status: 'queued', reason: 'rate_limited', error: detalle, attentionRequired: false, attempts: Math.max(0, r.gen - 1), leaseUntil: null, leaseOwner: null });
       } else {
         // AMBIGUO: el POST pudo haberse aplicado. Jamás se reintenta a ciegas — lo resuelve
-        // la reconciliación mirando el catálogo real.
-        await settleIfOwner(jobRef(tenantId, r.job.id), r.gen, 'processing', { status: 'needs_reconciliation', reason: 'submit_ambiguous', error: detalle, leaseUntil: null, leaseOwner: null });
+        // la reconciliación mirando el catálogo real. `submittedAt` se estampa ACÁ: el POST
+        // efectivamente salió, y sin el ancla la ventana de gracia no protegía justo al caso
+        // que existe para proteger (evaluar contra un catálogo leído antes de que Meta
+        // procese el lote).
+        await settleIfOwner(jobRef(tenantId, r.job.id), r.gen, 'processing', {
+          status: 'needs_reconciliation', reason: 'submit_ambiguous', error: detalle,
+          attentionRequired: true, submittedAt: r.job.submittedAt ?? Timestamp.now(), leaseUntil: null, leaseOwner: null,
+        });
       }
     }
-    const failed = clase === 'confirmed_not_applied' ? vigentes.length : 0;
     await refreshProductStates(tenantId, vigentes.map((r) => r.job.id));
     return { claimed: reclamados.length, submitted: 0, released, failed, handles: [], skipped: clase === 'rate_limited' ? 'rate_limited' : undefined };
   }
@@ -596,6 +680,7 @@ export async function drainCatalogOutbox(
   for (const r of vigentes) {
     const s = await settleIfOwner(jobRef(tenantId, r.job.id), r.gen, 'processing', {
       status: 'submitted',
+      attentionRequired: false,
       batchHandle: handle,
       submittedAt,
       reason: null,
@@ -644,7 +729,7 @@ async function revalidarAntesDelPost(
       // intento. Sin esto, cinco apagones de configuración lo mandaban a revisión humana con
       // un motivo falso de "envío ambiguo".
       const devolverIntento = gate.status === 'held' ? { attempts: Math.max(0, r.gen - 1) } : {};
-      tx.update(ref, { status: gate.status, reason: gate.reason, ...devolverIntento, leaseUntil: null, leaseOwner: null, updatedAt: Timestamp.now() });
+      tx.update(ref, { status: gate.status, reason: gate.reason, attentionRequired: attentionRequiredFor(gate.status), ...devolverIntento, leaseUntil: null, leaseOwner: null, updatedAt: Timestamp.now() });
       return 'excluido' as const;
     });
   } catch (e) {
@@ -652,7 +737,7 @@ async function revalidarAntesDelPost(
     // La revalidación falló por infraestructura: el job JAMÁS tocó Meta. Vuelve a la cola con
     // su intento devuelto y sin lease — dejarlo `processing` lo habría dejado varado hasta que
     // el sweep lo declarara ambiguo, que es exactamente lo contrario de lo que pasó.
-    await settleIfOwner(ref, r.gen, 'processing', { status: 'queued', attempts: Math.max(0, r.gen - 1), leaseUntil: null, leaseOwner: null }).catch(() => {});
+    await settleIfOwner(ref, r.gen, 'processing', { status: 'queued', attentionRequired: false, attempts: Math.max(0, r.gen - 1), leaseUntil: null, leaseOwner: null }).catch(() => {});
     return 'excluido';
   }
 }
@@ -699,9 +784,17 @@ export interface ReconcileResult {
   failed: number;
   requeued: number;
   unresolved: number;
-  /** Llamadas HTTP a Meta que costó la confirmación (incluidas las páginas de `listItems`). */
+  /**
+   * Llamadas HTTP REALES a Meta que costó la confirmación: incluye cada página de `listItems`
+   * y cada reintento interno de los GET. El máximo teórico por corrida es
+   * `páginas_de_listItems × reintentos + MAX_BATCH_STATUS_PER_RUN × reintentos`.
+   */
   metaCalls?: number;
-  /** Handles que no entraron en el presupuesto y quedan para la próxima corrida. */
+  /** Consultas de estado de lote INTENTADAS (el tope se aplica sobre esto). */
+  handlesAttempted?: number;
+  /** De las intentadas, las que Meta efectivamente respondió. */
+  handlesAnswered?: number;
+  /** Lotes sin consultar + jobs fuera de la ventana: todo queda para la próxima corrida. */
   deferredHandles?: number;
   skipped?: 'nothing_pending' | 'catalog_unreachable' | OutboxReason;
 }
@@ -744,21 +837,25 @@ export async function reconcileCatalogOutbox(
     const salioReciente = !!j.submittedAt && ahora - (j.submittedAt.toMillis?.() ?? 0) < gracia;
     return !salioReciente;
   });
-  // Todo dentro de la gracia ⇒ no se paga NI la relectura del catálogo.
-  if (!evaluables.length) return { ...base, skipped: 'nothing_pending', metaCalls: 0, deferredHandles: 0 };
+  // Todo dentro de la gracia ⇒ no se paga NI la relectura del catálogo. Pero lo diferido se
+  // DECLARA: reportar cero pendientes cuando hay una cola entera esperando sería mentir.
+  if (!evaluables.length) return { ...base, skipped: 'nothing_pending', metaCalls: 0, deferredHandles: pend.size };
 
   await catalogHold(tenantId, 'outbox_pre_verify');
 
-  let client: MetaCatalogClient;
+  let client: MetaCatalogClient | undefined;
   let remotos: MetaRemoteCatalogItem[];
   try {
     client = await (opts.clientFactory ?? getMetaCatalogClientForTenant)(tenantId);
     remotos = await client.listItems(cfg.catalogId);
   } catch (e) {
     // Sin relectura no se confirma NADA: los jobs quedan donde están y se reintenta después.
+    // Las llamadas que SÍ se hicieron se reportan igual — justo cuando la API falla es cuando
+    // más importa saber cuánto se está gastando.
     logger.warn('Outbox de catálogo: no se pudo releer el catálogo para confirmar', { tenantId, error: e instanceof Error ? e.message : 'desconocido' });
-    return { ...base, skipped: 'catalog_unreachable' };
+    return { ...base, skipped: 'catalog_unreachable', metaCalls: client?.callsMade ?? 0 };
   }
+  const cli = client; // asignado: el try de arriba retornó en el catch si falló
   const porRetailer = new Map(remotos.filter((r) => r.retailerId).map((r) => [r.retailerId, r]));
 
   // Errores por item que Meta ya haya reportado para los batches involucrados (best-effort).
@@ -771,23 +868,28 @@ export async function reconcileCatalogOutbox(
   // Solo los handles de los jobs que SÍ se van a evaluar: pagar por el handle de un job que
   // está en su ventana de gracia gastaba presupuesto y tiraba el resultado.
   const handles = [...new Set(evaluables.map((d) => (d.data() as MetaCatalogOutboxJob).batchHandle).filter((h): h is string => !!h))];
+  // El tope se aplica a los INTENTOS, no a las respuestas exitosas: si Meta contesta 5xx a
+  // todo, contar solo los éxitos habría intentado la cola completa igual — un tope que no
+  // topaba nada justo cuando la API está en problemas.
+  const handlesIntentados = new Set<string>();
   const handlesConsultados = new Set<string>();
   for (const h of handles) {
-    if (handlesConsultados.size >= MAX_BATCH_STATUS_PER_RUN) {
+    if (handlesIntentados.size >= MAX_BATCH_STATUS_PER_RUN) {
       logger.info('Outbox de catálogo: tope de consultas de estado alcanzado; el resto queda para la próxima corrida', {
         tenantId,
-        consultados: handlesConsultados.size,
-        pendientes: handles.length - handlesConsultados.size,
+        intentados: handlesIntentados.size,
+        pendientes: handles.length - handlesIntentados.size,
       });
       break;
     }
+    // El presupuesto se consume ANTES de llamar: una llamada que falla también costó.
+    handlesIntentados.add(h);
     try {
-      for (const err of (await client.getBatchStatus(cfg.catalogId, h)).errors) {
+      for (const err of (await cli.getBatchStatus(cfg.catalogId, h)).errors) {
         if (err.retailerId) itemErrors.set(`${h}|${err.retailerId}`, err.message);
       }
-      // Solo cuenta como consultado si la llamada REALMENTE respondió: si falló, no sabemos si
-      // Meta reportó errores para ese lote y tratar "sin datos" como "sin errores" habría
-      // confirmado envíos que Meta rechazó.
+      // "Consultado" = Meta RESPONDIÓ. Un intento fallido no habilita a evaluar sus jobs:
+      // tratar "sin datos" como "sin errores" habría confirmado envíos que Meta rechazó.
       handlesConsultados.add(h);
     } catch {
       logger.warn('Outbox de catálogo: no se pudo consultar el estado de un lote; sus jobs quedan para la próxima corrida', { tenantId });
@@ -804,10 +906,15 @@ export async function reconcileCatalogOutbox(
       const ok = await db().runTransaction(async (tx) => {
         const fresco = (await tx.get(d.ref)).data() as MetaCatalogOutboxJob | undefined;
         if (!fresco || fresco.status !== job.status) return false;
-        tx.update(d.ref, { status: 'needs_action', reason: 'catalog_mismatch', updatedAt: Timestamp.now() });
+        tx.update(d.ref, { status: 'needs_action', reason: 'catalog_mismatch', attentionRequired: true, updatedAt: Timestamp.now() });
         return true;
       }).catch(() => false);
-      if (ok) await proyectarEstado(tenantId, { ...job, status: 'needs_action', reason: 'catalog_mismatch' });
+      if (ok) {
+        // Es una transición REAL a revisión humana: se cuenta como no resuelta igual que las
+        // demás — sin esto los `catalog_mismatch` desaparecían de todo contador y auditoría.
+        out.unresolved++;
+        await proyectarEstado(tenantId, { ...job, status: 'needs_action', reason: 'catalog_mismatch' });
+      }
       continue;
     }
     // Su handle no entró en el presupuesto de esta corrida: sin el estado del batch no se
@@ -818,6 +925,8 @@ export async function reconcileCatalogOutbox(
     const itemErr = job.batchHandle ? itemErrors.get(`${job.batchHandle}|${job.retailerId}`) : undefined;
     const verif = verifyJobOutcome(job.intendedPatch, remoto);
 
+    // DECISIÓN (todavía sin efectos): qué transición corresponde según la evidencia. Los
+    // contadores NO se tocan acá — solo cuentan las transiciones que se APLICARON de verdad.
     let status: MetaCatalogOutboxStatus;
     let reason: OutboxReason | null = null;
     let error = '';
@@ -826,26 +935,31 @@ export async function reconcileCatalogOutbox(
       status = 'failed';
       reason = 'item_rejected';
       error = itemErr.slice(0, 500);
-      out.failed++;
     } else if (verif.outcome === 'confirmed_equal') {
       status = 'succeeded';
-      out.succeeded++;
     } else if (verif.outcome === 'confirmed_different') {
       // Un CREATE cuyo artículo YA existe en Meta no se puede repetir: con `allow_upsert:false`
       // Meta lo rechaza por id duplicado y el job quedaría `failed` por un artículo que en
       // realidad se creó bien. La divergencia que quede es materia del próximo preview (un
       // UPDATE), no de reenviar la creación.
       const createYaAplicado = job.action === 'create' && !!remoto;
+      const viejo = Timestamp.now().toMillis() - (job.updatedAt?.toMillis?.() ?? 0) > ATASCADO_MS;
       if (job.status === 'needs_reconciliation' && (job.attempts ?? 0) < MAX_ATTEMPTS && !createYaAplicado) {
         // Ambigüedad resuelta: Meta NO tiene lo nuestro ⇒ el reintento es seguro.
         status = 'queued';
         reason = 'remote_differs';
-        out.requeued++;
+      } else if (job.status === 'submitted' && !viejo) {
+        // El batch fue ACEPTADO y "distinto" puede significar simplemente "Meta todavía no lo
+        // procesó" — `getBatchStatus` no expone el estado de procesamiento, solo errores.
+        // Escalarlo ya sería declarar una divergencia sin saber si el lote terminó: queda como
+        // pendiente de reconciliación y se re-mira en la próxima corrida. Si envejece sin
+        // resolverse, recién ahí pasa a revisión humana.
+        status = 'needs_reconciliation';
+        reason = 'submit_ambiguous';
       } else {
-        // Salió y Meta quedó distinto: alguien más lo editó o Meta aplicó otra cosa.
+        // Salió hace rato y Meta quedó distinto: alguien más lo editó o Meta aplicó otra cosa.
         status = 'needs_action';
         reason = 'remote_differs';
-        out.unresolved++;
       }
     } else {
       // Sin evidencia. `submitted` espera; un ambiguo viejo pasa a decisión humana.
@@ -857,34 +971,47 @@ export async function reconcileCatalogOutbox(
       // Se PRESERVA el motivo original: que la relectura tampoco aclare nada no borra el
       // hecho de que el envío quedó ambiguo — es la información que necesita quien lo revise.
       reason = job.reason ?? 'verification_unavailable';
-      out.unresolved++;
     }
 
-    const actualizado: MetaCatalogOutboxJob = { ...job, status, reason, error };
-    // PRECONDICIÓN: entre la query y esta escritura una persona pudo descartar el job desde el
-    // panel, o el sweep pudo moverlo. Un `update` ciego resucitaba un job cancelado —y en el
-    // camino habría reenviado a Meta un cambio que el dueño acababa de descartar.
-    const asentado = await db().runTransaction(async (tx) => {
-      const fresco = (await tx.get(d.ref)).data() as MetaCatalogOutboxJob | undefined;
-      if (!fresco || fresco.status !== job.status) return false;
-      tx.update(d.ref, { status, reason, error, reconciledAt: Timestamp.now(), updatedAt: Timestamp.now() });
-      return true;
-    }).catch(() => false);
+    // APLICACIÓN. La precondición se re-evalúa DENTRO de la transacción: entre la query y esta
+    // escritura una persona pudo descartar el job desde el panel, o el sweep pudo moverlo. Un
+    // `update` ciego resucitaba un job cancelado —y en el camino habría reenviado a Meta un
+    // cambio que el dueño acababa de descartar. Las transiciones TERMINALES (`succeeded`,
+    // `failed`) escriben su sync log EN LA MISMA transacción: nunca un terminal sin historia.
+    let asentado: MetaCatalogOutboxJob | null = null;
+    if (status === 'succeeded' || status === 'failed') {
+      asentado = await cerrarTerminalConLog(tenantId, job, {
+        precondicion: (fresco) => fresco.status === job.status,
+        status,
+        reason,
+        error,
+        logStatus: status === 'succeeded' ? 'success' : 'failed',
+        itemId: remoto?.id ?? null,
+      });
+    } else {
+      asentado = await db().runTransaction(async (tx) => {
+        const fresco = (await tx.get(d.ref)).data() as MetaCatalogOutboxJob | undefined;
+        if (!fresco || fresco.status !== job.status) return null;
+        tx.update(d.ref, { status, reason, error, attentionRequired: attentionRequiredFor(status), reconciledAt: Timestamp.now(), updatedAt: Timestamp.now() });
+        return { ...job, status, reason, error };
+      }).catch(() => null);
+    }
+    // Perdió la carrera: NADA se cuenta, nada se proyecta, ningún log. El estado que quedó lo
+    // escribió quien ganó, y esta corrida no puede atribuirse su resultado.
     if (!asentado) continue;
+
+    // Los contadores recién ahora: reflejan transiciones REALES, no intenciones.
+    if (status === 'succeeded') out.succeeded++;
+    else if (status === 'failed') out.failed++;
+    else if (status === 'queued') out.requeued++;
+    else out.unresolved++;
+
     // Un job que llegó a un estado terminal suelta el puntero de su intención: recién ahí la
     // MISMA confirmación puede volver a ejecutarse como un ciclo nuevo.
     if (isTerminalOutboxStatus(status)) await liberarIntent(tenantId, job);
-    // El log se escribe JUNTO con la transición, no al final del bucle: una corrida cortada a
-    // la mitad perdía la historia de todo lo que ya había resuelto.
-    if (status === 'succeeded' || status === 'failed') {
-      const op = syncLogOp(tenantId, actualizado, status === 'succeeded' ? 'success' : 'failed', remoto?.id ?? null);
-      await db().doc(op.path).set(op.data, { merge: true }).catch(() => {
-        logger.warn('Outbox de catálogo: no se pudo escribir el log del ciclo', { tenantId, jobId: job.id });
-      });
-    }
     // El estado visible se proyecta CON FENCING: si mientras tanto se encoló un ciclo nuevo,
     // este job cierra su historia (documento + log) pero no habla por el presente.
-    await proyectarEstado(tenantId, actualizado, {
+    await proyectarEstado(tenantId, asentado, {
       ...(remoto ? { metaProductItemId: remoto.id } : {}),
       ...(status === 'succeeded' ? { metaLastSyncAt: Timestamp.now() } : {}),
     });
@@ -902,10 +1029,13 @@ export async function reconcileCatalogOutbox(
       metadata: { checked: out.checked, succeeded: out.succeeded, failed: out.failed, requeued: out.requeued, unresolved: out.unresolved },
     });
   }
-  out.metaCalls = client.callsMade;
-  // Lotes que quedaron sin consultar (por presupuesto o porque la consulta falló) MÁS los jobs
-  // que ni siquiera entraron en la ventana de la query: informar solo lo primero subreportaba
-  // el atasco cuando la cola es más larga que el lote.
+  // Observabilidad honesta: `metaCalls` cuenta cada request HTTP real (incluye las páginas de
+  // `listItems` y los reintentos internos de los GET); intentados ≠ respondidos cuando la API
+  // está fallando; y los diferidos incluyen tanto los lotes que no entraron en el tope como
+  // los jobs que ni siquiera entraron en la ventana de la query.
+  out.metaCalls = cli.callsMade;
+  out.handlesAttempted = handlesIntentados.size;
+  out.handlesAnswered = handlesConsultados.size;
   out.deferredHandles = handles.length - handlesConsultados.size + Math.max(0, pend.size - evaluables.length);
   return out;
 }
@@ -939,25 +1069,31 @@ export async function sweepCatalogOutbox(tenantId: string): Promise<SweepResult>
       const fresco = (await tx.get(d.ref)).data() as MetaCatalogOutboxJob | undefined;
       if (!fresco || fresco.status !== 'processing') return false;
       if ((fresco.leaseUntil?.toMillis?.() ?? 0) > now.toMillis()) return false; // lease vigente: intocable
-      tx.update(d.ref, { status: 'needs_reconciliation', reason: 'submit_ambiguous', leaseUntil: null, leaseOwner: null, updatedAt: Timestamp.now() });
+      tx.update(d.ref, { status: 'needs_reconciliation', reason: 'submit_ambiguous', attentionRequired: true, leaseUntil: null, leaseOwner: null, updatedAt: Timestamp.now() });
       return true;
     }).then((hubo) => { if (hubo) out.normalized++; }).catch((e) => {
       logger.warn('Outbox de catálogo: no se pudo normalizar un job en vuelo', { tenantId, jobId: d.id, error: e instanceof Error ? e.message : 'desconocido' });
     });
   }
 
+  // Los envejecidos incluyen a los `submitted`: si la confirmación no pudo cerrarlos en una
+  // hora —porque `listItems` falla en toda corrida, o porque su handle nunca responde y
+  // monopoliza el tope de intentos—, escalan a revisión humana IGUAL. El sweep no necesita a
+  // Meta para esto, así que una evidencia permanentemente inaccesible ya no puede congelar
+  // jobs para siempre ni dejar que diez handles muertos produzcan inanición total.
   const ambiguos = await jobsCol(tenantId)
-    .where('status', '==', 'needs_reconciliation')
+    .where('status', 'in', ['needs_reconciliation', 'submitted'])
     .where('updatedAt', '<=', Timestamp.fromMillis(now.toMillis() - ATASCADO_MS))
     .limit(LOTE)
     .get();
   for (const d of ambiguos.docs) {
     await db().runTransaction(async (tx) => {
       const fresco = (await tx.get(d.ref)).data() as MetaCatalogOutboxJob | undefined;
-      if (!fresco || fresco.status !== 'needs_reconciliation') return false;
+      if (!fresco || (fresco.status !== 'needs_reconciliation' && fresco.status !== 'submitted')) return false;
+      if ((fresco.updatedAt?.toMillis?.() ?? 0) > now.toMillis() - ATASCADO_MS) return false;
       // Se preserva el motivo original del ambiguo: por qué quedó así es lo que necesita saber
       // quien lo revise, no el hecho genérico de que no se pudo verificar.
-      tx.update(d.ref, { status: 'needs_action', reason: fresco.reason ?? 'verification_unavailable', updatedAt: Timestamp.now() });
+      tx.update(d.ref, { status: 'needs_action', reason: fresco.reason ?? 'verification_unavailable', attentionRequired: true, updatedAt: Timestamp.now() });
       return true;
     }).then((hubo) => { if (hubo) out.aged++; }).catch(() => {});
   }

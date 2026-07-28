@@ -586,7 +586,7 @@ const limpio = async () => {
   await db.doc(`tenants/${T}/products/MCE2E-B`).set({ price: 230000 }, { merge: true });
   await call('runTenantJob', owner, { action: 'catalogSyncApply' });
   const job = (await jobsDeProducto('MCE2E-B'))[0];
-  await db.doc(`tenants/${T}/metaCatalogOutboxJobs/${job.id}`).set({ status: 'needs_action', reason: 'submit_ambiguous' }, { merge: true });
+  await db.doc(`tenants/${T}/metaCatalogOutboxJobs/${job.id}`).set({ status: 'needs_action', reason: 'submit_ambiguous', attentionRequired: true }, { merge: true });
 
   const { result: lista } = await call('metaCatalogOutboxIncidents', owner, {});
   check('OB-65. el dueño ve la incidencia saneada', lista?.ok === true && lista.incidents?.some((x) => x.jobId === job.id), `n=${lista?.incidents?.length}`);
@@ -614,7 +614,7 @@ const limpio = async () => {
   await db.doc(`tenants/${T}/products/MCE2E-A`).set({ syncToMeta: true }, { merge: true });
   await call('runTenantJob', owner, { action: 'catalogSyncApply' });
   const jobA = await jobOfProduct('MCE2E-A');
-  await db.doc(`tenants/${T}/metaCatalogOutboxJobs/${jobA.id}`).set({ status: 'needs_action', reason: 'submit_ambiguous' }, { merge: true });
+  await db.doc(`tenants/${T}/metaCatalogOutboxJobs/${jobA.id}`).set({ status: 'needs_action', reason: 'submit_ambiguous', attentionRequired: true }, { merge: true });
   const wAntes = (await writesSnap()).size;
   const { result: unv } = await call('metaCatalogOutboxReconcile', owner, { jobId: jobA.id });
   check('OB-68. sin evidencia en Meta ⇒ queda pendiente y NO se reenvía', unv?.outcome === 'unverifiable' && (await writesSnap()).size === wAntes, JSON.stringify(unv ?? {}));
@@ -658,6 +658,242 @@ const limpio = async () => {
   const despuesX = await db.doc(`tenants/${T2}/products/MCE2E-X`).get();
   const jobsT2 = await db.collection(`tenants/${T2}/metaCatalogOutboxJobs`).get();
   check('OB-72. drenar un tenant no toca los productos ni la cola del otro', jobsT2.empty && JSON.stringify(antesX.data()) === JSON.stringify(despuesX.data()));
+}
+
+// ═══ E6. HARDEN-2: CAS humano, tope de intentos, bandeja sin ocultamiento, fencing de errores ═══
+const setHold = (point) => db.doc(`tenants/${T}/_debug/catalogFixtures`).set({ holdAt: point, resume: false });
+const resumeHold = (point) => db.doc(`tenants/${T}/_debug/catalogFixtures`).set({ holdAt: point, resume: true });
+const clearHold = () => db.doc(`tenants/${T}/_debug/catalogFixtures`).delete().catch(() => {});
+const waitHold = async (point) => {
+  for (let i = 0; i < 80; i++) {
+    if ((await db.doc(`tenants/${T}/_debug/catalogHolds`).get()).data()?.point === point) return true;
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  return false;
+};
+
+{
+  // A. EL DESCARTE GANA mientras la reconciliación manual está por asentar: la reconciliación
+  // pierde el CAS, responde nothing_to_do y JAMÁS resucita el job descartado.
+  await limpio();
+  await db.doc(`tenants/${T}/products/MCE2E-B`).set({ price: 240000 }, { merge: true });
+  await call('runTenantJob', owner, { action: 'catalogSyncApply' });
+  const job = (await jobsDeProducto('MCE2E-B'))[0];
+  await db.doc(`tenants/${T}/metaCatalogOutboxJobs/${job.id}`).set({ status: 'needs_action', reason: 'submit_ambiguous', attentionRequired: true }, { merge: true });
+  await db.doc(FIXTURE).set({ applyBatchToFixture: true }, { merge: true });
+  await setHold('manual_pre_cas');
+  const reconcilePromise = call('metaCatalogOutboxReconcile', owner, { jobId: job.id });
+  check('OB-80. la reconciliación manual llegó al punto de carrera', await waitHold('manual_pre_cas'));
+  // El descarte también pasa por el hold: para que solo la RECONCILIACIÓN quede pausada, se
+  // descarta por escritura directa Admin (equivale a que otro proceso ganó la carrera).
+  await db.doc(`tenants/${T}/metaCatalogOutboxJobs/${job.id}`).set({ status: 'cancelled', error: 'descartado por el dueño: prueba de carrera', attentionRequired: false, updatedAt: Timestamp.now() }, { merge: true });
+  await resumeHold('manual_pre_cas');
+  const { result: perdio } = await reconcilePromise;
+  await clearHold();
+  const trasCarrera = (await jobsDeProducto('MCE2E-B')).find((j) => j.id === job.id);
+  check('OB-80b. la reconciliación perdió el CAS ⇒ nothing_to_do, sin afirmar transición', perdio?.outcome === 'nothing_to_do', JSON.stringify(perdio ?? {}));
+  check('OB-80c. el job descartado NO fue resucitado (conserva cancelled y su motivo)', trasCarrera?.status === 'cancelled' && String(trasCarrera?.error ?? '').includes('prueba de carrera'), `status=${trasCarrera?.status}`);
+  const logCarrera = await db.doc(`tenants/${T}/metaCatalogSyncLogs/${job.id}`).get();
+  check('OB-80d. y no dejó un log de un éxito que no ocurrió', !logCarrera.exists);
+}
+{
+  // A2. Dos reconciliaciones manuales SIMULTÁNEAS: una sola transición, un solo log.
+  await limpio();
+  await db.doc(`tenants/${T}/products/MCE2E-B`).set({ price: 235000 }, { merge: true });
+  await call('runTenantJob', owner, { action: 'catalogSyncApply' });
+  const job = (await jobsDeProducto('MCE2E-B'))[0];
+  await drain(); // sale hacia Meta y el fixture lo aplica
+  await db.doc(`tenants/${T}/metaCatalogOutboxJobs/${job.id}`).set({ status: 'needs_action', reason: 'submit_ambiguous', attentionRequired: true, submittedAt: Timestamp.fromMillis(Date.now() - 120000) }, { merge: true });
+  const [r1, r2] = await Promise.all([
+    call('metaCatalogOutboxReconcile', owner, { jobId: job.id }),
+    call('metaCatalogOutboxReconcile', owner, { jobId: job.id }),
+  ]);
+  const outcomes = [r1.result?.outcome, r2.result?.outcome].sort();
+  const fin = (await jobsDeProducto('MCE2E-B')).find((j) => j.id === job.id);
+  const logsFin = (await db.collection(`tenants/${T}/metaCatalogSyncLogs`).get()).docs.filter((d) => d.id === job.id);
+  check('OB-81. dos revisiones simultáneas ⇒ UNA transición real', fin?.status === 'succeeded' && outcomes.includes('confirmed_equal'), `outcomes=${outcomes.join(',')} status=${fin?.status}`);
+  check('OB-81b. y UN solo log para el ciclo', logsFin.length === 1, `logs=${logsFin.length}`);
+}
+{
+  // A3. Reconciliación AUTOMÁTICA y manual: la automática pierde el CAS y sus contadores no
+  // declaran un éxito que no le pertenece.
+  await limpio();
+  await db.doc(`tenants/${T}/products/MCE2E-B`).set({ price: 232000 }, { merge: true });
+  await call('runTenantJob', owner, { action: 'catalogSyncApply' });
+  const job = (await jobsDeProducto('MCE2E-B'))[0];
+  await drain();
+  await db.doc(`tenants/${T}/metaCatalogOutboxJobs/${job.id}`).set({ status: 'needs_reconciliation', reason: 'submit_ambiguous', attentionRequired: true, submittedAt: Timestamp.fromMillis(Date.now() - 120000) }, { merge: true });
+  await setHold('outbox_pre_verify');
+  const drenajePromise = drain();
+  check('OB-82. la confirmación automática llegó al punto de carrera', await waitHold('outbox_pre_verify'));
+  const { result: manual } = await call('metaCatalogOutboxReconcile', owner, { jobId: job.id });
+  await resumeHold('outbox_pre_verify');
+  const rAuto = await drenajePromise;
+  await clearHold();
+  const fin = (await jobsDeProducto('MCE2E-B')).find((j) => j.id === job.id);
+  check('OB-82b. la manual cerró el job y la automática NO lo pisó ni lo contó', manual?.outcome === 'confirmed_equal' && fin?.status === 'succeeded' && (rAuto?.reconcile?.succeeded ?? 0) === 0, `manual=${manual?.outcome} autoSucceeded=${rAuto?.reconcile?.succeeded}`);
+  const logsFin = (await db.collection(`tenants/${T}/metaCatalogSyncLogs`).get()).docs.filter((d) => d.id === job.id);
+  check('OB-82c. un solo log pese a las dos corridas', logsFin.length === 1, `logs=${logsFin.length}`);
+}
+{
+  // A4. El descarte sobre un job que otro worker YA cerró como succeeded lo PRESERVA.
+  await limpio();
+  await db.doc(FIXTURE).set({ applyBatchToFixture: true }, { merge: true });
+  await db.doc(`tenants/${T}/products/MCE2E-B`).set({ price: 228000 }, { merge: true });
+  await call('runTenantJob', owner, { action: 'catalogSyncApply' });
+  const job = (await jobsDeProducto('MCE2E-B'))[0];
+  await drain();
+  const cerrado = (await jobsDeProducto('MCE2E-B')).find((j) => j.id === job.id);
+  const { result: desc } = await call('metaCatalogOutboxDiscard', owner, { jobId: job.id, reason: 'ya no lo necesito' });
+  const fin = (await jobsDeProducto('MCE2E-B')).find((j) => j.id === job.id);
+  check('OB-83. descartar un job ya cerrado como succeeded lo preserva (solo lo marca revisado)', cerrado?.status === 'succeeded' && fin?.status === 'succeeded' && !!fin?.reviewedAt && desc?.status === 'succeeded', `antes=${cerrado?.status} después=${fin?.status} resp=${desc?.status}`);
+}
+{
+  // C. TOPE REAL DE INTENTOS: getBatchStatus falla SIEMPRE y aun así los intentos quedan
+  // acotados; ningún job cambia de estado; las llamadas HTTP quedan acotadas.
+  await limpio();
+  await db.doc(FIXTURE).set({ applyBatchToFixture: false, failWith: { op: 'batchStatus', status: 500, code: 1, message: 'status caído' } }, { merge: true });
+  await call('runTenantJob', owner, { action: 'catalogSyncApply' });
+  const jobs = await jobsOf();
+  let i = 0;
+  for (const j of jobs) {
+    await db.doc(`tenants/${T}/metaCatalogOutboxJobs/${j.id}`).set({
+      status: 'submitted', batchHandle: `hf-${i++}`, submittedAt: Timestamp.fromMillis(Date.now() - 120000),
+    }, { merge: true });
+  }
+  // 100 handles distintos en total (rellenamos hasta 100 con jobs sintéticos del MISMO tenant).
+  for (; i < 100; i++) {
+    await db.doc(`tenants/${T}/metaCatalogOutboxJobs/synth_h2_${i}`).set({
+      id: `synth_h2_${i}`, intentKey: `synth_intent_${i}`, cycle: 1, tenantId: T, catalogId: CATALOG_ID,
+      productId: `synth-p-${i}`, retailerId: `SYNTH-${i}`, action: 'update',
+      intendedPatch: { id: `SYNTH-${i}`, price: '1000 PYG' }, intendedContentHash: `h${i}`, productSnapshotHash: 's',
+      runId: 'synth', requestedByUid: null, requestedByRole: null,
+      status: 'submitted', attempts: 1, leaseOwner: null, leaseUntil: null,
+      batchHandle: `hf-${i}`, reason: null, error: '', attentionRequired: false, reviewedAt: null, reviewedReason: null,
+      createdAt: Timestamp.now(), updatedAt: Timestamp.fromMillis(Date.now() - 300000 - i), submittedAt: Timestamp.fromMillis(Date.now() - 300000),
+      reconciledAt: null,
+    });
+  }
+  const r = await drain();
+  const rec = r?.reconcile ?? {};
+  check('OB-84. con la API de estado CAÍDA, los INTENTOS quedan acotados al tope exacto', rec.handlesAttempted === 10 && rec.handlesAnswered === 0, `intentados=${rec.handlesAttempted} respondidos=${rec.handlesAnswered}`);
+  check('OB-84b. las llamadas HTTP reales quedan acotadas (listItems + intentos, con margen de retries)', (rec.metaCalls ?? 999) <= 45, `metaCalls=${rec.metaCalls}`);
+  const sinTocar = (await jobsOf()).filter((j) => j.status === 'submitted').length;
+  check('OB-84c. ningún job sin confirmar cambió de estado', sinTocar >= 99, `submitted=${sinTocar}`);
+  check('OB-84d. el reporte declara lo diferido en vez de esconderlo', (rec.deferredHandles ?? 0) > 0, `diferidos=${rec.deferredHandles}`);
+  await db.doc(FIXTURE).set({ failWith: null }, { merge: true });
+  for (let k = 0; k < 100; k++) await db.doc(`tenants/${T}/metaCatalogOutboxJobs/synth_h2_${k}`).delete().catch(() => {});
+}
+{
+  // D. BANDEJA SIN OCULTAMIENTO: 100+ revisados viejos no tapan una incidencia nueva.
+  await limpio();
+  const base = Date.now() - 10_000_000;
+  for (let k = 0; k < 105; k++) {
+    await db.doc(`tenants/${T}/metaCatalogOutboxJobs/rev_h2_${k}`).set({
+      id: `rev_h2_${k}`, intentKey: `rev_intent_${k}`, cycle: 1, tenantId: T, catalogId: CATALOG_ID,
+      productId: `rev-p-${k}`, retailerId: `REV-${k}`, action: 'update',
+      intendedPatch: { id: `REV-${k}`, price: '1000 PYG' }, intendedContentHash: `h${k}`, productSnapshotHash: 's',
+      runId: 'synth', requestedByUid: null, requestedByRole: null,
+      status: 'failed', attempts: 1, leaseOwner: null, leaseUntil: null, batchHandle: null,
+      reason: 'item_rejected', error: 'viejo', attentionRequired: false, reviewedAt: Timestamp.now(), reviewedReason: 'visto',
+      createdAt: Timestamp.fromMillis(base + k), updatedAt: Timestamp.fromMillis(base + k), submittedAt: null, reconciledAt: null,
+    });
+  }
+  await db.doc(`tenants/${T}/products/MCE2E-B`).set({ price: 226000 }, { merge: true });
+  await call('runTenantJob', owner, { action: 'catalogSyncApply' });
+  const nuevo = (await jobsDeProducto('MCE2E-B'))[0];
+  await db.doc(`tenants/${T}/metaCatalogOutboxJobs/${nuevo.id}`).set({ status: 'needs_action', reason: 'submit_ambiguous', attentionRequired: true }, { merge: true });
+  const { result: lista } = await call('metaCatalogOutboxIncidents', owner, {});
+  check('OB-85. 100+ revisados viejos NO tapan la incidencia abierta nueva', lista?.incidents?.some((x) => x.jobId === nuevo.id) === true && lista?.truncated === false, `n=${lista?.incidents?.length} truncated=${lista?.truncated}`);
+  // 101 ABIERTAS ⇒ se muestran 100 y truncated=true.
+  for (let k = 0; k < 101; k++) {
+    await db.doc(`tenants/${T}/metaCatalogOutboxJobs/open_h2_${k}`).set({
+      id: `open_h2_${k}`, intentKey: `open_intent_${k}`, cycle: 1, tenantId: T, catalogId: CATALOG_ID,
+      productId: `open-p-${k}`, retailerId: `OPEN-${k}`, action: 'update',
+      intendedPatch: { id: `OPEN-${k}`, price: '1000 PYG' }, intendedContentHash: `h${k}`, productSnapshotHash: 's',
+      runId: 'synth', requestedByUid: null, requestedByRole: null,
+      status: 'needs_action', attempts: 1, leaseOwner: null, leaseUntil: null, batchHandle: null,
+      reason: 'submit_ambiguous', error: '', attentionRequired: true, reviewedAt: null, reviewedReason: null,
+      createdAt: Timestamp.fromMillis(base + k), updatedAt: Timestamp.fromMillis(base + k), submittedAt: null, reconciledAt: null,
+    });
+  }
+  const { result: lista2 } = await call('metaCatalogOutboxIncidents', owner, {});
+  check('OB-85b. con más de 100 abiertas: se muestran 100 y truncated=true', (lista2?.incidents?.length ?? 0) === 100 && lista2?.truncated === true, `n=${lista2?.incidents?.length} truncated=${lista2?.truncated}`);
+  for (let k = 0; k < 105; k++) await db.doc(`tenants/${T}/metaCatalogOutboxJobs/rev_h2_${k}`).delete().catch(() => {});
+  for (let k = 0; k < 101; k++) await db.doc(`tenants/${T}/metaCatalogOutboxJobs/open_h2_${k}`).delete().catch(() => {});
+}
+{
+  // AUDIT-1: un `submitted` cuyo contenido difiere del remoto NO escala a revisión de una —
+  // el batch pudo no haberse procesado todavía. Queda pendiente de reconciliación.
+  await limpio();
+  await db.doc(FIXTURE).set({ applyBatchToFixture: false }, { merge: true });
+  await db.doc(`tenants/${T}/products/MCE2E-B`).set({ price: 222000 }, { merge: true });
+  await call('runTenantJob', owner, { action: 'catalogSyncApply' });
+  await drain(); // envía y, en la misma corrida, evalúa: different pero submitted FRESCO
+  const jobB1 = (await jobsDeProducto('MCE2E-B'))[0];
+  check('OB-87. submitted fresco + remoto distinto ⇒ pendiente de reconciliar, NO revisión humana', jobB1?.status === 'needs_reconciliation', `status=${jobB1?.status}`);
+  await drain(); // la ambigüedad resuelta habilita el reintento CONTROLADO (jamás needs_action prematuro)
+  const jobB2 = (await jobsDeProducto('MCE2E-B'))[0];
+  check('OB-87b. el ciclo sigue el camino de reintento acotado, sin escalar por impaciencia', jobB2?.status !== 'needs_action', `status=${jobB2?.status}`);
+  await db.doc(`tenants/${T}/products/MCE2E-B`).set({ price: 250000 }, { merge: true });
+}
+{
+  // AUDIT-2: la evidencia permanentemente inaccesible NO congela jobs para siempre: el sweep
+  // (que no necesita a Meta) escala los `submitted` viejos a revisión humana.
+  await limpio();
+  await db.doc(`tenants/${T}/metaCatalogOutboxJobs/frozen_a1`).set({
+    id: 'frozen_a1', intentKey: 'frozen_intent', cycle: 1, tenantId: T, catalogId: CATALOG_ID,
+    productId: 'frozen-p', retailerId: 'FROZEN-1', action: 'update',
+    intendedPatch: { id: 'FROZEN-1', price: '1000 PYG' }, intendedContentHash: 'h', productSnapshotHash: 's',
+    runId: 'synth', requestedByUid: null, requestedByRole: null,
+    status: 'submitted', attempts: 1, leaseOwner: null, leaseUntil: null,
+    batchHandle: 'h-muerto', reason: null, error: '', attentionRequired: false, reviewedAt: null, reviewedReason: null,
+    createdAt: Timestamp.fromMillis(Date.now() - 2 * 3600_000), updatedAt: Timestamp.fromMillis(Date.now() - 2 * 3600_000),
+    submittedAt: Timestamp.fromMillis(Date.now() - 2 * 3600_000), reconciledAt: null,
+  });
+  await db.doc(FIXTURE).set({ failWith: { op: 'batchStatus', status: 500, code: 1, message: 'muerto' } }, { merge: true });
+  await drain();
+  const frozen = (await jobsOf()).find((j) => j.id === 'frozen_a1');
+  check('OB-88. un submitted congelado >1h escala a revisión humana aunque Meta no responda', frozen?.status === 'needs_action' && frozen?.attentionRequired === true, `status=${frozen?.status}`);
+  await db.doc(FIXTURE).set({ failWith: null }, { merge: true });
+  await db.doc(`tenants/${T}/metaCatalogOutboxJobs/frozen_a1`).delete().catch(() => {});
+}
+{
+  // AUDIT-3: un cierre TERMINAL libera la vigencia del producto: la convergencia del
+  // planificador vuelve a poder corregir el estado visible sin encolar trabajo.
+  await limpio();
+  await db.doc(FIXTURE).set({ applyBatchToFixture: true }, { merge: true });
+  await db.doc(`tenants/${T}/products/MCE2E-B`).set({ price: 218000 }, { merge: true });
+  await call('runTenantJob', owner, { action: 'catalogSyncApply' });
+  await drain(); // envía + confirma: succeeded ⇒ vigencia liberada
+  const p1 = await productOf('MCE2E-B');
+  check('OB-89. el cierre terminal libera la vigencia del producto', p1?.metaSyncStatus === 'synced' && (p1?.metaSyncCurrentJobId ?? null) === null, `status=${p1?.metaSyncStatus} vigente=${p1?.metaSyncCurrentJobId}`);
+  // Se fuerza un estado visible incorrecto y se corre un apply SIN cambios: la convergencia
+  // (que antes quedaba muerta para siempre) lo corrige.
+  await db.doc(`tenants/${T}/products/MCE2E-B`).set({ metaSyncStatus: 'failed', metaSyncError: 'estado viejo' }, { merge: true });
+  await call('runTenantJob', owner, { action: 'catalogSyncApply' });
+  const p2 = await productOf('MCE2E-B');
+  check('OB-89b. la convergencia vuelve a corregir el estado de un producto sin ciclo activo', p2?.metaSyncStatus === 'synced', `status=${p2?.metaSyncStatus}`);
+  await db.doc(`tenants/${T}/products/MCE2E-B`).set({ price: 250000 }, { merge: true });
+}
+{
+  // E. FENCING DE ERRORES DE VALIDACIÓN: un job A activo no se pisa visualmente cuando una
+  // confirmación NUEVA del mismo producto llega inválida.
+  await limpio();
+  await db.doc(`tenants/${T}/products/MCE2E-B`).set({ price: 224000 }, { merge: true });
+  await call('runTenantJob', owner, { action: 'catalogSyncApply' });
+  const jobA = (await jobsDeProducto('MCE2E-B'))[0];
+  const antes = await productOf('MCE2E-B');
+  // Encolado directo de una entrada INVÁLIDA para el mismo producto (simula una validación
+  // rota en una confirmación posterior): assertBatchRequestShape la rechaza. Se importa el
+  // build compilado con URL file:// (requisito de ESM en Windows).
+  const { enqueueCatalogPlan } = await import(new URL('../lib/meta/catalogOutboxWorker.js', import.meta.url).href);
+  const res = await enqueueCatalogPlan(T, 'run-h2-e', [{
+    productId: 'MCE2E-B', sku: 'MCE2E-B', action: 'update',
+    request: { method: 'UPDATE', data: { id: 'MCE2E-B', costPrice: 999 } }, payload: {}, remoteItemId: null,
+  }], { catalogId: CATALOG_ID });
+  const despues = await productOf('MCE2E-B');
+  check('OB-86. una confirmación inválida NO pisa el estado del ciclo activo', res.blocked === 1 && despues?.metaSyncStatus === antes?.metaSyncStatus && despues?.metaSyncCurrentJobId === jobA.id, `blocked=${res.blocked} status=${despues?.metaSyncStatus} vigente=${despues?.metaSyncCurrentJobId?.slice(-9)}`);
 }
 await limpio();
 await db.doc(FIXTURE).set({ catalog: { id: CATALOG_ID, name: 'Catálogo E2E' }, items: FIXTURE_ITEMS, failWith: { op: 'getCatalog', status: 400, code: 100, message: 'Unsupported get request' } });

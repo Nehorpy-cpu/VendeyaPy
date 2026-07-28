@@ -243,6 +243,20 @@
           "order": "ASCENDING"
         }
       ]
+    },
+    {
+      "collectionGroup": "metaCatalogOutboxJobs",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "attentionRequired",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "updatedAt",
+          "order": "DESCENDING"
+        }
+      ]
     }
   ],
   "fieldOverrides": []

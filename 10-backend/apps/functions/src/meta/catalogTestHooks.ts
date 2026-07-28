@@ -21,7 +21,9 @@ export type CatalogHoldPoint =
   | 'outbox_pre_submit'
   | 'outbox_post_submit'
   | 'outbox_pre_verify'
-  | 'outbox_sweep_pre_tx';
+  | 'outbox_sweep_pre_tx'
+  /** Reconciliación MANUAL: entre la lectura de Meta y el CAS (tests de carreras humanas). */
+  | 'manual_pre_cas';
 
 const HOLD_MAX_MS = 20_000;
 

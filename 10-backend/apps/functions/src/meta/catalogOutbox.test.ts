@@ -177,6 +177,15 @@ describe('verifyManagedField — confirmed_equal | confirmed_different | unverif
     expect(verifyManagedField('price', '250000 PYG', remoto({ price: '' }))).toBe('unverifiable');
   });
 
+  it('los decimales del formateo de Meta no inventan divergencias (misma regla que el plan)', () => {
+    // PYG no lleva decimales: "₲250.000,00" y "PYG250,000.00" son el mismo precio que
+    // "250000 PYG". Sin esta regla el plan decía "sin cambios" y la verificación "distinto".
+    expect(verifyManagedField('price', '250000 PYG', remoto({ price: '₲250.000,00' }))).toBe('confirmed_equal');
+    expect(verifyManagedField('price', '250000 PYG', remoto({ price: 'PYG250,000.00' }))).toBe('confirmed_equal');
+    // Un decimal REAL (no ,00) sigue siendo una diferencia.
+    expect(verifyManagedField('price', '250000 PYG', remoto({ price: '₲250.000,50' }))).toBe('confirmed_different');
+  });
+
   it('la MONEDA declarada manda sobre los dígitos', () => {
     // Mismos dígitos, otra moneda: el precio NO está confirmado, está confirmadamente distinto.
     expect(verifyManagedField('price', '250000 PYG', remoto({ price: '250,000', currency: 'USD' }))).toBe('confirmed_different');
