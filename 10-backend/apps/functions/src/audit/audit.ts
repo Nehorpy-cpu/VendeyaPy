@@ -79,6 +79,9 @@ export const AUDIT_ACTIONS = [
   // META-CATALOG-GENERIC-ONBOARDING-QUALITY-1: cada invocación del run de importación
   // paginada (contadores + estado + motivo de corte).
   'meta.catalog_import_run',
+  // HARDEN-1 (ADR-0014 §4c): cada invocación del mantenimiento de catálogo
+  // (preview/apply de backfill de locks + quality, con contadores y conflictos).
+  'meta.catalog_maintenance_run',
   'whatsapp.activation_requested',
   'whatsapp.activation_completed',
   'whatsapp.activation_cancelled',

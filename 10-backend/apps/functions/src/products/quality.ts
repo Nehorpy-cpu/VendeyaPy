@@ -21,7 +21,7 @@
 
 import { Timestamp } from 'firebase-admin/firestore';
 import type { CatalogQualityProfile, Product, ProductQuality, QualityObservation, QualityObservationOrigin, QualitySeverity } from '@vpw/shared';
-import { DEFAULT_STOPWORDS, normalizeText, significantTokens, syncEnableBlockers, type SyncEnableBlocker } from '../meta/catalogReconcile.js';
+import { GENERIC_STOPWORDS, PERFUMERIA_STOPWORDS, normalizeText, significantTokens, syncEnableBlockers, type SyncEnableBlocker } from '../meta/catalogReconcile.js';
 
 /** Días que una observación RESUELTA se conserva como histórico antes de podarse. */
 const RESOLVED_RETENTION_DAYS = 30;
@@ -114,7 +114,12 @@ const fingerprintOf = (o: Pick<FreshObservation, 'code' | 'field'>): string => `
 // Perfil
 // ---------------------------------------------------------------------------
 
-/** Normaliza el perfil guardado en `config/catalog.profile`. Basura ⇒ null (defaults). */
+/**
+ * Normaliza el perfil guardado en `config/catalog.profile`. Basura / perfil corrupto ⇒ null,
+ * que en `effectiveCatalogPolicy` cae al vertical `generic` (fail-safe: nunca un vertical
+ * que el tenant no declaró). Un campo inválido dentro de un perfil válido se DESCARTA
+ * (p.ej. `vertical: 'zapatos'` ⇒ sin vertical ⇒ generic).
+ */
 export function normalizeCatalogProfile(v: unknown): CatalogQualityProfile | null {
   if (!v || typeof v !== 'object' || Array.isArray(v)) return null;
   const d = v as Record<string, unknown>;
@@ -130,8 +135,35 @@ export function normalizeCatalogProfile(v: unknown): CatalogQualityProfile | nul
   return out;
 }
 
-const stopwordsDe = (profile: CatalogQualityProfile | null | undefined): ReadonlySet<string> =>
-  profile?.stopwords?.length ? new Set(profile.stopwords.map((w) => normalizeText(w))) : DEFAULT_STOPWORDS;
+/**
+ * Política EFECTIVA del tenant (HARDEN-1): la resolución ÚNICA de perfil → comportamiento.
+ * Sin perfil (o perfil inválido ⇒ null) el vertical es `generic`: stopwords idiomáticas
+ * mínimas, sin ficha `perfume` fabricada. El vocabulario de perfumería existe SOLO como
+ * plantilla del vertical explícito `perfumeria` (arfagi la activa por configuración).
+ * TODO el pipeline (análisis remoto, matching, clasificación del import, evaluador) debe
+ * derivar de acá — una segunda resolución se desincroniza.
+ */
+export interface EffectiveCatalogPolicy {
+  vertical: 'perfumeria' | 'generic';
+  stopwords: ReadonlySet<string>;
+  requireBrand: boolean;
+  genericNameCheck: boolean;
+}
+
+export function effectiveCatalogPolicy(profile: CatalogQualityProfile | null | undefined): EffectiveCatalogPolicy {
+  const vertical = profile?.vertical ?? 'generic';
+  const stopwords = profile?.stopwords?.length
+    ? new Set(profile.stopwords.map((w) => normalizeText(w)))
+    : vertical === 'perfumeria'
+      ? PERFUMERIA_STOPWORDS
+      : GENERIC_STOPWORDS;
+  return {
+    vertical,
+    stopwords,
+    requireBrand: profile?.requireBrand ?? true,
+    genericNameCheck: profile?.genericNameCheck ?? true,
+  };
+}
 
 /** Marca NEUTRAL del producto (misma derivación que outboundBrand, sin truncar). */
 const brandDe = (p: Product): string => (p.brand ?? p.perfume?.brand ?? '').trim();
@@ -152,8 +184,8 @@ export function localNameSet(products: ReadonlyArray<Pick<Product, 'id' | 'name'
 // ---------------------------------------------------------------------------
 
 function freshObservations(p: Product, ctx: QualityEvalContext): FreshObservation[] {
-  const profile = ctx.profile ?? null;
-  const stopwords = stopwordsDe(profile);
+  const policy = effectiveCatalogPolicy(ctx.profile ?? null);
+  const stopwords = policy.stopwords;
   const out: FreshObservation[] = [];
   const remoteHasIdentity = ctx.remoteHasIdentity ?? !!(p.metaRetailerId ?? '').trim();
 
@@ -165,8 +197,9 @@ function freshObservations(p: Product, ctx: QualityEvalContext): FreshObservatio
   const yaObservada = new Set(out.map(fingerprintOf));
 
   // 2) Marca como calidad de ficha: cuando el gate NO la exige (artículo ya existente en
-  //    Meta ⇒ UPDATE parcial) pero el perfil del tenant la pide igual (default conservador).
-  if ((profile?.requireBrand ?? true) && !brandDe(p) && !yaObservada.has('brand_missing:brand')) {
+  //    Meta ⇒ UPDATE parcial) pero el perfil del tenant la pide igual (default conservador:
+  //    Meta la exige para crear en CUALQUIER rubro — no es un sesgo de vertical).
+  if (policy.requireBrand && !brandDe(p) && !yaObservada.has('brand_missing:brand')) {
     out.push({ code: 'brand_missing', severity: 'WARNING', field: 'brand', ...BLOCKER_TEXT.brand_missing });
   }
   // `requireImage` queda reservado: la imagen https la exige SIEMPRE el contrato de Meta
@@ -178,7 +211,7 @@ function freshObservations(p: Product, ctx: QualityEvalContext): FreshObservatio
   // 3) Nombre genérico: el nombre es (casi) solo la marca — mismo criterio que
   //    analyzeRemoteItems para los artículos remotos.
   const esGenerico = !!nBrand && (nName === nBrand || nName.replace(nBrand, '').trim().length <= 3);
-  if ((profile?.genericNameCheck ?? true) && nName && esGenerico) {
+  if (policy.genericNameCheck && nName && esGenerico) {
     out.push({
       code: 'generic_name',
       severity: 'WARNING',

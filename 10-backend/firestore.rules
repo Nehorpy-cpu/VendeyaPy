@@ -365,6 +365,9 @@ service cloud.firestore {
       // callable (metaCatalogImportStatus, saneado).
       match /metaCatalogImportRuns/{id} { allow read, write: if false; }
       match /metaCatalogImportState/{id} { allow read, write: if false; }
+      // Mantenimiento del catálogo (HARDEN-1, ADR-0014 §4c): backfill de locks + quality.
+      // CERRADA al cliente: preview/apply y su progreso viajan SOLO por callable (owner).
+      match /metaCatalogMaintenanceRuns/{id} { allow read, write: if false; }
 
       // Eventos del negocio + Conversions API (D6): manager+ lee; escribe Cloud Functions.
       match /businessEvents/{id} { allow read: if isTenantManager(tenantId) || isPlatformAdmin(); allow write: if false; }

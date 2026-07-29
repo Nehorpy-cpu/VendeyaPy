@@ -90,17 +90,32 @@ export function CatalogQualityCenter({
     );
   }
 
-  // --- Todo en orden (vacío honesto, compacto: sin ruido permanente) ---
+  // --- Sin problemas REPORTADOS: el verde exige cobertura completa (ADR-0014 §4c) ---
+  // Un catálogo con productos aún SIN evaluar nunca se muestra como "completo": el agregado
+  // solo cuenta productos evaluados, así que sin este aviso un catálogo legacy entero
+  // parecería impecable antes de correr el mantenimiento.
   if (!hayProblemas) {
+    const sinEvaluar = resumen?.sinEvaluar ?? 0;
     return (
       <section
         aria-labelledby={`${uid}-titulo`}
-        className="flex flex-wrap items-center justify-between gap-2 rounded-2xl border border-mint-200 bg-mint-50/40 px-4 py-3"
+        className={
+          sinEvaluar > 0
+            ? 'flex flex-wrap items-center justify-between gap-2 rounded-2xl border border-amber-200 bg-amber-50/40 px-4 py-3'
+            : 'flex flex-wrap items-center justify-between gap-2 rounded-2xl border border-mint-200 bg-mint-50/40 px-4 py-3'
+        }
       >
         <h2 id={`${uid}-titulo`} className="text-sm font-semibold text-ink-900">
           Calidad del catálogo
         </h2>
-        <p className="text-sm text-mint-700">Sin datos pendientes: tus productos están completos.</p>
+        {sinEvaluar > 0 ? (
+          <p className="text-sm text-amber-800">
+            {sinEvaluar} producto{sinEvaluar === 1 ? '' : 's'} sin evaluar todavía. El estado real se conoce al
+            completar la revisión del catálogo.
+          </p>
+        ) : (
+          <p className="text-sm text-mint-700">Sin datos pendientes: tus productos están completos.</p>
+        )}
       </section>
     );
   }

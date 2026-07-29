@@ -98,6 +98,12 @@ await wipe(`tenants/${T}/metaCatalogSyncRuns`);
 await wipe(`tenants/${T}/metaCatalogSyncLogs`);
 await wipe(`tenants/${T}/auditLogs`);
 await db.doc(`tenants/${T}/config/meta`).delete().catch(() => {});
+// Re-corrida sobre emulador REUSADO: la corrida anterior TERMINA con jobs queued en el
+// outbox (PB-99 los deja a propósito) y con sus intents activos. Sin esta limpieza, la
+// sección E deduplicaría contra jobs viejos (OB-30) y el drenaje los marcaría stale
+// (OB-36/38): los productos re-sembrados ya no coinciden con los snapshots congelados.
+await wipe(`tenants/${T}/metaCatalogOutboxJobs`);
+await wipe(`tenants/${T}/metaCatalogOutboxIntents`);
 // Productos creados/mapeados por una corrida anterior de este script (si quedan, sus
 // vínculos reclamarían artículos remotos y falsearían los conteos de remoteOnly).
 await db.doc(`tenants/${T}/products/MCE2E-IMP`).delete().catch(() => {});
@@ -115,6 +121,11 @@ await db.doc(`tenants/${T}`).set({
   updatedAt: now,
 }, { merge: true });
 await db.doc(`tenants/${T2}`).set({ name: 'Boutique E2E', slug: T2, status: 'ACTIVE', planId: 'growth', subscription: { status: 'active', currentPeriodStart: now }, updatedAt: now }, { merge: true });
+// HARDEN-1 (ADR-0014 §4): sin `config/catalog.profile` el backend ahora es vertical GENERIC
+// (no fabrica la ficha `perfume` al importar). Este E2E modela a arfagi, cuyo release exige
+// el perfil perfumeria EXPLÍCITO en producción — se siembra igual acá para que el flujo de
+// import curado (checks 69-75) conserve su contrato histórico.
+await db.doc(`tenants/${T}/config/catalog`).set({ profile: { vertical: 'perfumeria' } }, { merge: true });
 
 // Productos controlados MCE2E-* (los del seed load-catalog, si existen, no participan de los asserts).
 await db.doc(`tenants/${T}/products/MCE2E-A`).set(prodDoc('MCE2E-A'));                                        // create
@@ -989,10 +1000,17 @@ const writesAntesMapping = (await writesSnap()).size;
 }
 {
   // Un producto que NO estaba sincronizando: el vínculo tampoco lo habilita (fail-closed).
+  // (HARDEN-1) El rid del escenario debe estar LIBRE: 'MCE2E-HUERFANO' ya lo reclama
+  // MCE2E-IMP (§46, importado legacy SIN lock) y desde el harden confirmarlo sobre OTRO
+  // producto es failed-precondition — el escenario viejo creaba justo el doble vínculo que
+  // el programa cierra (la protección tiene su E2E propio en verify-catalog-onboarding
+  // HD-7b). Se agrega un huérfano temporal solo para este bloque y se restaura el fixture.
+  await db.doc(FIXTURE).set({ catalog: { id: CATALOG_ID, name: 'Catálogo E2E' }, items: [...FIXTURE_ITEMS, remoteItem('MCE2E-ORPHAN3', { name: 'Solo en Meta Tres' })] });
   await db.doc(`tenants/${T}/products/MCE2E-NOSYNC`).set(prodDoc('MCE2E-NOSYNC', { syncToMeta: false }));
-  const { result } = await call('metaCatalogConfirmMapping', owner, { productId: 'MCE2E-NOSYNC', retailerId: 'MCE2E-HUERFANO' });
+  const { result } = await call('metaCatalogConfirmMapping', owner, { productId: 'MCE2E-NOSYNC', retailerId: 'MCE2E-ORPHAN3' });
   const p = await productOf('MCE2E-NOSYNC');
-  check('57b. el vínculo NO habilita la sync de un producto que no la tenía', result?.ok === true && p?.syncToMeta === false && p?.metaRetailerId === 'MCE2E-HUERFANO');
+  check('57b. el vínculo NO habilita la sync de un producto que no la tenía', result?.ok === true && p?.syncToMeta === false && p?.metaRetailerId === 'MCE2E-ORPHAN3');
+  await db.doc(FIXTURE).set({ catalog: { id: CATALOG_ID, name: 'Catálogo E2E' }, items: FIXTURE_ITEMS });
 }
 {
   const { err } = await call('metaCatalogConfirmMapping', owner, { productId: 'MCE2E-A', retailerId: 'MCE2E-B' });

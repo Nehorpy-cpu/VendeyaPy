@@ -9,13 +9,16 @@
  *                                 inmutable: no pisa un vínculo distinto).
  *   · metaCatalogImportItems    — importa artículos de Meta como productos INACTIVE con
  *                                 syncToMeta=false (no pueden modificar ni apagar Meta).
+ *                                 (HARDEN-1) La `quality` nace CON el producto en el MISMO
+ *                                 batch (mismo invariante que el run paginado) y la campana
+ *                                 agregada se refresca tras el commit.
  *   · metaCatalogSetSyncEnabled — habilita/apaga el opt-in de sync de un producto, con gates.
  *
  * Auth: SOLO TENANT_OWNER o PLATFORM_ADMIN (resolveOwnerAuth). Manager/Seller denegados.
  */
 import { onCall, HttpsError, type CallableRequest } from 'firebase-functions/v2/https';
 import { Timestamp } from 'firebase-admin/firestore';
-import type { Product } from '@vpw/shared';
+import type { CatalogQualityProfile, Product } from '@vpw/shared';
 import { resolveOwnerAuth } from '../../panel/auth.js';
 import { assertWithinLimit } from '../../entitlements/entitlements.js';
 import { db, paths } from '../../lib/firebase.js';
@@ -24,6 +27,8 @@ import { logger } from '../../lib/logger.js';
 import { normalizeCatalogSyncConfig } from '../../meta/catalogSyncConfig.js';
 import { getMetaCatalogClientForTenant, MetaCatalogApiError } from '../../meta/catalogClient.js';
 import { outboundId } from '../../meta/catalogOutbound.js';
+import { effectiveCatalogPolicy, evaluateProductQuality, normalizeCatalogProfile } from '../../products/quality.js';
+import { refreshCatalogQualityNotification } from '../../products/qualityNotification.js';
 import {
   analyzeRemoteItems,
   buildImportedProduct,
@@ -64,12 +69,25 @@ export async function requireCatalogId(tenantId: string): Promise<string> {
   return cfg.catalogId;
 }
 
-/** Lee el catálogo remoto COMPLETO (solo GET). Errores saneados, jamás el token. */
-async function readRemote(tenantId: string, catalogId: string): Promise<RemoteCandidate[]> {
+/**
+ * Perfil de calidad del tenant (`config/catalog.profile`). Ausente o corrupto ⇒ null, que
+ * la política efectiva resuelve como vertical `generic` (HARDEN-1). Exportado: el run de
+ * importación paginada (catalogImportCallables) usa EXACTAMENTE la misma carga.
+ */
+export async function loadCatalogProfile(tenantId: string): Promise<CatalogQualityProfile | null> {
+  const doc = await db().doc(`tenants/${tenantId}/config/catalog`).get();
+  return normalizeCatalogProfile((doc.data() as { profile?: unknown } | undefined)?.profile);
+}
+
+/**
+ * Lee el catálogo remoto COMPLETO (solo GET). Errores saneados, jamás el token.
+ * `stopwords` = política del TENANT (perfil): el análisis remoto deja de asumir perfumería.
+ */
+async function readRemote(tenantId: string, catalogId: string, stopwords?: ReadonlySet<string>): Promise<RemoteCandidate[]> {
   try {
     const client = await getMetaCatalogClientForTenant(tenantId);
     await client.getCatalog(catalogId);
-    return analyzeRemoteItems(await client.listItems(catalogId));
+    return analyzeRemoteItems(await client.listItems(catalogId), { stopwords });
   } catch (e) {
     const detail = e instanceof MetaCatalogApiError ? e.message : 'No se pudo leer el catálogo de Meta.';
     logger.error('Reconciliación: fallo leyendo Meta', e, { tenantId });
@@ -89,7 +107,9 @@ export const metaCatalogReconcilePlan = onCall<{ tenantId?: string; offset?: num
   async (req) => {
     const tenantId = authorizeOwner(req, req.data?.tenantId);
     const catalogId = await requireCatalogId(tenantId);
-    const remote = await readRemote(tenantId, catalogId);
+    // Política del tenant cargada UNA vez por invocación y propagada a análisis + ranking.
+    const policy = effectiveCatalogPolicy(await loadCatalogProfile(tenantId));
+    const remote = await readRemote(tenantId, catalogId, policy.stopwords);
     const products = await loadProducts(tenantId);
 
     // Artículos ya reclamados por un vínculo confirmado ⇒ dejan de ser candidatos.
@@ -109,14 +129,14 @@ export const metaCatalogReconcilePlan = onCall<{ tenantId?: string; offset?: num
     // Sugerencias SOLO para productos vivos que todavía no tienen vínculo. Se devuelven solo
     // candidatos con confianza media o alta: un top-5 de coincidencias irrelevantes llena la
     // pantalla de ruido y empuja a vincular cualquier cosa.
-    const tokenIndex = buildRemoteTokenIndex(unlinkedAll);
+    const tokenIndex = buildRemoteTokenIndex(unlinkedAll, policy.stopwords);
     const suggestions: ProductMappingSuggestions[] = products
       .filter((p) => p.status !== 'ARCHIVED' && !(p.metaRetailerId ?? '').trim())
       .map((p) => ({
         productId: p.id,
         productName: p.name ?? '',
         internalSku: p.inventory?.sku ?? '',
-        candidates: rankMappingCandidates(p, unlinkedAll, { limit: 5, index: tokenIndex, minConfidence: 'media' }),
+        candidates: rankMappingCandidates(p, unlinkedAll, { limit: 5, index: tokenIndex, minConfidence: 'media', stopwords: policy.stopwords }),
       }))
       .filter((s) => s.candidates.length > 0)
       .slice(0, MAX_PAGE_SIZE);
@@ -175,7 +195,8 @@ export const metaCatalogConfirmMapping = onCall<{ tenantId?: string; productId?:
     }
 
     // Releer el artículo en Meta: no se vincula contra algo que no existe.
-    const remote = await readRemote(tenantId, catalogId);
+    const policy = effectiveCatalogPolicy(await loadCatalogProfile(tenantId));
+    const remote = await readRemote(tenantId, catalogId, policy.stopwords);
     const item = remote.find((r) => r.retailerId === retailerId);
     if (!item) throw new HttpsError('not-found', 'Ese artículo no existe en el catálogo de Meta configurado.');
 
@@ -188,7 +209,12 @@ export const metaCatalogConfirmMapping = onCall<{ tenantId?: string; productId?:
     // artículo a productos distintos podrían commitear las dos, de forma irreversible.
     const lockRef = db().doc(paths.metaRetailerLock(tenantId, retailerIdLockKey(retailerId)));
     await db().runTransaction(async (tx) => {
-      const [fresh, lock] = await Promise.all([tx.get(ref), tx.get(lockRef)]);
+      // (HARDEN-1) El lock NO alcanza como única precondición: los importados del camino
+      // clásico nacieron SIN lock, así que un confirmMapping sobre otro producto habría
+      // creado dos dueños del mismo artículo. La query por `metaRetailerId` DENTRO de la
+      // transacción cierra ese hueco (Firestore serializa sobre el resultado leído).
+      const claimQuery = db().collection(paths.products(tenantId)).where('metaRetailerId', '==', retailerId).limit(2);
+      const [fresh, lock, claimants] = await Promise.all([tx.get(ref), tx.get(lockRef), tx.get(claimQuery)]);
       const freshData = fresh.data() as Product | undefined;
       const freshMapped = (freshData?.metaRetailerId ?? '').trim();
       if (freshMapped && freshMapped !== retailerId) {
@@ -197,6 +223,10 @@ export const metaCatalogConfirmMapping = onCall<{ tenantId?: string; productId?:
       const lockOwner = (lock.data() as { productId?: string } | undefined)?.productId;
       if (lock.exists && lockOwner && lockOwner !== productId) {
         throw new HttpsError('failed-precondition', `Ese artículo de Meta ya está vinculado a otro producto (${lockOwner}).`);
+      }
+      const otroDueno = claimants.docs.find((d) => d.id !== productId);
+      if (otroDueno) {
+        throw new HttpsError('failed-precondition', `Ese artículo de Meta ya está vinculado a otro producto (${otroDueno.id}).`);
       }
       tx.set(lockRef, { retailerId, productId, tenantId, createdAt: Timestamp.now() });
       tx.set(
@@ -258,7 +288,9 @@ export const metaCatalogImportItems = onCall<{ tenantId?: string; retailerIds?: 
     if (!catSnap.exists) throw new HttpsError('invalid-argument', 'La categoría indicada no existe en esta empresa.');
 
     const catalogId = await requireCatalogId(tenantId);
-    const remote = await readRemote(tenantId, catalogId);
+    const profile = await loadCatalogProfile(tenantId);
+    const policy = effectiveCatalogPolicy(profile);
+    const remote = await readRemote(tenantId, catalogId, policy.stopwords);
     const byRid = new Map(remote.map((r) => [r.retailerId, r]));
     const products = await loadProducts(tenantId);
 
@@ -270,10 +302,10 @@ export const metaCatalogImportItems = onCall<{ tenantId?: string; retailerIds?: 
     // todavía no está vinculado, importarlo crearía un duplicado del mismo perfume a otro
     // precio. Se bloquea y se pide resolver el vínculo primero.
     const sinVinculo = products.filter((p) => p.status !== 'ARCHIVED' && !(p.metaRetailerId ?? '').trim());
-    const tokenIndex = buildRemoteTokenIndex(remote);
+    const tokenIndex = buildRemoteTokenIndex(remote, policy.stopwords);
     const conCandidatoFuerte = new Set<string>();
     for (const p of sinVinculo) {
-      for (const c of rankMappingCandidates(p, remote, { index: tokenIndex, limit: 3, minConfidence: 'alta' })) {
+      for (const c of rankMappingCandidates(p, remote, { index: tokenIndex, limit: 3, minConfidence: 'alta', stopwords: policy.stopwords })) {
         conCandidatoFuerte.add(c.retailerId);
       }
     }
@@ -303,6 +335,18 @@ export const metaCatalogImportItems = onCall<{ tenantId?: string; retailerIds?: 
     // Cuota UNA sola vez, por el delta total (no N llamadas).
     await assertWithinLimit(tenantId, 'products', { actorUid: req.auth?.uid, delta: toImport.length });
 
+    // (HARDEN-1) El import clásico ahora escribe el lock del retailer_id JUNTO al producto
+    // — el mismo lock de confirmMapping y del run paginado. Los locks ya tomados por OTRO
+    // producto bloquean el ítem como `already_mapped` (antes: el importado quedaba sin lock
+    // y confirmMapping podía darle su artículo a un segundo producto).
+    const lockRefs = toImport.map((item) => db().doc(paths.metaRetailerLock(tenantId, retailerIdLockKey(item.retailerId))));
+    const lockSnaps = lockRefs.length ? await db().getAll(...lockRefs) : [];
+    const lockOwnerByRid = new Map<string, string>();
+    for (const [i, snap] of lockSnaps.entries()) {
+      const owner = (snap.data() as { productId?: string } | undefined)?.productId;
+      if (snap.exists && owner) lockOwnerByRid.set(toImport[i]!.retailerId, owner);
+    }
+
     const now = Timestamp.now();
     const basePosition = products.length;
     const batch = db().batch();
@@ -311,12 +355,35 @@ export const metaCatalogImportItems = onCall<{ tenantId?: string; retailerIds?: 
       // ID DETERMINÍSTICO derivado del retailer_id + `create()`: dos importaciones concurrentes
       // del mismo artículo NO pueden crear dos productos (la segunda falla con ALREADY_EXISTS
       // y su reintento lo verá como `already_imported`).
-      const ref = db().doc(paths.product(tenantId, `meta_${retailerIdLockKey(item.retailerId)}`));
-      const doc = buildImportedProduct(item, { productId: ref.id, tenantId, categoryId, catalogId, position: basePosition + i });
-      batch.create(ref, { ...doc, createdAt: now, updatedAt: now });
+      const lockKey = retailerIdLockKey(item.retailerId);
+      const ref = db().doc(paths.product(tenantId, `meta_${lockKey}`));
+      const lockOwner = lockOwnerByRid.get(item.retailerId);
+      if (lockOwner && lockOwner !== ref.id) {
+        blocked.push({ retailerId: item.retailerId, reason: 'already_mapped' });
+        continue;
+      }
+      const doc = buildImportedProduct(item, { productId: ref.id, tenantId, categoryId, catalogId, position: basePosition + i, vertical: policy.vertical });
+      // (HARDEN-1) La calidad nace CON el producto EN EL MISMO batch (mismo invariante que
+      // el run paginado, catalogImport.ts): sin ella el borrador quedaba INVISIBLE para el
+      // centro de calidad y la campana (las queries por `quality.blocking` jamás matchean
+      // un campo ausente) hasta un mantenimiento posterior.
+      const quality = evaluateProductQuality(doc as unknown as Product, {
+        profile,
+        localNames,
+        origin: 'import',
+        remoteHasIdentity: true,
+        now,
+      });
+      batch.create(ref, { ...doc, quality, createdAt: now, updatedAt: now });
+      // Lock EN LA MISMA escritura (todo-o-nada del callable clásico): si otro proceso lo
+      // toma en paralelo, el `create` aborta el batch entero — jamás dos dueños.
+      if (!lockOwner) {
+        batch.create(db().doc(paths.metaRetailerLock(tenantId, lockKey)), { retailerId: item.retailerId, productId: ref.id, tenantId, createdAt: now });
+      }
       // NUNCA se escribe productFinancials: el costo queda desconocido, no en 0.
       imported.push({ productId: ref.id, retailerId: item.retailerId, name: item.name, flags: item.flags });
     }
+    if (!imported.length) return { ok: false, dryRun: false, imported: [], blocked };
     try {
       await batch.commit();
     } catch {
@@ -324,6 +391,10 @@ export const metaCatalogImportItems = onCall<{ tenantId?: string; retailerIds?: 
       logger.warn('Importación abortada por conflicto de concurrencia', { tenantId, cantidad: toImport.length });
       throw new HttpsError('aborted', 'Otra importación creó estos productos al mismo tiempo. Volvé a abrir la reconciliación para ver el estado actualizado.');
     }
+
+    // Los borradores nacen con bloqueos (not_active + stock_pending_review): el agregado
+    // cambió — la campana se refresca tras el commit (best-effort, jamás rompe el import).
+    await refreshCatalogQualityNotification(tenantId);
 
     const actor = actorOf(req);
     await recordAudit({
@@ -371,7 +442,8 @@ export const metaCatalogSetSyncEnabled = onCall<{ tenantId?: string; productId?:
 
     // Habilitar exige catálogo configurado + TODOS los gates + confirmación del diff REAL.
     const catalogId = await requireCatalogId(tenantId);
-    const remote = await readRemote(tenantId, catalogId);
+    const policy = effectiveCatalogPolicy(await loadCatalogProfile(tenantId));
+    const remote = await readRemote(tenantId, catalogId, policy.stopwords);
     // MISMA derivación que usa el planificador: una copia inline se desincroniza y el gate
     // terminaría evaluando una identidad distinta de la que va a viajar a Meta.
     const identity = outboundId(product);

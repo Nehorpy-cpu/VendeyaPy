@@ -8,9 +8,19 @@
  *     `status: 'completed'`. UN solo run activo por tenant (puntero transaccional
  *     `metaCatalogImportState/current` + lease 120s, patrón intent del outbox): una
  *     invocación CONCURRENTE recibe `{ status: 'already_running' }` con el estado actual.
+ *     (HARDEN-1) Cada claim fija una GENERACIÓN inmutable (contador creciente en el puntero,
+ *     copiado al run): toda escritura posterior la demuestra transaccionalmente. Un worker
+ *     superado por un takeover responde `{ ok: false, status: 'claim_lost' }` sin haber
+ *     escrito NADA tardío (ni productos/locks, ni cursor, ni puntero). La campana agregada
+ *     queda FUERA del fencing: es BEST-EFFORT declarada (ADR-0014 §4b, last-writer-wins,
+ *     se auto-corrige en el próximo refresh) — lo único garantizado es que un worker que YA
+ *     SABE que perdió el claim no la refresca. El perfil de catálogo se FIJA al run en el
+ *     claim de creación (igual que defaultCategoryId): un cambio de config a mitad de
+ *     barrido no mezcla políticas dentro de un mismo runId.
  *   · metaCatalogImportStatus  (manager+) — read-only del run activo (o el último).
  *   · metaCatalogQualitySummary(manager+) — agregado del centro de calidad por severidad y
- *     código, con límite y `truncated` honesto.
+ *     código, con límite y `truncated` honesto, más la COBERTURA `sinEvaluar` (productos
+ *     no archivados sin `quality`): un catálogo legacy sin evaluar jamás se muestra verde.
  *
  * Semántica de `resume`: la reanudación de un run interrumpido (lease vencida) es el
  * comportamiento por DEFECTO — el run es idempotente y no puede haber dos. `resume: true`
@@ -24,7 +34,7 @@
  */
 import { onCall, HttpsError, type CallableRequest } from 'firebase-functions/v2/https';
 import { Timestamp } from 'firebase-admin/firestore';
-import type { MetaCatalogImportRunSummary, ProductQuality, QualitySeverity } from '@vpw/shared';
+import { PRODUCT_STATUS, type MetaCatalogImportRunSummary, type ProductQuality, type QualitySeverity } from '@vpw/shared';
 import { resolveOwnerAuth, resolvePanelAuth } from '../../panel/auth.js';
 import { assertWithinLimit } from '../../entitlements/entitlements.js';
 import { db, paths } from '../../lib/firebase.js';
@@ -35,12 +45,12 @@ import {
   emptyImportCounters,
   firestoreImportStore,
   runImportPages,
+  settleImportRunIfOwner,
   IMPORT_RUN_LEASE_MS,
   type MetaCatalogImportRunDoc,
 } from '../../meta/catalogImport.js';
-import { normalizeCatalogProfile } from '../../products/quality.js';
 import { refreshCatalogQualityNotification } from '../../products/qualityNotification.js';
-import { requireCatalogId } from './catalogReconcileCallables.js';
+import { loadCatalogProfile, requireCatalogId } from './catalogReconcileCallables.js';
 
 const REGION = 'us-central1';
 const DEFAULT_MAX_PAGES = 5;
@@ -63,12 +73,6 @@ function authorizeManager(req: CallableRequest<unknown>, requestedTenantId?: str
   return r.tenantId;
 }
 
-/** Perfil de calidad del tenant (`config/catalog.profile`). Ausente ⇒ defaults (arfagi). */
-async function loadProfile(tenantId: string) {
-  const doc = await db().doc(`tenants/${tenantId}/config/catalog`).get();
-  return normalizeCatalogProfile((doc.data() as { profile?: unknown } | undefined)?.profile);
-}
-
 /** Vista SANEADA del run para el panel (el doc está cerrado al cliente por rules). */
 function runSummary(run: MetaCatalogImportRunDoc): MetaCatalogImportRunSummary {
   return {
@@ -89,6 +93,8 @@ function runSummary(run: MetaCatalogImportRunDoc): MetaCatalogImportRunSummary {
 interface ImportState {
   activeRunId?: string | null;
   lastRunId?: string | null;
+  /** Generación de fencing: crece en CADA claim (creación de run o takeover). */
+  generation?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -121,13 +127,18 @@ export const metaCatalogImportRun = onCall<{ tenantId?: string; resume?: boolean
     }
 
     const catalogId = await requireCatalogId(tenantId);
-    const profile = await loadProfile(tenantId);
+    // La config se lee UNA vez acá: se usa para FIJAR la política a un run NUEVO (y como
+    // fallback para docs previos al campo `profile`). Un run existente usa LA DEL RUN.
+    const profile = await loadCatalogProfile(tenantId);
     const stateRef = db().doc(paths.metaCatalogImportState(tenantId));
 
-    // ---- Claim transaccional del run activo (lease 120s, patrón del outbox) ----
+    // ---- Claim transaccional del run activo (lease 120s + GENERACIÓN de fencing) ----
+    // La generación vive en el puntero y CRECE en cada claim (creación o takeover): toda
+    // escritura posterior del worker la demuestra transaccionalmente (HARDEN-1).
     const now = Timestamp.now();
     const claim = await db().runTransaction(async (tx) => {
       const state = (await tx.get(stateRef)).data() as ImportState | undefined;
+      const nextGeneration = (state?.generation ?? 0) + 1;
       const activo = state?.activeRunId
         ? ((await tx.get(db().doc(paths.metaCatalogImportRun(tenantId, state.activeRunId)))).data() as MetaCatalogImportRunDoc | undefined)
         : undefined;
@@ -150,13 +161,16 @@ export const metaCatalogImportRun = onCall<{ tenantId?: string; resume?: boolean
         if (leaseVigente) return { r: 'already_running' as const, run: activo };
         // Lease vencida (invocación anterior cortada o entre iteraciones del panel):
         // retomar es el DEFAULT — es el mismo run, y re-procesar páginas es idempotente.
+        // El TAKEOVER estrena generación: el worker anterior, si despierta, ya no escribe.
         tx.update(db().doc(paths.metaCatalogImportRun(tenantId, activo.runId)), {
           leaseUntil: Timestamp.fromMillis(now.toMillis() + IMPORT_RUN_LEASE_MS),
           attempts: (activo.attempts ?? 0) + 1,
+          generation: nextGeneration,
           actorUid,
           updatedAt: now,
         });
-        return { r: 'claimed' as const, run: { ...activo, attempts: (activo.attempts ?? 0) + 1 } };
+        tx.set(stateRef, { generation: nextGeneration, updatedAt: now }, { merge: true });
+        return { r: 'claimed' as const, run: { ...activo, attempts: (activo.attempts ?? 0) + 1, generation: nextGeneration } };
       }
 
       if (resume) return { r: 'nothing_to_resume' as const };
@@ -173,8 +187,11 @@ export const metaCatalogImportRun = onCall<{ tenantId?: string; resume?: boolean
         counters: emptyImportCounters(),
         blockedByReason: {},
         defaultCategoryId,
+        // Política FIJADA al run (ADR-0014 §4b): las invocaciones siguientes usan ESTA.
+        profile,
         leaseUntil: Timestamp.fromMillis(now.toMillis() + IMPORT_RUN_LEASE_MS),
         attempts: 1,
+        generation: nextGeneration,
         actorUid,
         lastError: '',
         startedAt: now,
@@ -183,7 +200,7 @@ export const metaCatalogImportRun = onCall<{ tenantId?: string; resume?: boolean
       };
       // `create` (no set): si dos transacciones compitieran por el mismo id, la segunda falla.
       tx.create(runRef, run as unknown as Record<string, unknown>);
-      tx.set(stateRef, { tenantId, activeRunId: runRef.id, lastRunId: runRef.id, updatedAt: now }, { merge: true });
+      tx.set(stateRef, { tenantId, activeRunId: runRef.id, lastRunId: runRef.id, generation: nextGeneration, updatedAt: now }, { merge: true });
       return { r: 'claimed' as const, run };
     });
 
@@ -198,7 +215,11 @@ export const metaCatalogImportRun = onCall<{ tenantId?: string; resume?: boolean
     }
 
     const run = claim.run;
-    const runRef = db().doc(paths.metaCatalogImportRun(tenantId, run.runId));
+    // (C1/HARDEN-1) TODAS las páginas de un run se procesan con la política DEL RUN (fijada
+    // en el claim de creación): un cambio de `config/catalog.profile` a mitad de barrido no
+    // mezcla criterios de bloqueo/vertical dentro de un mismo runId. El fallback a la config
+    // cubre SOLO run docs previos al campo (repo no desplegado: no debería ocurrir).
+    const runProfile = run.profile !== undefined ? run.profile : profile;
 
     // ---- Cliente + verificación del catálogo (solo GET; errores saneados) ----
     let client: Awaited<ReturnType<typeof getMetaCatalogClientForTenant>>;
@@ -207,14 +228,15 @@ export const metaCatalogImportRun = onCall<{ tenantId?: string; resume?: boolean
       await client.getCatalog(catalogId);
     } catch (e) {
       const detalle = e instanceof MetaCatalogApiError ? e.message : 'No se pudo leer el catálogo de Meta.';
-      // Se libera la lease para que la próxima invocación reanude sin esperar los 120s.
-      await runRef.set({ lastError: detalle.slice(0, 300), leaseUntil: null, updatedAt: Timestamp.now() }, { merge: true }).catch(() => {});
+      // Se libera la lease para que la próxima invocación reanude sin esperar los 120s —
+      // SOLO si este worker sigue siendo el dueño (fencing: jamás una escritura ciega).
+      await settleImportRunIfOwner(tenantId, run.runId, run.generation, { lastError: detalle.slice(0, 300), leaseUntil: null }).catch(() => {});
       logger.error('Import de catálogo: fallo leyendo Meta', e, { tenantId, runId: run.runId });
       throw new HttpsError('unavailable', detalle);
     }
 
     // ---- Hasta N páginas por invocación (cursor persistido tras cada una) ----
-    const store = firestoreImportStore({ tenantId, runId: run.runId, profile });
+    const store = firestoreImportStore({ tenantId, runId: run.runId, profile: runProfile, generation: run.generation });
     let res;
     try {
       res = await runImportPages({
@@ -229,24 +251,37 @@ export const metaCatalogImportRun = onCall<{ tenantId?: string; resume?: boolean
         processed: run.processed ?? 0,
         maxPages,
         // SIEMPRE manda la categoría del RUN (fijada al crearlo): mezclar categorías a mitad
-        // de barrido haría imposible explicar qué se importó a dónde.
+        // de barrido haría imposible explicar qué se importó a dónde. Ídem la política.
         defaultCategoryId: run.defaultCategoryId,
-        profile,
+        profile: runProfile,
         assertQuota: (delta) => assertWithinLimit(tenantId, 'products', { actorUid: req.auth?.uid, delta }),
       });
     } catch (e) {
       // Fallo inesperado a mitad de invocación: el progreso por página YA está persistido.
-      // Se libera la lease para que el reintento reanude sin esperar los 120s.
-      await runRef.set({ lastError: e instanceof Error ? e.message.slice(0, 300) : 'error interno', leaseUntil: null, updatedAt: Timestamp.now() }, { merge: true }).catch(() => {});
+      // Se libera la lease (si seguimos siendo dueños) para que el reintento reanude YA.
+      await settleImportRunIfOwner(tenantId, run.runId, run.generation, { lastError: e instanceof Error ? e.message.slice(0, 300) : 'error interno', leaseUntil: null }).catch(() => {});
       logger.error('Import de catálogo: invocación interrumpida', e, { tenantId, runId: run.runId });
       throw new HttpsError('internal', 'La importación se interrumpió. El progreso quedó guardado: volvé a intentar para reanudar.');
     }
 
-    if (res.status === 'completed') {
-      await stateRef.set({ activeRunId: null, lastRunId: run.runId, updatedAt: Timestamp.now() }, { merge: true });
-    } else {
+    if (res.stopReason === 'claim_lost') {
+      // Otro worker reclamó el run con una generación nueva: este worker NO escribió nada
+      // tardío (ni productos, ni cursor, ni puntero) y TAMPOCO toca la campana ni audita
+      // contadores que ya no son suyos. El panel debe consultar el estado del claim vigente.
+      logger.warn('Import de catálogo: invocación superada por un claim más nuevo', { tenantId, runId: run.runId, generation: run.generation });
+      return {
+        ok: false,
+        status: 'claim_lost' as const,
+        runId: run.runId,
+        message: 'Otra invocación tomó el control de esta importación. Consultá el estado actual.',
+      };
+    }
+
+    if (res.status !== 'completed') {
       // Entre invocaciones nadie trabaja el run: liberar la lease permite reanudar YA.
-      await runRef.set({ leaseUntil: null, updatedAt: Timestamp.now() }, { merge: true });
+      // (El puntero de un run COMPLETADO ya lo liberó el propio saveProgress, en la misma
+      // transacción con ownership.) Guardado con fencing: jamás pisa el claim de otro.
+      await settleImportRunIfOwner(tenantId, run.runId, run.generation, { leaseUntil: null }).catch(() => {});
     }
 
     // Campana agregada + auditoría (best-effort: jamás rompen el run). Se refresca al
@@ -309,10 +344,24 @@ export const metaCatalogQualitySummary = onCall<{ tenantId?: string }>({ region:
   const col = db().collection(paths.products(tenantId));
   // Índice automático de campo único de Firestore (sin entrada en firestore.indexes.json):
   // cada query filtra por UN solo campo anidado, sin orderBy adicional.
-  const [b, w] = await Promise.all([
+  //
+  // COBERTURA `sinEvaluar` (ADR-0014 §4c): productos NO archivados que aún NO tienen
+  // `quality` — un catálogo legacy sin evaluar nunca se muestra como "completo". Técnica:
+  // count() agregado con la desigualdad `quality.blocking >= 0`, que matchea SOLO docs que
+  // TIENEN el campo con valor numérico (en Firestore una desigualdad jamás matchea un campo
+  // ausente; verificado en el emulador por el E2E CO-28). Los ARCHIVED quedan FUERA de la
+  // cobertura a propósito: el mantenimiento saltea su backfill (contarlos sería deuda
+  // inaccionable que rompería el estado verde para siempre). `status in [...]` + desigualdad
+  // sobre otro campo exige el índice compuesto (status, quality.blocking) declarado en
+  // firestore.indexes.json.
+  const NO_ARCHIVADOS = PRODUCT_STATUS.filter((s) => s !== 'ARCHIVED');
+  const [b, w, totalSnap, evaluadosSnap] = await Promise.all([
     col.where('quality.blocking', '>', 0).select('name', 'quality').limit(SUMMARY_LIMIT).get(),
     col.where('quality.warning', '>', 0).select('name', 'quality').limit(SUMMARY_LIMIT).get(),
+    col.where('status', 'in', NO_ARCHIVADOS).count().get(),
+    col.where('status', 'in', NO_ARCHIVADOS).where('quality.blocking', '>=', 0).count().get(),
   ]);
+  const sinEvaluar = Math.max(0, totalSnap.data().count - evaluadosSnap.data().count);
 
   // Un producto puede aparecer en ambas queries: se deduplica por id.
   const porProducto = new Map<string, { name: string; quality: ProductQuality }>();
@@ -340,6 +389,8 @@ export const metaCatalogQualitySummary = onCall<{ tenantId?: string }>({ region:
     ok: true,
     conBloqueos: b.size,
     conAdvertencias: w.size,
+    /** Productos NO archivados que todavía NO fueron evaluados (sin campo `quality`). */
+    sinEvaluar,
     truncated,
     porCodigo,
     muestras,

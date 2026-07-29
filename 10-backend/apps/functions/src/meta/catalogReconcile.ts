@@ -31,17 +31,25 @@ export const normalizeText = (s: unknown): string =>
     .trim();
 
 /**
- * Ruido comercial que no aporta identidad al comparar nombres de perfumes. Es el DEFAULT del
- * perfil de arfagi, no una verdad universal: otros verticales pasan su propia lista vía
- * `CatalogQualityProfile.stopwords` (los llamadores existentes no pasan nada y conservan
- * exactamente este comportamiento — los 102 resultados ya comunicados no cambian).
+ * Ruido comercial del vertical PERFUMERÍA al comparar nombres. Es la plantilla del perfil
+ * `vertical: 'perfumeria'` (arfagi la activa por configuración EXPLÍCITA — los 102
+ * resultados ya comunicados no cambian bajo ese perfil), no una verdad universal.
+ *
+ * HARDEN-1: dejó de ser el default. Sin perfil, el análisis usa `GENERIC_STOPWORDS`
+ * (núcleo idiomático, cero vocabulario de rubro): importar un catálogo de ferretería no
+ * hereda el ruido de perfumes.
  */
-export const DEFAULT_STOPWORDS: ReadonlySet<string> = new Set([
+export const PERFUMERIA_STOPWORDS: ReadonlySet<string> = new Set([
   'edp', 'edt', 'eau', 'de', 'parfum', 'toilette', 'ml', '100ml', 'the', 'el', 'la', 'los',
   'las', 'y', 'edition', 'limited', 'collector', 'collectors', 'perfume', 'para',
 ]);
 
-export const significantTokens = (s: unknown, stopwords: ReadonlySet<string> = DEFAULT_STOPWORDS): string[] =>
+/** Núcleo idiomático universal (artículos/conectores): el ÚNICO ruido asumible sin perfil. */
+export const GENERIC_STOPWORDS: ReadonlySet<string> = new Set([
+  'the', 'el', 'la', 'los', 'las', 'y', 'de', 'para',
+]);
+
+export const significantTokens = (s: unknown, stopwords: ReadonlySet<string> = GENERIC_STOPWORDS): string[] =>
   normalizeText(s).split(' ').filter((t) => t.length > 1 && !stopwords.has(t));
 
 const jaccard = (a: string[], b: string[]): number => {
@@ -133,8 +141,12 @@ const BLOCKING_FLAGS: RemoteQualityFlag[] = ['invalid_price', 'image_not_https']
  * Analiza los artículos remotos y les asigna flags de calidad. PURO y determinístico:
  * el orden de salida sigue el de entrada, y los grupos de duplicados se ordenan por
  * retailer_id para que el resultado no dependa del orden de lectura de Meta.
+ *
+ * `opts.stopwords` es la política del TENANT (perfil de calidad): sin ella se usa el núcleo
+ * idiomático genérico — jamás el vocabulario de un rubro que el tenant no declaró.
  */
-export function analyzeRemoteItems(items: MetaRemoteCatalogItem[]): RemoteCandidate[] {
+export function analyzeRemoteItems(items: MetaRemoteCatalogItem[], opts: { stopwords?: ReadonlySet<string> } = {}): RemoteCandidate[] {
+  const stopwords = opts.stopwords ?? GENERIC_STOPWORDS;
   // Duplicado probable: misma descripción normalizada (los nombres genéricos no alcanzan
   // para distinguir; la descripción sí identifica el perfume real).
   const byDesc = new Map<string, string[]>();
@@ -165,7 +177,7 @@ export function analyzeRemoteItems(items: MetaRemoteCatalogItem[]): RemoteCandid
     // discrepancia es esperable y ya está cubierta por `generic_name`).
     const descIni = normalizeText(it.description).slice(0, 80);
     if (!flags.includes('generic_name')) {
-      const nameTokens = significantTokens(name);
+      const nameTokens = significantTokens(name, stopwords);
       const hit = nameTokens.some((t) => descIni.includes(t)) || (nBrand && descIni.includes(nBrand.split(' ')[0]!));
       if (nameTokens.length && descIni && !hit) flags.push('name_description_mismatch');
     }
@@ -229,13 +241,14 @@ const confidenceOf = (score: number): MappingConfidence => (score >= 0.6 ? 'alta
 /**
  * Tokens precomputados del lado remoto. Sin esto, el ranking recalcula la normalización de
  * cada artículo una vez POR PRODUCTO (O(productos × artículos) normalizaciones de string).
+ * Las `stopwords` deben ser LAS MISMAS que después reciba `rankMappingCandidates`.
  */
 export type RemoteTokenIndex = Map<string, { name: string[]; desc: string[] }>;
 
-export function buildRemoteTokenIndex(remote: RemoteCandidate[]): RemoteTokenIndex {
+export function buildRemoteTokenIndex(remote: RemoteCandidate[], stopwords: ReadonlySet<string> = GENERIC_STOPWORDS): RemoteTokenIndex {
   const idx: RemoteTokenIndex = new Map();
   for (const r of remote) {
-    idx.set(r.retailerId, { name: significantTokens(`${r.name} ${r.brand}`), desc: significantTokens(r.description.slice(0, 140)) });
+    idx.set(r.retailerId, { name: significantTokens(`${r.name} ${r.brand}`, stopwords), desc: significantTokens(r.description.slice(0, 140), stopwords) });
   }
   return idx;
 }
@@ -243,12 +256,13 @@ export function buildRemoteTokenIndex(remote: RemoteCandidate[]): RemoteTokenInd
 export function rankMappingCandidates(
   product: Product,
   remote: RemoteCandidate[],
-  opts: { limit?: number; index?: RemoteTokenIndex; minConfidence?: MappingConfidence } = {},
+  opts: { limit?: number; index?: RemoteTokenIndex; minConfidence?: MappingConfidence; stopwords?: ReadonlySet<string> } = {},
 ): MappingCandidate[] {
+  const stopwords = opts.stopwords ?? GENERIC_STOPWORDS;
   // Marca NEUTRAL con fallback al sub-objeto del vertical: un producto genérico sin
   // `perfume` no pierde su marca en el matching (para arfagi nada cambia: no tiene `brand`).
   const marcaLocal = product.brand ?? product.perfume?.brand ?? '';
-  const pTokens = significantTokens(`${product.name ?? ''} ${marcaLocal}`);
+  const pTokens = significantTokens(`${product.name ?? ''} ${marcaLocal}`, stopwords);
   const pBrand = normalizeText(marcaLocal).split(' ')[0] ?? '';
   const pPrice = Number(product.price ?? 0);
   const index = opts.index;
@@ -256,9 +270,9 @@ export function rankMappingCandidates(
   const scored = remote.map((r) => {
     const reasons: string[] = [];
     const cached = index?.get(r.retailerId);
-    const simName = jaccard(pTokens, cached?.name ?? significantTokens(`${r.name} ${r.brand}`));
+    const simName = jaccard(pTokens, cached?.name ?? significantTokens(`${r.name} ${r.brand}`, stopwords));
     // La descripción rescata los artículos con nombre genérico (el perfume real vive ahí).
-    const simDesc = jaccard(pTokens, cached?.desc ?? significantTokens(r.description.slice(0, 140)));
+    const simDesc = jaccard(pTokens, cached?.desc ?? significantTokens(r.description.slice(0, 140), stopwords));
     // El término `+ simDesc * 0.2` es el DESEMPATE: cuando varios artículos comparten el
     // mismo nombre genérico (5× "ANTONIO BANDERAS"), su simName es idéntico y solo la
     // descripción dice cuál es cuál. Sin este término ganaría el primero por orden alfabético.
@@ -340,16 +354,17 @@ export function buildImportedProduct(
     catalogId: string;
     position: number;
     /**
-     * Vertical del tenant (perfil de calidad). Default 'perfumeria' = comportamiento
-     * histórico de arfagi (arma la ficha `perfume` cuando hay marca). Con 'generic' la
-     * marca va SOLO al campo neutral `brand`: importar un catálogo de otro rubro no
-     * fabrica atributos de perfumería inventados.
+     * Vertical del tenant (perfil de calidad). Default 'generic' (HARDEN-1): la marca va
+     * SOLO al campo neutral `brand` y NO se fabrica la ficha `perfume` — importar un
+     * catálogo de otro rubro jamás inventa atributos de perfumería. El comportamiento
+     * histórico de arfagi (armar `perfume` cuando hay marca) se activa ÚNICAMENTE con el
+     * perfil explícito `vertical: 'perfumeria'`.
      */
     vertical?: 'perfumeria' | 'generic';
   },
 ): Omit<Product, 'createdAt' | 'updatedAt'> & { stockPendingReview: true } {
   const gender = genderFromProductType(item.productType);
-  const esPerfumeria = (ctx.vertical ?? 'perfumeria') === 'perfumeria';
+  const esPerfumeria = (ctx.vertical ?? 'generic') === 'perfumeria';
   return {
     id: ctx.productId,
     tenantId: ctx.tenantId,

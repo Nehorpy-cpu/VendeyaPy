@@ -7,7 +7,10 @@ import {
   parseRemotePriceGs,
   rankMappingCandidates,
   retailerIdLockKey,
+  significantTokens,
   syncEnableBlockers,
+  GENERIC_STOPWORDS,
+  PERFUMERIA_STOPWORDS,
   type RemoteCandidate,
 } from './catalogReconcile.js';
 import type { MetaRemoteCatalogItem } from './catalogClient.js';
@@ -347,5 +350,84 @@ describe('syncEnableBlockers — gates de habilitación', () => {
 
   it('sin identidad remota ni SKU ⇒ no_identity', () => {
     expect(syncEnableBlockers(prod({ id: 'p1', perfume: { brand: 'A' } as Product['perfume'], inventory: { trackStock: false, stock: 0, lowStockThreshold: 0, sku: '' } }))).toContain('no_identity');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// HARDEN-1 — default multi-vertical REAL (ADR-0014 §4)
+// ---------------------------------------------------------------------------
+
+describe('HARDEN-1: stopwords por política, jamás perfumería por defecto', () => {
+  it('significantTokens sin stopwords explícitas usa el núcleo idiomático GENÉRICO', () => {
+    // 'edp'/'ml'/'perfume' YA NO son ruido por defecto: son vocabulario de UN vertical.
+    expect(significantTokens('Perfume Odyssey EDP 100ml')).toEqual(['perfume', 'odyssey', 'edp', '100ml']);
+    // El núcleo idiomático sí se filtra ('de', 'para', artículos).
+    expect(significantTokens('Juego de puntas para taladro')).toEqual(['juego', 'puntas', 'taladro']);
+    // La plantilla de perfumería existe SOLO como stopwords explícitas.
+    expect(significantTokens('Perfume Odyssey EDP 100ml', PERFUMERIA_STOPWORDS)).toEqual(['odyssey']);
+    expect(GENERIC_STOPWORDS.has('edp')).toBe(false);
+    expect(PERFUMERIA_STOPWORDS.has('edp')).toBe(true);
+  });
+
+  it('analyzeRemoteItems: las stopwords del perfil cambian la incoherencia detectada', () => {
+    // Nombre = puro vocabulario de perfumería; descripción ajena. Sin perfil (default
+    // generic) hay tokens reales que NO aparecen en la descripción ⇒ mismatch. Con la
+    // plantilla de perfumería no queda nada que comparar ⇒ sin mismatch (arfagi vigente).
+    const item = remote({ retailerId: 'STW-1', name: 'Perfume EDP 100ml', brand: '', description: 'Estuche de regalo con lazo dorado' });
+    const [porDefecto] = analyzeRemoteItems([item]);
+    expect(porDefecto!.flags).toContain('name_description_mismatch');
+    const [conPerfil] = analyzeRemoteItems([item], { stopwords: PERFUMERIA_STOPWORDS });
+    expect(conPerfil!.flags).not.toContain('name_description_mismatch');
+  });
+
+  it('rankMappingCandidates: las stopwords personalizadas cambian el resultado REALMENTE', () => {
+    // Local y remoto comparten SOLO tokens que el perfil del tenant declara como ruido
+    // comercial. Sin perfil coinciden token a token ⇒ confianza alta (bloquearía el import
+    // como candidato fuerte). Con las stopwords del rubro no queda similitud ⇒ nunca alta.
+    const local = prod({ id: 'p9', name: 'Kit Premium Deluxe', perfume: null, price: 999999 });
+    const candidatos = analyzeRemoteItems([
+      remote({ retailerId: 'KIT-1', name: 'Kit Premium Deluxe', brand: '', description: 'Contenido sorpresa del proveedor' }),
+    ]);
+    const sinPerfil = rankMappingCandidates(local, candidatos);
+    expect(sinPerfil[0]!.confidence).toBe('alta');
+    const conPerfil = rankMappingCandidates(local, candidatos, { stopwords: new Set(['kit', 'premium', 'deluxe']) });
+    expect(conPerfil[0]!.confidence).not.toBe('alta');
+  });
+});
+
+describe('HARDEN-1: buildImportedProduct por vertical (default generic)', () => {
+  const item = () => analyzeRemoteItems([remote({ retailerId: 'VERT-1', price: '₲180.000' })])[0]!;
+  const ctx = { productId: 'x', tenantId: 't1', categoryId: 'c1', catalogId: 'CAT', position: 0 };
+
+  it('sin vertical (default) NO fabrica la ficha perfume: la marca vive SOLO en brand', () => {
+    const built = buildImportedProduct(item(), ctx);
+    expect(built.perfume).toBeNull();
+    expect(built.brand).toBe('ARMAF');
+  });
+
+  it("vertical 'generic' explícito: idéntico al default", () => {
+    const built = buildImportedProduct(item(), { ...ctx, vertical: 'generic' });
+    expect(built.perfume).toBeNull();
+    expect(built.brand).toBe('ARMAF');
+  });
+
+  it("vertical 'perfumeria' explícito conserva EXACTAMENTE el comportamiento vigente de arfagi", () => {
+    const built = buildImportedProduct(item(), { ...ctx, vertical: 'perfumeria' });
+    expect(built.perfume).toEqual({
+      brand: 'ARMAF',
+      gender: 'Masculino', // derivado de la taxonomía 'Perfumes > Perfume > Masculino'
+      olfactiveFamily: '',
+      styleTags: [],
+      notes: { top: [], heart: [], base: [] },
+      priceRange: 'MID',
+      sizeMl: null,
+      isNew: false,
+    });
+    expect(built.brand).toBe('ARMAF'); // la marca neutral se conserva SIEMPRE
+  });
+
+  it('sin marca remota, ni siquiera perfumeria fabrica la ficha', () => {
+    const sinMarca = analyzeRemoteItems([remote({ retailerId: 'VERT-2', brand: '' })])[0]!;
+    expect(buildImportedProduct(sinMarca, { ...ctx, vertical: 'perfumeria' }).perfume).toBeNull();
   });
 });

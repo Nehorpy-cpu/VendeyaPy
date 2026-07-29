@@ -22,6 +22,8 @@ import {
   type ImportProgressPatch,
   type ImportRunStore,
 } from './catalogImport.js';
+// El fencing generacional (HARDEN-1) tiene su propia batería: catalogImport.fencing.test.ts
+import { normalizeCatalogProfile } from '../products/quality.js';
 import { analyzeRemoteItems, retailerIdLockKey, type RemoteCandidate } from './catalogReconcile.js';
 import {
   FakeMetaCatalogClient,
@@ -482,15 +484,71 @@ describe('runImportPages', () => {
     expect(q.fingerprints['category_unclassified:categoryId']).toBeDefined();
   });
 
-  it('perfil arfagi (default) arma perfume con la marca; vertical generic NO fabrica perfume', async () => {
+  it('HARDEN-1: sin perfil el default es GENERIC — perfume null, marca SOLO en brand', async () => {
     const mkClient = () => new FakeMetaCatalogClient({ items: [fxItem('A1', { product_type: 'Perfumes > Perfume > Femenino' })] });
     const def = memStore();
-    await runImportPages(runArgs({ client: mkClient(), store: def.store }));
-    expect((def.creates[0]!.doc.perfume as { brand: string }).brand).toBe('Lumen');
+    await runImportPages(runArgs({ client: mkClient(), store: def.store, profile: null }));
+    expect(def.creates[0]!.doc.perfume).toBeNull();
+    expect(def.creates[0]!.doc.brand).toBe('Lumen');
+    // Perfil inválido (normalizado a null) ⇒ mismo fallback generic seguro.
+    const inv = memStore();
+    await runImportPages(runArgs({ client: mkClient(), store: inv.store, profile: normalizeCatalogProfile('basura') }));
+    expect(inv.creates[0]!.doc.perfume).toBeNull();
+    // Generic EXPLÍCITO: idéntico al default.
     const gen = memStore();
     await runImportPages(runArgs({ client: mkClient(), store: gen.store, profile: { vertical: 'generic' } }));
     expect(gen.creates[0]!.doc.perfume).toBeNull();
     expect(gen.creates[0]!.doc.brand).toBe('Lumen');
+    // Perfumería EXPLÍCITA conserva el comportamiento vigente de arfagi.
+    const per = memStore();
+    await runImportPages(runArgs({ client: mkClient(), store: per.store, profile: { vertical: 'perfumeria' } }));
+    expect((per.creates[0]!.doc.perfume as { brand: string; gender: string }).brand).toBe('Lumen');
+    expect((per.creates[0]!.doc.perfume as { brand: string; gender: string }).gender).toBe('Femenino');
+    expect(per.creates[0]!.doc.brand).toBe('Lumen');
+  });
+
+  it('HARDEN-1: dos tenants con perfiles DISTINTOS quedan aislados (mismo catálogo remoto)', async () => {
+    const mkClient = () => new FakeMetaCatalogClient({ items: [fxItem('A1')] });
+    const perfumeria = memStore();
+    await runImportPages(runArgs({ tenantId: 'tenant-perfumeria', client: mkClient(), store: perfumeria.store, profile: { vertical: 'perfumeria' } }));
+    const boutique = memStore();
+    await runImportPages(runArgs({ tenantId: 'tenant-boutique', client: mkClient(), store: boutique.store, profile: null }));
+    expect((perfumeria.creates[0]!.doc.perfume as { brand: string }).brand).toBe('Lumen');
+    expect(boutique.creates[0]!.doc.perfume).toBeNull();
+    expect(perfumeria.creates[0]!.doc.tenantId).toBe('tenant-perfumeria');
+    expect(boutique.creates[0]!.doc.tenantId).toBe('tenant-boutique');
+  });
+
+  it('HARDEN-1: las stopwords del perfil se PROPAGAN al ranking del import (candidato fuerte)', async () => {
+    // Local y remoto comparten SOLO tokens que el perfil declara como ruido comercial.
+    // Sin perfil: coincidencia total ⇒ ambiguous (candidato fuerte, NO se importa).
+    // Con las stopwords del rubro: sin similitud ⇒ se importa.
+    const item = fxItem('KIT-1', { name: 'Kit Premium Deluxe', description: 'Contenido sorpresa del proveedor', brand: '' });
+    const local = prodLocal({ id: 'x1', name: 'Kit Premium Deluxe', price: 999999 });
+    const sinPerfil = memStore({ unlinkedProducts: [local] });
+    const r1 = await runImportPages(runArgs({ client: new FakeMetaCatalogClient({ items: [item] }), store: sinPerfil.store, profile: null }));
+    expect(r1.counters.ambiguous).toBe(1);
+    expect(sinPerfil.creates).toHaveLength(0);
+    const conPerfil = memStore({ unlinkedProducts: [local] });
+    const r2 = await runImportPages(
+      runArgs({ client: new FakeMetaCatalogClient({ items: [item] }), store: conPerfil.store, profile: { stopwords: ['kit', 'premium', 'deluxe'] } }),
+    );
+    expect(r2.counters.ambiguous).toBe(0);
+    expect(r2.counters.imported).toBe(1);
+  });
+
+  it('HARDEN-1: las stopwords del perfil llegan hasta la quality del importado (mismatch)', async () => {
+    // Nombre = puro vocabulario de perfumería, descripción ajena. Sin perfil el importado
+    // nace con name_description_mismatch; con el perfil perfumeria, no (tokens = ruido).
+    const item = fxItem('STW-1', { name: 'Perfume EDP 100ml', brand: '', description: 'Estuche de regalo con lazo dorado' });
+    const def = memStore();
+    await runImportPages(runArgs({ client: new FakeMetaCatalogClient({ items: [item] }), store: def.store, profile: null }));
+    const qDef = def.creates[0]!.doc.quality as { fingerprints: Record<string, unknown> };
+    expect(qDef.fingerprints['name_description_mismatch:description']).toBeDefined();
+    const per = memStore();
+    await runImportPages(runArgs({ client: new FakeMetaCatalogClient({ items: [item] }), store: per.store, profile: { vertical: 'perfumeria' } }));
+    const qPer = per.creates[0]!.doc.quality as { fingerprints: Record<string, unknown> };
+    expect(qPer.fingerprints['name_description_mismatch:description']).toBeUndefined();
   });
 
   it('already_imported con drift dispara markRemoteDrift sobre el producto local (jamás lo pisa)', async () => {

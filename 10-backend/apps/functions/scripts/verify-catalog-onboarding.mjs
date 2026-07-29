@@ -9,8 +9,14 @@
  *   ya vinculado), gates de calidad sobre setSyncEnabled, corrección vía productUpsert con
  *   resolvedAt sellado, campana agregada única con autocierre, roles, rules y vendibilidad.
  *
+ * (HARDEN-1) Sección HD al final: mantenimiento del catálogo (preview sin escrituras / apply
+ * confirmado con backfill de locks+quality, conflictos sin ganador, reanudación idempotente,
+ * roles), import clásico con lock por ítem + perfiles por vertical, fencing generacional del
+ * run de importación (zombi con generación superada no escribe NADA) y query de la campana
+ * catalog_quality bajo rules.
+ *
  * Requiere: emuladores (auth+functions+firestore) + seed-users + load-catalog.
- * Checks numerados CO-N (uno por punto del programa; letras = sub-asserts del mismo punto).
+ * Checks numerados CO-N / HD-N (uno por punto del programa; letras = sub-asserts).
  */
 import { initializeApp } from 'firebase-admin/app';
 import { getAuth } from 'firebase-admin/auth';
@@ -75,7 +81,10 @@ async function deleteRefs(refs) {
     await b.commit();
   }
 }
-const MIS_PREFIJOS = ['meta_OB600-', 'meta_OBMED-', 'meta_MINI-', 'meta_MULTI-', 'meta_ONB-', 'ONB-LOCAL-', 'ptest-'];
+// 'meta_' entero: TODO importado es un artefacto de harness (los seeds no usan ese prefijo).
+// Cubre también residuos de verify-meta-catalog (p.ej. meta_MCE2E-NUEVO, que termina su
+// corrida CON quality vía productUpsert y falsearía los agregados de calidad de este script).
+const MIS_PREFIJOS = ['meta_', 'ONB-LOCAL-', 'ptest-', 'hdm-'];
 /** Borra products/locks/runs/state del programa en un tenant (idempotente, re-corrible). */
 async function wipeImportArtifacts(tenant, { keepLocals = false } = {}) {
   const prods = await db.collection(`tenants/${tenant}/products`).get();
@@ -83,6 +92,7 @@ async function wipeImportArtifacts(tenant, { keepLocals = false } = {}) {
   await deleteRefs(objetivo.map((d) => d.ref));
   await deleteRefs((await db.collection(`tenants/${tenant}/metaRetailerLocks`).get()).docs.map((d) => d.ref));
   await deleteRefs((await db.collection(`tenants/${tenant}/metaCatalogImportRuns`).get()).docs.map((d) => d.ref));
+  await deleteRefs((await db.collection(`tenants/${tenant}/metaCatalogMaintenanceRuns`).get()).docs.map((d) => d.ref)); // HARDEN-1
   await db.doc(`tenants/${tenant}/metaCatalogImportState/current`).delete().catch(() => {});
 }
 async function wipePrograma() {
@@ -110,6 +120,11 @@ await db.doc(`tenants/${T}`).set(tenantBase(T, 'Perfumería E2E'), { merge: true
 await db.doc(`tenants/${T2}`).set(tenantBase(T2, 'Boutique E2E'), { merge: true });
 await db.doc(`tenants/${T}/config/meta`).set({ catalogSync: CFG }, { merge: true });
 await db.doc(`tenants/${T2}/config/meta`).set({ catalogSync: CFG }, { merge: true });
+// HARDEN-1: el tenant "perfumeria" del E2E lleva su perfil de vertical EXPLÍCITO (espejo del
+// gate del release de arfagi: sin perfil, el backend ahora es GENERIC). La boutique (T2)
+// queda SIN perfil a propósito: cubre el default generic real.
+await db.doc(`tenants/${T}/config/catalog`).set({ profile: { vertical: 'perfumeria' } }, { merge: true });
+await db.doc(`tenants/${T2}/config/catalog`).delete().catch(() => {});
 await db.doc(`tenants/${T}/categories/perfumes`).set({ id: 'perfumes', tenantId: T, name: 'Perfumes', isActive: true, position: 0, createdAt: now, updatedAt: now }, { merge: true });
 await db.doc(`tenants/${T2}/categories/general`).set({ id: 'general', tenantId: T2, name: 'General', isActive: true, position: 0, createdAt: now, updatedAt: now }, { merge: true });
 
@@ -150,6 +165,7 @@ await setFixture([1, 2, 3].map((i) => item(`MINI-${i}`, { name: `Articulo Inicia
   const p = await productOf(T, 'meta_MINI-1');
   check('CO-2b. el importado nace INACTIVE + syncToMeta=false + stock sin inventar (pendiente de revisión)', p?.status === 'INACTIVE' && p?.syncToMeta === false && p?.stockPendingReview === true && p?.inventory?.trackStock === false && p?.inventory?.stock === 0);
   check('CO-2c. identidad remota + categoría del run + marca NEUTRAL + precio parseado', p?.metaRetailerId === 'MINI-1' && p?.metaCatalogId === CATALOG_ID && p?.categoryId === 'perfumes' && p?.brand === 'MarcaMini' && p?.price === 150000 && p?.currency === 'PYG');
+  check('CO-2c². el perfil perfumeria EXPLÍCITO del tenant arma la ficha perfume (compat arfagi)', p?.perfume?.brand === 'MarcaMini');
   check('CO-2d. la calidad nace CON el producto (blocking por not_active + stock_pending_review)', p?.quality?.blocking === 2 && obsActiva(p?.quality, 'not_active') && obsActiva(p?.quality, 'stock_pending_review'), `blocking=${p?.quality?.blocking}`);
   check('CO-2e. NO se inventa productFinancials (el costo queda desconocido)', !(await db.doc(`tenants/${T}/productFinancials/meta_MINI-1`).get()).exists);
   const lock = (await db.doc(`tenants/${T}/metaRetailerLocks/MINI-1`).get()).data();
@@ -400,6 +416,7 @@ let t2RunId = null;
   const okT2 = await productOf(T2, 'meta_ONB-OK');
   const linkedT2 = await productOf(T2, 'meta_ONB-LINKED');
   check('CO-10b. cada tenant tiene SUS docs bajo su propia ruta (mismo retailer_id, dos productos)', okT2?.tenantId === T2 && linkedT2?.tenantId === T2 && (await productOf(T2, 'meta_ONB-AMBIG'))?.tenantId === T2);
+  check('CO-10b². la boutique SIN perfil importa GENERIC: sin ficha perfume, marca solo en brand (HARDEN-1)', okT2?.perfume === null && okT2?.brand === 'BellaCasa');
   const okDespuesT = await productOf(T, 'meta_ONB-OK');
   check('CO-10c. el import de T2 NO tocó al tenant original (ni docs nuevos ni ediciones)', (await productOf(T, 'meta_ONB-LINKED')) === null && (await productOf(T, 'meta_ONB-AMBIG')) === null && okDespuesT?.updatedAt?.toMillis?.() === okAntesT?.updatedAt?.toMillis?.() && okDespuesT?.tenantId === T);
   const lockT = (await db.doc(`tenants/${T}/metaRetailerLocks/ONB-OK`).get()).data();
@@ -490,9 +507,265 @@ let t2RunId = null;
   check('CO-27c. RECORRIDO COMPLETO sin tocar Meta: cero batches escritos por el fake', (await writesSnap()).empty);
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// ═══ HD. HARDEN-1 — mantenimiento, conflictos, fencing y legacy con lock  ═══
+// ═══════════════════════════════════════════════════════════════════════════
+// El escenario del mantenimiento corre en la BOUTIQUE (T2): no tiene seed propio, así que
+// tras el wipe queda 100% controlada por este script y los contadores son EXACTOS.
+const runMaint = (token, data = {}) => call('metaCatalogMaintenanceRun', token, data);
+const MAINT_KEYS = ['examinados', 'locksCreados', 'locksExistentes', 'conflictos', 'qualityCalculada', 'qualityVigente'];
+const maintStr = (c) => MAINT_KEYS.map((k) => `${k}=${c?.[k] ?? 0}`).join(' ');
+const maintEq = (c, exp) => MAINT_KEYS.every((k) => (c?.[k] ?? 0) === (exp[k] ?? 0));
+const maintRunOf = async (tenant, runId) => (await db.doc(`tenants/${tenant}/metaCatalogMaintenanceRuns/${runId}`).get()).data() ?? null;
+/** Huella de escrituras del tenant: updateTime por producto + locks + campana. */
+const t2Snapshot = async () => {
+  const prods = await db.collection(`tenants/${T2}/products`).get();
+  const locks = await db.collection(`tenants/${T2}/metaRetailerLocks`).get();
+  const bell = await db.doc(`tenants/${T2}/notifications/catalog-quality-${T2}`).get();
+  return {
+    prodTimes: new Map(prods.docs.map((d) => [d.id, d.updateTime.toMillis()])),
+    lockIds: locks.docs.map((d) => d.id).sort().join(),
+    bellTime: bell.exists ? bell.updateTime.toMillis() : null,
+  };
+};
+
+// ── Setup HD: boutique en cero + 206 productos controlados (simulan un catálogo legacy) ──
+await wipeImportArtifacts(T2);
+// La boutique no tiene seed propio: se vacía ENTERA. Residuos de otros harnesses (p.ej.
+// MCE2E-X, que verify-meta-catalog deja en T2 y recrea en su propio setup) romperían los
+// contadores EXACTOS del mantenimiento.
+await deleteRefs((await db.collection(`tenants/${T2}/products`).get()).docs.map((d) => d.ref));
+const t2hd = (id, over = {}) => ({
+  id, tenantId: T2, name: `Producto ${id}`, description: `Producto ${id} descripcion corta`, price: 100000,
+  compareAtPrice: null, aiNotes: '', currency: 'PYG', categoryId: 'general', images: [IMG(id)], emoji: '',
+  inventory: { trackStock: true, stock: 5, lowStockThreshold: 1, sku: id }, status: 'ACTIVE', featured: false,
+  position: 700, externalIds: { facebook: null, instagram: null, tiktok: null }, brand: 'MarcaHD',
+  perfume: null, aiFicha: null, productUrl: `https://tienda.e2e.test/p/${id}`, syncToMeta: false,
+  createdAt: now, updatedAt: now, ...over,
+});
+// Quality VIGENTE sintética (con contenido distintivo): el mantenimiento JAMÁS debe recalcularla.
+const VIG_Q = {
+  blocking: 1, warning: 0,
+  fingerprints: { 'e2e_probe:name': { code: 'e2e_probe', severity: 'BLOCKING', field: 'name', message: 'observacion sintetica del harness', action: 'no tocar', firstSeenAt: now, lastSeenAt: now, resolvedAt: null, origin: 'system' } },
+  evaluatedAt: now,
+};
+{
+  const b = db.batch();
+  // Legacy: identidad remota SIN lock (el hueco que el mantenimiento debe cerrar) y sin quality.
+  b.set(db.doc(`tenants/${T2}/products/hdm-legacy-nolock`), t2hd('hdm-legacy-nolock', { metaRetailerId: 'HDRID-NOLOCK', metaCatalogId: CATALOG_ID }));
+  // Identidad remota CON lock vigente + quality vigente (nada que hacer).
+  b.set(db.doc(`tenants/${T2}/products/hdm-lockok`), t2hd('hdm-lockok', { metaRetailerId: 'HDRID-OK', metaCatalogId: CATALOG_ID, quality: { ...VIG_Q, blocking: 0, fingerprints: {} } }));
+  b.set(db.doc(`tenants/${T2}/metaRetailerLocks/HDRID-OK`), { retailerId: 'HDRID-OK', productId: 'hdm-lockok', tenantId: T2, createdAt: now });
+  // Sin identidad: uno con quality vigente (no se toca) y uno sin quality (INACTIVE ⇒ backfill con bloqueo).
+  b.set(db.doc(`tenants/${T2}/products/hdm-conquality`), t2hd('hdm-conquality', { quality: VIG_Q }));
+  b.set(db.doc(`tenants/${T2}/products/hdm-noquality`), t2hd('hdm-noquality', { status: 'INACTIVE' }));
+  // CONFLICTO: dos productos del MISMO tenant reclamando el MISMO retailer_id.
+  b.set(db.doc(`tenants/${T2}/products/hdm-confl-a`), t2hd('hdm-confl-a', { metaRetailerId: 'HDRID-DUP' }));
+  b.set(db.doc(`tenants/${T2}/products/hdm-confl-b`), t2hd('hdm-confl-b', { metaRetailerId: 'HDRID-DUP' }));
+  // 200 masivos sin quality: fuerzan DOS páginas (pageSize 200) y la reanudación real.
+  for (let i = 1; i <= 200; i++) {
+    const id = `hdm-bulk-${String(i).padStart(3, '0')}`;
+    b.set(db.doc(`tenants/${T2}/products/${id}`), t2hd(id));
+  }
+  await b.commit();
+}
+
+// ═══ HD-1 + HD-3(preview). Mantenimiento preview: contadores exactos y CERO escrituras ═══
+const baseHD = await t2Snapshot();
+check('HD(setup). boutique 100% controlada: 206 productos, 1 lock, campana previa presente', baseHD.prodTimes.size === 206 && baseHD.lockIds === 'HDRID-OK' && baseHD.bellTime !== null, `prods=${baseHD.prodTimes.size}`);
+{
+  const { result: r } = await runMaint(ownerBoutique, {}); // sin mode: preview es el DEFAULT
+  check('HD-1. mantenimiento SIN mode ⇒ preview por default, completed (2 páginas)', r?.ok === true && r?.mode === 'preview' && r?.status === 'completed' && r?.pagesDone === 2 && r?.more === false, `mode=${r?.mode} pages=${r?.pagesDone}`);
+  check('HD-1b. contadores del preview EXACTOS: lock faltante y quality faltantes CONTADOS (no escritos)', maintEq(r?.counters, { examinados: 206, locksCreados: 1, locksExistentes: 1, conflictos: 1, qualityCalculada: 202, qualityVigente: 2 }), maintStr(r?.counters));
+  const despues = await t2Snapshot();
+  const intactos = [...baseHD.prodTimes].every(([id, t]) => despues.prodTimes.get(id) === t);
+  check('HD-1c. preview = CERO escrituras: 206 docs byte-idénticos, ni un lock nuevo ni la campana', intactos && despues.prodTimes.size === 206 && despues.lockIds === baseHD.lockIds && despues.bellTime === baseHD.bellTime);
+  const runDoc = await maintRunOf(T2, r?.runId);
+  check('HD-1d. la corrida queda AUDITADA en su run doc (mode preview, completed, tenant-scoped)', runDoc?.mode === 'preview' && runDoc?.status === 'completed' && runDoc?.tenantId === T2);
+  const confl = (r?.conflicts ?? []).find((c) => c.retailerId === 'HDRID-DUP');
+  check('HD-3. dos productos reclamando el MISMO retailer_id ⇒ conflicto reportado con AMBOS productIds', (r?.conflicts ?? []).length === 1 && confl?.productIds?.join() === 'hdm-confl-a,hdm-confl-b' && r?.conflictsTruncated === false, JSON.stringify(r?.conflicts ?? []));
+}
+
+// ═══ HD-4. Apply sin confirm ⇒ rechazado (y mode desconocido, fail-closed) ═══
+{
+  const { err } = await runMaint(ownerBoutique, { mode: 'apply' });
+  check('HD-4. apply SIN confirm:true ⇒ failed-precondition (la confirmación jamás es implícita)', err === 'FAILED_PRECONDITION', `err=${err}`);
+  const { err: eModo } = await runMaint(ownerBoutique, { mode: 'yolo' });
+  check('HD-4b. mode desconocido ⇒ invalid-argument', eModo === 'INVALID_ARGUMENT', `err=${eModo}`);
+}
+
+// ═══ HD-2 + HD-3(apply). Apply confirmado: backfill quirúrgico, conflicto sin ganador ═══
+let applyConflicts = null;
+{
+  const preApply = await t2Snapshot();
+  const vigAntes = JSON.stringify((await productOf(T2, 'hdm-conquality'))?.quality ?? null);
+  const nolockAntes = await productOf(T2, 'hdm-legacy-nolock');
+  const { result: r } = await runMaint(ownerBoutique, { mode: 'apply', confirm: true });
+  applyConflicts = r?.conflicts ?? null;
+  check('HD-2. apply con confirm:true ⇒ completed con LOS MISMOS contadores que anticipó el preview', r?.mode === 'apply' && r?.status === 'completed' && maintEq(r?.counters, { examinados: 206, locksCreados: 1, locksExistentes: 1, conflictos: 1, qualityCalculada: 202, qualityVigente: 2 }), maintStr(r?.counters));
+  const lockNuevo = (await db.doc(`tenants/${T2}/metaRetailerLocks/HDRID-NOLOCK`).get()).data();
+  check('HD-2b. el lock faltante del legacy AHORA existe (cierra el doble vínculo histórico)', lockNuevo?.productId === 'hdm-legacy-nolock' && lockNuevo?.retailerId === 'HDRID-NOLOCK' && lockNuevo?.tenantId === T2);
+  const noq = await productOf(T2, 'hdm-noquality');
+  check('HD-2c. el producto SIN quality la recibe (INACTIVE ⇒ not_active BLOCKING activo)', (noq?.quality?.blocking ?? 0) > 0 && obsActiva(noq?.quality, 'not_active'), `blocking=${noq?.quality?.blocking}`);
+  const nolockDespues = await productOf(T2, 'hdm-legacy-nolock');
+  const comerciales = (p) => JSON.stringify([p?.name, p?.price, p?.inventory, p?.status, p?.updatedAt?.toMillis?.() ?? null]);
+  check('HD-2d. campos comerciales INTACTOS byte a byte (nombre/precio/stock/status; updatedAt sin tocar)', comerciales(nolockAntes) === comerciales(nolockDespues) && !!nolockDespues?.quality && !nolockAntes?.quality);
+  const vigDespues = JSON.stringify((await productOf(T2, 'hdm-conquality'))?.quality ?? null);
+  const vigTime = (await db.doc(`tenants/${T2}/products/hdm-conquality`).get()).updateTime.toMillis();
+  const lockokTime = (await db.doc(`tenants/${T2}/products/hdm-lockok`).get()).updateTime.toMillis();
+  check('HD-2e. la quality VIGENTE no cambió NI UN BYTE (mapa idéntico; docs ni re-escritos)', vigDespues === vigAntes && vigTime === preApply.prodTimes.get('hdm-conquality') && lockokTime === preApply.prodTimes.get('hdm-lockok'));
+  const conflApply = (applyConflicts ?? []).find((c) => c.retailerId === 'HDRID-DUP');
+  const conflA = await productOf(T2, 'hdm-confl-a');
+  const conflB = await productOf(T2, 'hdm-confl-b');
+  check('HD-3b. el apply REPORTA el conflicto y NO elige ganador: cero lock, cero quality en los ambiguos', conflApply?.productIds?.join() === 'hdm-confl-a,hdm-confl-b' && !(await db.doc(`tenants/${T2}/metaRetailerLocks/HDRID-DUP`).get()).exists && conflA?.quality === undefined && conflB?.quality === undefined);
+  const conBloqueo = (await db.collection(`tenants/${T2}/products`).where('quality.blocking', '>', 0).get()).size;
+  const bell = await notifOf(T2);
+  check('HD-2f. la campana agregada se RECALCULA al terminar el apply (reabierta, espeja el conteo real)', bell?.blockingCount === conBloqueo && conBloqueo >= 2 && bell?.resolvedAt === null && bell?.read === false, `bell=${bell?.blockingCount} real=${conBloqueo}`);
+}
+
+// ═══ HD-5. Reanudación del mantenimiento + re-ejecución completa idempotente ═══
+{
+  const { result: r1 } = await runMaint(ownerBoutique, { mode: 'apply', confirm: true, maxPages: 1 });
+  check('HD-5. maxPages:1 ⇒ queda running con cursor (un catálogo parcial JAMÁS se declara completo)', r1?.status === 'running' && r1?.more === true && r1?.hasCursor === true && r1?.stopReason === 'pages_budget' && r1?.pagesDone === 1, `status=${r1?.status}`);
+  const runDoc = await maintRunOf(T2, r1?.runId);
+  check('HD-5b. el run doc persiste cursor + modo entre invocaciones', runDoc?.status === 'running' && typeof runDoc?.cursor === 'string' && runDoc?.cursor.length > 0 && runDoc?.mode === 'apply', `cursor=${runDoc?.cursor}`);
+  const { result: r2 } = await runMaint(ownerBoutique, { mode: 'apply', confirm: true, runId: r1?.runId });
+  check('HD-5c. reinvocar con runId retoma DESDE el cursor y completa el MISMO run', r2?.runId === r1?.runId && r2?.status === 'completed' && r2?.pagesDone === 2, `pages=${r2?.pagesDone}`);
+  check('HD-5d. la re-ejecución completa es IDEMPOTENTE: 0 locks nuevos, 0 quality nuevas, MISMOS conflictos', maintEq(r2?.counters, { examinados: 206, locksCreados: 0, locksExistentes: 2, conflictos: 1, qualityCalculada: 0, qualityVigente: 204 }) && JSON.stringify(r2?.conflicts) === JSON.stringify(applyConflicts), maintStr(r2?.counters));
+  const { err } = await runMaint(ownerBoutique, { mode: 'apply', confirm: true, runId: r1?.runId });
+  check('HD-5e. reanudar una corrida YA terminada ⇒ failed-precondition (iniciá una nueva)', err === 'FAILED_PRECONDITION', `err=${err}`);
+}
+
+// ═══ HD-6. Roles del mantenimiento: correr = owner; leer estado = manager+ ═══
+{
+  const { err: eSeller } = await runMaint(seller, {});
+  const { err: eManager } = await runMaint(manager, {});
+  check('HD-6. SELLER y MANAGER no pueden CORRER el mantenimiento (acción de dueño)', eSeller === 'PERMISSION_DENIED' && eManager === 'PERMISSION_DENIED', `seller=${eSeller} manager=${eManager}`);
+  const { result: rT } = await runMaint(owner, {}); // preview sobre perfumería: cero escrituras
+  check('HD-6b. el OWNER sí corre el mantenimiento de SU tenant', rT?.ok === true && rT?.mode === 'preview', `status=${rT?.status}`);
+  const { result: st } = await call('metaCatalogMaintenanceStatus', manager, { runId: rT?.runId });
+  check('HD-6c. el MANAGER sí LEE el estado del mantenimiento (contrato manager+, espejo del import)', st?.ok === true && st?.run?.runId === rT?.runId && st?.run?.mode === 'preview', `run=${st?.run?.runId?.slice(-6)}`);
+  const { err: eSellerSt } = await call('metaCatalogMaintenanceStatus', seller, { runId: rT?.runId });
+  check('HD-6d. el SELLER tampoco lee el estado', eSellerSt === 'PERMISSION_DENIED', `err=${eSellerSt}`);
+  const { err: eAdmin } = await runMaint(admin, {});
+  check('HD-6e. PLATFORM_ADMIN sin tenant explícito ⇒ invalid-argument (jamás un default)', eAdmin === 'INVALID_ARGUMENT', `err=${eAdmin}`);
+}
+
+// ═══ HD-7 + HD-9. Import CLÁSICO con lock por ítem + perfiles por vertical ═══
+{
+  await setFixture([
+    item('HD-LEG-1', { name: 'Articulo Legado Uno', description: 'Articulo legado uno linea corta', brand: 'MarcaLegado' }),
+    item('HD-LEG-2', { name: 'Articulo Legado Dos', description: 'Articulo legado dos linea corta', brand: 'MarcaLegadoDos' }),
+  ]);
+  const { result: rT } = await call('metaCatalogImportItems', owner, { retailerIds: ['HD-LEG-1'], categoryId: 'perfumes' });
+  const lockLeg = (await db.doc(`tenants/${T}/metaRetailerLocks/HD-LEG-1`).get()).data();
+  check('HD-7. el import clásico AHORA escribe el lock del retailer_id JUNTO al producto', rT?.ok === true && rT?.imported?.[0]?.productId === 'meta_HD-LEG-1' && lockLeg?.productId === 'meta_HD-LEG-1' && lockLeg?.retailerId === 'HD-LEG-1', JSON.stringify(rT?.blocked ?? []));
+  const impT = await productOf(T, 'meta_HD-LEG-1');
+  check('HD-9. perfil perfumeria EXPLÍCITO ⇒ el import clásico arma la ficha perfume (compat arfagi)', impT?.perfume?.brand === 'MarcaLegado' && impT?.brand === 'MarcaLegado' && impT?.status === 'INACTIVE' && impT?.syncToMeta === false);
+  const { result: rT2 } = await call('metaCatalogImportItems', ownerBoutique, { retailerIds: ['HD-LEG-2'], categoryId: 'general' });
+  const impT2 = await productOf(T2, 'meta_HD-LEG-2');
+  check('HD-9b. tenant SIN perfil ⇒ import clásico GENERIC: marca top-level y perfume null', rT2?.ok === true && impT2?.brand === 'MarcaLegadoDos' && impT2?.perfume === null, `brand=${impT2?.brand}`);
+  // El rid del importado legacy ya tiene DUEÑO: confirmarlo sobre OTRO producto se rechaza.
+  await db.doc(`tenants/${T}/products/hdm-map-victim`).set(localBase('hdm-map-victim', { name: 'Producto Victima Mapeo HD' }));
+  const { err } = await call('metaCatalogConfirmMapping', owner, { productId: 'hdm-map-victim', retailerId: 'HD-LEG-1' });
+  check('HD-7b. confirmMapping de un rid YA reclamado por el importado legacy ⇒ failed-precondition', err === 'FAILED_PRECONDITION', `err=${err}`);
+}
+
+// ═══ HD-8. Fencing generacional del run de importación (claim/generation E2E) ═══
+// Suspender un worker REAL a mitad de invocación no es reproducible vía REST (esa carrera
+// exacta la cubren los unit tests de fencing en memoria). Acá se verifica el contrato
+// DURABLE: generación persistida en puntero+run, incrementada en cada takeover, y un worker
+// zombi — el store REAL compilado portando la generación superada — que no escribe NADA.
+{
+  await deleteRefs((await db.collection(`tenants/${T2}/metaCatalogImportRuns`).get()).docs.map((d) => d.ref));
+  await db.doc(`tenants/${T2}/metaCatalogImportState/current`).delete().catch(() => {});
+  await setFixture(Array.from({ length: 30 }, (_, i) => item(`HDGEN-${String(i + 1).padStart(2, '0')}`, {
+    name: `Articulo Generacional ${i + 1}`, description: `Articulo generacional ${i + 1} linea corta`, brand: 'MarcaGen',
+  })), { pagesPerList: 6 });
+
+  const { result: r1 } = await runImport(ownerBoutique, { maxPages: 1 });
+  const st1 = await stateOf(T2);
+  const run1 = await runDocOf(T2, r1?.runId);
+  check('HD-8. el PRIMER claim fija generation=1 en el puntero Y copiada al run', r1?.status === 'running' && st1?.generation === 1 && run1?.generation === 1 && st1?.activeRunId === r1?.runId, `gen=${st1?.generation}`);
+
+  const { result: r2 } = await runImport(ownerBoutique, { maxPages: 1 });
+  const st2 = await stateOf(T2);
+  const run2 = await runDocOf(T2, r1?.runId);
+  check('HD-8b. el takeover tras lease liberada INCREMENTA la generación (mismo run, claim nuevo persistido)', r2?.runId === r1?.runId && st2?.generation === 2 && run2?.generation === 2, `gen=${st2?.generation}`);
+
+  const { settleImportRunIfOwner, firestoreImportStore, emptyImportCounters, ImportRunClaimLostError } =
+    await import(new URL('../lib/meta/catalogImport.js', import.meta.url).href);
+  const zombi = firestoreImportStore({ tenantId: T2, runId: r1?.runId, profile: null, generation: 1 });
+  const preZombi = (await db.doc(`tenants/${T2}/metaCatalogImportRuns/${r1?.runId}`).get()).updateTime.toMillis();
+
+  const settleViejo = await settleImportRunIfOwner(T2, r1?.runId, 1, { lastError: 'escritura-zombi' });
+  let claimLostCreate = false;
+  try {
+    await zombi.createImported({ productId: 'meta_HDGEN-ZOMBIE', lockKey: 'HDGEN-ZOMBIE', retailerId: 'HDGEN-ZOMBIE', doc: { id: 'meta_HDGEN-ZOMBIE', tenantId: T2, name: 'Producto Zombi Tardio' } });
+  } catch (e) { claimLostCreate = e instanceof ImportRunClaimLostError; }
+  let claimLostProgress = false;
+  try {
+    await zombi.saveProgress({ status: 'completed', cursor: null, counters: emptyImportCounters(), blockedByReason: {}, pagesDone: 99, processed: 999 });
+  } catch (e) { claimLostProgress = e instanceof ImportRunClaimLostError; }
+
+  const runTrasZombi = await runDocOf(T2, r1?.runId);
+  const stTrasZombi = await stateOf(T2);
+  const timeTrasZombi = (await db.doc(`tenants/${T2}/metaCatalogImportRuns/${r1?.runId}`).get()).updateTime.toMillis();
+  check('HD-8c. la generación SUPERADA no asienta nada: settle ⇒ false y el run doc byte-idéntico', settleViejo === false && timeTrasZombi === preZombi && runTrasZombi?.lastError === '');
+  check('HD-8d. claim_lost REAL del store: crear producto+lock con generación vieja LANZA y no escribe', claimLostCreate === true && (await productOf(T2, 'meta_HDGEN-ZOMBIE')) === null && !(await db.doc(`tenants/${T2}/metaRetailerLocks/HDGEN-ZOMBIE`).get()).exists);
+  check('HD-8e. el zombi tampoco cierra el run ni libera el puntero de otro (saveProgress ⇒ claim_lost)', claimLostProgress === true && runTrasZombi?.status === 'running' && runTrasZombi?.pagesDone === 2 && stTrasZombi?.activeRunId === r1?.runId);
+  const settleVigente = await settleImportRunIfOwner(T2, r1?.runId, 2, { lastError: '' });
+  check('HD-8f. el MISMO settle con la generación VIGENTE sí asienta (discrimina por generación, no por suerte)', settleVigente === true);
+
+  // HD-8g'. Guard monotónico del STORE REAL: generación VIGENTE pero progreso MENOR al
+  // persistido ⇒ la escritura se descarta y el run doc queda intacto (espejo E2E del unit
+  // importProgressRegression; NOTA de cobertura de la review HARDEN-1).
+  {
+    const vigente = firestoreImportStore({ tenantId: T2, runId: r1?.runId, profile: null, generation: 2 });
+    const antesMono = await runDocOf(T2, r1?.runId);
+    await vigente.saveProgress({ status: 'running', cursor: antesMono?.cursor ?? null, counters: emptyImportCounters(), blockedByReason: {}, pagesDone: Math.max(0, (antesMono?.pagesDone ?? 1) - 1), processed: 0 });
+    const trasMono = await runDocOf(T2, r1?.runId);
+    check("HD-8g'. progreso MENOR con generación vigente ⇒ descartado: pagesDone/procesados no retroceden", trasMono?.pagesDone === antesMono?.pagesDone && trasMono?.processed === antesMono?.processed && trasMono?.status === 'running', `pages=${trasMono?.pagesDone}`);
+  }
+
+  let fin = r2;
+  for (let i = 0; i < 8 && fin?.status !== 'completed'; i++) fin = (await runImport(ownerBoutique, { maxPages: 10 })).result;
+  const stFin = await stateOf(T2);
+  const runFin = await runDocOf(T2, r1?.runId);
+  check('HD-8g. el claim vigente completa el run; generación final persistida coincide puntero↔run y nada tardío apareció', fin?.status === 'completed' && runFin?.status === 'completed' && runFin?.generation === stFin?.generation && stFin?.generation >= 3 && stFin?.activeRunId === null && (await productOf(T2, 'meta_HDGEN-ZOMBIE')) === null, `gen=${stFin?.generation}`);
+}
+
+// ═══ HD-10. La campana catalog_quality es CONSULTABLE por query bajo rules (manager sí, seller no) ═══
+{
+  const structuredQuery = {
+    structuredQuery: {
+      from: [{ collectionId: 'notifications' }],
+      where: { fieldFilter: { field: { fieldPath: 'category' }, op: 'EQUAL', value: { stringValue: 'catalog_quality' } } },
+      limit: 10,
+    },
+  };
+  const runQueryNotifs = async (token) => {
+    const res = await fetch(`${FS}/tenants/${T}:runQuery`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify(structuredQuery) });
+    const body = await res.json().catch(() => null);
+    const rows = Array.isArray(body) ? body : [];
+    return { status: res.status, denied: res.status !== 200 || rows.some((r) => r?.error), names: rows.filter((r) => r?.document).map((r) => r.document.name) };
+  };
+  const qManager = await runQueryNotifs(manager);
+  check('HD-10. la QUERY de igualdad category==catalog_quality DEVUELVE la campana al MANAGER (rules)', qManager.denied === false && qManager.names.some((n) => n.endsWith(`notifications/catalog-quality-${T}`)), `status=${qManager.status} docs=${qManager.names.length}`);
+  const qSeller = await runQueryNotifs(seller);
+  check('HD-10b. la MISMA query como SELLER queda DENEGADA por rules', qSeller.denied === true && qSeller.names.length === 0, `status=${qSeller.status}`);
+}
+
+// ═══ HD-11. Cierre HARDEN-1: tampoco esta sección escribió NADA hacia Meta ═══
+{
+  check('HD-11. HARDEN-1 completo sin tocar Meta: cero batches escritos por el fake', (await writesSnap()).empty);
+}
+
 // ═══ Limpieza final (deja el emulador listo para verify-meta-catalog) ═══
 await wipePrograma();
 await db.doc(`tenants/${T}/config/meta`).delete().catch(() => {});
+// El perfil de vertical se limpia también: verify-meta-catalog siembra el suyo en su setup.
+await db.doc(`tenants/${T}/config/catalog`).delete().catch(() => {});
 await db.doc(`tenants/${T}`).set({ limitOverrides: FieldValue.delete() }, { merge: true });
 await setFixture([]);
 

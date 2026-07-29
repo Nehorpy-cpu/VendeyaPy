@@ -480,7 +480,12 @@ export interface ImportRunContadores {
 }
 
 export interface MetaCatalogImportRunState {
-  status: 'running' | 'completed' | 'failed' | 'already_running';
+  /**
+   * `claim_lost` = otra invocación tomó el control del run (fencing generacional del
+   * backend): la respuesta viene SIN contadores — el panel debe consultar el estado del
+   * claim vigente, jamás pintar estos ceros como si fueran el avance real.
+   */
+  status: 'running' | 'completed' | 'failed' | 'already_running' | 'claim_lost';
   runId: string;
   /** Cursor remoto persistido; null = arranque (o catálogo terminado). */
   cursor: string | null;
@@ -505,9 +510,11 @@ export interface MetaCatalogImportRunState {
  * ortografías en juego mientras el backend se implementa en paralelo: el contrato del
  * programa (`procesados`/`contadores`/`cursorResets`/`more`) y la vista compartida
  * `MetaCatalogImportRunSummary` de @vpw/shared (`processed`/`counters` con cursorResets
- * adentro/`hasCursor`). `cancelled` se muestra como corte con aviso (reanudable).
+ * adentro/`hasCursor`). `cancelled` se muestra como corte con aviso (reanudable);
+ * `claim_lost` (otra invocación tomó el run) se reconoce con su `message` — jamás cae al
+ * default `failed` con contadores en cero. PURA (sin Firebase) — exportada para testearla.
  */
-function normalizarImportRun(raw: unknown): MetaCatalogImportRunState {
+export function normalizarImportRun(raw: unknown): MetaCatalogImportRunState {
   const top = (raw ?? {}) as Record<string, unknown>;
   // `already_running` trae el avance REAL adentro de `run` (el nivel superior solo dice que
   // está ocupado): sin esto, la fase "ocupado" mostraba todos los contadores en cero.
@@ -521,15 +528,19 @@ function normalizarImportRun(raw: unknown): MetaCatalogImportRunState {
   const statusRaw = typeof d['status'] === 'string' ? (d['status'] as string) : 'failed';
   const cancelado = statusRaw === 'cancelled';
   const status: MetaCatalogImportRunState['status'] =
-    statusRaw === 'running' || statusRaw === 'completed' || statusRaw === 'already_running'
+    statusRaw === 'running' || statusRaw === 'completed' || statusRaw === 'already_running' || statusRaw === 'claim_lost'
       ? statusRaw
       : 'failed';
+  // `claim_lost` trae su explicación en `message` (no en lastError) y NINGÚN contador: el
+  // texto se conserva, y el loop del panel sabe que este estado no debe pintar avance.
   const lastError =
     typeof d['lastError'] === 'string' && d['lastError']
       ? (d['lastError'] as string)
-      : cancelado
-        ? 'La importación fue cancelada. Se puede reanudar.'
-        : undefined;
+      : status === 'claim_lost' && typeof d['message'] === 'string' && d['message']
+        ? (d['message'] as string)
+        : cancelado
+          ? 'La importación fue cancelada. Se puede reanudar.'
+          : undefined;
   return {
     status,
     runId: typeof d['runId'] === 'string' ? (d['runId'] as string) : '',
@@ -592,6 +603,11 @@ export interface CatalogQualitySummary {
   conBloqueos: number;
   /** Productos con advertencias (WARNING) abiertas. */
   conAdvertencias: number;
+  /**
+   * COBERTURA (ADR-0014 §4c): productos NO archivados que todavía no fueron evaluados
+   * (sin campo `quality`). Con esto >0 el panel jamás muestra el estado verde "completo".
+   */
+  sinEvaluar: number;
   /** Conteo por código de problema (para los filtros del centro de calidad). */
   porCodigo: Record<string, number>;
   muestras: Array<{
@@ -605,14 +621,15 @@ export interface CatalogQualitySummary {
   truncated: boolean;
 }
 
-export async function fetchCatalogQualitySummary(tenantId: string): Promise<CatalogQualitySummary> {
-  const call = httpsCallable(firebaseFunctions(), 'metaCatalogQualitySummary');
-  const res = await call({ tenantId });
-  const data = (res.data ?? {}) as Record<string, unknown>;
-  // El callable emite `porCodigo: {code: {severity, count}}` y `muestras[].name/codes`; el
-  // panel consume números planos y `productName/codigos`. Se normaliza ACÁ (un solo borde):
-  // sin esto el filtro mostraba "([object Object])" y el fallback crasheaba con codigos
-  // undefined.
+/**
+ * Normaliza el agregado de calidad al shape del panel. El callable emite las DOS formas en
+ * juego: `porCodigo` como número plano o como objeto `{severity, count}`, y `muestras[]` con
+ * `productName/codigos` o `name/codes`. Se normaliza ACÁ (un solo borde): sin esto el filtro
+ * mostraba "([object Object])" y el fallback crasheaba con codigos undefined.
+ * PURA (sin Firebase) — exportada para testearla directo.
+ */
+export function normalizarQualitySummary(raw: unknown): CatalogQualitySummary {
+  const data = (raw ?? {}) as Record<string, unknown>;
   const porCodigo: Record<string, number> = {};
   for (const [code, v] of Object.entries((data['porCodigo'] as Record<string, unknown>) ?? {})) {
     porCodigo[code] =
@@ -643,8 +660,16 @@ export async function fetchCatalogQualitySummary(tenantId: string): Promise<Cata
   return {
     conBloqueos: typeof data['conBloqueos'] === 'number' ? (data['conBloqueos'] as number) : 0,
     conAdvertencias: typeof data['conAdvertencias'] === 'number' ? (data['conAdvertencias'] as number) : 0,
+    // Backend viejo sin cobertura ⇒ 0 (no se inventa deuda que el server no reportó).
+    sinEvaluar: typeof data['sinEvaluar'] === 'number' && data['sinEvaluar'] > 0 ? (data['sinEvaluar'] as number) : 0,
     porCodigo,
     muestras,
     truncated: data['truncated'] === true,
   };
+}
+
+export async function fetchCatalogQualitySummary(tenantId: string): Promise<CatalogQualitySummary> {
+  const call = httpsCallable(firebaseFunctions(), 'metaCatalogQualitySummary');
+  const res = await call({ tenantId });
+  return normalizarQualitySummary(res.data);
 }

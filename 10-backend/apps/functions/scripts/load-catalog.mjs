@@ -57,6 +57,14 @@ await db.doc(`tenants/${TENANT_ID}/categories/perfumes`).set(
   { merge: true },
 );
 
+// 2b. Perfil de vertical EXPLÍCITO (HARDEN-1, ADR-0014 §4): sin `config/catalog.profile`
+// el backend es GENERIC. Este seed espeja el gate del release de arfagi (perfil perfumeria
+// explícito en producción ANTES de desplegar las Functions).
+await db.doc(`tenants/${TENANT_ID}/config/catalog`).set(
+  { profile: { vertical: 'perfumeria' } },
+  { merge: true },
+);
+
 // 3. Productos (batch) — el COSTO va aparte en productFinancials (privado, ADR-0008)
 const batch = db.batch();
 for (const p of productos) {

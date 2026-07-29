@@ -42,6 +42,62 @@ export async function countCatalogQuality(tenantId: string): Promise<CatalogQual
 
 const plural = (n: number, truncated: boolean): string => `${n}${truncated ? ' o más' : ''}`;
 
+/** Estado previo mínimo de la campana que la decisión necesita. */
+export interface CatalogQualityPrev {
+  blockingCount?: number;
+  read?: boolean;
+  createdAt?: Timestamp;
+  resolvedAt?: Timestamp | null;
+}
+
+/**
+ * Decisión PURA de la campana agregada (extraída para poder testearla sin Firestore):
+ * dado el agregado vivo y el doc previo, devuelve el patch a escribir o null (no tocar).
+ * Reglas: en 0/0 solo se AUTOCIERRA un aviso abierto (jamás se crea uno vacío); la
+ * reapertura exige que los bloqueos SUBAN respecto del último aviso leído (bajar no
+ * despierta a nadie). Best-effort por diseño (ADR-0014 §4b): last-writer-wins.
+ */
+export function decideCatalogQualityPatch(
+  tenantId: string,
+  agg: CatalogQualityAggregate,
+  prev: CatalogQualityPrev | undefined,
+  now: Timestamp,
+): Record<string, unknown> | null {
+  const id = `catalog-quality-${tenantId}`;
+  if (agg.blocking + agg.warning === 0) {
+    if (!prev || prev.resolvedAt) return null;
+    return {
+      read: true,
+      readAt: now,
+      resolvedAt: now,
+      blockingCount: 0,
+      warningCount: 0,
+      title: '✅ Catálogo sin pendientes de calidad',
+      body: 'Se resolvieron todas las observaciones del catálogo.',
+    };
+  }
+  const title = agg.blocking > 0 ? '🛒 Tu catálogo tiene productos con bloqueos' : '🛒 Tu catálogo tiene advertencias de calidad';
+  const body =
+    agg.blocking > 0
+      ? `${plural(agg.blocking, agg.truncated)} producto(s) con bloqueos y ${plural(agg.warning, agg.truncated)} con advertencias. Revisalos desde Catálogo para poder venderlos y sincronizarlos.`
+      : `${plural(agg.warning, agg.truncated)} producto(s) con advertencias de calidad. Revisalos desde Catálogo.`;
+  const reabre = !prev || (prev.read === true && agg.blocking > (prev.blockingCount ?? 0));
+  return {
+    id,
+    tenantId,
+    category: 'catalog_quality',
+    type: 'catalog_quality_summary',
+    title,
+    body,
+    dedupeKey: id,
+    blockingCount: agg.blocking,
+    warningCount: agg.warning,
+    resolvedAt: null,
+    createdAt: prev?.createdAt ?? now,
+    ...(reabre ? { read: false, readAt: null } : {}),
+  };
+}
+
 /**
  * Recomputa el agregado y upsertea la notificación `catalog-quality-{tenantId}`.
  * Llamar al terminar una invocación del import run y tras un productUpsert que cambió los
@@ -53,55 +109,9 @@ export async function refreshCatalogQualityNotification(tenantId: string): Promi
     // sourceId FIJO por tenant: la clave de idempotencia de la campana agregada.
     const id = `catalog-quality-${tenantId}`;
     const ref = db().doc(`${paths.notifications(tenantId)}/${id}`);
-    const prev = (await ref.get()).data() as
-      | { blockingCount?: number; read?: boolean; createdAt?: Timestamp; resolvedAt?: Timestamp | null }
-      | undefined;
-    const now = Timestamp.now();
-
-    if (agg.blocking + agg.warning === 0) {
-      // AUTOCIERRE: sin doc previo no hay nada que cerrar (no se crea un aviso vacío).
-      if (!prev || prev.resolvedAt) return;
-      await ref.set(
-        {
-          read: true,
-          readAt: now,
-          resolvedAt: now,
-          blockingCount: 0,
-          warningCount: 0,
-          title: '✅ Catálogo sin pendientes de calidad',
-          body: 'Se resolvieron todas las observaciones del catálogo.',
-        },
-        { merge: true },
-      );
-      return;
-    }
-
-    const title = agg.blocking > 0 ? '🛒 Tu catálogo tiene productos con bloqueos' : '🛒 Tu catálogo tiene advertencias de calidad';
-    const body =
-      agg.blocking > 0
-        ? `${plural(agg.blocking, agg.truncated)} producto(s) con bloqueos y ${plural(agg.warning, agg.truncated)} con advertencias. Revisalos desde Catálogo para poder venderlos y sincronizarlos.`
-        : `${plural(agg.warning, agg.truncated)} producto(s) con advertencias de calidad. Revisalos desde Catálogo.`;
-
-    // REAPERTURA: solo si hay MÁS productos con bloqueos que la última vez que se avisó.
-    // Bajar de 5 a 3 no despierta a nadie; subir de 3 a 5 sí.
-    const reabre = !prev || (prev.read === true && agg.blocking > (prev.blockingCount ?? 0));
-    await ref.set(
-      {
-        id,
-        tenantId,
-        category: 'catalog_quality',
-        type: 'catalog_quality_summary',
-        title,
-        body,
-        dedupeKey: id,
-        blockingCount: agg.blocking,
-        warningCount: agg.warning,
-        resolvedAt: null,
-        createdAt: prev?.createdAt ?? now,
-        ...(reabre ? { read: false, readAt: null } : {}),
-      },
-      { merge: true },
-    );
+    const prev = (await ref.get()).data() as CatalogQualityPrev | undefined;
+    const patch = decideCatalogQualityPatch(tenantId, agg, prev, Timestamp.now());
+    if (patch) await ref.set(patch, { merge: true });
   } catch (e) {
     // La campana es un aviso, no un invariante: jamás rompe el flujo que la dispara.
     logger.warn('No se pudo refrescar la notificación de calidad del catálogo', {

@@ -702,7 +702,8 @@ cliente por Rules** (solo Cloud Functions):
 | `metaCatalogOutboxIntents/{intentKey}` | Puntero de deduplicación del trabajo ACTIVO | 0013 |
 | `metaRetailerLocks/{lockKey}` | Unicidad transaccional de la identidad remota (retailer_id) | 0012 |
 | `metaCatalogImportRuns/{runId}` | Corridas de importación paginada reanudable (cursor persistido) | 0014 |
-| `metaCatalogImportState/current` | Puntero del run de importación activo (un solo run por tenant) | 0014 |
+| `metaCatalogImportState/current` | Puntero del run de importación activo (un solo run por tenant; claim con generación de fencing) | 0014 |
+| `metaCatalogMaintenanceRuns/{runId}` | Corridas de mantenimiento preview/apply (backfill de locks y quality; paginadas y reanudables) | 0014 |
 
 El producto (`products/{productId}`, §4.3) suma además: identidad remota
 (`metaRetailerId`/`metaCatalogId`/`metaProductItemId`), estado de sincronización

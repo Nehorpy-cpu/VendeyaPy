@@ -250,3 +250,54 @@ export interface MetaCatalogImportRunSummary {
   finishedAtMs: number | null;
   lastError: string | null;
 }
+
+// ---------------------------------------------------------------------------
+// Mantenimiento del catálogo: backfill de locks + quality (HARDEN-1, ADR-0014 §4c)
+// ---------------------------------------------------------------------------
+
+export type MetaCatalogMaintenanceMode = 'preview' | 'apply';
+export type MetaCatalogMaintenanceStatus = 'running' | 'completed' | 'failed';
+
+/**
+ * Contadores HONESTOS de una corrida de mantenimiento. En `preview` cuentan lo que SE HARÍA
+ * (nada se escribe); en `apply` cuentan lo efectivamente hecho. `conflictos` jamás elige
+ * ganador: los casos ambiguos se reportan para resolución humana y no se toca nada.
+ * `archivadosSalteados` cuenta los ARCHIVED sin quality que el backfill SALTEA a propósito
+ * (ADR-0014 §4c: evaluarlos generaría bloqueos permanentes e inaccionables); `erroresQuality`
+ * cuenta los backfills que fallaron por error de transacción (≠ producto inexistente) — un
+ * run con errores jamás se presenta limpio.
+ */
+export interface MetaCatalogMaintenanceCounters {
+  examinados: number;
+  locksCreados: number;
+  locksExistentes: number;
+  conflictos: number;
+  qualityCalculada: number;
+  qualityVigente: number;
+  archivadosSalteados: number;
+  erroresQuality: number;
+}
+
+/** Conflicto de identidad remota: dos (o más) productos reclamando el mismo retailer_id. */
+export interface MetaCatalogMaintenanceConflict {
+  retailerId: string;
+  productIds: string[];
+}
+
+/** Vista SANEADA de la corrida para el panel (el doc está cerrado al cliente por rules). */
+export interface MetaCatalogMaintenanceRunSummary {
+  runId: string;
+  mode: MetaCatalogMaintenanceMode;
+  status: MetaCatalogMaintenanceStatus;
+  pagesDone: number;
+  counters: MetaCatalogMaintenanceCounters;
+  conflicts: MetaCatalogMaintenanceConflict[];
+  /** true si hubo más conflictos que el tope almacenado: la lista es un piso, no el total. */
+  conflictsTruncated: boolean;
+  /** true si la corrida quedó a mitad de catálogo (cursor persistido para reanudar). */
+  hasCursor: boolean;
+  startedAtMs: number | null;
+  updatedAtMs: number | null;
+  finishedAtMs: number | null;
+  lastError: string | null;
+}

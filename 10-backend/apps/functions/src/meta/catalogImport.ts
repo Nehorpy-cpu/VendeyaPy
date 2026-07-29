@@ -17,17 +17,25 @@
  *    re-procesar una página ya escrita es un no-op declarado.
  *  - Cursor de Graph vencido/adulterado ⇒ reset a null con `cursorResets++` y el barrido
  *    continúa desde el principio (barato: los ya creados caen en `alreadyImported`).
+ *  - (HARDEN-1) FENCING GENERACIONAL: cada claim del run lleva una `generation` inmutable
+ *    (número creciente en el puntero `metaCatalogImportState/current`, copiado al run).
+ *    TODA escritura posterior al claim demuestra ownership TRANSACCIONALMENTE (el run sigue
+ *    `running` con ESA generación) antes de aplicar: crear producto+lock, marcar drift,
+ *    renovar la lease (heartbeat verificado, jamás ciego), guardar cursor/contadores,
+ *    cerrar el run y liberar el puntero. Un worker vencido no escribe NADA
+ *    (`ImportRunClaimLostError` ⇒ la invocación termina con `stopReason: 'claim_lost'`).
+ *    Cursor y contadores JAMÁS retroceden (guard monotónico en `saveProgress`).
  *
  * El acceso a Firestore está detrás de `ImportRunStore` (misma costura inyectable que el
- * `CatalogTransport` del cliente): los tests unitarios ejercitan cursores/idempotencia sin
- * emulador y el callable usa la implementación real de abajo.
+ * `CatalogTransport` del cliente): los tests unitarios ejercitan cursores/idempotencia/
+ * fencing sin emulador y el callable usa la implementación real de abajo.
  */
 
 import { Timestamp } from 'firebase-admin/firestore';
 import type { CatalogQualityProfile, MetaCatalogImportCounters, Product } from '@vpw/shared';
 import { db, paths } from '../lib/firebase.js';
 import { logger } from '../lib/logger.js';
-import { evaluateProductQuality, localNameSet } from '../products/quality.js';
+import { effectiveCatalogPolicy, evaluateProductQuality, localNameSet } from '../products/quality.js';
 import { isInvalidCatalogCursor, MetaCatalogApiError, type MetaCatalogClient, type MetaCatalogItemsPage } from './catalogClient.js';
 import {
   analyzeRemoteItems,
@@ -123,13 +131,18 @@ export function classifyPageItems(items: readonly RemoteCandidate[], ctx: Classi
 /**
  * Candidatos FUERTES de mapping calculados POR PÁGINA. El ranking es ítem-a-ítem (jaccard),
  * así que evaluarlo por página es equivalente a hacerlo sobre el catálogo entero.
+ * Las `stopwords` son la política del tenant: DEBEN ser las mismas del resto del análisis.
  */
-export function strongCandidateRidsForPage(unlinkedProducts: readonly Product[], candidates: readonly RemoteCandidate[]): Set<string> {
+export function strongCandidateRidsForPage(
+  unlinkedProducts: readonly Product[],
+  candidates: readonly RemoteCandidate[],
+  stopwords?: ReadonlySet<string>,
+): Set<string> {
   const out = new Set<string>();
   if (!unlinkedProducts.length || !candidates.length) return out;
-  const index = buildRemoteTokenIndex([...candidates]);
+  const index = buildRemoteTokenIndex([...candidates], stopwords);
   for (const p of unlinkedProducts) {
-    for (const c of rankMappingCandidates(p, [...candidates], { index, limit: 3, minConfidence: 'alta' })) {
+    for (const c of rankMappingCandidates(p, [...candidates], { index, limit: 3, minConfidence: 'alta', stopwords })) {
       out.add(c.retailerId);
     }
   }
@@ -162,9 +175,56 @@ export interface ImportProgressPatch {
   lastError?: string;
 }
 
+// ---------------------------------------------------------------------------
+// Fencing generacional (HARDEN-1)
+// ---------------------------------------------------------------------------
+
+/**
+ * El claim de este worker ya no es el vigente: otro worker reclamó el run con una
+ * generación nueva (o el run dejó de estar `running`). El worker vencido NO escribe nada
+ * más — ni productos, ni locks, ni cursor, ni contadores, ni estado, ni puntero. La campana
+ * agregada es BEST-EFFORT declarada (ADR-0014 §4b, no fenceada): la única garantía es que
+ * un worker que YA SABE que perdió el claim tampoco la refresca.
+ */
+export class ImportRunClaimLostError extends Error {
+  constructor(detail = 'El claim del run de importación ya no es el vigente.') {
+    super(detail);
+    this.name = 'ImportRunClaimLostError';
+  }
+}
+
+/**
+ * Predicado ÚNICO de ownership (puro): el run sigue en vuelo Y su generación es EXACTAMENTE
+ * la que fijó el claim de este worker. Cualquier otra cosa ⇒ cero escrituras (mismo patrón
+ * que `settleIfOwner` de lib/outboxFencing.ts, con generación dedicada en vez de attempts).
+ */
+export const ownsImportRun = (
+  run: { status?: string; generation?: number } | null | undefined,
+  generation: number,
+): boolean => !!run && run.status === 'running' && (run.generation ?? 0) === generation;
+
+/**
+ * Guard monotónico del progreso (puro): cursor y contadores JAMÁS retroceden. Devuelve la
+ * razón de la regresión o null si el patch es aplicable. `cursor` no se compara (un reset
+ * legítimo lo vuelve null contando `cursorResets`): la monotonicidad vive en los contadores.
+ */
+export function importProgressRegression(
+  current: { pagesDone?: number; processed?: number; counters?: Partial<MetaCatalogImportCounters> },
+  patch: Pick<ImportProgressPatch, 'pagesDone' | 'processed' | 'counters'>,
+): string | null {
+  if (patch.pagesDone < (current.pagesDone ?? 0)) return `pagesDone ${patch.pagesDone} < ${current.pagesDone}`;
+  if (patch.processed < (current.processed ?? 0)) return `processed ${patch.processed} < ${current.processed}`;
+  for (const [k, v] of Object.entries(current.counters ?? {})) {
+    const nuevo = patch.counters[k as keyof MetaCatalogImportCounters];
+    if (typeof v === 'number' && typeof nuevo === 'number' && nuevo < v) return `counters.${k} ${nuevo} < ${v}`;
+  }
+  return null;
+}
+
 /**
  * Costura de persistencia del run. La implementación real (abajo) escribe en Firestore con
- * transacción por ítem; los tests inyectan una en memoria.
+ * transacción por ítem que VERIFICA el ownership generacional; los tests inyectan una en
+ * memoria. Cualquier método puede lanzar `ImportRunClaimLostError`: el run loop corta ahí.
  */
 export interface ImportRunStore {
   loadLocalIndex(): Promise<ImportLocalIndex>;
@@ -207,8 +267,12 @@ export interface RunImportResult {
   blockedByReason: Record<string, number>;
   pagesDone: number;
   processed: number;
-  /** Por qué se cortó una invocación que quedó `running`. */
-  stopReason?: 'pages_budget' | 'quota' | 'remote_error';
+  /**
+   * Por qué se cortó una invocación que quedó `running`. `claim_lost` = otro worker reclamó
+   * el run con una generación nueva: este worker NO escribió nada más (el estado de este
+   * resultado es solo informativo — la verdad la tiene el run doc del claim vigente).
+   */
+  stopReason?: 'pages_budget' | 'quota' | 'remote_error' | 'claim_lost';
   lastError?: string;
 }
 
@@ -224,7 +288,9 @@ export async function runImportPages(args: RunImportArgs): Promise<RunImportResu
   let pagesDone = args.pagesDone;
   let processed = args.processed;
   const index = await args.store.loadLocalIndex();
-  const vertical = args.profile?.vertical ?? 'perfumeria';
+  // Política EFECTIVA del tenant (HARDEN-1): sin perfil ⇒ generic. Se resuelve UNA vez por
+  // invocación y se propaga a TODO el análisis (flags remotos, matching, construcción).
+  const policy = effectiveCatalogPolicy(args.profile);
   let creadosEnRun = 0;
 
   const resultado = (extra: Partial<RunImportResult> & { status: 'running' | 'completed' }): RunImportResult => ({
@@ -236,136 +302,150 @@ export async function runImportPages(args: RunImportArgs): Promise<RunImportResu
     ...extra,
   });
 
-  for (let intento = 0; intento < args.maxPages; intento++) {
-    let page: MetaCatalogItemsPage;
-    try {
-      page = await args.client.listItemsPage(args.catalogId, cursor);
-    } catch (e) {
-      if (isInvalidCatalogCursor(e)) {
-        // Cursor vencido/adulterado: se REINICIA el barrido desde cero. Es seguro y barato:
-        // la idempotencia por docId convierte lo ya creado en `alreadyImported`.
-        counters.cursorResets++;
-        cursor = null;
-        await args.store.saveProgress({ status: 'running', cursor, counters, blockedByReason, pagesDone, processed });
-        continue; // el reset consume presupuesto: un cursor SIEMPRE inválido no loopea
-      }
-      const detalle = e instanceof MetaCatalogApiError ? e.message.slice(0, 300) : 'No se pudo leer el catálogo de Meta.';
-      await args.store.saveProgress({ status: 'running', cursor, counters, blockedByReason, pagesDone, processed, lastError: detalle });
-      return resultado({ status: 'running', stopReason: 'remote_error', lastError: detalle });
+  try {
+    return await procesarPaginas();
+  } catch (e) {
+    if (e instanceof ImportRunClaimLostError) {
+      // Otro worker es el dueño vigente: NADA más se escribe (ni saveProgress — fallaría
+      // igual). El resultado es informativo; la verdad durable la tiene el claim nuevo.
+      logger.warn('Import de catálogo: claim perdido, el worker se retira sin escribir', { tenantId: args.tenantId });
+      return resultado({ status: 'running', stopReason: 'claim_lost', lastError: e.message });
     }
-
-    // Análisis de calidad remota por página (byDesc intra-página; los duplicados contra el
-    // catálogo LOCAL — incluidos los importados de páginas anteriores — los ve el evaluador
-    // vía `localNames`, que se acumula durante el run).
-    const candidatos = analyzeRemoteItems(page.items);
-    const fuertes = strongCandidateRidsForPage(index.unlinkedProducts, candidatos);
-    const clasificados = classifyPageItems(candidatos, {
-      mappedRids: index.mappedRids,
-      importedByRid: index.importedByRid,
-      localSkuRids: index.localSkuRids,
-      strongCandidateRids: fuertes,
-      defaultCategoryId: args.defaultCategoryId,
-    });
-
-    // Cuota ANTES de escribir la página: agotarla PAUSA el run con estado explícito y
-    // reanudable tras el upgrade — jamás un throw que pierda el progreso.
-    const importables = clasificados.filter((c) => c.kind === 'importable');
-    if (importables.length && args.assertQuota) {
-      try {
-        await args.assertQuota(importables.length);
-      } catch (e) {
-        const detalle = `Cuota de productos del plan agotada: ${e instanceof Error ? e.message.slice(0, 200) : 'límite alcanzado'}`;
-        await args.store.saveProgress({ status: 'running', cursor, counters, blockedByReason, pagesDone, processed, lastError: detalle });
-        return resultado({ status: 'running', stopReason: 'quota', lastError: detalle });
-      }
-    }
-
-    for (const c of clasificados) {
-      processed++;
-      switch (c.kind) {
-        case 'already_linked':
-          counters.alreadyLinked++;
-          break;
-        case 'already_imported': {
-          counters.alreadyImported++;
-          if (c.driftFields.length) {
-            // El remoto cambió respecto de lo importado: observación en el producto local.
-            // JAMÁS se pisa el doc local con datos remotos.
-            await args.store.markRemoteDrift(c.productId, c.item, c.driftFields);
-          }
-          break;
-        }
-        case 'ambiguous':
-          counters.ambiguous++;
-          sumar(blockedByReason, c.reason);
-          break;
-        case 'conflicted':
-          counters.conflicted++;
-          sumar(blockedByReason, c.reason);
-          break;
-        case 'skipped':
-          counters.skipped++;
-          sumar(blockedByReason, c.reason);
-          break;
-        case 'importable': {
-          const lockKey = retailerIdLockKey(c.item.retailerId);
-          const productId = `meta_${lockKey}`;
-          const base = buildImportedProduct(c.item, {
-            productId,
-            tenantId: args.tenantId,
-            categoryId: c.categoryId,
-            catalogId: args.catalogId,
-            position: index.productsCount + creadosEnRun,
-            vertical,
-          });
-          // La calidad nace CON el producto (origin 'import'): el centro de calidad no
-          // necesita otra pasada. Los nombres locales acumulan lo importado en este run,
-          // así el segundo homónimo de un catálogo con duplicados queda marcado.
-          const quality = evaluateProductQuality(base as unknown as Product, {
-            profile: args.profile,
-            localNames: index.localNames,
-            origin: 'import',
-            remoteHasIdentity: true,
-            now: now(),
-          });
-          const doc = { ...base, quality, createdAt: now(), updatedAt: now() };
-          const outcome = await args.store.createImported({ productId, lockKey, retailerId: c.item.retailerId, doc });
-          if (outcome === 'created') {
-            counters.imported++;
-            if (c.unclassified) counters.unclassified++;
-            creadosEnRun++;
-            const n = normalizeText(c.item.name);
-            if (n) index.localNames.add(n);
-            index.importedByRid.set(c.item.retailerId, {
-              productId,
-              name: c.item.name,
-              price: c.item.priceGs,
-              description: c.item.description,
-              imageUrl: c.item.imageUrl,
-            });
-          } else if (outcome === 'already_imported') {
-            // Otra invocación/carrera lo creó: es EXACTAMENTE el no-op declarado que exige
-            // la reanudación idempotente. Jamás aborta el resto de la página.
-            counters.alreadyImported++;
-          } else {
-            counters.conflicted++;
-            sumar(blockedByReason, 'retailer_id_lock_taken');
-          }
-          break;
-        }
-      }
-    }
-
-    cursor = page.nextCursor;
-    pagesDone++;
-    const status = cursor === null ? 'completed' : 'running';
-    // El progreso se persiste DESPUÉS de commitear la página: un crash acá reanuda desde
-    // este cursor y re-procesar la página anterior es un no-op (docIds determinísticos).
-    await args.store.saveProgress({ status, cursor, counters, blockedByReason, pagesDone, processed });
-    if (status === 'completed') return resultado({ status: 'completed' });
+    throw e;
   }
 
-  return resultado({ status: 'running', stopReason: 'pages_budget' });
+  async function procesarPaginas(): Promise<RunImportResult> {
+    for (let intento = 0; intento < args.maxPages; intento++) {
+      let page: MetaCatalogItemsPage;
+      try {
+        page = await args.client.listItemsPage(args.catalogId, cursor);
+      } catch (e) {
+        if (isInvalidCatalogCursor(e)) {
+          // Cursor vencido/adulterado: se REINICIA el barrido desde cero. Es seguro y barato:
+          // la idempotencia por docId convierte lo ya creado en `alreadyImported`.
+          counters.cursorResets++;
+          cursor = null;
+          await args.store.saveProgress({ status: 'running', cursor, counters, blockedByReason, pagesDone, processed });
+          continue; // el reset consume presupuesto: un cursor SIEMPRE inválido no loopea
+        }
+        const detalle = e instanceof MetaCatalogApiError ? e.message.slice(0, 300) : 'No se pudo leer el catálogo de Meta.';
+        await args.store.saveProgress({ status: 'running', cursor, counters, blockedByReason, pagesDone, processed, lastError: detalle });
+        return resultado({ status: 'running', stopReason: 'remote_error', lastError: detalle });
+      }
+
+      // Análisis de calidad remota por página (byDesc intra-página; los duplicados contra el
+      // catálogo LOCAL — incluidos los importados de páginas anteriores — los ve el evaluador
+      // vía `localNames`, que se acumula durante el run). Stopwords: las de la política.
+      const candidatos = analyzeRemoteItems(page.items, { stopwords: policy.stopwords });
+      const fuertes = strongCandidateRidsForPage(index.unlinkedProducts, candidatos, policy.stopwords);
+      const clasificados = classifyPageItems(candidatos, {
+        mappedRids: index.mappedRids,
+        importedByRid: index.importedByRid,
+        localSkuRids: index.localSkuRids,
+        strongCandidateRids: fuertes,
+        defaultCategoryId: args.defaultCategoryId,
+      });
+
+      // Cuota ANTES de escribir la página: agotarla PAUSA el run con estado explícito y
+      // reanudable tras el upgrade — jamás un throw que pierda el progreso.
+      const importables = clasificados.filter((c) => c.kind === 'importable');
+      if (importables.length && args.assertQuota) {
+        try {
+          await args.assertQuota(importables.length);
+        } catch (e) {
+          const detalle = `Cuota de productos del plan agotada: ${e instanceof Error ? e.message.slice(0, 200) : 'límite alcanzado'}`;
+          await args.store.saveProgress({ status: 'running', cursor, counters, blockedByReason, pagesDone, processed, lastError: detalle });
+          return resultado({ status: 'running', stopReason: 'quota', lastError: detalle });
+        }
+      }
+
+      for (const c of clasificados) {
+        processed++;
+        switch (c.kind) {
+          case 'already_linked':
+            counters.alreadyLinked++;
+            break;
+          case 'already_imported': {
+            counters.alreadyImported++;
+            if (c.driftFields.length) {
+              // El remoto cambió respecto de lo importado: observación en el producto local.
+              // JAMÁS se pisa el doc local con datos remotos.
+              await args.store.markRemoteDrift(c.productId, c.item, c.driftFields);
+            }
+            break;
+          }
+          case 'ambiguous':
+            counters.ambiguous++;
+            sumar(blockedByReason, c.reason);
+            break;
+          case 'conflicted':
+            counters.conflicted++;
+            sumar(blockedByReason, c.reason);
+            break;
+          case 'skipped':
+            counters.skipped++;
+            sumar(blockedByReason, c.reason);
+            break;
+          case 'importable': {
+            const lockKey = retailerIdLockKey(c.item.retailerId);
+            const productId = `meta_${lockKey}`;
+            const base = buildImportedProduct(c.item, {
+              productId,
+              tenantId: args.tenantId,
+              categoryId: c.categoryId,
+              catalogId: args.catalogId,
+              position: index.productsCount + creadosEnRun,
+              vertical: policy.vertical,
+            });
+            // La calidad nace CON el producto (origin 'import'): el centro de calidad no
+            // necesita otra pasada. Los nombres locales acumulan lo importado en este run,
+            // así el segundo homónimo de un catálogo con duplicados queda marcado.
+            const quality = evaluateProductQuality(base as unknown as Product, {
+              profile: args.profile,
+              localNames: index.localNames,
+              origin: 'import',
+              remoteHasIdentity: true,
+              now: now(),
+            });
+            const doc = { ...base, quality, createdAt: now(), updatedAt: now() };
+            const outcome = await args.store.createImported({ productId, lockKey, retailerId: c.item.retailerId, doc });
+            if (outcome === 'created') {
+              counters.imported++;
+              if (c.unclassified) counters.unclassified++;
+              creadosEnRun++;
+              const n = normalizeText(c.item.name);
+              if (n) index.localNames.add(n);
+              index.importedByRid.set(c.item.retailerId, {
+                productId,
+                name: c.item.name,
+                price: c.item.priceGs,
+                description: c.item.description,
+                imageUrl: c.item.imageUrl,
+              });
+            } else if (outcome === 'already_imported') {
+              // Otra invocación/carrera lo creó: es EXACTAMENTE el no-op declarado que exige
+              // la reanudación idempotente. Jamás aborta el resto de la página.
+              counters.alreadyImported++;
+            } else {
+              counters.conflicted++;
+              sumar(blockedByReason, 'retailer_id_lock_taken');
+            }
+            break;
+          }
+        }
+      }
+
+      cursor = page.nextCursor;
+      pagesDone++;
+      const status = cursor === null ? 'completed' : 'running';
+      // El progreso se persiste DESPUÉS de commitear la página: un crash acá reanuda desde
+      // este cursor y re-procesar la página anterior es un no-op (docIds determinísticos).
+      await args.store.saveProgress({ status, cursor, counters, blockedByReason, pagesDone, processed });
+      if (status === 'completed') return resultado({ status: 'completed' });
+    }
+
+    return resultado({ status: 'running', stopReason: 'pages_budget' });
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -384,8 +464,20 @@ export interface MetaCatalogImportRunDoc {
   counters: MetaCatalogImportCounters;
   blockedByReason: Record<string, number>;
   defaultCategoryId: string;
+  /**
+   * (ADR-0014 §4b) Política NORMALIZADA fijada al run en su CREACIÓN (igual que
+   * `defaultCategoryId`): todas las páginas de un run se procesan con la MISMA política
+   * aunque `config/catalog.profile` cambie a mitad. Los claims siguientes usan LA DEL RUN.
+   */
+  profile: CatalogQualityProfile | null;
   leaseUntil: Timestamp | null;
   attempts: number;
+  /**
+   * Generación de FENCING (HARDEN-1): número creciente que vive en el puntero
+   * `metaCatalogImportState/current` y se copia acá en CADA claim (creación o takeover de
+   * lease vencida). Inmutable durante el claim: toda escritura del worker la verifica.
+   */
+  generation: number;
   actorUid: string | null;
   lastError: string;
   startedAt: Timestamp;
@@ -396,12 +488,37 @@ export interface MetaCatalogImportRunDoc {
 /** Lease del run: idéntica a la del outbox (un solo worker por run). */
 export const IMPORT_RUN_LEASE_MS = 120_000;
 
+/**
+ * Asienta `patch` sobre el run SOLO si este worker sigue siendo el dueño vigente
+ * (status `running` + generación del claim). Para las escrituras administrativas del
+ * callable (liberar lease entre invocaciones, registrar lastError): jamás una escritura
+ * ciega sobre un run que otro worker ya reclamó.
+ */
+export async function settleImportRunIfOwner(
+  tenantId: string,
+  runId: string,
+  generation: number,
+  patch: Record<string, unknown>,
+): Promise<boolean> {
+  const ref = db().doc(paths.metaCatalogImportRun(tenantId, runId));
+  return db().runTransaction(async (tx) => {
+    const run = (await tx.get(ref)).data() as MetaCatalogImportRunDoc | undefined;
+    if (!ownsImportRun(run, generation)) return false;
+    tx.update(ref, { ...patch, updatedAt: Timestamp.now() });
+    return true;
+  });
+}
+
 export function firestoreImportStore(args: {
   tenantId: string;
   runId: string;
   profile: CatalogQualityProfile | null;
+  /** Generación fijada por el claim de ESTE worker (fencing). */
+  generation: number;
 }): ImportRunStore {
-  const { tenantId, runId, profile } = args;
+  const { tenantId, runId, profile, generation } = args;
+  const runRef = () => db().doc(paths.metaCatalogImportRun(tenantId, runId));
+  const stateRef = () => db().doc(paths.metaCatalogImportState(tenantId));
   return {
     async loadLocalIndex(): Promise<ImportLocalIndex> {
       const snap = await db().collection(paths.products(tenantId)).get();
@@ -442,7 +559,12 @@ export function firestoreImportStore(args: {
       const lockRef = db().doc(paths.metaRetailerLock(tenantId, lockKey));
       try {
         return await db().runTransaction(async (tx) => {
-          const [prodSnap, lockSnap] = await Promise.all([tx.get(prodRef), tx.get(lockRef)]);
+          const [runSnap, prodSnap, lockSnap] = await Promise.all([tx.get(runRef()), tx.get(prodRef), tx.get(lockRef)]);
+          // FENCING: el ownership se demuestra EN LA MISMA transacción que crea el
+          // producto+lock. Un worker vencido no puede crear nada en el catálogo de B.
+          if (!ownsImportRun(runSnap.data() as MetaCatalogImportRunDoc | undefined, generation)) {
+            throw new ImportRunClaimLostError();
+          }
           const lockOwner = (lockSnap.data() as { productId?: string } | undefined)?.productId;
           if (lockSnap.exists && lockOwner && lockOwner !== productId) return 'lock_conflict' as const;
           const lock = { retailerId, productId, tenantId, createdAt: Timestamp.now() };
@@ -460,6 +582,7 @@ export function firestoreImportStore(args: {
           return 'created' as const;
         });
       } catch (e) {
+        if (e instanceof ImportRunClaimLostError) throw e;
         const code = (e as { code?: number | string }).code;
         if (code === 6 || code === 'already-exists') return 'already_imported'; // carrera perdida = ya está
         throw e;
@@ -469,20 +592,27 @@ export function firestoreImportStore(args: {
     async markRemoteDrift(productId, item, _driftFields): Promise<void> {
       try {
         const ref = db().doc(paths.product(tenantId, productId));
-        const snap = await ref.get();
-        if (!snap.exists) return;
-        const p = { ...(snap.data() as Product), id: snap.id };
-        const quality = evaluateProductQuality(p, {
-          profile,
-          previous: p.quality ?? null,
-          remoteSnapshot: { name: item.name, priceGs: item.priceGs, description: item.description, imageUrl: item.imageUrl },
-          origin: 'import',
-          now: Timestamp.now(),
+        await db().runTransaction(async (tx) => {
+          const [runSnap, snap] = await Promise.all([tx.get(runRef()), tx.get(ref)]);
+          // FENCING: un worker vencido tampoco toca la calidad de un producto ajeno al claim.
+          if (!ownsImportRun(runSnap.data() as MetaCatalogImportRunDoc | undefined, generation)) {
+            throw new ImportRunClaimLostError();
+          }
+          if (!snap.exists) return;
+          const p = { ...(snap.data() as Product), id: snap.id };
+          const quality = evaluateProductQuality(p, {
+            profile,
+            previous: p.quality ?? null,
+            remoteSnapshot: { name: item.name, priceGs: item.priceGs, description: item.description, imageUrl: item.imageUrl },
+            origin: 'import',
+            now: Timestamp.now(),
+          });
+          // `update` de UN campo: reemplaza el mapa entero (un set con merge resucitaría
+          // fingerprints podados) y no toca updatedAt — el barrido no es una edición humana.
+          tx.update(ref, { quality });
         });
-        // `update` de UN campo: reemplaza el mapa entero (un set con merge resucitaría
-        // fingerprints podados) y no toca updatedAt — el barrido no es una edición humana.
-        await ref.update({ quality });
       } catch (e) {
+        if (e instanceof ImportRunClaimLostError) throw e;
         // El aviso de drift jamás frena la importación.
         logger.warn('Import de catálogo: no se pudo registrar el drift remoto', { tenantId, runId, productId, error: e instanceof Error ? e.message.slice(0, 200) : 'desconocido' });
       }
@@ -490,24 +620,42 @@ export function firestoreImportStore(args: {
 
     async saveProgress(patch): Promise<void> {
       const now = Timestamp.now();
-      await db()
-        .doc(paths.metaCatalogImportRun(tenantId, runId))
-        .set(
-          {
-            status: patch.status,
-            cursor: patch.cursor,
-            counters: patch.counters,
-            blockedByReason: patch.blockedByReason,
-            pagesDone: patch.pagesDone,
-            processed: patch.processed,
-            lastError: patch.lastError ?? '',
-            updatedAt: now,
-            // La lease se renueva con cada página; al completar se libera.
-            leaseUntil: patch.status === 'completed' ? null : Timestamp.fromMillis(now.toMillis() + IMPORT_RUN_LEASE_MS),
-            ...(patch.status === 'completed' ? { finishedAt: now } : {}),
-          },
-          { merge: true },
-        );
+      await db().runTransaction(async (tx) => {
+        const [runSnap, stateSnap] = await Promise.all([tx.get(runRef()), tx.get(stateRef())]);
+        const run = runSnap.data() as MetaCatalogImportRunDoc | undefined;
+        // FENCING: renovar la lease es un HEARTBEAT VERIFICADO (jamás una renovación ciega)
+        // y el cursor/contadores solo los persiste el dueño vigente.
+        if (!ownsImportRun(run, generation)) throw new ImportRunClaimLostError();
+        // Guard monotónico: cursor y contadores JAMÁS retroceden. Una regresión indica un
+        // bug del llamador — se descarta la escritura y se deja constancia, nunca se pisa
+        // progreso ya durable.
+        const regresion = importProgressRegression(run ?? {}, patch);
+        if (regresion) {
+          logger.error('Import de catálogo: escritura de progreso REGRESIVA descartada', { tenantId, runId, regresion });
+          return;
+        }
+        tx.update(runRef(), {
+          status: patch.status,
+          cursor: patch.cursor,
+          counters: patch.counters,
+          blockedByReason: patch.blockedByReason,
+          pagesDone: patch.pagesDone,
+          processed: patch.processed,
+          lastError: patch.lastError ?? '',
+          updatedAt: now,
+          // La lease se renueva con cada página; al completar se libera.
+          leaseUntil: patch.status === 'completed' ? null : Timestamp.fromMillis(now.toMillis() + IMPORT_RUN_LEASE_MS),
+          ...(patch.status === 'completed' ? { finishedAt: now } : {}),
+        });
+        if (patch.status === 'completed') {
+          // Liberar el puntero es parte del MISMO settle (y solo si sigue apuntando acá):
+          // un worker vencido jamás suelta el run activo de otro.
+          const state = stateSnap.data() as { activeRunId?: string | null } | undefined;
+          if (state?.activeRunId === runId) {
+            tx.set(stateRef(), { activeRunId: null, lastRunId: runId, updatedAt: now }, { merge: true });
+          }
+        }
+      });
     },
   };
 }

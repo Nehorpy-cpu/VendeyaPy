@@ -181,6 +181,14 @@ export {
   metaCatalogQualitySummary,
 } from './functions/meta/catalogImportCallables.js';
 
+// Mantenimiento del catálogo (HARDEN-1, ADR-0014 §4c): backfill de metaRetailerLocks +
+// quality de productos preexistentes. Preview por defecto; apply solo con confirm:true.
+// NO se ejecuta contra producción durante el desarrollo (paso del release auditado).
+export {
+  metaCatalogMaintenanceRun,
+  metaCatalogMaintenanceStatus,
+} from './functions/meta/catalogMaintenanceCallables.js';
+
 // Outbox de escrituras hacia el Meta Catalog (META-CATALOG-OUTBOX-1): confirmar el plan ENCOLA
 // jobs persistidos; el mantenimiento los reclama con lease, los envía y los confirma contra el
 // catálogo real. Nada declara `synced` sin evidencia.

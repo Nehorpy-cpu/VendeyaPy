@@ -118,6 +118,9 @@ export const paths = {
   metaCatalogImportRun: (tenantId: string, runId: string) => `tenants/${tenantId}/metaCatalogImportRuns/${runId}`,
   /** Puntero del run ACTIVO por tenant (claim transaccional, patrón intent del outbox). */
   metaCatalogImportState: (tenantId: string) => `tenants/${tenantId}/metaCatalogImportState/current`,
+  /** Corridas de mantenimiento: backfill de locks + quality (HARDEN-1, ADR-0014 §4c). */
+  metaCatalogMaintenanceRuns: (tenantId: string) => `tenants/${tenantId}/metaCatalogMaintenanceRuns`,
+  metaCatalogMaintenanceRun: (tenantId: string, runId: string) => `tenants/${tenantId}/metaCatalogMaintenanceRuns/${runId}`,
   trackingSources: (tenantId: string) => `tenants/${tenantId}/trackingSources`,
   trackingSource: (tenantId: string, id: string) => `tenants/${tenantId}/trackingSources/${id}`,
   businessEvents: (tenantId: string) => `tenants/${tenantId}/businessEvents`,

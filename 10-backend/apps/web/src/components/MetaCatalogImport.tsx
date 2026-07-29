@@ -22,15 +22,13 @@ import {
   runMetaCatalogImport,
   type MetaCatalogImportRunState,
 } from '@/lib/catalog';
+import { correrImportacionPaginada, errTextImport } from '@/lib/metaImportLoop';
 import { ConfirmModal, StatusBadge, type BadgeTone } from '@/components/ui';
 
 /** Importar TODO el catálogo es una acción de dueño (mismo gate que la reconciliación). */
 const ROLES_IMPORTACION = new Set(['TENANT_OWNER', 'PLATFORM_ADMIN']);
 
-/** Tope defensivo de invocaciones por sesión de UI (≈ miles de páginas): jamás un bucle infinito. */
-const MAX_INVOCACIONES = 500;
-
-type Fase = 'idle' | 'corriendo' | 'completado' | 'fallado' | 'cortado' | 'ocupado';
+type Fase = 'idle' | 'corriendo' | 'completado' | 'fallado' | 'cortado' | 'ocupado' | 'tomado';
 
 const CONTADORES: Array<{ key: keyof MetaCatalogImportRunState['contadores']; label: string; tone: BadgeTone }> = [
   { key: 'imported', label: 'Importados', tone: 'mint' },
@@ -83,72 +81,30 @@ export function MetaCatalogImport({ tenantId, categories }: { tenantId: string; 
     qc.invalidateQueries({ queryKey: ['metaImportStatus', tenantId] });
   };
 
-  /** Bucle de importación: re-invoca mientras queden páginas, mostrando el avance. */
+  /**
+   * Bucle de importación: la POLÍTICA (cuándo re-invocar, cuándo cortar y con qué mensaje)
+   * vive en `correrImportacionPaginada` (lib/metaImportLoop.ts, pura y testeada); acá solo
+   * se traduce el desenlace a estado de UI.
+   */
   const correr = async (reanudar: boolean) => {
     if (corriendoRef.current) return;
     corriendoRef.current = true;
     setFase('corriendo');
     setErrorMsg(null);
-    let sinProgreso = 0;
-    let paginasPrevias = -1;
-    try {
-      for (let i = 0; i < MAX_INVOCACIONES; i++) {
-        const r = await runMetaCatalogImport(tenantId, {
-          resume: reanudar || i > 0,
+    const out = await correrImportacionPaginada(reanudar, {
+      invocar: ({ resume }) =>
+        runMetaCatalogImport(tenantId, {
+          resume,
           ...(categoria ? { defaultCategoryId: categoria } : {}),
-        });
-        if (!montadoRef.current) return;
-        setUltimo(r);
-        if (r.status === 'already_running') {
-          setFase('ocupado');
-          return;
-        }
-        if (r.status === 'failed') {
-          setFase('fallado');
-          return;
-        }
-        if (r.status === 'completed') {
-          setFase('completado');
-          refrescarDatos();
-          return;
-        }
-        // status 'running' con corte declarado (cuota agotada, Meta con problemas): NO se
-        // re-invoca en bucle — cada reintento costaría lecturas completas y GETs a Meta
-        // contra un servicio ya degradado. Se muestra el motivo y queda "Reanudar" manual.
-        // `pages_budget` (presupuesto de páginas de la invocación) es el avance normal.
-        if (r.stopReason === 'quota' || r.stopReason === 'remote_error' || (r.lastError && r.stopReason !== 'pages_budget')) {
-          setFase('cortado');
-          setErrorMsg(
-            r.lastError ??
-              (r.stopReason === 'quota'
-                ? 'Se alcanzó el límite del plan. Revisá el plan y tocá "Reanudar" para continuar.'
-                : 'Meta no respondió bien. Esperá un momento y tocá "Reanudar".'),
-          );
-          return;
-        }
-        // Si el backend no avanza (mismas páginas y sin `more`), cortamos con honestidad
-        // en vez de martillar el servidor.
-        if (!r.more && r.pagesDone === paginasPrevias) {
-          sinProgreso += 1;
-          if (sinProgreso >= 3) {
-            setFase('cortado');
-            setErrorMsg('La importación no está avanzando. Esperá un momento y tocá "Reanudar".');
-            return;
-          }
-        } else {
-          sinProgreso = 0;
-        }
-        paginasPrevias = r.pagesDone;
-      }
-      setFase('cortado');
-      setErrorMsg('La importación sigue en curso (catálogo muy grande). Tocá "Reanudar" para continuar.');
-    } catch (e) {
-      if (!montadoRef.current) return;
-      setFase('cortado');
-      setErrorMsg(errText(e));
-    } finally {
-      corriendoRef.current = false;
-    }
+        }),
+      onAvance: (r) => setUltimo(r),
+      montado: () => montadoRef.current,
+    });
+    corriendoRef.current = false;
+    if (out.fase === 'abortado') return; // desmontado a mitad: no tocar más estado
+    setFase(out.fase);
+    setErrorMsg(out.errorMsg);
+    if (out.fase === 'completado') refrescarDatos();
   };
 
   /** Consulta el estado del run cuando otra sesión lo tiene tomado (already_running). */
@@ -165,7 +121,7 @@ export function MetaCatalogImport({ tenantId, categories }: { tenantId: string; 
         setFase('fallado');
       }
     } catch (e) {
-      if (montadoRef.current) setErrorMsg(errText(e));
+      if (montadoRef.current) setErrorMsg(errTextImport(e));
     } finally {
       if (montadoRef.current) setConsultandoEstado(false);
     }
@@ -248,6 +204,21 @@ export function MetaCatalogImport({ tenantId, categories }: { tenantId: string; 
               importados quedaron <strong>inactivos</strong>: completá sus datos y activalos cuando estén listos.
             </p>
           )}
+          {fase === 'tomado' && (
+            <div className="flex flex-wrap items-center gap-3 rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-800">
+              <span>
+                Otro proceso tomó el control de esta importación (quizás otra pestaña u otra persona). El run sigue su
+                curso allá; estos números muestran lo último visto desde acá.
+              </span>
+              <button
+                onClick={actualizarEstado}
+                disabled={consultandoEstado}
+                className="rounded-lg border border-amber-200 bg-white px-2.5 py-1 text-xs font-semibold text-amber-800 transition-colors hover:bg-amber-50 disabled:opacity-50"
+              >
+                {consultandoEstado ? 'Consultando…' : 'Actualizar estado'}
+              </button>
+            </div>
+          )}
           {fase === 'ocupado' && (
             <div className="flex flex-wrap items-center gap-3 rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-800">
               <span>
@@ -328,9 +299,4 @@ export function MetaCatalogImport({ tenantId, categories }: { tenantId: string; 
       )}
     </section>
   );
-}
-
-function errText(e: unknown): string {
-  const m = (e as { message?: string } | null)?.message;
-  return m && m.trim() ? m : 'Error inesperado. Revisá tu conexión y probá de nuevo.';
 }

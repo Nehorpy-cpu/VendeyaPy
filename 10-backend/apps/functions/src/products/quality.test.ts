@@ -4,12 +4,14 @@ import type { Product, ProductQuality } from '@vpw/shared';
 import {
   evaluateProductQuality,
   diffQuality,
+  effectiveCatalogPolicy,
   localNameSet,
   normalizeCatalogProfile,
   saleBlockingCodes,
   SALE_BLOCKING_CODES,
 } from './quality.js';
 import { outboundBrand } from '../meta/catalogOutbound.js';
+import { GENERIC_STOPWORDS, PERFUMERIA_STOPWORDS } from '../meta/catalogReconcile.js';
 
 /**
  * META-CATALOG-GENERIC-ONBOARDING-QUALITY-1 — evaluador de calidad PURO del catálogo:
@@ -188,11 +190,24 @@ describe('evaluateProductQuality — WARNINGs nuevos', () => {
     expect(igual.fingerprints['remote_drift:remote']).toBeUndefined();
   });
 
-  it('sin perfil se mantiene el comportamiento actual (stopwords de perfumería por defecto)', () => {
-    // 'edp'/'ml' son ruido en perfumería: no generan incoherencia por sí solos.
-    const p = prod({ name: 'Odyssey EDP 100ml', description: 'Odyssey fragancia intensa con vainilla' });
-    const q = evaluateProductQuality(p, { now: T0 });
-    expect(q.fingerprints['name_description_mismatch:description']).toBeUndefined();
+  it('HARDEN-1: sin perfil el default es GENERIC — el vocabulario de perfumería NO es ruido', () => {
+    // Nombre compuesto SOLO de vocabulario de perfumería, descripción ajena. Sin perfil,
+    // 'perfume'/'edp'/'100ml' son tokens REALES (el tenant no declaró el rubro) ⇒
+    // incoherencia detectada. Con el perfil explícito 'perfumeria' son ruido ⇒ nada que
+    // comparar (comportamiento vigente de arfagi, ahora SOLO por configuración).
+    const p = prod({ name: 'Perfume EDP 100ml', brand: '', description: 'Estuche de regalo con lazo dorado' });
+    const sinPerfil = evaluateProductQuality(p, { now: T0 });
+    expect(sinPerfil.fingerprints['name_description_mismatch:description']).toBeDefined();
+    const perfumeria = evaluateProductQuality(p, { now: T0, profile: { vertical: 'perfumeria' } });
+    expect(perfumeria.fingerprints['name_description_mismatch:description']).toBeUndefined();
+  });
+
+  it('HARDEN-1: perfil inválido/corrupto ⇒ fallback generic seguro (misma política que sin perfil)', () => {
+    const p = prod({ name: 'Perfume EDP 100ml', brand: '', description: 'Estuche de regalo con lazo dorado' });
+    for (const basura of ['texto', 42, ['x'], { vertical: 'zapatos' }] as unknown[]) {
+      const q = evaluateProductQuality(p, { now: T0, profile: normalizeCatalogProfile(basura) });
+      expect(q.fingerprints['name_description_mismatch:description']).toBeDefined();
+    }
   });
 });
 
@@ -284,5 +299,37 @@ describe('gate de venta + helpers', () => {
     const p = normalizeCatalogProfile({ requireBrand: false, stopwords: ['kit', 3, 'par'], vertical: 'generic', genericNameCheck: true });
     expect(p).toEqual({ requireBrand: false, genericNameCheck: true, stopwords: ['kit', 'par'], vertical: 'generic' });
     expect(normalizeCatalogProfile({ vertical: 'otra' })?.vertical).toBeUndefined();
+  });
+});
+
+describe('effectiveCatalogPolicy — resolución ÚNICA perfil → política (HARDEN-1)', () => {
+  it('sin perfil ⇒ vertical generic con stopwords idiomáticas mínimas (sin vocabulario de rubro)', () => {
+    const pol = effectiveCatalogPolicy(null);
+    expect(pol.vertical).toBe('generic');
+    expect(pol.stopwords).toBe(GENERIC_STOPWORDS);
+    expect(pol.stopwords.has('edp')).toBe(false);
+    expect(pol.stopwords.has('perfume')).toBe(false);
+    expect(pol.stopwords.has('de')).toBe(true); // núcleo idiomático sí
+    expect(pol.requireBrand).toBe(true);
+    expect(pol.genericNameCheck).toBe(true);
+  });
+
+  it('perfil inválido (normalizado a null o sin vertical) ⇒ generic seguro', () => {
+    expect(effectiveCatalogPolicy(normalizeCatalogProfile('basura')).vertical).toBe('generic');
+    expect(effectiveCatalogPolicy(normalizeCatalogProfile({ vertical: 'zapatos' })).vertical).toBe('generic');
+  });
+
+  it("vertical 'perfumeria' explícito activa la plantilla con las stopwords históricas de arfagi", () => {
+    const pol = effectiveCatalogPolicy({ vertical: 'perfumeria' });
+    expect(pol.vertical).toBe('perfumeria');
+    expect(pol.stopwords).toBe(PERFUMERIA_STOPWORDS);
+    expect(pol.stopwords.has('edp')).toBe(true);
+    expect(pol.stopwords.has('toilette')).toBe(true);
+  });
+
+  it('stopwords personalizadas del perfil GANAN sobre la plantilla del vertical', () => {
+    const pol = effectiveCatalogPolicy({ vertical: 'perfumeria', stopwords: ['Talle', 'PAR'] });
+    expect(pol.stopwords.has('talle')).toBe(true); // normalizadas
+    expect(pol.stopwords.has('edp')).toBe(false); // la plantilla NO se mezcla
   });
 });
