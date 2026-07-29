@@ -12,7 +12,14 @@
 
 import { collection, getDocs, query, orderBy } from 'firebase/firestore';
 import { httpsCallable } from 'firebase/functions';
-import type { Product, Category, ProductFinancials } from '@vpw/shared';
+import type {
+  Product,
+  Category,
+  ProductFinancials,
+  QualityObservation,
+  QualityObservationOrigin,
+  QualitySeverity,
+} from '@vpw/shared';
 import { firebaseDb, firebaseFunctions } from './firebase';
 
 const productsCol = (tenantId: string) => collection(firebaseDb(), 'tenants', tenantId, 'products');
@@ -31,12 +38,35 @@ export async function listCategories(tenantId: string): Promise<Category[]> {
   return snap.docs.map((d) => d.data() as Category);
 }
 
+// --- Calidad del catálogo (META-CATALOG-GENERIC-ONBOARDING-QUALITY-1) --------
+// Los campos `brand` y `quality` de Product y los tipos de observación ya viven en
+// @vpw/shared (product.types.ts). Acá solo se re-exportan con los nombres que consume
+// el panel, para que los componentes no dependan de los detalles del paquete.
+
+export type { QualitySeverity, QualityObservation, ProductQuality } from '@vpw/shared';
+
+/** Alias del panel para el origen de una observación (shared: QualityObservationOrigin). */
+export type QualityOrigin = QualityObservationOrigin;
+
+/** Alias del panel: entrada del mapa `quality.fingerprints` (shared: QualityObservation). */
+export type QualityFingerprintEntry = QualityObservation;
+
+/**
+ * Product ya incluye `brand` (marca neutral) y `quality` (evaluación server-side) en
+ * @vpw/shared. Se conserva el alias porque los componentes del catálogo lo nombran así.
+ */
+export type ProductConCalidad = Product;
+
 /** Datos editables de un producto desde el panel (el resto se completa/preserva). */
 export interface ProductInput {
   id?: string; // si viene, es edición
   name: string;
+  /** Marca neutral (campo top-level nuevo). Para perfumes se espeja también en perfume.brand. */
+  brand: string;
   description: string;
   price: number;
+  /** Precio anterior (tachado). Se precarga del producto para que guardar NO lo borre. */
+  compareAtPrice: number | null;
   costPrice: number | null;
   priorityScore: number | null;
   aiNotes: string;
@@ -44,6 +74,9 @@ export interface ProductInput {
   images: string[];
   emoji: string;
   stock: number;
+  /** Si el negocio controla stock de este producto (los importados nacen sin control). */
+  trackStock: boolean;
+  lowStockThreshold: number;
   sku: string;
   status: Product['status'];
   featured: boolean;
@@ -54,26 +87,64 @@ export interface ProductInput {
   aiFicha: Product['aiFicha'];
 }
 
-type ProductUpsertResp = { ok: boolean; id: string; created: boolean };
+/** Observación que el guardado RESOLVIÓ (la condición dejó de cumplirse). */
+export interface QualityResuelta {
+  code: string;
+  field: string;
+  message: string;
+}
+
+/** Observación que sigue pendiente después del guardado. */
+export interface QualityPendiente {
+  code: string;
+  severity: QualitySeverity;
+  field: string;
+  message: string;
+  action: string;
+}
+
+/** Resultado de calidad que devuelve productUpsert (recomputada server-side al guardar). */
+export interface UpsertQualityResult {
+  resueltas: QualityResuelta[];
+  pendientes: QualityPendiente[];
+}
+
+export interface ProductUpsertOutcome {
+  id: string;
+  /** Ausente mientras el backend del programa no esté desplegado (compat). */
+  quality?: UpsertQualityResult;
+}
+
+type ProductUpsertResp = { ok: boolean; id: string; created: boolean; quality?: UpsertQualityResult };
 
 /**
  * Alta/edición de producto vía callable `productUpsert`. El backend valida (whitelist),
  * aplica la cuota `maxProducts` al crear y escribe el costo privado `productFinancials`
  * en el mismo batch. NO escribe directo a Firestore.
  */
-export async function upsertProduct(tenantId: string, input: ProductInput): Promise<string> {
+export async function upsertProduct(tenantId: string, input: ProductInput): Promise<ProductUpsertOutcome> {
   // `data` = solo campos editables (el backend descarta id/tenantId/timestamps/sync).
   const data: Record<string, unknown> = {
     name: input.name,
+    brand: input.brand.trim(),
     description: input.description,
     price: input.price,
-    compareAtPrice: null,
+    // Precargado del producto por el form: guardar sin tocarlo lo PRESERVA (antes se
+    // mandaba null fijo y cada edición borraba el precio-antes en silencio).
+    compareAtPrice: input.compareAtPrice,
     aiNotes: input.aiNotes,
     currency: 'PYG',
     categoryId: input.categoryId,
     images: input.images,
     emoji: input.emoji,
-    inventory: { trackStock: true, stock: input.stock, lowStockThreshold: 3, sku: input.sku },
+    // trackStock/lowStockThreshold también se precargan: un importado (trackStock:false)
+    // no debe volverse "controlado" solo por guardarlo desde el panel.
+    inventory: {
+      trackStock: input.trackStock,
+      stock: input.stock,
+      lowStockThreshold: input.lowStockThreshold,
+      sku: input.sku,
+    },
     status: input.status,
     featured: input.featured,
     externalIds: { facebook: null, instagram: null, tiktok: null },
@@ -95,7 +166,7 @@ export async function upsertProduct(tenantId: string, input: ProductInput): Prom
     'productUpsert',
   );
   const res = await call({ tenantId, id: input.id, data, financials });
-  return res.data.id;
+  return { id: res.data.id, quality: res.data.quality };
 }
 
 /**
@@ -391,4 +462,189 @@ export async function syncCatalogToMeta(
     ...(opts?.apply && opts.preview ? { args: { previewRunId: opts.preview.runId, planHash: opts.preview.planHash } } : {}),
   });
   return (res.data as { result: CatalogSyncRun }).result;
+}
+
+// --- Importación paginada reanudable + centro de calidad ----------------------
+// (META-CATALOG-GENERIC-ONBOARDING-QUALITY-1). Contratos fijados por el diseño;
+// el backend se implementa en paralelo — el panel codea contra ESTOS shapes.
+
+/** Contadores por desenlace de la corrida de importación (acumulados del run). */
+export interface ImportRunContadores {
+  imported: number;
+  alreadyLinked: number;
+  alreadyImported: number;
+  ambiguous: number;
+  conflicted: number;
+  skipped: number;
+  unclassified: number;
+}
+
+export interface MetaCatalogImportRunState {
+  status: 'running' | 'completed' | 'failed' | 'already_running';
+  runId: string;
+  /** Cursor remoto persistido; null = arranque (o catálogo terminado). */
+  cursor: string | null;
+  /** true = quedan páginas: el panel debe re-invocar (con resume) hasta completed. */
+  more: boolean;
+  pagesDone: number;
+  procesados: number;
+  contadores: ImportRunContadores;
+  /** Veces que el cursor venció y la lectura reinició (la idempotencia evita duplicados). */
+  cursorResets: number;
+  lastError?: string;
+  /**
+   * Por qué se cortó ESTA invocación: 'pages_budget' es avance normal (seguir invocando);
+   * 'quota'/'remote_error' son cortes que el panel NO debe martillar en bucle — se muestran
+   * y se ofrece reanudar manualmente.
+   */
+  stopReason?: 'pages_budget' | 'quota' | 'remote_error';
+}
+
+/**
+ * Normaliza la respuesta del backend al shape que consume el panel. Tolera las dos
+ * ortografías en juego mientras el backend se implementa en paralelo: el contrato del
+ * programa (`procesados`/`contadores`/`cursorResets`/`more`) y la vista compartida
+ * `MetaCatalogImportRunSummary` de @vpw/shared (`processed`/`counters` con cursorResets
+ * adentro/`hasCursor`). `cancelled` se muestra como corte con aviso (reanudable).
+ */
+function normalizarImportRun(raw: unknown): MetaCatalogImportRunState {
+  const top = (raw ?? {}) as Record<string, unknown>;
+  // `already_running` trae el avance REAL adentro de `run` (el nivel superior solo dice que
+  // está ocupado): sin esto, la fase "ocupado" mostraba todos los contadores en cero.
+  const anidado =
+    top['status'] === 'already_running' && top['run'] && typeof top['run'] === 'object'
+      ? (top['run'] as Record<string, unknown>)
+      : null;
+  const d = anidado ? { ...anidado, status: 'already_running' } : top;
+  const contadoresRaw = (d['contadores'] ?? d['counters'] ?? {}) as Record<string, unknown>;
+  const num = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
+  const statusRaw = typeof d['status'] === 'string' ? (d['status'] as string) : 'failed';
+  const cancelado = statusRaw === 'cancelled';
+  const status: MetaCatalogImportRunState['status'] =
+    statusRaw === 'running' || statusRaw === 'completed' || statusRaw === 'already_running'
+      ? statusRaw
+      : 'failed';
+  const lastError =
+    typeof d['lastError'] === 'string' && d['lastError']
+      ? (d['lastError'] as string)
+      : cancelado
+        ? 'La importación fue cancelada. Se puede reanudar.'
+        : undefined;
+  return {
+    status,
+    runId: typeof d['runId'] === 'string' ? (d['runId'] as string) : '',
+    cursor: typeof d['cursor'] === 'string' ? (d['cursor'] as string) : null,
+    more:
+      d['more'] === true ||
+      (status === 'running' && (d['hasCursor'] === true || typeof d['cursor'] === 'string')),
+    pagesDone: num(d['pagesDone']),
+    procesados: num(d['procesados'] ?? d['processed']),
+    contadores: {
+      imported: num(contadoresRaw['imported']),
+      alreadyLinked: num(contadoresRaw['alreadyLinked']),
+      alreadyImported: num(contadoresRaw['alreadyImported']),
+      ambiguous: num(contadoresRaw['ambiguous']),
+      conflicted: num(contadoresRaw['conflicted']),
+      skipped: num(contadoresRaw['skipped']),
+      unclassified: num(contadoresRaw['unclassified']),
+    },
+    cursorResets: num(d['cursorResets'] ?? contadoresRaw['cursorResets']),
+    ...(lastError ? { lastError } : {}),
+    ...(d['stopReason'] === 'pages_budget' || d['stopReason'] === 'quota' || d['stopReason'] === 'remote_error'
+      ? { stopReason: d['stopReason'] as 'pages_budget' | 'quota' | 'remote_error' }
+      : {}),
+  };
+}
+
+/**
+ * Corre (o reanuda) la importación paginada del catálogo de Meta. SOLO dueño.
+ * Cada invocación procesa un puñado de páginas y devuelve el estado del run; si
+ * `more` es true hay que volver a invocar con `resume: true` hasta `completed`.
+ * NO escribe nada en Meta: solo crea productos locales inactivos.
+ */
+export async function runMetaCatalogImport(
+  tenantId: string,
+  opts?: { resume?: boolean; defaultCategoryId?: string; maxPages?: number },
+): Promise<MetaCatalogImportRunState> {
+  const call = httpsCallable(firebaseFunctions(), 'metaCatalogImportRun');
+  const res = await call({
+    tenantId,
+    ...(opts?.resume != null ? { resume: opts.resume } : {}),
+    ...(opts?.defaultCategoryId ? { defaultCategoryId: opts.defaultCategoryId } : {}),
+    ...(opts?.maxPages != null ? { maxPages: opts.maxPages } : {}),
+  });
+  return normalizarImportRun(res.data);
+}
+
+/** Estado del run de importación activo/último (null si nunca se corrió). */
+export async function fetchMetaCatalogImportStatus(
+  tenantId: string,
+): Promise<{ run: MetaCatalogImportRunState | null }> {
+  const call = httpsCallable(firebaseFunctions(), 'metaCatalogImportStatus');
+  const res = await call({ tenantId });
+  const data = res.data as { run?: unknown };
+  return { run: data.run != null ? normalizarImportRun(data.run) : null };
+}
+
+/** Agregado del centro de calidad, calculado server-side (nunca recorriendo el cliente). */
+export interface CatalogQualitySummary {
+  /** Productos con al menos una observación BLOCKING abierta. */
+  conBloqueos: number;
+  /** Productos con advertencias (WARNING) abiertas. */
+  conAdvertencias: number;
+  /** Conteo por código de problema (para los filtros del centro de calidad). */
+  porCodigo: Record<string, number>;
+  muestras: Array<{
+    productId: string;
+    productName: string;
+    blocking: number;
+    warning: number;
+    codigos: string[];
+  }>;
+  /** true si hay más productos con problemas que las muestras devueltas. */
+  truncated: boolean;
+}
+
+export async function fetchCatalogQualitySummary(tenantId: string): Promise<CatalogQualitySummary> {
+  const call = httpsCallable(firebaseFunctions(), 'metaCatalogQualitySummary');
+  const res = await call({ tenantId });
+  const data = (res.data ?? {}) as Record<string, unknown>;
+  // El callable emite `porCodigo: {code: {severity, count}}` y `muestras[].name/codes`; el
+  // panel consume números planos y `productName/codigos`. Se normaliza ACÁ (un solo borde):
+  // sin esto el filtro mostraba "([object Object])" y el fallback crasheaba con codigos
+  // undefined.
+  const porCodigo: Record<string, number> = {};
+  for (const [code, v] of Object.entries((data['porCodigo'] as Record<string, unknown>) ?? {})) {
+    porCodigo[code] =
+      typeof v === 'number'
+        ? v
+        : typeof (v as { count?: unknown })?.count === 'number'
+          ? ((v as { count: number }).count)
+          : 0;
+  }
+  const muestras = Array.isArray(data['muestras'])
+    ? (data['muestras'] as Array<Record<string, unknown>>).map((m) => ({
+        productId: typeof m['productId'] === 'string' ? (m['productId'] as string) : '',
+        productName:
+          typeof m['productName'] === 'string'
+            ? (m['productName'] as string)
+            : typeof m['name'] === 'string'
+              ? (m['name'] as string)
+              : '',
+        blocking: typeof m['blocking'] === 'number' ? (m['blocking'] as number) : 0,
+        warning: typeof m['warning'] === 'number' ? (m['warning'] as number) : 0,
+        codigos: Array.isArray(m['codigos'])
+          ? (m['codigos'] as string[])
+          : Array.isArray(m['codes'])
+            ? (m['codes'] as string[])
+            : [],
+      }))
+    : [];
+  return {
+    conBloqueos: typeof data['conBloqueos'] === 'number' ? (data['conBloqueos'] as number) : 0,
+    conAdvertencias: typeof data['conAdvertencias'] === 'number' ? (data['conAdvertencias'] as number) : 0,
+    porCodigo,
+    muestras,
+    truncated: data['truncated'] === true,
+  };
 }

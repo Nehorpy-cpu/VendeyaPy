@@ -265,18 +265,23 @@ service cloud.firestore {
 
       // Notificaciones internas del panel. Trial/billing → solo OWNER + admin (sin cambios).
       // COVERAGE-1C: la categoría 'handoff' también la lee el MANAGER, y el SELLER únicamente
-      // los avisos dirigidos a su uid (targetUid, server-controlled). Nada más se amplía.
+      // los avisos dirigidos a su uid (targetUid, server-controlled).
+      // META-CATALOG-GENERIC-ONBOARDING-QUALITY-1: la categoría 'catalog_quality' (resumen
+      // agregado del centro de calidad) también la lee el MANAGER — es quien opera el
+      // catálogo a diario vía productUpsert. Nada más se amplía.
       match /notifications/{notificationId} {
         allow read: if isTenantOwner(tenantId) || isPlatformAdmin()
           || (isTenantManager(tenantId) && resource.data.category == 'handoff')
+          || (isTenantManager(tenantId) && resource.data.category == 'catalog_quality')
           || (isTenantSeller(tenantId) && resource.data.category == 'handoff'
               && resource.data.targetUid == request.auth.uid);
-        allow create, delete: if false; // Solo Admin SDK (generateTrialNotifications / handoff)
+        allow create, delete: if false; // Solo Admin SDK (generateTrialNotifications / handoff / calidad)
         // El MANAGER no marca leídos los avisos DIRIGIDOS a un seller (el doc-id es determinístico:
         // si otro lo lee, el aviso muere para el vendedor asignado). El owner conserva el control.
         allow update: if (isTenantOwner(tenantId) || isPlatformAdmin()
             || (isTenantManager(tenantId) && resource.data.category == 'handoff'
                 && !('targetUid' in resource.data))
+            || (isTenantManager(tenantId) && resource.data.category == 'catalog_quality')
             || (isTenantSeller(tenantId) && resource.data.category == 'handoff'
                 && resource.data.targetUid == request.auth.uid))
           && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['read', 'readAt']);
@@ -353,6 +358,13 @@ service cloud.firestore {
       match /metaCatalogOutboxJobs/{id} { allow read, write: if false; }
       // Puntero por intención (deduplicación del trabajo activo): mismo criterio.
       match /metaCatalogOutboxIntents/{id} { allow read, write: if false; }
+
+      // Importación PAGINADA del catálogo (META-CATALOG-GENERIC-ONBOARDING-QUALITY-1):
+      // CERRADAS al cliente. El run guarda cursor/lease/contadores — tocarlo desde el
+      // navegador permitiría duplicar barridos o pisar el claim. El panel consulta por
+      // callable (metaCatalogImportStatus, saneado).
+      match /metaCatalogImportRuns/{id} { allow read, write: if false; }
+      match /metaCatalogImportState/{id} { allow read, write: if false; }
 
       // Eventos del negocio + Conversions API (D6): manager+ lee; escribe Cloud Functions.
       match /businessEvents/{id} { allow read: if isTenantManager(tenantId) || isPlatformAdmin(); allow write: if false; }

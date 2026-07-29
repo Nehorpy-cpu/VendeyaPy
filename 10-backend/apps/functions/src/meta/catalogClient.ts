@@ -67,6 +67,13 @@ export interface CatalogBatchItemError {
   message: string;
 }
 
+/** Una página del listado remoto (META-CATALOG-GENERIC-ONBOARDING-QUALITY-1). */
+export interface MetaCatalogItemsPage {
+  items: MetaRemoteCatalogItem[];
+  /** Cursor OPACO para pedir la página siguiente. null = no hay más páginas. */
+  nextCursor: string | null;
+}
+
 export interface MetaCatalogClient {
   /**
    * Llamadas HTTP realizadas a Meta desde que se creó el cliente. Cuenta CADA request, no cada
@@ -78,6 +85,14 @@ export interface MetaCatalogClient {
   getCatalog(catalogId: string): Promise<{ id: string; name: string }>;
   /** Lista COMPLETA (paginada) de items del catálogo. Lanza si supera el tope soportado. */
   listItems(catalogId: string): Promise<MetaRemoteCatalogItem[]>;
+  /**
+   * UNA página del listado (importación paginada/reanudable). Sin cursor arranca desde el
+   * principio; con cursor sigue desde donde quedó. Un cursor vencido o adulterado lanza
+   * `invalid_cursor` (clasificable con `isInvalidCatalogCursor`): el llamador reinicia el
+   * barrido — la idempotencia por docId hace seguro re-escanear. `listItems` queda INTACTO
+   * y fail-closed para el plan/preview/outbox (un diff con listado parcial mentiría).
+   */
+  listItemsPage(catalogId: string, cursor?: string | null): Promise<MetaCatalogItemsPage>;
   /** Envía un lote de escrituras ya serializadas. JAMÁS borra items. */
   submitItemsBatch(catalogId: string, requests: CatalogBatchRequest[]): Promise<{ handles: string[] }>;
   /** Estado best-effort de un batch asíncrono (errores por item si Meta ya los reportó). */
@@ -88,7 +103,7 @@ export interface MetaCatalogClient {
 export class MetaCatalogApiError extends Error {
   constructor(
     message: string,
-    readonly kind: 'missing_token' | 'http',
+    readonly kind: 'missing_token' | 'http' | 'invalid_cursor',
     readonly status: number | null = null,
     readonly fbCode: number | null = null,
     readonly retriable = false,
@@ -98,7 +113,35 @@ export class MetaCatalogApiError extends Error {
   }
 }
 
+/** true si el error es un cursor de paginación vencido/inválido (⇒ reiniciar el barrido). */
+export const isInvalidCatalogCursor = (e: unknown): boolean =>
+  e instanceof MetaCatalogApiError && e.kind === 'invalid_cursor';
+
 const maskId = (id: string) => (id.length > 4 ? `…${id.slice(-4)}` : '…');
+
+/**
+ * Mapeo ÚNICO del item crudo (snake_case del contrato de lectura) al modelo camelCase.
+ * Lo comparten `listItems`, `listItemsPage` y el fake: dos mapeos se desincronizan.
+ */
+function toRemoteItem(raw: Record<string, unknown>): MetaRemoteCatalogItem {
+  return {
+    id: String(raw.id ?? ''),
+    retailerId: String(raw.retailer_id ?? ''),
+    name: String(raw.name ?? ''),
+    description: String(raw.description ?? ''),
+    availability: String(raw.availability ?? ''),
+    price: String(raw.price ?? ''),
+    currency: String(raw.currency ?? ''),
+    imageUrl: String(raw.image_url ?? ''),
+    brand: String(raw.brand ?? ''),
+    url: String(raw.url ?? ''),
+    condition: String(raw.condition ?? ''),
+    productType: String(raw.product_type ?? ''),
+  };
+}
+
+/** Solo un cursor del propio Graph API puede seguirse con el Bearer puesto. */
+const GRAPH_CURSOR_PREFIX = 'https://graph.facebook.com/';
 
 /** Respuesta mínima del transporte (inyectable para tests del retry). */
 export interface CatalogHttpResponse {
@@ -225,24 +268,9 @@ export class HttpMetaCatalogClient implements MetaCatalogClient {
         data?: Array<Record<string, unknown>>;
         paging?: { next?: string };
       };
-      for (const raw of data.data ?? []) {
-        items.push({
-          id: String(raw.id ?? ''),
-          retailerId: String(raw.retailer_id ?? ''),
-          name: String(raw.name ?? ''),
-          description: String(raw.description ?? ''),
-          availability: String(raw.availability ?? ''),
-          price: String(raw.price ?? ''),
-          currency: String(raw.currency ?? ''),
-          imageUrl: String(raw.image_url ?? ''),
-          brand: String(raw.brand ?? ''),
-          url: String(raw.url ?? ''),
-          condition: String(raw.condition ?? ''),
-          productType: String(raw.product_type ?? ''),
-        });
-      }
+      for (const raw of data.data ?? []) items.push(toRemoteItem(raw));
       const next = data.paging?.next ?? null; // paging.next NO trae el token (va por header)
-      if (next && !next.startsWith('https://graph.facebook.com/')) {
+      if (next && !next.startsWith(GRAPH_CURSOR_PREFIX)) {
         // Jamás seguir un cursor fuera del Graph API con el Bearer puesto.
         throw new MetaCatalogApiError('Meta Catalog: cursor de paginación con host inesperado; corrida abortada.', 'http', null, null, false);
       }
@@ -254,6 +282,39 @@ export class HttpMetaCatalogClient implements MetaCatalogClient {
       throw new MetaCatalogApiError(`Meta Catalog: el catálogo supera el tope soportado de ${PAGE_LIMIT * MAX_PAGES} items; corrida abortada para no planificar con datos parciales.`, 'http', null, null, false);
     }
     return items;
+  }
+
+  /**
+   * UNA página por llamada (importación paginada). Mismo request, mapeo y validación de host
+   * que `listItems` — el cursor es la URL `paging.next` COMPLETA que devolvió Meta (no trae
+   * el token: la autorización viaja por header). Se valida también al RECIBIRLA como input:
+   * un cursor persistido/adulterado con otro host jamás se sigue con el Bearer puesto.
+   */
+  async listItemsPage(catalogId: string, cursor?: string | null): Promise<MetaCatalogItemsPage> {
+    let url = `${this.base}/${catalogId}/products?fields=${REMOTE_ITEM_FIELDS}&limit=${PAGE_LIMIT}`;
+    if (cursor != null && cursor !== '') {
+      if (!cursor.startsWith(GRAPH_CURSOR_PREFIX)) {
+        throw new MetaCatalogApiError('Meta Catalog: cursor de paginación con host inesperado; se reinicia el barrido.', 'invalid_cursor', null, null, false);
+      }
+      url = cursor;
+    }
+    let data: { data?: Array<Record<string, unknown>>; paging?: { next?: string } };
+    try {
+      data = ((await this.request('GET', url)) ?? {}) as typeof data;
+    } catch (e) {
+      // Graph responde 400 code 100 cuando el cursor venció o no es válido. SOLO se
+      // clasifica así cuando efectivamente seguíamos un cursor: el mismo error en la
+      // primera página es un problema real del catálogo y debe propagarse tal cual.
+      if (cursor && e instanceof MetaCatalogApiError && e.status === 400 && e.fbCode === 100) {
+        throw new MetaCatalogApiError(`Meta Catalog: cursor de paginación vencido o inválido (${e.message.slice(0, 120)})`, 'invalid_cursor', 400, 100, false);
+      }
+      throw e;
+    }
+    const next = data.paging?.next ?? null;
+    if (next && !next.startsWith(GRAPH_CURSOR_PREFIX)) {
+      throw new MetaCatalogApiError('Meta Catalog: cursor de paginación con host inesperado; corrida abortada.', 'http', null, null, false);
+    }
+    return { items: (data.data ?? []).map(toRemoteItem), nextCursor: next };
   }
 
   async submitItemsBatch(catalogId: string, requests: CatalogBatchRequest[]): Promise<{ handles: string[] }> {
@@ -471,20 +532,37 @@ export class FakeMetaCatalogClient implements MetaCatalogClient {
     // llamada" y el presupuesto de la corrida tiene que verlo.
     this.llamadas += Math.max(1, fx.pagesPerList ?? 1);
     this.failIf(fx, 'listItems');
-    return (fx.items ?? []).map((raw) => ({
-      id: String(raw.id ?? ''),
-      retailerId: String(raw.retailer_id ?? ''),
-      name: String(raw.name ?? ''),
-      description: String(raw.description ?? ''),
-      availability: String(raw.availability ?? ''),
-      price: String(raw.price ?? ''),
-      currency: String(raw.currency ?? ''),
-      imageUrl: String(raw.image_url ?? ''),
-      brand: String(raw.brand ?? ''),
-      url: String(raw.url ?? ''),
-      condition: String(raw.condition ?? ''),
-      productType: String(raw.product_type ?? ''),
-    }));
+    return (fx.items ?? []).map(toRemoteItem);
+  }
+
+  /**
+   * Paginación REAL del fixture: `pagesPerList` divide `items` en páginas determinísticas y
+   * el cursor sintético es `page:<n>` (índice de la PRÓXIMA página). Un cursor malformado o
+   * fuera de rango lanza `invalid_cursor`, igual que un cursor de Graph vencido — es lo que
+   * permite ejercitar el reset del barrido en el emulador. `failWith` de `listItems` aplica
+   * también acá (fallo a mitad de importación con cursor ya persistido).
+   */
+  async listItemsPage(_catalogId: string, cursor?: string | null): Promise<MetaCatalogItemsPage> {
+    const fx = await this.fixture();
+    this.llamadas++; // una llamada por página, como el cliente real
+    this.failIf(fx, 'listItems');
+    const all = (fx.items ?? []).map(toRemoteItem);
+    const pages = Math.max(1, Math.trunc(fx.pagesPerList ?? 1));
+    const pageSize = Math.max(1, Math.ceil(all.length / pages));
+    let pageIndex = 0;
+    if (cursor != null && cursor !== '') {
+      const m = /^page:(\d+)$/.exec(cursor);
+      const n = m ? Number(m[1]) : NaN;
+      const fueraDeRango = !Number.isInteger(n) || n < 1 || n * pageSize >= Math.max(all.length, 1);
+      if (!m || fueraDeRango) {
+        throw new MetaCatalogApiError('Meta Catalog: cursor de paginación vencido o inválido (fixture).', 'invalid_cursor', 400, 100, false);
+      }
+      pageIndex = n;
+    }
+    const start = pageIndex * pageSize;
+    const items = all.slice(start, start + pageSize);
+    const nextCursor = start + pageSize < all.length ? `page:${pageIndex + 1}` : null;
+    return { items, nextCursor };
   }
 
   async submitItemsBatch(catalogId: string, requests: CatalogBatchRequest[]): Promise<{ handles: string[] }> {

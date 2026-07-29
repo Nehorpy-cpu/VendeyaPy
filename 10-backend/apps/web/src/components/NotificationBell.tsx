@@ -47,6 +47,8 @@ export function NotificationBell() {
       <button
         onClick={() => setOpen((o) => !o)}
         aria-label={`Notificaciones (${unread.length} sin leer)`}
+        aria-expanded={open}
+        aria-haspopup="true"
         className="relative grid h-9 w-9 place-items-center rounded-lg border border-ink-200 text-ink-600 transition-colors hover:bg-ink-50"
       >
         <BellIcon className="h-5 w-5" />
@@ -67,13 +69,19 @@ export function NotificationBell() {
                   <p className="mt-0.5 text-xs leading-snug text-ink-500">{nf.body}</p>
                   <div className="mt-2 flex items-center gap-3">
                     {/* HANDOFF-2: el CTA depende de la categoría — un pedido de atención humana
-                        lleva a Conversaciones, no a facturación. */}
+                        lleva a Conversaciones; la calidad del catálogo, al Catálogo. */}
                     <Link
-                      href={nf.category === 'handoff' ? `/conversations${nf.customerId ? `?c=${nf.customerId}` : ''}` : '/billing'}
+                      href={
+                        nf.category === 'handoff'
+                          ? `/conversations${nf.customerId ? `?c=${nf.customerId}` : ''}`
+                          : nf.category === 'catalog_quality'
+                            ? '/catalog'
+                            : '/billing'
+                      }
                       onClick={() => setOpen(false)}
                       className="text-xs font-semibold text-mint-700 hover:text-mint-600"
                     >
-                      {nf.category === 'handoff' ? 'Ver conversación' : 'Ver planes'}
+                      {nf.category === 'handoff' ? 'Ver conversación' : nf.category === 'catalog_quality' ? 'Ver catálogo' : 'Ver planes'}
                     </Link>
                     <button
                       onClick={() => markRead.mutate(nf.id)}

@@ -101,13 +101,16 @@ export async function searchCatalog(
   tenantId: string,
   filters: CatalogFilters = {},
 ): Promise<Product[]> {
-  // Solo productos activos y con stock
+  // Solo productos activos y VENDIBLES. Mismo predicado trackStock-aware que
+  // findProductByName y que la availability de Meta (catalogOutbound.ts): exigir stock>0
+  // sin mirar trackStock hacía invisible en el listado un producto sin control de stock
+  // que sí podía entrar al carrito por nombre — la elegibilidad mentía según el canal.
   const snap = await db()
     .collection(paths.products(tenantId))
     .where('status', '==', 'ACTIVE')
     .get();
 
-  const activos = snap.docs.map((d) => d.data() as Product).filter((p) => p.inventory?.stock > 0);
+  const activos = snap.docs.map((d) => d.data() as Product).filter((p) => !p.inventory?.trackStock || (p.inventory?.stock ?? 0) > 0);
 
   // Modo Ganancia: leer costo/prioridad (privado, server-side) para rankear por rentabilidad.
   const finMap: FinMap = new Map();

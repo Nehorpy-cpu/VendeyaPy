@@ -136,6 +136,9 @@ export function validateProductPatch(data: unknown, opts: { requireName: boolean
   if (d.name !== undefined) out.name = reqStr(d.name, 'name', 300);
   else if (opts.requireName) throw new Error('El producto necesita un nombre.');
   if (d.description !== undefined) out.description = str(d.description, 'description', 5000);
+  // Marca NEUTRAL del producto (cualquier rubro). Mismo tope que perfume.brand; Meta
+  // trunca a 100 en el serializador y el evaluador de calidad avisa si falta.
+  if (d.brand !== undefined) out.brand = str(d.brand, 'brand', 200);
   if (d.aiNotes !== undefined) out.aiNotes = str(d.aiNotes, 'aiNotes', 5000);
   if (d.categoryId !== undefined) out.categoryId = str(d.categoryId, 'categoryId', 200);
   if (d.emoji !== undefined) out.emoji = str(d.emoji, 'emoji', 16);

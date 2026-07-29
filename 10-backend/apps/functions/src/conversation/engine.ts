@@ -217,7 +217,10 @@ function emojiDe(p: Product): string {
 function formatearProductos(productos: Product[]): string {
   let out = '✨ Mirá, te elegí estas opciones:\n';
   for (const p of productos) {
-    out += `\n${emojiDe(p)} *${p.name} – ${p.perfume?.brand}* → ${GS(p.price)}`;
+    // Marca NEUTRAL con fallback al vertical y SIN separador si no hay: un producto genérico
+    // sin `perfume` se listaba como "Nombre – undefined" en el WhatsApp real.
+    const marca = (p.brand ?? p.perfume?.brand ?? '').trim();
+    out += `\n${emojiDe(p)} *${p.name}${marca ? ` – ${marca}` : ''}* → ${GS(p.price)}`;
     if (p.inventory && p.inventory.stock <= 3) out += `  ⚠️ ¡Últimas ${p.inventory.stock}!`;
     if (p.featured) out += '\n   Uno de nuestros más vendidos 🌟';
   }

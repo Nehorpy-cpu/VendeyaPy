@@ -76,6 +76,9 @@ export const AUDIT_ACTIONS = [
   'meta.catalog_items_imported',
   'meta.catalog_sync_enabled',
   'meta.catalog_sync_disabled',
+  // META-CATALOG-GENERIC-ONBOARDING-QUALITY-1: cada invocación del run de importación
+  // paginada (contadores + estado + motivo de corte).
+  'meta.catalog_import_run',
   'whatsapp.activation_requested',
   'whatsapp.activation_completed',
   'whatsapp.activation_cancelled',

@@ -6,12 +6,20 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
  * apoya toda la importación desde Meta (los importados nacen INACTIVE).
  */
 const docGet = vi.fn();
+const colGet = vi.fn();
 vi.mock('../lib/firebase.js', () => ({
-  db: () => ({ doc: () => ({ get: docGet }) }),
-  paths: { product: (t: string, p: string) => `tenants/${t}/products/${p}` },
+  db: () => ({
+    doc: () => ({ get: docGet }),
+    collection: () => ({ where: () => ({ get: colGet }), get: colGet }),
+  }),
+  paths: {
+    product: (t: string, p: string) => `tenants/${t}/products/${p}`,
+    products: (t: string) => `tenants/${t}/products`,
+    productFinancials: (t: string) => `tenants/${t}/productFinancials`,
+  },
 }));
 
-import { getProductById, getProductByIdRaw } from './search.js';
+import { getProductById, getProductByIdRaw, searchCatalog } from './search.js';
 
 const producto = (status: string) => ({
   exists: true,
@@ -48,5 +56,29 @@ describe('getProductById — gate de vendibilidad', () => {
     docGet.mockResolvedValue(producto('INACTIVE'));
     const raw = await getProductByIdRaw('t1', 'p1');
     expect(raw?.status).toBe('INACTIVE');
+  });
+});
+
+describe('searchCatalog — predicado de vendibilidad consistente (trackStock-aware)', () => {
+  const fila = (name: string, inventory: Record<string, unknown>) => ({
+    data: () => ({ id: name, name, status: 'ACTIVE', price: 100000, inventory }),
+  });
+
+  it('ACTIVE sin trackStock y stock 0 SÍ se lista (mismo criterio que findProductByName y Meta)', async () => {
+    // Antes searchCatalog exigía stock>0 sin mirar trackStock: un servicio o un importado
+    // activado con trackStock:false era invisible en el listado del bot pero agregable al
+    // carrito por nombre — la elegibilidad mentía según el canal.
+    colGet.mockResolvedValue({
+      docs: [
+        fila('Servicio Sin Stock', { trackStock: false, stock: 0, sku: 's1' }),
+        fila('Con Stock', { trackStock: true, stock: 2, sku: 's2' }),
+        fila('Agotado Trackeado', { trackStock: true, stock: 0, sku: 's3' }),
+      ],
+    });
+    const res = await searchCatalog('t1', { limit: 10 });
+    const nombres = res.map((p) => p.name);
+    expect(nombres).toContain('Servicio Sin Stock');
+    expect(nombres).toContain('Con Stock');
+    expect(nombres).not.toContain('Agotado Trackeado');
   });
 });

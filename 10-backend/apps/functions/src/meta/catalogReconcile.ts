@@ -30,14 +30,19 @@ export const normalizeText = (s: unknown): string =>
     .replace(/\s+/g, ' ')
     .trim();
 
-/** Ruido comercial que no aporta identidad al comparar nombres de perfumes. */
-const STOPWORDS = new Set([
+/**
+ * Ruido comercial que no aporta identidad al comparar nombres de perfumes. Es el DEFAULT del
+ * perfil de arfagi, no una verdad universal: otros verticales pasan su propia lista vía
+ * `CatalogQualityProfile.stopwords` (los llamadores existentes no pasan nada y conservan
+ * exactamente este comportamiento — los 102 resultados ya comunicados no cambian).
+ */
+export const DEFAULT_STOPWORDS: ReadonlySet<string> = new Set([
   'edp', 'edt', 'eau', 'de', 'parfum', 'toilette', 'ml', '100ml', 'the', 'el', 'la', 'los',
   'las', 'y', 'edition', 'limited', 'collector', 'collectors', 'perfume', 'para',
 ]);
 
-export const significantTokens = (s: unknown): string[] =>
-  normalizeText(s).split(' ').filter((t) => t.length > 1 && !STOPWORDS.has(t));
+export const significantTokens = (s: unknown, stopwords: ReadonlySet<string> = DEFAULT_STOPWORDS): string[] =>
+  normalizeText(s).split(' ').filter((t) => t.length > 1 && !stopwords.has(t));
 
 const jaccard = (a: string[], b: string[]): number => {
   if (!a.length || !b.length) return 0;
@@ -240,8 +245,11 @@ export function rankMappingCandidates(
   remote: RemoteCandidate[],
   opts: { limit?: number; index?: RemoteTokenIndex; minConfidence?: MappingConfidence } = {},
 ): MappingCandidate[] {
-  const pTokens = significantTokens(`${product.name ?? ''} ${product.perfume?.brand ?? ''}`);
-  const pBrand = normalizeText(product.perfume?.brand ?? '').split(' ')[0] ?? '';
+  // Marca NEUTRAL con fallback al sub-objeto del vertical: un producto genérico sin
+  // `perfume` no pierde su marca en el matching (para arfagi nada cambia: no tiene `brand`).
+  const marcaLocal = product.brand ?? product.perfume?.brand ?? '';
+  const pTokens = significantTokens(`${product.name ?? ''} ${marcaLocal}`);
+  const pBrand = normalizeText(marcaLocal).split(' ')[0] ?? '';
   const pPrice = Number(product.price ?? 0);
   const index = opts.index;
 
@@ -325,9 +333,23 @@ export function genderFromProductType(productType: string): 'Femenino' | 'Mascul
  */
 export function buildImportedProduct(
   item: RemoteCandidate,
-  ctx: { productId: string; tenantId: string; categoryId: string; catalogId: string; position: number },
+  ctx: {
+    productId: string;
+    tenantId: string;
+    categoryId: string;
+    catalogId: string;
+    position: number;
+    /**
+     * Vertical del tenant (perfil de calidad). Default 'perfumeria' = comportamiento
+     * histórico de arfagi (arma la ficha `perfume` cuando hay marca). Con 'generic' la
+     * marca va SOLO al campo neutral `brand`: importar un catálogo de otro rubro no
+     * fabrica atributos de perfumería inventados.
+     */
+    vertical?: 'perfumeria' | 'generic';
+  },
 ): Omit<Product, 'createdAt' | 'updatedAt'> & { stockPendingReview: true } {
   const gender = genderFromProductType(item.productType);
+  const esPerfumeria = (ctx.vertical ?? 'perfumeria') === 'perfumeria';
   return {
     id: ctx.productId,
     tenantId: ctx.tenantId,
@@ -349,7 +371,9 @@ export function buildImportedProduct(
     featured: false,
     position: ctx.position,
     externalIds: { facebook: null, instagram: null, tiktok: null },
-    perfume: item.brand
+    // La marca SIEMPRE se conserva en el campo NEUTRAL (es lo que consume outboundBrand).
+    brand: item.brand,
+    perfume: esPerfumeria && item.brand
       ? { brand: item.brand, gender: gender ?? 'Unisex', olfactiveFamily: '', styleTags: [], notes: { top: [], heart: [], base: [] }, priceRange: 'MID', sizeMl: null, isNew: false }
       : null,
     aiFicha: null,

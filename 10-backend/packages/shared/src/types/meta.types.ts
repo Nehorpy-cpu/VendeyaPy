@@ -211,3 +211,42 @@ export interface MetaAdInsightDaily {
   createdAt: Timestamp;
   updatedAt: Timestamp;
 }
+
+// ---------------------------------------------------------------------------
+// Importación PAGINADA del catálogo de Meta (META-CATALOG-GENERIC-ONBOARDING-QUALITY-1)
+// ---------------------------------------------------------------------------
+
+export type MetaCatalogImportRunStatus = 'running' | 'completed' | 'failed' | 'cancelled';
+
+/**
+ * Contadores acumulados de un run de importación. `unclassified` es un SUBCONJUNTO de
+ * `imported` (importados como borrador sin categoría); `cursorResets` cuenta cuántas veces
+ * el cursor de Graph venció y el barrido reinició desde cero (idempotente por docId).
+ */
+export interface MetaCatalogImportCounters {
+  imported: number;
+  alreadyLinked: number;
+  alreadyImported: number;
+  ambiguous: number;
+  conflicted: number;
+  skipped: number;
+  unclassified: number;
+  cursorResets: number;
+}
+
+/** Vista SANEADA del run para el panel (la devuelven los callables; el doc está cerrado por rules). */
+export interface MetaCatalogImportRunSummary {
+  runId: string;
+  status: MetaCatalogImportRunStatus;
+  pagesDone: number;
+  /** Items remotos procesados (clasificados) hasta ahora. */
+  processed: number;
+  counters: MetaCatalogImportCounters;
+  blockedByReason: Record<string, number>;
+  /** true si el run quedó a mitad de catálogo (hay cursor persistido para reanudar). */
+  hasCursor: boolean;
+  startedAtMs: number | null;
+  updatedAtMs: number | null;
+  finishedAtMs: number | null;
+  lastError: string | null;
+}

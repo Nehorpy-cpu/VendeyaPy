@@ -1,12 +1,16 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import type { Product, Category, ProductAiFicha } from '@vpw/shared';
 import { aiFichaQuality, composeAiNotesFromFicha, composeDescriptionFromFicha, AI_FICHA_LEVEL_LABEL } from '@vpw/shared';
 import type { ProductInput } from '@/lib/catalog';
 
 const GENDERS = ['Femenino', 'Masculino', 'Unisex'] as const;
-const STATUSES: Product['status'][] = ['ACTIVE', 'INACTIVE', 'ARCHIVED'];
+const STATUSES: Array<{ value: Product['status']; label: string }> = [
+  { value: 'ACTIVE', label: 'Activo (el bot lo ofrece)' },
+  { value: 'INACTIVE', label: 'Inactivo (oculto)' },
+  { value: 'ARCHIVED', label: 'Archivado (dado de baja)' },
+];
 const CONCENTRACIONES = ['', 'EDT', 'EDP', 'Extrait', 'Parfum', 'Body Mist', 'Otro'] as const;
 const PROYECCIONES = ['', 'suave', 'moderada', 'fuerte'] as const;
 
@@ -26,6 +30,18 @@ function priceRangeFromPrice(p: number): 'ACCESIBLE' | 'MID' | 'PREMIUM' | 'LUJO
 
 const csv = (s: string) => s.split(/[;,]/).map((x) => x.trim()).filter(Boolean);
 
+/**
+ * ¿La categoría es de perfumería? Decide si un producto NUEVO muestra la ficha de la
+ * vertical (los existentes se deciden por su dato: `perfume != null`). Heurística por
+ * nombre/id — la ficha jamás se fabrica sola: solo cambia qué campos se OFRECEN.
+ */
+function categoriaEsPerfumeria(cat: Category | undefined): boolean {
+  if (!cat) return false;
+  // NFD + quitar diacríticos (rango U+0300–U+036F): "Perfumería" → "perfumeria".
+  const norm = (s: string) => s.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+  return norm(`${cat.name} ${cat.id}`).includes('perfum');
+}
+
 interface Props {
   initial: Product | null;
   /** Costo del producto a editar (vive en productFinancials, no en el producto). */
@@ -41,23 +57,34 @@ interface Props {
 }
 
 export function ProductForm({ initial, initialCost, initialPriority, categories, onCancel, onSubmit, saving, error }: Props) {
+  const uid = useId();
+  const id = (k: string) => `${uid}-${k}`;
   const pf = initial?.perfume ?? null;
+  // `brand` neutral (campo nuevo del programa): si el producto viejo solo tiene la marca
+  // adentro de `perfume`, se precarga de ahí — un solo campo "Marca" para cualquier rubro.
+  const brandInicial = initial?.brand ?? pf?.brand ?? '';
+  const categoriaInicial = initial?.categoryId ?? (categories[0]?.id ?? '');
   const [f, setF] = useState({
     name: initial?.name ?? '',
+    brand: brandInicial,
     sku: initial?.inventory?.sku ?? '',
-    categoryId: initial?.categoryId ?? (categories[0]?.id ?? 'perfumes'),
+    categoryId: categoriaInicial,
     price: initial?.price ?? 0,
+    // Se precarga para que guardar SIN tocarlo lo preserve (antes se pisaba con null).
+    compareAtPrice: initial?.compareAtPrice ?? 0,
     costPrice: initialCost ?? 0,
     priorityScore: initialPriority ?? 0,
     stock: initial?.inventory?.stock ?? 0,
+    // Un importado nace con trackStock:false — guardarlo no debe "activarle" el control.
+    trackStock: initial ? initial.inventory?.trackStock === true : true,
+    lowStockThreshold: initial ? (initial.inventory?.lowStockThreshold ?? 0) : 3,
     status: initial?.status ?? ('ACTIVE' as Product['status']),
     featured: initial?.featured ?? false,
-    emoji: initial?.emoji ?? '🌸',
-    imageUrl: initial?.images?.[0] ?? '',
+    emoji: initial?.emoji ?? (categoriaEsPerfumeria(categories.find((c) => c.id === categoriaInicial)) ? '🌸' : '🛍️'),
+    imagesText: (initial?.images ?? []).join('\n'),
     productUrl: initial?.productUrl ?? '',
     description: initial?.description ?? '',
     aiNotes: initial?.aiNotes ?? '',
-    brand: pf?.brand ?? '',
     gender: pf?.gender ?? ('Femenino' as (typeof GENDERS)[number]),
     olfactiveFamily: pf?.olfactiveFamily ?? '',
     styleTags: (pf?.styleTags ?? []).join(', '),
@@ -81,9 +108,28 @@ export function ProductForm({ initial, initialCost, initialPriority, categories,
   });
   const set = <K extends keyof typeof f>(k: K, v: (typeof f)[K]) => setF((s) => ({ ...s, [k]: v }));
 
-  // El producto es perfume salvo que la edición diga explícitamente lo contrario (vertical actual).
-  // != null cubre null y undefined, igual que aiFichaQuality — chip y badge deben coincidir.
-  const esPerfume = initial ? initial.perfume != null : true;
+  // La ficha de la vertical se decide por el DATO al editar (perfume != null) y por la
+  // categoría elegida al crear: un producto genérico no muestra campos de perfumería.
+  const esPerfume = initial
+    ? initial.perfume != null
+    : categoriaEsPerfumeria(categories.find((c) => c.id === f.categoryId));
+
+  // --- Accesibilidad del diálogo: foco inicial, devolución de foco y Escape ---
+  const nameRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    const previo = document.activeElement as HTMLElement | null;
+    nameRef.current?.focus();
+    return () => previo?.focus?.();
+  }, []);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      // Escape cierra igual que "Cancelar" (no durante el guardado: sería mentir el estado).
+      if (e.key === 'Escape' && !saving) onCancel();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [saving]);
 
   const buildFicha = (): ProductAiFicha => ({
     ...(f.cuandoRecomendar.trim() ? { cuandoRecomendar: f.cuandoRecomendar.trim() } : {}),
@@ -139,21 +185,26 @@ export function ProductForm({ initial, initialCost, initialPriority, categories,
     const input: ProductInput = {
       ...(initial ? { id: initial.id } : {}),
       name: f.name.trim(),
+      brand: f.brand.trim(),
       description: f.description.trim(),
       price: Number(f.price) || 0,
+      compareAtPrice: f.compareAtPrice ? Number(f.compareAtPrice) : null,
       costPrice: f.costPrice ? Number(f.costPrice) : null,
       priorityScore: f.priorityScore ? Number(f.priorityScore) : null,
       aiNotes: f.aiNotes.trim(),
       categoryId: f.categoryId,
-      images: f.imageUrl.trim() ? [f.imageUrl.trim()] : [],
+      images: f.imagesText.split(/\n+/).map((u) => u.trim()).filter(Boolean),
       emoji: f.emoji,
       stock: Number(f.stock) || 0,
+      trackStock: f.trackStock,
+      lowStockThreshold: Number(f.lowStockThreshold) || 0,
       sku: f.sku.trim() || f.name.trim().toLowerCase().replace(/\s+/g, '-'),
       status: f.status,
       featured: f.featured,
       productUrl: f.productUrl.trim(),
       // Un producto genérico sigue siendo genérico al editarlo (si mandáramos el objeto
       // perfume, el badge de la lista pasaría a exigir las señales de perfumería).
+      // La marca del perfume se espeja del campo neutral: UN solo lugar para cargarla.
       perfume: esPerfume ? {
         brand: f.brand.trim(),
         gender: f.gender,
@@ -171,139 +222,204 @@ export function ProductForm({ initial, initialCost, initialPriority, categories,
 
   const field = 'w-full rounded-lg border border-ink-200 px-3 py-2 text-sm text-ink-800 transition-colors focus:border-mint-500 focus:outline-none focus:ring-2 focus:ring-mint-500/30';
   const lbl = 'mb-1 block text-xs font-medium text-ink-600';
+  const seccion = 'rounded-xl border border-ink-100 p-4';
+  const leyenda = 'px-1 text-sm font-semibold text-ink-900';
+  const catConocida = categories.some((c) => c.id === f.categoryId);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink-950/40 p-4">
-      <form onSubmit={submit} className="flex max-h-[90vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-ink-100 bg-white shadow-float">
-        <h2 className="shrink-0 border-b border-ink-100 px-6 py-4 text-lg font-bold text-ink-900">
+      <form
+        onSubmit={submit}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={id('titulo')}
+        className="flex max-h-[90vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-ink-100 bg-white shadow-float"
+      >
+        <h2 id={id('titulo')} className="shrink-0 border-b border-ink-100 px-6 py-4 text-lg font-bold text-ink-900">
           {initial ? 'Editar producto' : 'Nuevo producto'}
         </h2>
 
-        <div className="flex-1 overflow-y-auto px-6 py-5">
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-          <div className="sm:col-span-2">
-            <label className={lbl}>Nombre *</label>
-            <input className={field} required value={f.name} onChange={(e) => set('name', e.target.value)} />
-          </div>
-          {esPerfume && (
-            <div>
-              <label className={lbl}>Marca</label>
-              <input className={field} value={f.brand} onChange={(e) => set('brand', e.target.value)} />
-            </div>
-          )}
-          <div>
-            <label className={lbl}>SKU / código</label>
-            <input className={field} value={f.sku} onChange={(e) => set('sku', e.target.value)} placeholder="(auto si vacío)" />
-          </div>
-          <div>
-            <label className={lbl}>Precio de venta (₲) *</label>
-            <input className={field} type="number" required value={f.price} onChange={(e) => set('price', Number(e.target.value))} />
-          </div>
-          <div>
-            <label className={lbl}>Precio de costo (₲)</label>
-            <input className={field} type="number" value={f.costPrice} onChange={(e) => set('costPrice', Number(e.target.value))} placeholder="para calcular ganancia" />
-          </div>
-          <div>
-            <label className={lbl}>Prioridad de venta (0-10)</label>
-            <input className={field} type="number" value={f.priorityScore} onChange={(e) => set('priorityScore', Number(e.target.value))} placeholder="Modo Ganancia: empujar este producto" />
-          </div>
-          <div>
-            <label className={lbl}>Stock</label>
-            <input className={field} type="number" value={f.stock} onChange={(e) => set('stock', Number(e.target.value))} />
-          </div>
-          {esPerfume && (
-            <div>
-              <label className={lbl}>Tamaño (ml)</label>
-              <input className={field} type="number" value={f.sizeMl} onChange={(e) => set('sizeMl', Number(e.target.value))} />
-            </div>
-          )}
-          <div>
-            <label className={lbl}>Categoría</label>
-            <select className={field} value={f.categoryId} onChange={(e) => set('categoryId', e.target.value)}>
-              {categories.length === 0 && <option value="perfumes">perfumes</option>}
-              {categories.map((c) => (
-                <option key={c.id} value={c.id}>{c.name}</option>
-              ))}
-            </select>
-          </div>
-          {esPerfume && (
-            <>
+        <div className="flex-1 space-y-4 overflow-y-auto px-6 py-5">
+          {/* ===== Datos públicos: lo que puede viajar a Meta y ver el cliente ===== */}
+          <fieldset className={seccion}>
+            <legend className={leyenda}>
+              Datos públicos <span className="font-normal text-ink-500">(pueden ir a Meta y a tus clientes)</span>
+            </legend>
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+              <div className="sm:col-span-2">
+                <label className={lbl} htmlFor={id('name')}>Nombre *</label>
+                <input id={id('name')} ref={nameRef} className={field} required value={f.name} onChange={(e) => set('name', e.target.value)} />
+              </div>
               <div>
-                <label className={lbl}>Género</label>
-                <select className={field} value={f.gender} onChange={(e) => set('gender', e.target.value as (typeof GENDERS)[number])}>
-                  {GENDERS.map((g) => <option key={g} value={g}>{g}</option>)}
+                <label className={lbl} htmlFor={id('brand')}>Marca</label>
+                <input id={id('brand')} className={field} value={f.brand} onChange={(e) => set('brand', e.target.value)} placeholder="Meta la exige para publicar" />
+              </div>
+              <div>
+                <label className={lbl} htmlFor={id('categoryId')}>Categoría</label>
+                <select id={id('categoryId')} className={field} value={f.categoryId} onChange={(e) => set('categoryId', e.target.value)}>
+                  {/* Sin fallback inventado: si el valor actual no está en la lista (importado
+                      sin clasificar o categoría borrada), se muestra tal cual para no pisarlo. */}
+                  {!catConocida && (
+                    <option value={f.categoryId}>{f.categoryId ? `(${f.categoryId})` : 'Sin clasificar'}</option>
+                  )}
+                  {categories.map((c) => (
+                    <option key={c.id} value={c.id}>{c.name}</option>
+                  ))}
+                </select>
+                {!f.categoryId && (
+                  <p className="mt-1 text-xs text-ink-500">Sin categoría no se puede publicar en Meta ni ordenar el catálogo.</p>
+                )}
+              </div>
+              <div>
+                <label className={lbl} htmlFor={id('price')}>Precio de venta (₲) *</label>
+                <input id={id('price')} className={field} type="number" min={0} inputMode="numeric" required value={f.price} onChange={(e) => set('price', Number(e.target.value))} />
+              </div>
+              <div>
+                <label className={lbl} htmlFor={id('compareAtPrice')}>Precio anterior (₲, tachado)</label>
+                <input id={id('compareAtPrice')} className={field} type="number" min={0} inputMode="numeric" value={f.compareAtPrice} onChange={(e) => set('compareAtPrice', Number(e.target.value))} placeholder="0 = sin oferta" />
+              </div>
+              <div>
+                <label className={lbl} htmlFor={id('currency')}>Moneda</label>
+                <input id={id('currency')} className={`${field} bg-ink-50 text-ink-600`} value="PYG — guaraníes" readOnly aria-readonly="true" />
+                <p className="mt-1 text-xs text-ink-500">Por ahora el catálogo trabaja solo en guaraníes.</p>
+              </div>
+              <div className="sm:col-span-2">
+                <label className={lbl} htmlFor={id('images')}>Imágenes (una URL https por línea; la primera es la principal)</label>
+                <textarea id={id('images')} className={field} rows={2} value={f.imagesText} onChange={(e) => set('imagesText', e.target.value)} placeholder={'https://…\nhttps://…'} />
+              </div>
+              <div className="sm:col-span-2">
+                <label className={lbl} htmlFor={id('productUrl')}>Enlace al producto (URL)</label>
+                <input
+                  id={id('productUrl')}
+                  className={field}
+                  type="url"
+                  value={f.productUrl}
+                  onChange={(e) => set('productUrl', e.target.value)}
+                  placeholder="https://tutienda.com/producto"
+                />
+                <p className="mt-1 text-xs text-ink-500">Meta lo exige para publicar el producto en el catálogo.</p>
+              </div>
+              <div className="sm:col-span-2">
+                <label className={lbl} htmlFor={id('description')}>Descripción</label>
+                <textarea id={id('description')} className={field} rows={2} value={f.description} onChange={(e) => set('description', e.target.value)} />
+              </div>
+            </div>
+          </fieldset>
+
+          {/* ===== Datos internos: nunca se publican ===== */}
+          <fieldset className={seccion}>
+            <legend className={leyenda}>
+              Datos internos <span className="font-normal text-ink-500">(solo los ve tu equipo)</span>
+            </legend>
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+              <div>
+                <label className={lbl} htmlFor={id('sku')}>SKU / código</label>
+                <input id={id('sku')} className={field} value={f.sku} onChange={(e) => set('sku', e.target.value)} placeholder="(auto si vacío)" />
+              </div>
+              <div>
+                <label className={lbl} htmlFor={id('status')}>Estado</label>
+                <select id={id('status')} className={field} value={f.status} onChange={(e) => set('status', e.target.value as Product['status'])}>
+                  {STATUSES.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}
                 </select>
               </div>
               <div>
-                <label className={lbl}>Familia olfativa</label>
-                <input className={field} value={f.olfactiveFamily} onChange={(e) => set('olfactiveFamily', e.target.value)} placeholder="Floral, Oriental…" />
+                <label className={lbl} htmlFor={id('costPrice')}>Precio de costo (₲)</label>
+                <input id={id('costPrice')} className={field} type="number" min={0} inputMode="numeric" value={f.costPrice} onChange={(e) => set('costPrice', Number(e.target.value))} placeholder="para calcular ganancia" />
               </div>
-            </>
-          )}
-          <div>
-            <label className={lbl}>Estado</label>
-            <select className={field} value={f.status} onChange={(e) => set('status', e.target.value as Product['status'])}>
-              {STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
-            </select>
-          </div>
-          {esPerfume && (
-            <>
+              <div>
+                <label className={lbl} htmlFor={id('priorityScore')}>Prioridad de venta (0-10)</label>
+                <input id={id('priorityScore')} className={field} type="number" min={0} max={10} inputMode="numeric" value={f.priorityScore} onChange={(e) => set('priorityScore', Number(e.target.value))} placeholder="Modo Ganancia: empujar este producto" />
+              </div>
+              <div>
+                <label className={lbl} htmlFor={id('stock')}>Stock</label>
+                <input id={id('stock')} className={field} type="number" min={0} inputMode="numeric" value={f.stock} onChange={(e) => set('stock', Number(e.target.value))} />
+              </div>
+              <div>
+                <label className={lbl} htmlFor={id('lowStockThreshold')}>Aviso de stock bajo (unidades)</label>
+                <input
+                  id={id('lowStockThreshold')}
+                  className={field}
+                  type="number"
+                  min={0}
+                  inputMode="numeric"
+                  value={f.lowStockThreshold}
+                  onChange={(e) => set('lowStockThreshold', Number(e.target.value))}
+                  disabled={!f.trackStock}
+                />
+              </div>
+              <label className="flex items-center gap-2 text-sm text-ink-700" htmlFor={id('trackStock')}>
+                <input id={id('trackStock')} type="checkbox" className="accent-mint-600" checked={f.trackStock} onChange={(e) => set('trackStock', e.target.checked)} />
+                Controlar stock (sin control, el bot vende sin mirar cantidades)
+              </label>
+              <div>
+                <label className={lbl} htmlFor={id('emoji')}>Emoji (se muestra en la lista y en el chat)</label>
+                <input id={id('emoji')} className={field} maxLength={4} value={f.emoji} onChange={(e) => set('emoji', e.target.value)} />
+              </div>
+              {initial?.stockPendingReview === true && (
+                <p role="status" className="sm:col-span-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                  Este producto se importó de Meta y su stock todavía no fue revisado. Al guardar con el
+                  inventario correcto queda marcado como revisado.
+                </p>
+              )}
+              <label className="flex items-center gap-2 text-sm text-ink-700" htmlFor={id('featured')}>
+                <input id={id('featured')} type="checkbox" className="accent-mint-600" checked={f.featured} onChange={(e) => set('featured', e.target.checked)} /> Destacado
+              </label>
               <div className="sm:col-span-2">
-                <label className={lbl}>Estilos (separá con coma)</label>
-                <input className={field} value={f.styleTags} onChange={(e) => set('styleTags', e.target.value)} placeholder="dulce, floral, intenso" />
+                <label className={lbl} htmlFor={id('aiNotes')}>Notas para la IA (el agente las usa para recomendar)</label>
+                <p className="mb-1.5 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                  ⚠️ Este contenido puede ser usado por el bot al responder a clientes. No incluyas costos, márgenes, datos internos, campañas privadas ni información sensible.
+                </p>
+                <textarea id={id('aiNotes')} className={field} rows={2} value={f.aiNotes} onChange={(e) => set('aiNotes', e.target.value)} placeholder="Beneficios, público ideal, cuándo recomendarlo…" />
               </div>
-              <div>
-                <label className={lbl}>Notas de salida</label>
-                <input className={field} value={f.notesTop} onChange={(e) => set('notesTop', e.target.value)} />
-              </div>
-              <div>
-                <label className={lbl}>Notas de corazón</label>
-                <input className={field} value={f.notesHeart} onChange={(e) => set('notesHeart', e.target.value)} />
-              </div>
-              <div>
-                <label className={lbl}>Notas de fondo</label>
-                <input className={field} value={f.notesBase} onChange={(e) => set('notesBase', e.target.value)} />
-              </div>
-            </>
-          )}
-          <div>
-            <label className={lbl}>Imagen (URL)</label>
-            <input className={field} value={f.imageUrl} onChange={(e) => set('imageUrl', e.target.value)} placeholder="https://…" />
-          </div>
-          <div>
-            <label className={lbl} htmlFor="productUrl">Enlace al producto (URL)</label>
-            <input
-              id="productUrl"
-              className={field}
-              type="url"
-              value={f.productUrl}
-              onChange={(e) => set('productUrl', e.target.value)}
-              placeholder="https://tutienda.com/producto"
-            />
-            <p className="mt-1 text-xs text-ink-500">Meta lo exige para publicar el producto en el catálogo.</p>
-          </div>
-          <div className="sm:col-span-2">
-            <label className={lbl}>Descripción</label>
-            <textarea className={field} rows={2} value={f.description} onChange={(e) => set('description', e.target.value)} />
-          </div>
-          <div className="sm:col-span-2">
-            <label className={lbl}>Notas para la IA (el agente las usa para recomendar)</label>
-            <p className="mb-1.5 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
-              ⚠️ Este contenido puede ser usado por el bot al responder a clientes. No incluyas costos, márgenes, datos internos, campañas privadas ni información sensible.
-            </p>
-            <textarea className={field} rows={2} value={f.aiNotes} onChange={(e) => set('aiNotes', e.target.value)} placeholder="Beneficios, público ideal, cuándo recomendarlo…" />
-          </div>
-          <label className="flex items-center gap-2 text-sm text-ink-700">
-            <input type="checkbox" className="accent-mint-600" checked={f.featured} onChange={(e) => set('featured', e.target.checked)} /> Destacado
-          </label>
+            </div>
+          </fieldset>
+
+          {/* ===== Ficha de la vertical (solo si el producto ES de perfumería) ===== */}
           {esPerfume && (
-            <label className="flex items-center gap-2 text-sm text-ink-700">
-              <input type="checkbox" className="accent-mint-600" checked={f.isNew} onChange={(e) => set('isNew', e.target.checked)} /> Nuevo
-            </label>
+            <fieldset className={seccion}>
+              <legend className={leyenda}>
+                Ficha de perfumería <span className="font-normal text-ink-500">(este producto es un perfume)</span>
+              </legend>
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                <div>
+                  <label className={lbl} htmlFor={id('gender')}>Género</label>
+                  <select id={id('gender')} className={field} value={f.gender} onChange={(e) => set('gender', e.target.value as (typeof GENDERS)[number])}>
+                    {GENDERS.map((g) => <option key={g} value={g}>{g}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label className={lbl} htmlFor={id('olfactiveFamily')}>Familia olfativa</label>
+                  <input id={id('olfactiveFamily')} className={field} value={f.olfactiveFamily} onChange={(e) => set('olfactiveFamily', e.target.value)} placeholder="Floral, Oriental…" />
+                </div>
+                <div>
+                  <label className={lbl} htmlFor={id('sizeMl')}>Tamaño (ml)</label>
+                  <input id={id('sizeMl')} className={field} type="number" min={0} inputMode="numeric" value={f.sizeMl} onChange={(e) => set('sizeMl', Number(e.target.value))} />
+                </div>
+                <label className="flex items-center gap-2 self-end pb-2 text-sm text-ink-700" htmlFor={id('isNew')}>
+                  <input id={id('isNew')} type="checkbox" className="accent-mint-600" checked={f.isNew} onChange={(e) => set('isNew', e.target.checked)} /> Nuevo
+                </label>
+                <div className="sm:col-span-2">
+                  <label className={lbl} htmlFor={id('styleTags')}>Estilos (separá con coma)</label>
+                  <input id={id('styleTags')} className={field} value={f.styleTags} onChange={(e) => set('styleTags', e.target.value)} placeholder="dulce, floral, intenso" />
+                </div>
+                <div>
+                  <label className={lbl} htmlFor={id('notesTop')}>Notas de salida</label>
+                  <input id={id('notesTop')} className={field} value={f.notesTop} onChange={(e) => set('notesTop', e.target.value)} />
+                </div>
+                <div>
+                  <label className={lbl} htmlFor={id('notesHeart')}>Notas de corazón</label>
+                  <input id={id('notesHeart')} className={field} value={f.notesHeart} onChange={(e) => set('notesHeart', e.target.value)} />
+                </div>
+                <div>
+                  <label className={lbl} htmlFor={id('notesBase')}>Notas de fondo</label>
+                  <input id={id('notesBase')} className={field} value={f.notesBase} onChange={(e) => set('notesBase', e.target.value)} />
+                </div>
+              </div>
+            </fieldset>
           )}
 
           {/* ===== Ficha para recomendaciones (CAT-1) ===== */}
-          <div className="sm:col-span-2 mt-2 rounded-xl border border-ink-100 bg-ink-50/40 p-4">
+          <div className="rounded-xl border border-ink-100 bg-ink-50/40 p-4">
             <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
               <div>
                 <h3 className="text-sm font-semibold text-ink-900">Ficha para recomendaciones</h3>
@@ -318,55 +434,55 @@ export function ProductForm({ initial, initialCost, initialPriority, categories,
               {esPerfume && (
                 <>
                   <div>
-                    <label className={lbl}>Concentración</label>
-                    <select className={field} value={f.concentracion} onChange={(e) => set('concentracion', e.target.value)}>
+                    <label className={lbl} htmlFor={id('concentracion')}>Concentración</label>
+                    <select id={id('concentracion')} className={field} value={f.concentracion} onChange={(e) => set('concentracion', e.target.value)}>
                       {CONCENTRACIONES.map((c) => <option key={c} value={c}>{c || '—'}</option>)}
                     </select>
                   </div>
                   <div>
-                    <label className={lbl}>Duración</label>
-                    <input className={field} value={f.duracion} onChange={(e) => set('duracion', e.target.value)} placeholder="6-8 horas" />
+                    <label className={lbl} htmlFor={id('duracion')}>Duración</label>
+                    <input id={id('duracion')} className={field} value={f.duracion} onChange={(e) => set('duracion', e.target.value)} placeholder="6-8 horas" />
                   </div>
                   <div>
-                    <label className={lbl}>Proyección</label>
-                    <select className={field} value={f.proyeccion} onChange={(e) => set('proyeccion', e.target.value)}>
+                    <label className={lbl} htmlFor={id('proyeccion')}>Proyección</label>
+                    <select id={id('proyeccion')} className={field} value={f.proyeccion} onChange={(e) => set('proyeccion', e.target.value)}>
                       {PROYECCIONES.map((p) => <option key={p} value={p}>{p || '—'}</option>)}
                     </select>
                   </div>
                   <div>
-                    <label className={lbl}>Ocasiones (coma)</label>
-                    <input className={field} value={f.ocasiones} onChange={(e) => set('ocasiones', e.target.value)} placeholder="cita, fiesta, diario" />
+                    <label className={lbl} htmlFor={id('ocasiones')}>Ocasiones (coma)</label>
+                    <input id={id('ocasiones')} className={field} value={f.ocasiones} onChange={(e) => set('ocasiones', e.target.value)} placeholder="cita, fiesta, diario" />
                   </div>
                   <div>
-                    <label className={lbl}>Clima (coma)</label>
-                    <input className={field} value={f.clima} onChange={(e) => set('clima', e.target.value)} placeholder="invierno, todo el año" />
+                    <label className={lbl} htmlFor={id('clima')}>Clima (coma)</label>
+                    <input id={id('clima')} className={field} value={f.clima} onChange={(e) => set('clima', e.target.value)} placeholder="invierno, todo el año" />
                   </div>
                   <div>
-                    <label className={lbl}>Perfil recomendado</label>
-                    <input className={field} value={f.perfil} onChange={(e) => set('perfil', e.target.value)} placeholder="juvenil, elegante…" />
+                    <label className={lbl} htmlFor={id('perfil')}>Perfil recomendado</label>
+                    <input id={id('perfil')} className={field} value={f.perfil} onChange={(e) => set('perfil', e.target.value)} placeholder="juvenil, elegante…" />
                   </div>
                 </>
               )}
               <div className="sm:col-span-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
                 <div>
-                  <label className={lbl}>Cuándo recomendarlo</label>
-                  <input className={field} value={f.cuandoRecomendar} onChange={(e) => set('cuandoRecomendar', e.target.value)} placeholder="busca duración y presencia" />
+                  <label className={lbl} htmlFor={id('cuandoRecomendar')}>Cuándo recomendarlo</label>
+                  <input id={id('cuandoRecomendar')} className={field} value={f.cuandoRecomendar} onChange={(e) => set('cuandoRecomendar', e.target.value)} placeholder="busca duración y presencia" />
                 </div>
                 <div>
-                  <label className={lbl}>Cuándo NO recomendarlo</label>
-                  <input className={field} value={f.cuandoNoRecomendar} onChange={(e) => set('cuandoNoRecomendar', e.target.value)} placeholder="quiere algo suave para oficina" />
+                  <label className={lbl} htmlFor={id('cuandoNoRecomendar')}>Cuándo NO recomendarlo</label>
+                  <input id={id('cuandoNoRecomendar')} className={field} value={f.cuandoNoRecomendar} onChange={(e) => set('cuandoNoRecomendar', e.target.value)} placeholder="quiere algo suave para oficina" />
                 </div>
                 <div>
-                  <label className={lbl}>Objeciones frecuentes (y cómo responder)</label>
-                  <input className={field} value={f.objeciones} onChange={(e) => set('objeciones', e.target.value)} placeholder='"es caro" → rinde como uno de lujo' />
+                  <label className={lbl} htmlFor={id('objeciones')}>Objeciones frecuentes (y cómo responder)</label>
+                  <input id={id('objeciones')} className={field} value={f.objeciones} onChange={(e) => set('objeciones', e.target.value)} placeholder='"es caro" → rinde como uno de lujo' />
                 </div>
                 <div>
-                  <label className={lbl}>Similares / alternativas (coma)</label>
-                  <input className={field} value={f.similares} onChange={(e) => set('similares', e.target.value)} placeholder="Odyssey Mega, Asad" />
+                  <label className={lbl} htmlFor={id('similares')}>Similares / alternativas (coma)</label>
+                  <input id={id('similares')} className={field} value={f.similares} onChange={(e) => set('similares', e.target.value)} placeholder="Odyssey Mega, Asad" />
                 </div>
                 <div className="sm:col-span-2">
-                  <label className={lbl}>Frases de venta sugeridas (separá con ;)</label>
-                  <input className={field} value={f.frasesVenta} onChange={(e) => set('frasesVenta', e.target.value)} placeholder="Rendimiento de gama alta a precio accesible; El favorito para regalar" />
+                  <label className={lbl} htmlFor={id('frasesVenta')}>Frases de venta sugeridas (separá con ;)</label>
+                  <input id={id('frasesVenta')} className={field} value={f.frasesVenta} onChange={(e) => set('frasesVenta', e.target.value)} placeholder="Rendimiento de gama alta a precio accesible; El favorito para regalar" />
                 </div>
               </div>
             </div>
@@ -375,13 +491,12 @@ export function ProductForm({ initial, initialCost, initialPriority, categories,
               <button type="button" onClick={generarDesdeFicha} className="rounded-lg border border-mint-300 bg-mint-50 px-3 py-1.5 text-xs font-semibold text-mint-700 transition-colors hover:bg-mint-100">
                 ✨ Generar “Notas para la IA” desde la ficha
               </button>
-              <span className="text-[11px] text-ink-400">Plantilla con TUS datos (sin IA): rellena las notas y, si está vacía, la descripción. Podés editarlas después.</span>
+              <span className="text-[11px] text-ink-500">Plantilla con TUS datos (sin IA): rellena las notas y, si está vacía, la descripción. Podés editarlas después.</span>
             </div>
           </div>
-        </div>
 
           {error && (
-            <p className="mt-4 rounded-lg bg-coral-50 px-3 py-2 text-sm text-coral-700">{error}</p>
+            <p role="alert" className="rounded-lg bg-coral-50 px-3 py-2 text-sm text-coral-700">{error}</p>
           )}
         </div>
 

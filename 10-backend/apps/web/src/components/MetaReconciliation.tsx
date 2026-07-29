@@ -118,6 +118,21 @@ export function MetaReconciliation({ tenantId, categories }: { tenantId: string;
       return next;
     });
 
+  // Selección masiva SOLO de los importables del filtro actual (los bloqueados nunca se tildan).
+  const importablesVisibles = useMemo(() => filtered.filter((it) => it.importable), [filtered]);
+  const todosImportablesSeleccionados =
+    importablesVisibles.length > 0 && importablesVisibles.every((it) => selected.has(it.retailerId));
+  const toggleTodos = () =>
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (todosImportablesSeleccionados) {
+        for (const it of importablesVisibles) next.delete(it.retailerId);
+      } else {
+        for (const it of importablesVisibles) next.add(it.retailerId);
+      }
+      return next;
+    });
+
   // Escape cierra el modal abierto (los diálogos se abren sobre la sección).
   useEffect(() => {
     if (!confirmMap && !confirmImport) return;
@@ -279,9 +294,22 @@ export function MetaReconciliation({ tenantId, categories }: { tenantId: string;
               <div className="max-h-96 overflow-y-auto rounded-xl border border-ink-100">
                 <table className="min-w-full text-sm">
                   <caption className="sr-only">Artículos del catálogo de Meta sin producto vinculado</caption>
-                  <thead className="sticky top-0 border-b border-ink-100 bg-ink-50/90 text-left text-xs uppercase tracking-wide text-ink-400">
+                  <thead className="sticky top-0 border-b border-ink-100 bg-ink-50/90 text-left text-xs uppercase tracking-wide text-ink-500">
                     <tr>
-                      <th scope="col" className="w-10 px-3 py-2"><span className="sr-only">Seleccionar</span></th>
+                      <th scope="col" className="w-10 px-3 py-2">
+                        <input
+                          type="checkbox"
+                          ref={(el) => {
+                            if (el) el.indeterminate = !todosImportablesSeleccionados && importablesVisibles.some((it) => selected.has(it.retailerId));
+                          }}
+                          checked={todosImportablesSeleccionados}
+                          onChange={toggleTodos}
+                          disabled={importablesVisibles.length === 0}
+                          aria-label={`Seleccionar los ${importablesVisibles.length} artículos importables de esta vista`}
+                          title={importablesVisibles.length === 0 ? 'No hay artículos importables en esta vista' : 'Seleccionar todos los importables del filtro'}
+                          className="h-4 w-4 rounded border-ink-300 text-mint-600 focus:ring-mint-500 disabled:opacity-40"
+                        />
+                      </th>
                       <th scope="col" className="px-3 py-2">Artículo</th>
                       <th scope="col" className="px-3 py-2">Precio en Meta</th>
                       <th scope="col" className="px-3 py-2">Disponibilidad</th>
@@ -322,8 +350,9 @@ export function MetaReconciliation({ tenantId, categories }: { tenantId: string;
             )}
 
             {plan.page.hasMore && (
-              <p className="text-xs text-ink-400">
-                Mostrando {plan.page.offset + plan.unlinked.length} de {plan.page.total} artículos.
+              <p className="text-xs text-ink-500">
+                Mostrando {plan.page.offset + plan.unlinked.length} de {plan.page.total} artículos. Para traer el
+                catálogo completo usá “Importar catálogo de Meta”.
               </p>
             )}
           </div>

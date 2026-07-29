@@ -688,6 +688,28 @@ Los siguientes índices compuestos deben crearse explícitamente:
 
 ---
 
+### 4.11 Colecciones de la integración Meta Catalog
+
+Agregadas por los programas de Meta Catalog (decisiones en ADR-0012, ADR-0013 y ADR-0014;
+esquemas completos en esos ADRs). Todas viven bajo `tenants/{tenantId}/` y están **cerradas al
+cliente por Rules** (solo Cloud Functions):
+
+| Colección | Rol | ADR |
+|-----------|-----|-----|
+| `metaCatalogSyncRuns/{runId}` | Corridas de previsualización/apply (preview binding: `planHash`, consumo único) | 0013 |
+| `metaCatalogSyncLogs/{jobId}` | Log único por ciclo confirmado contra Meta | 0013 |
+| `metaCatalogOutboxJobs/{jobId}` | Outbox durable de escrituras (ciclos inmutables, claim/lease/fencing) | 0013 |
+| `metaCatalogOutboxIntents/{intentKey}` | Puntero de deduplicación del trabajo ACTIVO | 0013 |
+| `metaRetailerLocks/{lockKey}` | Unicidad transaccional de la identidad remota (retailer_id) | 0012 |
+| `metaCatalogImportRuns/{runId}` | Corridas de importación paginada reanudable (cursor persistido) | 0014 |
+| `metaCatalogImportState/current` | Puntero del run de importación activo (un solo run por tenant) | 0014 |
+
+El producto (`products/{productId}`, §4.3) suma además: identidad remota
+(`metaRetailerId`/`metaCatalogId`/`metaProductItemId`), estado de sincronización
+(`syncToMeta`, `metaSyncStatus`, `metaSyncCurrentJobId`, `stockPendingReview`), la marca
+neutral `brand` (la ficha de vertical —p. ej. `perfume`— es opcional y NO es requisito
+universal) y el bloque de calidad `quality` calculado SOLO por servidor (ADR-0014).
+
 ## 5. Estrategia de autenticación
 
 ### 5.1 Roles y permisos

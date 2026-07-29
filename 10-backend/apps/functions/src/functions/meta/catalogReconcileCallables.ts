@@ -52,8 +52,10 @@ const actorOf = (req: CallableRequest<unknown>) => ({
   role: (req.auth?.token as { role?: string } | undefined)?.role ?? null,
 });
 
-/** Config de catálogo del tenant (fail-closed): sin catalogId válido no se opera. */
-async function requireCatalogId(tenantId: string): Promise<string> {
+/** Config de catálogo del tenant (fail-closed): sin catalogId válido no se opera.
+ *  Exportado: el run de importación paginada (catalogImportCallables) usa EXACTAMENTE
+ *  el mismo gate — una segunda copia se desincroniza. */
+export async function requireCatalogId(tenantId: string): Promise<string> {
   const doc = await db().doc(`tenants/${tenantId}/config/meta`).get();
   const cfg = normalizeCatalogSyncConfig((doc.data() as { catalogSync?: unknown } | undefined)?.catalogSync);
   if (!cfg.enabled || !cfg.catalogId) {

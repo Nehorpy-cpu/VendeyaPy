@@ -15,12 +15,19 @@ export type TrialNotificationType = 'trial_ending_soon' | 'trial_ending_today' |
  */
 export type HandoffNotificationType = 'handoff_customer_requested' | 'handoff_ai_unavailable' | 'handoff_coverage_review' | 'handoff_coverage_stale';
 
+/**
+ * META-CATALOG-GENERIC-ONBOARDING-QUALITY-1: aviso AGREGADO del centro de calidad del
+ * catálogo. UNA sola notificación viva por tenant (id determinístico), que el backend
+ * actualiza (contador) y AUTOCIERRA cuando los pendientes llegan a 0 — jamás una por producto.
+ */
+export type CatalogQualityNotificationType = 'catalog_quality_summary';
+
 export interface Notification {
   id: string;
   tenantId: string;
-  /** Categoría (`trial` | `handoff`; extensible a futuro). */
-  category: 'trial' | 'handoff';
-  type: TrialNotificationType | HandoffNotificationType;
+  /** Categoría (`trial` | `handoff` | `catalog_quality`; extensible a futuro). */
+  category: 'trial' | 'handoff' | 'catalog_quality';
+  type: TrialNotificationType | HandoffNotificationType | CatalogQualityNotificationType;
   title: string;
   body: string;
   /** Clave determinística de idempotencia (= id del doc). 1 por (tenant, tipo) por trial. */
@@ -33,4 +40,11 @@ export interface Notification {
   /** COVERAGE-1C: uid del SELLER destinatario (server-controlled). Las rules le permiten leer
    * SOLO los avisos handoff dirigidos a su uid; owner/manager no lo necesitan. */
   targetUid?: string | null;
+  // --- Solo category 'catalog_quality' (server-set) ---
+  /** Productos con bloqueos activos al momento del último recompute. */
+  blockingCount?: number;
+  /** Productos con advertencias activas al momento del último recompute. */
+  warningCount?: number;
+  /** AUTOCIERRE: estampado por el backend cuando blocking+warning llegan a 0. */
+  resolvedAt?: Timestamp | null;
 }

@@ -113,6 +113,11 @@ export const paths = {
   metaCatalogOutboxIntent: (tenantId: string, intentKey: string) => `tenants/${tenantId}/metaCatalogOutboxIntents/${intentKey}`,
   /** Lock de unicidad del retailer_id dentro del tenant (reconciliación con Meta). */
   metaRetailerLock: (tenantId: string, key: string) => `tenants/${tenantId}/metaRetailerLocks/${key}`,
+  /** Runs de importación paginada del catálogo (META-CATALOG-GENERIC-ONBOARDING-QUALITY-1). */
+  metaCatalogImportRuns: (tenantId: string) => `tenants/${tenantId}/metaCatalogImportRuns`,
+  metaCatalogImportRun: (tenantId: string, runId: string) => `tenants/${tenantId}/metaCatalogImportRuns/${runId}`,
+  /** Puntero del run ACTIVO por tenant (claim transaccional, patrón intent del outbox). */
+  metaCatalogImportState: (tenantId: string) => `tenants/${tenantId}/metaCatalogImportState/current`,
   trackingSources: (tenantId: string) => `tenants/${tenantId}/trackingSources`,
   trackingSource: (tenantId: string, id: string) => `tenants/${tenantId}/trackingSources/${id}`,
   businessEvents: (tenantId: string) => `tenants/${tenantId}/businessEvents`,

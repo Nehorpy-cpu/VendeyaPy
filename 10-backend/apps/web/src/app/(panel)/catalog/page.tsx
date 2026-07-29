@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import type { Product } from '@vpw/shared';
 import { aiFichaQuality } from '@vpw/shared';
@@ -18,10 +18,22 @@ import {
   type CatalogSyncRun,
   type ProductInput,
   type SetSyncEnabledResult,
+  type UpsertQualityResult,
 } from '@/lib/catalog';
+import {
+  esElegibleParaSync,
+  razonNoElegible,
+  agruparNoElegibles,
+  observacionesAbiertas,
+  RAZON_NO_ELEGIBLE_LABEL,
+  type RazonNoElegible,
+} from '@/lib/catalogQuality';
 import { ProductForm } from '@/components/ProductForm';
 import { MetaReconciliation } from '@/components/MetaReconciliation';
 import { OutboxIncidents } from '@/components/OutboxIncidents';
+import { CatalogQualityCenter } from '@/components/CatalogQualityCenter';
+import { MetaCatalogImport } from '@/components/MetaCatalogImport';
+import { ConfirmModal } from '@/components/ui';
 
 const gs = (n: number | null | undefined) =>
   n == null ? '—' : '₲ ' + n.toLocaleString('es-PY');
@@ -48,13 +60,46 @@ const SYNC_BLOCKER_LABEL: Record<string, string> = {
   product_url_not_https: 'el enlace al producto debe empezar con https://',
 };
 
+/** Tope de la tanda de habilitación masiva (una llamada por producto, en serie). */
+const TANDA_MAX = 50;
+
+/** Desenlace por producto de la habilitación masiva (para informar TODO, no un total mudo). */
+interface ResultadoMasivo {
+  productId: string;
+  name: string;
+  ok: boolean;
+  blockers?: string[];
+  error?: string;
+}
+
 export default function CatalogPage() {
   const { tenantId, loading: companyLoading } = useActiveCompany();
   const { claims } = useAuth();
   const qc = useQueryClient();
   const [search, setSearch] = useState('');
+  // Búsqueda con debounce: filtrar y re-renderizar la tabla entera por tecla no escala
+  // con catálogos importados grandes (hallazgo de auditoría de la lista).
+  const [busqueda, setBusqueda] = useState('');
+  useEffect(() => {
+    const t = setTimeout(() => setBusqueda(search), 200);
+    return () => clearTimeout(t);
+  }, [search]);
   const [editing, setEditing] = useState<Product | null | undefined>(undefined); // undefined = cerrado
   const [confirmDelete, setConfirmDelete] = useState<Product | null>(null);
+  // Resultado de calidad del último guardado (contrato nuevo de productUpsert).
+  const [saveQuality, setSaveQuality] = useState<{ nombre: string; quality: UpsertQualityResult } | null>(null);
+  // Detalle expandido del badge de calidad por fila (accesible: no solo tooltip).
+  const [detalleCalidad, setDetalleCalidad] = useState<Set<string>>(new Set());
+  // --- Selección masiva de elegibles para habilitar sincronización ---
+  const [seleccion, setSeleccion] = useState<Set<string>>(new Set());
+  const [confirmarMasivo, setConfirmarMasivo] = useState(false);
+  const [masivo, setMasivo] = useState<{
+    fase: 'idle' | 'corriendo' | 'hecho';
+    actual: number;
+    total: number;
+    resultados: ResultadoMasivo[];
+  }>({ fase: 'idle', actual: 0, total: 0, resultados: [] });
+  const masivoRef = useRef(false);
 
   const productsQ = useQuery({
     queryKey: ['products', tenantId],
@@ -76,10 +121,13 @@ export default function CatalogPage() {
 
   const saveMut = useMutation({
     mutationFn: (input: ProductInput) => upsertProduct(tenantId!, input),
-    onSuccess: () => {
+    onSuccess: (res, input) => {
       qc.invalidateQueries({ queryKey: ['products', tenantId] });
       qc.invalidateQueries({ queryKey: ['productFinancials', tenantId] });
+      qc.invalidateQueries({ queryKey: ['catalogQuality', tenantId] });
       setEditing(undefined);
+      // El backend recomputa la calidad al guardar y cuenta qué se resolvió y qué falta.
+      setSaveQuality(res.quality ? { nombre: input.name, quality: res.quality } : null);
     },
   });
   const deleteMut = useMutation({
@@ -87,6 +135,7 @@ export default function CatalogPage() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['products', tenantId] });
       qc.invalidateQueries({ queryKey: ['productFinancials', tenantId] });
+      qc.invalidateQueries({ queryKey: ['catalogQuality', tenantId] });
       setConfirmDelete(null);
     },
   });
@@ -106,6 +155,7 @@ export default function CatalogPage() {
         setConfirmSync(null);
         setSyncPreview(null);
         qc.invalidateQueries({ queryKey: ['products', tenantId] });
+        qc.invalidateQueries({ queryKey: ['catalogQuality', tenantId] });
       } else if (v.enabled) {
         // El backend devuelve el diff a confirmar o la lista de requisitos que faltan.
         setSyncPreview(res);
@@ -135,18 +185,97 @@ export default function CatalogPage() {
   });
 
   // Ocultamos los productos dados de baja (status ARCHIVED, por el soft-delete del callable).
+  // Product ya trae `brand` y `quality` (server-set) desde @vpw/shared.
   const activeProducts = useMemo(
     () => (productsQ.data ?? []).filter((p) => p.status !== 'ARCHIVED'),
     [productsQ.data],
   );
   const archivedCount = (productsQ.data ?? []).length - activeProducts.length;
   const filtered = useMemo(() => {
-    const s = search.trim().toLowerCase();
+    const s = busqueda.trim().toLowerCase();
     if (!s) return activeProducts;
     return activeProducts.filter(
-      (p) => p.name.toLowerCase().includes(s) || (p.perfume?.brand ?? '').toLowerCase().includes(s),
+      (p) =>
+        p.name.toLowerCase().includes(s) ||
+        (p.brand ?? p.perfume?.brand ?? '').toLowerCase().includes(s),
     );
-  }, [activeProducts, search]);
+  }, [activeProducts, busqueda]);
+
+  // Precalculado UNA vez por carga de productos (no por fila y por render): con catálogos
+  // importados grandes, evaluar la ficha en cada tecla del buscador congelaba la tabla.
+  const infoFilas = useMemo(() => {
+    const m = new Map<string, { fichaIncompleta: boolean; faltantes: string[]; abiertas: ReturnType<typeof observacionesAbiertas> }>();
+    for (const p of activeProducts) {
+      const ficha = aiFichaQuality(p);
+      m.set(p.id, {
+        fichaIncompleta: ficha.level === 'incompleto' || ficha.level === 'basico',
+        faltantes: ficha.faltantes,
+        abiertas: observacionesAbiertas(p),
+      });
+    }
+    return m;
+  }, [activeProducts]);
+
+  // --- Selección masiva: solo elegibles (la elegibilidad la evalúa el backend vía quality) ---
+  const elegiblesVisibles = useMemo(() => filtered.filter(esElegibleParaSync), [filtered]);
+  const noElegiblesVisibles = useMemo(() => agruparNoElegibles(filtered), [filtered]);
+  const noElegiblesTotal = useMemo(
+    () => Object.values(noElegiblesVisibles).reduce((a, b) => a + (b ?? 0), 0),
+    [noElegiblesVisibles],
+  );
+  const todosElegiblesSeleccionados =
+    elegiblesVisibles.length > 0 && elegiblesVisibles.every((p) => seleccion.has(p.id));
+  const toggleSeleccion = (id: string) =>
+    setSeleccion((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else if (next.size < TANDA_MAX) next.add(id);
+      return next;
+    });
+  const toggleTodos = () =>
+    setSeleccion((prev) => {
+      if (todosElegiblesSeleccionados) {
+        const next = new Set(prev);
+        for (const p of elegiblesVisibles) next.delete(p.id);
+        return next;
+      }
+      const next = new Set(prev);
+      for (const p of elegiblesVisibles) {
+        if (next.size >= TANDA_MAX) break;
+        next.add(p.id);
+      }
+      return next;
+    });
+
+  /**
+   * Habilita la sincronización de los seleccionados EN SERIE (una llamada por producto,
+   * tope 50 por tanda). El backend re-valida cada uno: acá solo se informa el desenlace.
+   * NO envía nada a Meta — el envío sigue siendo Previsualizar → Enviar (preview binding).
+   */
+  const correrMasivo = async () => {
+    if (masivoRef.current || !tenantId) return;
+    masivoRef.current = true;
+    const ids = [...seleccion].slice(0, TANDA_MAX);
+    const porId = new Map(activeProducts.map((p) => [p.id, p]));
+    setMasivo({ fase: 'corriendo', actual: 0, total: ids.length, resultados: [] });
+    const resultados: ResultadoMasivo[] = [];
+    for (let i = 0; i < ids.length; i++) {
+      const id = ids[i]!;
+      const nombre = porId.get(id)?.name ?? id;
+      try {
+        const res = await setProductSyncEnabled(tenantId, id, true, { confirmDiff: true });
+        resultados.push(res.ok ? { productId: id, name: nombre, ok: true } : { productId: id, name: nombre, ok: false, blockers: res.blockers });
+      } catch (e) {
+        resultados.push({ productId: id, name: nombre, ok: false, error: errMsg(e) });
+      }
+      setMasivo({ fase: 'corriendo', actual: i + 1, total: ids.length, resultados: [...resultados] });
+    }
+    setMasivo({ fase: 'hecho', actual: ids.length, total: ids.length, resultados });
+    setSeleccion(new Set());
+    qc.invalidateQueries({ queryKey: ['products', tenantId] });
+    qc.invalidateQueries({ queryKey: ['catalogQuality', tenantId] });
+    masivoRef.current = false;
+  };
 
   if (companyLoading) return <div className="text-sm text-ink-400">Cargando…</div>;
   if (!tenantId) {
@@ -176,6 +305,72 @@ export default function CatalogPage() {
 
       {/* Solo el dueño puede resolver un envío trabado (el backend lo restringe igual). */}
       {puedeReconciliar && <OutboxIncidents tenantId={tenantId} />}
+
+      {/* Resultado de calidad del último guardado (contrato nuevo de productUpsert):
+          alert si quedaron bloqueantes, status si fue informativo. */}
+      {saveQuality && (
+        <div
+          role={saveQuality.quality.pendientes.some((p) => p.severity === 'BLOCKING') ? 'alert' : 'status'}
+          className="rounded-2xl border border-ink-100 bg-white p-4 shadow-soft"
+        >
+          <div className="flex flex-wrap items-start justify-between gap-2">
+            <div className="min-w-0 text-sm">
+              <p className="font-semibold text-ink-900">
+                Guardado: {saveQuality.nombre}
+                {saveQuality.quality.resueltas.length > 0 && (
+                  <span className="ml-2 font-normal text-mint-700">
+                    Se resolvieron {saveQuality.quality.resueltas.length} pendiente{saveQuality.quality.resueltas.length === 1 ? '' : 's'}.
+                  </span>
+                )}
+              </p>
+              {saveQuality.quality.pendientes.length === 0 ? (
+                <p className="mt-1 text-mint-700">No quedan datos pendientes en este producto.</p>
+              ) : (
+                <>
+                  <p className="mt-1 text-ink-700">
+                    Quedan {saveQuality.quality.pendientes.length} por resolver:
+                  </p>
+                  <ul className="mt-1 space-y-1">
+                    {saveQuality.quality.pendientes.map((p) => (
+                      <li key={`${p.code}:${p.field}`} className="flex flex-wrap items-baseline gap-2 text-xs">
+                        <span
+                          className={
+                            'inline-flex rounded-full px-2 py-0.5 font-semibold ' +
+                            (p.severity === 'BLOCKING' ? 'bg-coral-50 text-coral-700' : 'bg-amber-50 text-amber-700')
+                          }
+                        >
+                          {p.severity === 'BLOCKING' ? 'Impide vender/publicar' : 'Advertencia'}
+                        </span>
+                        <span className="text-ink-700">{p.message}</span>
+                        {p.action && <span className="text-ink-500">→ {p.action}</span>}
+                      </li>
+                    ))}
+                  </ul>
+                </>
+              )}
+            </div>
+            <button
+              onClick={() => setSaveQuality(null)}
+              className="text-xs font-medium text-ink-500 transition-colors hover:text-ink-700"
+            >
+              Cerrar
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Centro de calidad: agregado server-side + detalle de observaciones por producto. */}
+      <CatalogQualityCenter
+        tenantId={tenantId}
+        products={activeProducts}
+        onEditar={(productId) => {
+          const p = activeProducts.find((x) => x.id === productId);
+          if (p) setEditing(p);
+        }}
+      />
+
+      {/* Importación paginada del catálogo de Meta (solo dueño; el componente se auto-oculta). */}
+      <MetaCatalogImport tenantId={tenantId} categories={categoriesQ.data ?? []} />
 
       <MetaReconciliation tenantId={tenantId} categories={categoriesQ.data ?? []} />
 
@@ -269,7 +464,7 @@ export default function CatalogPage() {
                     // El envío real solo se ofrece con evidencia (planHash) y con algo para
                     // enviar: va atado a ESTA previsualización, con cantidad y producto a la vista.
                     !syncRun.planHash || applySummary(syncRun).count === 0 ? (
-                      <p className="text-xs text-ink-400">
+                      <p className="text-xs text-ink-500">
                         {applySummary(syncRun).count === 0
                           ? 'No hay cambios para enviar: todo está igual que en Meta o excluido del plan.'
                           : 'Esta previsualización no es utilizable para enviar. Previsualizá de nuevo.'}
@@ -300,7 +495,7 @@ export default function CatalogPage() {
                       </button>
                     )
                   ) : (
-                    <p className="text-xs text-ink-400">
+                    <p className="text-xs text-ink-500">
                       Modo dry-run: esta previsualización no escribió nada en Meta. Para aplicar cambios reales, la plataforma debe activar el modo live.
                     </p>
                   )}
@@ -320,11 +515,96 @@ export default function CatalogPage() {
           className="w-full max-w-sm rounded-lg border border-ink-200 px-3 py-2 text-sm text-ink-800 transition-colors focus:border-mint-500 focus:outline-none focus:ring-2 focus:ring-mint-500/30"
         />
         {archivedCount > 0 && (
-          <p className="text-xs text-ink-400">
+          <p className="text-xs text-ink-500">
             {archivedCount} producto{archivedCount === 1 ? '' : 's'} dado{archivedCount === 1 ? '' : 's'} de baja (ocultos).
           </p>
         )}
       </div>
+
+      {/* Barra de habilitación masiva: aparece con la selección o mientras corre la tanda. */}
+      {puedeReconciliar && (seleccion.size > 0 || masivo.fase !== 'idle') && (
+        <section
+          aria-label="Habilitación masiva de sincronización"
+          className="space-y-2 rounded-2xl border border-mint-200 bg-mint-50/40 p-4"
+        >
+          {masivo.fase !== 'corriendo' && seleccion.size > 0 && (
+            <div className="flex flex-wrap items-center gap-3">
+              <span className="text-sm font-medium text-ink-800">
+                {seleccion.size} producto{seleccion.size === 1 ? '' : 's'} seleccionado{seleccion.size === 1 ? '' : 's'}
+              </span>
+              <button
+                onClick={() => setConfirmarMasivo(true)}
+                className="rounded-lg bg-mint-600 px-3 py-1.5 text-sm font-semibold text-white transition-colors hover:bg-mint-700"
+              >
+                Habilitar sincronización ({seleccion.size})
+              </button>
+              <button
+                onClick={() => setSeleccion(new Set())}
+                className="rounded-lg border border-ink-200 bg-white px-3 py-1.5 text-sm font-medium text-ink-700 transition-colors hover:bg-ink-50"
+              >
+                Quitar selección
+              </button>
+              {seleccion.size >= TANDA_MAX && (
+                <span className="text-xs text-ink-600">Tope de {TANDA_MAX} por tanda: habilitá estos y repetí con los demás.</span>
+              )}
+              <span className="text-xs text-ink-600">
+                No envía nada a Meta: el envío se hace después con “Previsualizar cambios”.
+              </span>
+            </div>
+          )}
+
+          {/* Progreso y resultados con aria-live: el lector anuncia sin robar el foco. */}
+          <div role="status" aria-live="polite" className="space-y-2">
+            {masivo.fase === 'corriendo' && (
+              <p className="text-sm text-ink-700">
+                Habilitando {masivo.actual} de {masivo.total}… no cierres esta pestaña.
+              </p>
+            )}
+            {masivo.fase === 'hecho' && (
+              <div className="space-y-1 text-sm">
+                <div className="flex flex-wrap items-center gap-3">
+                  <p className="text-ink-800">
+                    <span className="font-semibold text-mint-700">
+                      {masivo.resultados.filter((r) => r.ok).length} habilitado{masivo.resultados.filter((r) => r.ok).length === 1 ? '' : 's'}
+                    </span>
+                    {masivo.resultados.some((r) => !r.ok) && (
+                      <>
+                        {' '}· <span className="font-semibold text-coral-700">{masivo.resultados.filter((r) => !r.ok).length} quedaron fuera</span>
+                      </>
+                    )}
+                  </p>
+                  <button
+                    onClick={() => setMasivo({ fase: 'idle', actual: 0, total: 0, resultados: [] })}
+                    className="rounded-lg border border-ink-200 bg-white px-2.5 py-1 text-xs font-medium text-ink-700 transition-colors hover:bg-ink-50"
+                  >
+                    Entendido
+                  </button>
+                </div>
+                {masivo.resultados.some((r) => !r.ok) && (
+                  <ul className="space-y-0.5 text-xs text-ink-700">
+                    {agruparFallasMasivo(masivo.resultados).map((g) => (
+                      <li key={g.motivo}>
+                        <span className="font-medium">{g.nombres.length} por “{g.motivo}”</span>: {g.nombres.slice(0, 5).join(', ')}
+                        {g.nombres.length > 5 ? ` y ${g.nombres.length - 5} más` : ''}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            )}
+          </div>
+
+          {noElegiblesTotal > 0 && masivo.fase !== 'corriendo' && (
+            <p className="text-xs text-ink-600">
+              {noElegiblesTotal} de los productos visibles no se pueden seleccionar:{' '}
+              {(Object.entries(noElegiblesVisibles) as Array<[RazonNoElegible, number]>)
+                .map(([r, n]) => `${n} ${RAZON_NO_ELEGIBLE_LABEL[r]}`)
+                .join(' · ')}
+              . Los bloqueados se corrigen desde “Calidad del catálogo”.
+            </p>
+          )}
+        </section>
+      )}
 
       {productsQ.isLoading && (
         <div className="space-y-2">
@@ -349,16 +629,37 @@ export default function CatalogPage() {
       {productsQ.isSuccess && filtered.length > 0 && (
         <div className="overflow-x-auto rounded-2xl border border-ink-100 bg-white shadow-soft">
           <table className="min-w-full text-sm">
-            <thead className="border-b border-ink-100 bg-ink-50/60 text-left text-xs uppercase tracking-wide text-ink-400">
+            <thead className="border-b border-ink-100 bg-ink-50/60 text-left text-xs uppercase tracking-wide text-ink-500">
               <tr>
-                <th className="px-4 py-3">Producto</th>
-                <th className="px-4 py-3">Precio</th>
-                <th className="px-4 py-3">Costo</th>
-                <th className="px-4 py-3">Margen</th>
-                <th className="px-4 py-3">Stock</th>
-                <th className="px-4 py-3">Estado</th>
-                <th className="px-4 py-3">Meta</th>
-                <th className="px-4 py-3"></th>
+                {puedeReconciliar && (
+                  <th scope="col" className="w-10 px-4 py-3">
+                    {/* Selecciona SOLO los elegibles visibles (sin bloqueos y sin sync activa). */}
+                    <input
+                      type="checkbox"
+                      ref={(el) => {
+                        if (el) el.indeterminate = !todosElegiblesSeleccionados && elegiblesVisibles.some((p) => seleccion.has(p.id));
+                      }}
+                      checked={todosElegiblesSeleccionados}
+                      onChange={toggleTodos}
+                      disabled={elegiblesVisibles.length === 0 || masivo.fase === 'corriendo'}
+                      aria-label={`Seleccionar los ${Math.min(elegiblesVisibles.length, TANDA_MAX)} productos elegibles para habilitar sincronización`}
+                      title={
+                        elegiblesVisibles.length === 0
+                          ? 'No hay productos elegibles en la vista'
+                          : `Seleccionar elegibles (hasta ${TANDA_MAX} por tanda)`
+                      }
+                      className="h-4 w-4 rounded border-ink-300 text-mint-600 focus:ring-mint-500 disabled:opacity-40"
+                    />
+                  </th>
+                )}
+                <th scope="col" className="px-4 py-3">Producto</th>
+                <th scope="col" className="px-4 py-3">Precio</th>
+                <th scope="col" className="px-4 py-3">Costo</th>
+                <th scope="col" className="px-4 py-3">Margen</th>
+                <th scope="col" className="px-4 py-3">Stock</th>
+                <th scope="col" className="px-4 py-3">Estado</th>
+                <th scope="col" className="px-4 py-3">Meta</th>
+                <th scope="col" className="px-4 py-3"><span className="sr-only">Acciones</span></th>
               </tr>
             </thead>
             <tbody className="divide-y divide-ink-50">
@@ -366,30 +667,94 @@ export default function CatalogPage() {
                 const cost = finMap[p.id]?.costPrice ?? null;
                 const margin = productMargin(p.price, cost);
                 const stock = p.inventory?.stock ?? 0;
-                // Ficha para recomendaciones (CAT-1): avisar si al agente le falta info clave.
-                const calidad = aiFichaQuality(p);
-                const fichaIncompleta = calidad.level === 'incompleto' || calidad.level === 'basico';
+                // Precalculado por carga (no por render): ficha CAT-1 + observaciones de calidad.
+                const info = infoFilas.get(p.id);
+                const fichaIncompleta = info?.fichaIncompleta === true;
+                const abiertas = info?.abiertas ?? [];
+                const blocking = p.quality?.blocking ?? 0;
+                const razon = razonNoElegible(p);
+                const detalleAbierto = detalleCalidad.has(p.id);
+                const marca = p.brand ?? p.perfume?.brand ?? '';
                 return (
                   <tr key={p.id} className="hover:bg-ink-50/50">
+                    {puedeReconciliar && (
+                      <td className="px-4 py-3 align-top">
+                        <input
+                          type="checkbox"
+                          checked={seleccion.has(p.id)}
+                          disabled={razon != null || masivo.fase === 'corriendo' || (!seleccion.has(p.id) && seleccion.size >= TANDA_MAX)}
+                          onChange={() => toggleSeleccion(p.id)}
+                          aria-label={
+                            razon != null
+                              ? `${p.name}: no seleccionable (${RAZON_NO_ELEGIBLE_LABEL[razon]})`
+                              : `Seleccionar ${p.name} para habilitar sincronización`
+                          }
+                          title={
+                            razon != null
+                              ? RAZON_NO_ELEGIBLE_LABEL[razon]
+                              : !seleccion.has(p.id) && seleccion.size >= TANDA_MAX
+                                ? `Máximo ${TANDA_MAX} por tanda`
+                                : undefined
+                          }
+                          className="h-4 w-4 rounded border-ink-300 text-mint-600 focus:ring-mint-500 disabled:opacity-40"
+                        />
+                      </td>
+                    )}
                     <td className="px-4 py-3">
                       <div className="font-medium text-ink-900">
                         {p.emoji} {p.name} {p.featured && <span title="Destacado">🌟</span>}
                       </div>
-                      {p.perfume?.brand && <div className="text-xs text-ink-400">{p.perfume.brand}</div>}
-                      {fichaIncompleta && (
-                        <span
-                          className="mt-1 inline-flex rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-[11px] font-semibold text-amber-700"
-                          title={'La IA recomienda mejor con la ficha completa. Falta: ' + calidad.faltantes.slice(0, 4).join(', ')}
-                        >
-                          Ficha IA incompleta
-                        </span>
+                      {marca && <div className="text-xs text-ink-500">{marca}</div>}
+                      <div className="mt-1 flex flex-wrap items-center gap-1.5">
+                        {/* Badge de calidad: botón (no solo tooltip) que despliega el detalle. */}
+                        {abiertas.length > 0 && (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setDetalleCalidad((prev) => {
+                                const next = new Set(prev);
+                                if (next.has(p.id)) next.delete(p.id);
+                                else next.add(p.id);
+                                return next;
+                              })
+                            }
+                            aria-expanded={detalleAbierto}
+                            className={
+                              'inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-mint-500/40 ' +
+                              (blocking > 0
+                                ? 'border-coral-200 bg-coral-50 text-coral-700 hover:bg-coral-100'
+                                : 'border-amber-200 bg-amber-50 text-amber-700 hover:bg-amber-100')
+                            }
+                          >
+                            {blocking > 0 ? `Faltan datos (${blocking})` : `Revisar (${abiertas.length})`}
+                            <span aria-hidden="true">{detalleAbierto ? '▴' : '▾'}</span>
+                          </button>
+                        )}
+                        {fichaIncompleta && (
+                          <span
+                            className="inline-flex rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-[11px] font-semibold text-amber-700"
+                            title={'La IA recomienda mejor con la ficha completa. Falta: ' + (info?.faltantes ?? []).slice(0, 4).join(', ')}
+                          >
+                            Ficha IA incompleta
+                          </span>
+                        )}
+                      </div>
+                      {detalleAbierto && abiertas.length > 0 && (
+                        <ul className="mt-1 space-y-0.5 text-xs text-ink-600">
+                          {abiertas.slice(0, 4).map((o) => (
+                            <li key={`${o.code}:${o.field}`}>• {o.message}</li>
+                          ))}
+                          {abiertas.length > 4 && (
+                            <li>… y {abiertas.length - 4} más en “Calidad del catálogo”.</li>
+                          )}
+                        </ul>
                       )}
                     </td>
                     <td className="px-4 py-3 text-ink-700">{gs(p.price)}</td>
                     <td className="px-4 py-3 text-ink-600">{gs(cost)}</td>
                     <td className="px-4 py-3">
                       {margin == null ? (
-                        <span className="text-amber-600" title="Sin precio de costo → ganancia incompleta">⚠️ sin costo</span>
+                        <span className="text-amber-700" title="Sin precio de costo → ganancia incompleta">⚠️ sin costo</span>
                       ) : (
                         <span className={margin < 15 ? 'font-medium text-coral-600' : 'text-ink-700'}>{Math.round(margin)}%</span>
                       )}
@@ -411,7 +776,7 @@ export default function CatalogPage() {
                         ) : (
                           <span className="inline-flex rounded-full bg-ink-50 px-2 py-0.5 text-xs font-semibold text-ink-500">No se sincroniza</span>
                         )}
-                        {p.metaRetailerId && <span className="text-[11px] text-ink-400">↔ {p.metaRetailerId}</span>}
+                        {p.metaRetailerId && <span className="text-[11px] text-ink-500">↔ {p.metaRetailerId}</span>}
                         {puedeReconciliar && (
                           <button
                             onClick={() => (p.syncToMeta === true ? syncFlagMut.mutate({ productId: p.id, enabled: false }) : setConfirmSync(p))}
@@ -433,6 +798,25 @@ export default function CatalogPage() {
             </tbody>
           </table>
         </div>
+      )}
+
+      {/* Confirmación de la tanda masiva: UNA confirmación explícita para las N habilitaciones. */}
+      {confirmarMasivo && (
+        <ConfirmModal
+          title={`¿Habilitar la sincronización de ${seleccion.size} producto${seleccion.size === 1 ? '' : 's'}?`}
+          confirmLabel="Sí, habilitar"
+          onCancel={() => setConfirmarMasivo(false)}
+          onConfirm={() => {
+            setConfirmarMasivo(false);
+            void correrMasivo();
+          }}
+        >
+          <ul className="space-y-1">
+            <li>• Cada producto se verifica de nuevo en el servidor: el que no cumpla queda fuera y te avisamos por qué.</li>
+            <li>• Los que ya existen en Meta se van a ACTUALIZAR con los datos de acá; los nuevos se van a CREAR.</li>
+            <li>• <strong>No se envía nada a Meta ahora</strong>: los cambios salen recién cuando confirmás una previsualización.</li>
+          </ul>
+        </ConfirmModal>
       )}
 
       {editing !== undefined && (
@@ -534,6 +918,27 @@ function errMsg(e: unknown): string {
   return m && m.trim() ? m : 'No se pudo completar la operación. Revisá tus permisos o tu plan.';
 }
 
+/**
+ * Agrupa las fallas de la tanda masiva por motivo legible (los blockers que devolvió el
+ * backend, traducidos). El dueño ve CUÁNTOS quedaron fuera y POR QUÉ, no un total mudo.
+ */
+function agruparFallasMasivo(resultados: ResultadoMasivo[]): Array<{ motivo: string; nombres: string[] }> {
+  const grupos = new Map<string, string[]>();
+  for (const r of resultados) {
+    if (r.ok) continue;
+    const motivo =
+      r.blockers && r.blockers.length > 0
+        ? r.blockers.map((b) => SYNC_BLOCKER_LABEL[b] ?? b).join(' y ')
+        : r.error ?? 'error inesperado';
+    const lista = grupos.get(motivo) ?? [];
+    lista.push(r.name);
+    grupos.set(motivo, lista);
+  }
+  return [...grupos.entries()]
+    .map(([motivo, nombres]) => ({ motivo, nombres }))
+    .sort((a, b) => b.nombres.length - a.nombres.length);
+}
+
 // --- Presentación del resultado de la sync de catálogo (META-CATALOG-LIVE-1) ---
 
 function syncTitle(run: CatalogSyncRun): string {
@@ -627,7 +1032,7 @@ function SyncChip({ label, n, tone }: { label: string; n: number; tone: 'mint' |
     ink: 'bg-ink-50 text-ink-500',
   };
   return (
-    <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 font-semibold ${n > 0 ? tones[tone] : 'bg-ink-50 text-ink-400'}`}>
+    <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 font-semibold ${n > 0 ? tones[tone] : 'bg-ink-50 text-ink-500'}`}>
       {label}: {n}
     </span>
   );

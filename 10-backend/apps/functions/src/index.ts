@@ -172,6 +172,15 @@ export {
   metaCatalogSetSyncEnabled,
 } from './functions/meta/catalogReconcileCallables.js';
 
+// Importación PAGINADA y reanudable + centro de calidad (META-CATALOG-GENERIC-ONBOARDING-QUALITY-1):
+// run persistido con cursor (un solo run activo por tenant, lease 120s) + estado read-only
+// + resumen agregado de calidad por severidad/código.
+export {
+  metaCatalogImportRun,
+  metaCatalogImportStatus,
+  metaCatalogQualitySummary,
+} from './functions/meta/catalogImportCallables.js';
+
 // Outbox de escrituras hacia el Meta Catalog (META-CATALOG-OUTBOX-1): confirmar el plan ENCOLA
 // jobs persistidos; el mantenimiento los reclama con lease, los envía y los confirma contra el
 // catálogo real. Nada declara `synced` sin evidencia.

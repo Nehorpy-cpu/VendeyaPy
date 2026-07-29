@@ -45,6 +45,68 @@ export interface ProductExternalIds {
   tiktok: string | null;
 }
 
+// ---------------------------------------------------------------------------
+// Calidad del catálogo (META-CATALOG-GENERIC-ONBOARDING-QUALITY-1)
+// ---------------------------------------------------------------------------
+
+export type QualitySeverity = 'BLOCKING' | 'WARNING';
+
+/** Quién originó el recompute que vio la observación por primera vez. */
+export type QualityObservationOrigin = 'import' | 'editor' | 'sync_gate' | 'system';
+
+/**
+ * Observación de calidad de UN producto. El fingerprint (`${code}:${field}`) es la clave del
+ * mapa `ProductQuality.fingerprints`: estable por definición, así la historia
+ * (firstSeenAt/lastSeenAt/resolvedAt) sobrevive a los recomputes.
+ */
+export interface QualityObservation {
+  code: string;
+  severity: QualitySeverity;
+  /** Campo del producto al que apunta la corrección (p.ej. 'name', 'price', 'images'). */
+  field: string;
+  /** Explicación en español, no técnica. */
+  message: string;
+  /** Qué hacer para resolverla, en español. */
+  action: string;
+  firstSeenAt: Timestamp;
+  lastSeenAt: Timestamp;
+  /** null = activa. Al resolverse se SELLA (histórico corto), no se borra. */
+  resolvedAt: Timestamp | null;
+  origin: QualityObservationOrigin;
+}
+
+/**
+ * Resumen de calidad persistido en el product doc. SOLO lo escribe el servidor
+ * (productUpsert / import run, Admin SDK): `validateProductPatch` no lo acepta y las rules
+ * de products están cerradas al cliente.
+ */
+export interface ProductQuality {
+  /** Observaciones BLOCKING activas (resolvedAt == null). */
+  blocking: number;
+  /** Observaciones WARNING activas. */
+  warning: number;
+  fingerprints: Record<string, QualityObservation>;
+  evaluatedAt: Timestamp;
+}
+
+/**
+ * Perfil de calidad por tenant (`tenants/{t}/config/catalog`, campo `profile`). TODO opcional:
+ * sin perfil, el evaluador usa defaults conservadores que reproducen el comportamiento actual
+ * de arfagi (stopwords de perfumería, chequeo de genericidad activo, vertical perfumería).
+ */
+export interface CatalogQualityProfile {
+  /** Exigir marca como calidad de ficha aunque el gate de Meta no la pida (default true). */
+  requireBrand?: boolean;
+  /** Reservado: la imagen https ya la exige SIEMPRE el contrato de Meta (default true). */
+  requireImage?: boolean;
+  /** Detectar nombres genéricos (nombre ≈ marca). Default true. */
+  genericNameCheck?: boolean;
+  /** Ruido comercial del vertical para comparar nombres. Default: stopwords de perfumería. */
+  stopwords?: string[];
+  /** Vertical del tenant: 'perfumeria' arma la ficha perfume al importar; 'generic' no. */
+  vertical?: 'perfumeria' | 'generic';
+}
+
 /**
  * Ficha para recomendaciones (CATALOG-ENRICHMENT-1): datos ESTRUCTURADOS que el vendedor carga
  * para que el agente recomiende bien sin inventar. Todo opcional (compatible con productos
@@ -100,6 +162,13 @@ export interface Product {
   featured: boolean;
   position: number;
   externalIds: ProductExternalIds;
+  /**
+   * Marca NEUTRAL del producto (cualquier rubro). Meta la exige para crear un artículo:
+   * antes vivía SOLO en `perfume.brand`, lo que obligaba a fabricar atributos de perfumería
+   * para cualquier vertical. `outboundBrand` la lee con fallback a `perfume.brand`, así los
+   * productos existentes de arfagi no necesitan backfill.
+   */
+  brand?: string;
   /** Atributos de perfumería. null para productos que no son perfumes. */
   perfume: PerfumeAttributes | null;
   /**
@@ -144,6 +213,11 @@ export interface Product {
    * hasta que alguien revise el inventario real.
    */
   stockPendingReview?: boolean;
+  /**
+   * Calidad del producto (META-CATALOG-GENERIC-ONBOARDING-QUALITY-1). SERVER-SET: lo escribe
+   * el recomputo de productUpsert y el import run; el cliente jamás (whitelist + rules).
+   */
+  quality?: ProductQuality;
   createdAt: Timestamp;
   updatedAt: Timestamp;
 }

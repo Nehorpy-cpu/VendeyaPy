@@ -17,6 +17,35 @@ describe('validateProductPatch', () => {
     expect(() => validateProductPatch({ price: 1 }, { requireName: true })).toThrow();
     expect(validateProductPatch({ price: 1 }, { requireName: false })).toEqual({ price: 1 });
   });
+  it('acepta la marca NEUTRAL (brand) con tope de longitud', () => {
+    expect(validateProductPatch({ brand: 'Lumen' }, { requireName: false })).toEqual({ brand: 'Lumen' });
+    expect(() => validateProductPatch({ brand: 'x'.repeat(201) }, { requireName: false })).toThrow();
+    expect(() => validateProductPatch({ brand: 5 }, { requireName: false })).toThrow();
+  });
+  it('INVARIANTE: los campos server-only JAMÁS entran a la whitelist (quality/meta*/sync)', () => {
+    // Si alguien amplía la whitelist con uno de estos, este test tiene que fallar: `quality`
+    // es la autoridad del centro de calidad y los meta*/sync gobiernan el outbox — un cliente
+    // que pudiera escribirlos falsificaría gates o resucitaría estados.
+    const r = validateProductPatch(
+      {
+        name: 'x',
+        quality: { blocking: 0, warning: 0, fingerprints: {}, evaluatedAt: 1 },
+        syncToMeta: true,
+        metaRetailerId: 'RID',
+        metaProductItemId: 'itm',
+        metaSyncStatus: 'synced',
+        metaSyncCurrentJobId: 'job',
+        metaCatalogId: 'cat',
+        metaLastSyncAt: 1,
+        metaSyncError: '',
+        stockPendingReview: false,
+        createdAt: 1,
+        updatedAt: 1,
+      },
+      { requireName: true },
+    );
+    expect(Object.keys(r).sort()).toEqual(['name']);
+  });
   it('valida números, enums y coherencia de precio', () => {
     expect(() => validateProductPatch({ name: 'x', price: -1 }, { requireName: true })).toThrow();
     expect(() => validateProductPatch({ name: 'x', currency: 'EUR' }, { requireName: true })).toThrow();

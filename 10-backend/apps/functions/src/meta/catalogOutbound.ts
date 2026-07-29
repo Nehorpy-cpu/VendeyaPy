@@ -134,7 +134,13 @@ export const outboundTitle = (p: Product) => (p.name ?? '').trim().slice(0, MAX_
  * ⇒ el producto queda bloqueado (`description_missing`) hasta que alguien la escriba.
  */
 export const outboundDescription = (p: Product) => (p.description ?? '').trim().slice(0, MAX_DESCRIPTION_LENGTH);
-export const outboundBrand = (p: Product) => (p.perfume?.brand ?? '').trim().slice(0, MAX_BRAND_LENGTH);
+/**
+ * Marca pública: primero el campo NEUTRAL `brand` (cualquier rubro), con fallback al
+ * sub-objeto del vertical (`perfume.brand`) para que los productos existentes de arfagi
+ * sigan publicando su marca sin backfill. Una sola derivación: el gate, el diff y el
+ * serializador ven exactamente el mismo valor.
+ */
+export const outboundBrand = (p: Product) => ((p.brand ?? p.perfume?.brand) ?? '').trim().slice(0, MAX_BRAND_LENGTH);
 /** URL del producto en su forma CANÓNICA. Cadena vacía si no es una https válida. */
 export const outboundLink = (p: Product) => canonicalHttpsUrl(p.productUrl) ?? '';
 export const outboundImageUrl = (p: Product) => (p.images ?? []).find((u) => typeof u === 'string' && u.startsWith('https://')) ?? '';

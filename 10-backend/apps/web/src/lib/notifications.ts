@@ -65,6 +65,9 @@ const SEVERITY: Record<Notification['type'], number> = {
   handoff_coverage_review: 6, // cliente queriendo PAGAR a la espera de cobertura: lo más urgente
   handoff_ai_unavailable: 5, // el bot no pudo atender
   handoff_customer_requested: 4,
+  // Calidad del catálogo (agregada, autocerrable): productos que no pueden venderse/publicarse.
+  // Debajo de los handoff (un cliente esperando manda) y a la par del trial vencido.
+  catalog_quality_summary: 3,
   trial_expired: 3,
   trial_ending_today: 2,
   trial_ending_soon: 1,
