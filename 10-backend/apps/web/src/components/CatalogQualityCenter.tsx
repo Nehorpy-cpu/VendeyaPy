@@ -9,13 +9,23 @@
  * (`quality.fingerprints`) de los productos ya cargados en la página. Texto no técnico:
  * el dueño tiene que entender qué falta y qué hacer, no códigos.
  *
+ * ADR-0015: además de los datos incompletos, muestra la DERIVA contra lo publicado. Se lee del
+ * estado actual de cada producto (`metaSyncState`/`metaDrift`), así que entra TODO lo vinculado
+ * —lo importado y lo vinculado a mano—; la detección vieja solo miraba importados y por eso
+ * Odyssey quedó invisible con el precio publicado un 92 % abajo.
+ *
  * Patrón visual de OutboxIncidents: sección con aria-labelledby y estados
  * cargando / vacío / error (con reintento) / éxito.
  */
 
 import { useId, useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { fetchCatalogQualitySummary, type ProductConCalidad } from '@/lib/catalog';
+import {
+  fetchCatalogQualitySummary,
+  normalizarDerivaProducto,
+  type ProductConCalidad,
+  type ProductoDerivaView,
+} from '@/lib/catalog';
 import {
   filasDeCalidad,
   filtrarFilas,
@@ -24,7 +34,40 @@ import {
   ORIGEN_LABEL,
   type FiltrosCalidad,
 } from '@/lib/catalogQuality';
+import { ESTADO_META_INFO } from '@/lib/catalogOwnership';
+import { MetaDriftDetail } from '@/components/MetaDriftDetail';
 import { StatusBadge } from '@/components/ui';
+
+/**
+ * Productos cuyo estado ACTUAL contra lo publicado dejó de coincidir. Se listan SOLO las
+ * divergencias reales; "no lo pudimos verificar" (`stale`/`unverifiable`) se cuenta aparte:
+ * mezclarlos inflaría el aviso —con un catálogo grande casi todo vence a la vez— y le sacaría
+ * el peso justo a lo que sí está publicado distinto.
+ */
+function derivasDe(products: ProductConCalidad[]): {
+  divergentes: Array<{ id: string; nombre: string; deriva: ProductoDerivaView }>;
+  sinVerificar: number;
+} {
+  const divergentes: Array<{ id: string; nombre: string; deriva: ProductoDerivaView }> = [];
+  let sinVerificar = 0;
+  for (const p of products) {
+    const d = normalizarDerivaProducto(p);
+    if (!d || d.estado === 'verified' || d.estado === 'desconocido') continue;
+    if (d.estado === 'stale' || d.estado === 'unverifiable') {
+      sinVerificar++;
+      continue;
+    }
+    divergentes.push({ id: p.id, nombre: p.name, deriva: d });
+  }
+  // Lo que frena una venta primero; después, orden estable por nombre.
+  divergentes.sort((a, b) =>
+    a.deriva.critico !== b.deriva.critico ? (a.deriva.critico ? -1 : 1) : a.nombre.localeCompare(b.nombre, 'es'),
+  );
+  return { divergentes, sinVerificar };
+}
+
+/** Tope de derivas listadas en la tarjeta (el resto se anuncia, no se oculta). */
+const DERIVAS_VISIBLES = 5;
 
 export function CatalogQualityCenter({
   tenantId,
@@ -48,6 +91,8 @@ export function CatalogQualityCenter({
   });
 
   const filas = useMemo(() => filasDeCalidad(products), [products]);
+  const { divergentes: derivas, sinVerificar } = useMemo(() => derivasDe(products), [products]);
+  const hayDeriva = derivas.length > 0 || sinVerificar > 0;
   const visibles = useMemo(() => filtrarFilas(filas, filtros), [filas, filtros]);
   // Códigos disponibles para el filtro: los del agregado del server + los locales.
   const codigos = useMemo(() => {
@@ -94,7 +139,9 @@ export function CatalogQualityCenter({
   // Un catálogo con productos aún SIN evaluar nunca se muestra como "completo": el agregado
   // solo cuenta productos evaluados, así que sin este aviso un catálogo legacy entero
   // parecería impecable antes de correr el mantenimiento.
-  if (!hayProblemas) {
+  // Con deriva contra lo publicado NUNCA se muestra el verde, aunque no falte ningún dato:
+  // ese es exactamente el caso de Odyssey (ficha completa, precio publicado distinto).
+  if (!hayProblemas && !hayDeriva) {
     const sinEvaluar = resumen?.sinEvaluar ?? 0;
     return (
       <section
@@ -121,12 +168,12 @@ export function CatalogQualityCenter({
   }
 
   const contadorTexto = [
-    resumen!.conBloqueos > 0
+    (resumen?.conBloqueos ?? 0) > 0
       ? `${resumen!.conBloqueos} producto${resumen!.conBloqueos === 1 ? '' : 's'} con datos incompletos`
       : null,
-    resumen!.conAdvertencias > 0
-      ? `${resumen!.conAdvertencias} con advertencias`
-      : null,
+    (resumen?.conAdvertencias ?? 0) > 0 ? `${resumen!.conAdvertencias} con advertencias` : null,
+    derivas.length > 0 ? `${derivas.length} publicado${derivas.length === 1 ? '' : 's'} distinto a lo tuyo` : null,
+    sinVerificar > 0 ? `${sinVerificar} sin poder verificar contra lo publicado` : null,
   ]
     .filter(Boolean)
     .join(' · ');
@@ -137,19 +184,73 @@ export function CatalogQualityCenter({
         <div>
           <h2 id={`${uid}-titulo`} className="font-semibold text-ink-900">Calidad del catálogo</h2>
           <p className="mt-0.5 text-sm text-ink-600">
-            {contadorTexto}. Completá esos datos para que puedan venderse y publicarse sin trabas.
+            {contadorTexto}.{' '}
+            {hayProblemas
+              ? 'Completá esos datos para que puedan venderse y publicarse sin trabas.'
+              : 'Revisá las diferencias con lo publicado antes de seguir vendiendo esos productos.'}
           </p>
         </div>
-        <button
-          onClick={() => setAbierto((v) => !v)}
-          aria-expanded={abierto}
-          className="rounded-lg border border-ink-200 bg-white px-3 py-1.5 text-sm font-medium text-ink-700 transition-colors hover:bg-ink-50"
-        >
-          {abierto ? 'Ocultar detalle' : 'Ver qué falta'}
-        </button>
+        {hayProblemas && (
+          <button
+            onClick={() => setAbierto((v) => !v)}
+            aria-expanded={abierto}
+            className="rounded-lg border border-ink-200 bg-white px-3 py-1.5 text-sm font-medium text-ink-700 transition-colors hover:bg-ink-50"
+          >
+            {abierto ? 'Ocultar detalle' : 'Ver qué falta'}
+          </button>
+        )}
       </div>
 
-      {abierto && (
+      {/* Deriva contra lo publicado: importados Y vinculados a mano (ADR-0015 §6). */}
+      {hayDeriva && (
+        <div className="mt-3 rounded-xl border border-coral-200 bg-white p-3">
+          <h3 className="text-sm font-semibold text-ink-900">
+            {derivas.length > 0
+              ? `Publicado distinto a lo tuyo (${derivas.length})`
+              : 'Sin verificar contra lo publicado'}
+          </h3>
+          <p className="mt-0.5 text-xs text-ink-600">
+            Comparamos tus productos con lo que hoy está publicado en Meta. Entran todos los vinculados: los que
+            importaste y los que vinculaste a mano.
+          </p>
+          {sinVerificar > 0 && (
+            <p className="mt-1 text-xs text-amber-800">
+              Además hay {sinVerificar} producto{sinVerificar === 1 ? '' : 's'} que no pudimos verificar contra lo
+              publicado (la comprobación venció o no se pudo leer). Hasta volver a compararlos no damos por confirmado
+              su precio ni su stock.
+            </p>
+          )}
+          <ul className="mt-2 space-y-2">
+            {derivas.slice(0, DERIVAS_VISIBLES).map((d) => (
+              <li key={d.id} className="rounded-lg border border-ink-100 p-2.5">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <p className="min-w-0 truncate font-medium text-ink-900">{d.nombre}</p>
+                  <div className="flex shrink-0 items-center gap-2">
+                    <StatusBadge tone={ESTADO_META_INFO[d.deriva.estado].tono}>
+                      {ESTADO_META_INFO[d.deriva.estado].label}
+                    </StatusBadge>
+                    <button
+                      onClick={() => onEditar(d.id)}
+                      className="rounded-lg border border-ink-200 px-2.5 py-1 text-xs font-medium text-ink-700 transition-colors hover:bg-ink-50 focus:outline-none focus:ring-2 focus:ring-mint-500/40"
+                    >
+                      Ver el producto
+                    </button>
+                  </div>
+                </div>
+                <MetaDriftDetail deriva={d.deriva} className="mt-1.5 space-y-1.5" />
+              </li>
+            ))}
+          </ul>
+          {derivas.length > DERIVAS_VISIBLES && (
+            <p className="mt-2 text-xs text-ink-600">
+              … y {derivas.length - DERIVAS_VISIBLES} producto{derivas.length - DERIVAS_VISIBLES === 1 ? '' : 's'} más
+              con diferencias.
+            </p>
+          )}
+        </div>
+      )}
+
+      {abierto && hayProblemas && (
         <div className="mt-3 space-y-3">
           {/* Filtros (labels asociadas; navegables por teclado) */}
           <div className="flex flex-wrap items-end gap-3">

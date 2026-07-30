@@ -35,7 +35,14 @@ const T = 'perfumeria';
 const T2 = 'boutique-demo';
 const CATALOG_ID = 'CAT-ONB-1';
 const FIXTURE = 'metaTestFixtures/catalog';
-const CFG = { enabled: true, mode: 'dry_run', catalogId: CATALOG_ID, sourceOfTruth: 'vendeyapy' };
+/**
+ * (ADR-0015) `ownership` es OBLIGATORIA: sin ella la config queda con propiedad DEGRADADA
+ * —cero campos escribibles, techo `dry_run`— y el opt-in de sincronización se bloquea. Este
+ * escenario describe un tenant que administra sus propios campos públicos, así que declara
+ * la matriz completa. `sourceOfTruth` queda como literal legacy (ya no decide nada).
+ */
+const OWNED_FIELDS = ['title', 'description', 'price', 'currency', 'availability', 'inventory', 'brand', 'category', 'image', 'url'];
+const CFG = { enabled: true, mode: 'dry_run', catalogId: CATALOG_ID, sourceOfTruth: 'vendeyapy', ownership: { model: 'vendeyapy_managed', ownedFields: OWNED_FIELDS, external: null } };
 
 const results = [];
 const check = (n, c, e = '') => { results.push(!!c); console.log(`${c ? '✅' : '❌'} ${n}${e ? '  — ' + e : ''}`); };

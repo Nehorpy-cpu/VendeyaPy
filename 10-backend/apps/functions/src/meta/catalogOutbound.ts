@@ -262,6 +262,16 @@ export class CatalogOutboundError extends Error {
 }
 
 /**
+ * Campos públicos que un CREATE completo emite (todos menos la identidad). Existe para que
+ * los gates de PROPIEDAD (ADR-0015) pregunten "¿gobernamos TODO lo que este create publica?"
+ * ANTES de construirlo — decirle al dueño "falta la descripción" cuando el problema real es
+ * que el campo lo gobierna el feed sería mandarlo a arreglar lo que no está roto.
+ * `catalogOutbound.contract.test.ts` verifica que coincida EXACTAMENTE con lo que emite
+ * `buildCatalogCreatePayload`: una lista paralela que se desincroniza es un agujero.
+ */
+export const CREATE_PAYLOAD_FIELDS = ['title', 'description', 'link', 'price', 'availability', 'condition', 'brand', 'image'] as const satisfies readonly WritableField[];
+
+/**
  * Request de CREACIÓN: `method: 'CREATE'` con los 9 campos obligatorios del contrato y
  * nada más. Lanza si falta alguno — un create incompleto jamás se despacha.
  */

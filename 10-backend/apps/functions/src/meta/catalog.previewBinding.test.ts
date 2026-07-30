@@ -48,12 +48,25 @@ const entry = (over: Partial<Entry> & { productId: string }): Entry =>
     ...over,
   }) as Entry;
 
+/** Propiedad SANEADA del plan (ADR-0015): participa de la huella. */
+const propiedad = (over: Partial<CatalogSyncPlan['ownership']> = {}): CatalogSyncPlan['ownership'] => ({
+  model: 'vendeyapy_managed',
+  fingerprint: 'own_aaaaaaaa',
+  ownedFields: ['price', 'title'],
+  externalFields: [],
+  degraded: false,
+  reasons: [],
+  blockedActions: 0,
+  ...over,
+});
+
 const plan = (entries: Entry[], over: Partial<CatalogSyncPlan> = {}): CatalogSyncPlan => ({
   entries,
   remoteOnly: [],
   ignoredArchived: 0,
   excludedNotManaged: 0,
   summary: { create: 0, update: entries.length, disable: 0, unchanged: 0, blocked: 0, remoteOnly: 0 },
+  ownership: propiedad(),
   ...over,
 });
 
@@ -109,6 +122,20 @@ describe('planFingerprint — determinística, sensible al contenido, insensible
     const a = plan([entry({ productId: 'a' })]);
     const b = plan([entry({ productId: 'a' })], { remoteOnly: [{ retailerId: 'EXTERNO', name: 'Alta externa' }] });
     expect(planFingerprint('t1', 'cat1', a)).toBe(planFingerprint('t1', 'cat1', b));
+  });
+
+  it('la PROPIEDAD participa: el mismo plan bajo otros permisos es otra huella (ADR-0015)', () => {
+    // Un preview se aprueba bajo permisos concretos. Si entre la previsualización y el apply
+    // alguien cambia quién gobierna qué, encolar sería ejecutar con permisos que nadie aprobó.
+    const a = plan([entry({ productId: 'a' })]);
+    const b = plan([entry({ productId: 'a' })], { ownership: propiedad({ fingerprint: 'own_bbbbbbbb' }) });
+    expect(planFingerprint('t1', 'cat1', a)).not.toBe(planFingerprint('t1', 'cat1', b));
+  });
+
+  it('los campos que quedaron AFUERA por propiedad son parte del plan aprobado', () => {
+    const a = plan([entry({ productId: 'a' })]);
+    const b = plan([entry({ productId: 'a', notOwnedFields: ['title'] })]);
+    expect(planFingerprint('t1', 'cat1', a)).not.toBe(planFingerprint('t1', 'cat1', b));
   });
 });
 

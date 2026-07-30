@@ -11,7 +11,14 @@ vi.mock('./coverage.js', async (io) => {
   return { ...real, gateCoberturaCheckout: vi.fn() };
 });
 vi.mock('../orders/checkoutReuse.js', () => ({ resolveCheckoutReuse: vi.fn() }));
-vi.mock('../orders/createPendingOrder.js', () => ({ createPendingOrder: vi.fn() }));
+// Solo `createPendingOrder` se mockea: el resto del módulo va REAL (mismo patrón que el resto de
+// los tests del motor). La rama de reuso llama a `assertOrdenSinDerivaCritica`, que sin proyección
+// de deriva cableada retorna en la primera línea — así estos tests siguen midiendo la precedencia
+// del checkout, no el guard, y un mock parcial no puede esconder el freno fail-closed.
+vi.mock('../orders/createPendingOrder.js', async (io) => {
+  const real = await io<typeof import('../orders/createPendingOrder.js')>();
+  return { ...real, createPendingOrder: vi.fn() };
+});
 vi.mock('../orders/checkoutConfig.js', async (io) => {
   const real = await io<typeof import('../orders/checkoutConfig.js')>();
   return { ...real, getCheckoutConfig: vi.fn() };

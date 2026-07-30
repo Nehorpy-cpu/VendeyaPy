@@ -24,7 +24,7 @@ import { assertWithinLimit } from '../../entitlements/entitlements.js';
 import { db, paths } from '../../lib/firebase.js';
 import { recordAudit } from '../../audit/audit.js';
 import { logger } from '../../lib/logger.js';
-import { normalizeCatalogSyncConfig } from '../../meta/catalogSyncConfig.js';
+import { normalizeCatalogSyncConfig, type MetaCatalogSyncConfig } from '../../meta/catalogSyncConfig.js';
 import { getMetaCatalogClientForTenant, MetaCatalogApiError } from '../../meta/catalogClient.js';
 import { outboundId } from '../../meta/catalogOutbound.js';
 import { effectiveCatalogPolicy, evaluateProductQuality, normalizeCatalogProfile } from '../../products/quality.js';
@@ -58,15 +58,20 @@ const actorOf = (req: CallableRequest<unknown>) => ({
 });
 
 /** Config de catálogo del tenant (fail-closed): sin catalogId válido no se opera.
- *  Exportado: el run de importación paginada (catalogImportCallables) usa EXACTAMENTE
- *  el mismo gate — una segunda copia se desincroniza. */
-export async function requireCatalogId(tenantId: string): Promise<string> {
+ *  Incluye la PROPIEDAD ya normalizada (ADR-0015), que es lo que decide si se puede escribir. */
+export async function requireCatalogConfig(tenantId: string): Promise<MetaCatalogSyncConfig> {
   const doc = await db().doc(`tenants/${tenantId}/config/meta`).get();
   const cfg = normalizeCatalogSyncConfig((doc.data() as { catalogSync?: unknown } | undefined)?.catalogSync);
   if (!cfg.enabled || !cfg.catalogId) {
     throw new HttpsError('failed-precondition', 'La sincronización de catálogo no está configurada para esta empresa.');
   }
-  return cfg.catalogId;
+  return cfg;
+}
+
+/** Solo el id del catálogo. Exportado: el run de importación paginada (catalogImportCallables)
+ *  usa EXACTAMENTE el mismo gate — una segunda copia se desincroniza. */
+export async function requireCatalogId(tenantId: string): Promise<string> {
+  return (await requireCatalogConfig(tenantId)).catalogId;
 }
 
 /**
@@ -440,8 +445,26 @@ export const metaCatalogSetSyncEnabled = onCall<{ tenantId?: string; productId?:
       return { ok: true, enabled: false, blockers: [] };
     }
 
-    // Habilitar exige catálogo configurado + TODOS los gates + confirmación del diff REAL.
-    const catalogId = await requireCatalogId(tenantId);
+    // Habilitar exige catálogo configurado + PROPIEDAD + TODOS los gates + confirmación del
+    // diff REAL.
+    const cfg = await requireCatalogConfig(tenantId);
+    // ═══ GATE DE PROPIEDAD (ADR-0015 §7) ═══
+    // Sin un solo campo propio no existe patch posible: el opt-in no sincronizaría NADA.
+    // Dejar habilitar igual sería prometer una propagación que nunca va a pasar — el mismo
+    // `synced` mentiroso que este programa vino a eliminar, pero un paso antes.
+    if (!cfg.ownership.writable.length) {
+      return {
+        ok: false,
+        enabled: false,
+        blockers: [],
+        ownershipBlocked: true,
+        ownership: { model: cfg.ownership.model, degraded: cfg.ownership.degraded, reasons: cfg.ownership.reasons },
+        message: cfg.ownership.degraded
+          ? 'Todavía no está declarado qué campos del catálogo administra este sistema, así que no puede escribir ninguno. Declaralo en la configuración del catálogo y volvé a intentar.'
+          : 'Los campos públicos de este catálogo los publica una fuente externa (el feed de la tienda). Este sistema no escribe ninguno, así que habilitar la sincronización del producto no cambiaría nada en Meta: los datos se corrigen en el origen del feed.',
+      };
+    }
+    const catalogId = cfg.catalogId;
     const policy = effectiveCatalogPolicy(await loadCatalogProfile(tenantId));
     const remote = await readRemote(tenantId, catalogId, policy.stopwords);
     // MISMA derivación que usa el planificador: una copia inline se desincroniza y el gate

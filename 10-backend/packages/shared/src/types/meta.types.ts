@@ -301,3 +301,240 @@ export interface MetaCatalogMaintenanceRunSummary {
   finishedAtMs: number | null;
   lastError: string | null;
 }
+
+// ---------------------------------------------------------------------------
+// Propiedad por campos del catálogo (META-CATALOG-OWNERSHIP-MODEL-1, ADR-0015)
+// ---------------------------------------------------------------------------
+// VOCABULARIO PÚBLICO para el panel. La LÓGICA (normalización fail-closed de nivel 2, gates
+// outbound) vive en `apps/functions/src/meta/catalogOwnership.ts` y NO se duplica acá: estas
+// son las formas SANEADAS que viajan por callable. Un test de paridad en functions
+// (`catalogOwnership.test.ts`) falla si alguno de los dos lados agrega un valor que el otro no
+// conoce — sin él, el panel podría mostrar un modelo que el normalizador rechaza.
+
+/**
+ * Campos PÚBLICOS del contrato de escritura que pueden tener dueño. Deliberadamente NO incluye
+ * costo, márgenes, `productFinancials`, `aiFicha` ni notas internas: son locales, jamás
+ * publicables ni delegables (ADR-0015 §1).
+ */
+export const CATALOG_WRITABLE_FIELDS = [
+  'title',
+  'description',
+  'price',
+  'currency',
+  'availability',
+  'inventory',
+  'brand',
+  'category',
+  'image',
+  'url',
+] as const;
+export type WritableField = (typeof CATALOG_WRITABLE_FIELDS)[number];
+
+export const CATALOG_OWNERSHIP_MODELS = ['vendeyapy_managed', 'external_managed', 'hybrid'] as const;
+export type CatalogOwnershipModel = (typeof CATALOG_OWNERSHIP_MODELS)[number];
+
+export const CATALOG_EXTERNAL_SOURCE_KINDS = ['meta_feed', 'commerce_manager', 'other_api'] as const;
+export type CatalogExternalSourceKind = (typeof CATALOG_EXTERNAL_SOURCE_KINDS)[number];
+
+/** Modo de ejecución de la sync (espejo de `CATALOG_SYNC_MODES` en functions). */
+export type MetaCatalogSyncMode = 'off' | 'dry_run' | 'live';
+
+/** Por qué la propiedad quedó degradada (fail-closed de nivel 2). Se le muestra al owner. */
+export type CatalogOwnershipDegradedReason =
+  | 'ownership_missing'
+  | 'ownership_malformed'
+  | 'ownership_conflict'
+  | 'ownership_never_publishable'
+  | 'external_declaration_invalid'
+  | 'external_required'
+  | 'owned_fields_required'
+  | 'hybrid_partition_missing';
+
+/**
+ * Fuente externa RECONOCIDA por una persona, en su forma SANEADA para el panel. `fingerprint`
+ * se calcula sobre datos NO secretos (identificador, host sin query, horario, columnas): jamás
+ * viaja ni se persiste la URL firmada, su query string ni el token (ADR-0015 §4).
+ */
+export interface CatalogExternalSourceView {
+  kind: CatalogExternalSourceKind;
+  acknowledgedSourceIds: string[];
+  declaredFields: WritableField[];
+  fingerprint: string;
+  acknowledgedAtMs: number | null;
+  acknowledgedByUid: string;
+}
+
+/**
+ * Propiedad EFECTIVA (ya normalizada) tal como la ve el panel. `writable` vacío ⇒ no existe
+ * patch posible: con `external_managed` el loop diario es inalcanzable por construcción.
+ */
+export interface CatalogOwnershipView {
+  model: CatalogOwnershipModel;
+  writable: WritableField[];
+  external: WritableField[];
+  externalSource: CatalogExternalSourceView | null;
+  /** Techo de ejecución: 'dry_run' impide escribir aunque la config diga `live`. */
+  modeCeiling: 'dry_run' | 'live';
+  degraded: boolean;
+  reasons: CatalogOwnershipDegradedReason[];
+}
+
+/**
+ * Fuente externa DETECTADA por la lectura de la API oficial (solo GET) — metadata SANEADA.
+ * Contrato de datos entre el detector y la migración/panel. NUNCA incluye la URL firmada, su
+ * query string, el token ni el archivo crudo del feed (ADR-0015 §4).
+ */
+export interface MetaCatalogDetectedSource {
+  kind: CatalogExternalSourceKind;
+  /** Identificador NO secreto del feed/data source (el id que devuelve Graph). */
+  sourceId: string;
+  /** Nombre saneado que muestra Meta. Sin URLs ni credenciales. */
+  name: string;
+  /** Host de la fuente SIN esquema de credenciales ni query string. '' si no se conoce. */
+  host: string;
+  /** Horario declarado del feed (p. ej. '03:33') y su zona, si Meta los informa. */
+  schedule: string | null;
+  timezone: string | null;
+  /** true si la fuente BORRA los artículos que no aparecen en su archivo. */
+  deletesMissingItems: boolean | null;
+  /** Campos públicos que la fuente publica, según lo detectado. */
+  detectedFields: WritableField[];
+  /** Artículos que gobierna, si Meta lo informa. */
+  itemCount: number | null;
+  /** Huella SANEADA (identificador + host sin query + horario + columnas declaradas). */
+  fingerprint: string;
+  lastSeenAtMs: number | null;
+}
+
+// ---------------------------------------------------------------------------
+// Migración de propiedad: operación administrativa preview/apply (ADR-0015 §9)
+// ---------------------------------------------------------------------------
+
+export type MetaCatalogOwnershipMigrationMode = 'preview' | 'apply';
+export type MetaCatalogOwnershipMigrationStatus = 'running' | 'completed' | 'failed';
+
+/**
+ * Motivos que IMPIDEN el apply. Un bloqueo jamás se resuelve solo: la migración no desactiva
+ * feeds, no cambia el modelo por su cuenta y no reconoce una fuente que nadie vio.
+ */
+export type MetaCatalogOwnershipMigrationBlocker =
+  /** Nivel 1: la sync está apagada o mal configurada — no hay nada que migrar (p. ej. un tenant sin config). */
+  | 'sync_disabled'
+  /** El detector de fuentes externas todavía no está disponible en este despliegue. */
+  | 'detection_unavailable'
+  /** No se detectó ninguna fuente externa y nadie declaró explícitamente el modelo. */
+  | 'external_source_unknown'
+  /** La huella de la fuente reconocida cambió: hace falta un reconocimiento humano nuevo. */
+  | 'external_fingerprint_changed'
+  /** La propuesta no sobrevive al normalizador (escribiríamos una propiedad que degrada). */
+  | 'proposal_invalid'
+  /** Ya hay una propiedad vigente DISTINTA: cambiarla es una decisión humana explícita. */
+  | 'ownership_already_declared';
+
+/**
+ * Contadores HONESTOS de la migración. En `preview` cuentan lo que SE HARÍA; en `apply`, lo
+ * hecho. `syncedNoVerificados` es el hallazgo central de la auditoría: productos que afirmaban
+ * `synced` sin que nadie hubiera leído Meta nunca.
+ */
+export interface MetaCatalogOwnershipMigrationCounters {
+  examinados: number;
+  /** Productos cuyo `metaSyncState` se sembraría/sembró. */
+  estadoSembrado: number;
+  /** Productos que ya tenían un `metaSyncState` coherente: no se tocan. */
+  estadoVigente: number;
+  /** Subconjunto de `estadoSembrado`: los `synced` que pasan a `unverifiable`. */
+  syncedNoVerificados: number;
+  /** Productos sin identidad remota (ni retailer_id ni item id): quedan `not_synced`. */
+  sinMapeo: number;
+  errores: number;
+}
+
+/** Plan SANEADO de la migración: lo que el owner tiene que poder leer ANTES de confirmar. */
+export interface MetaCatalogOwnershipMigrationPlan {
+  tenantId: string;
+  /** Modo configurado hoy y modo EFECTIVO que quedaría con la propuesta aplicada. */
+  configMode: MetaCatalogSyncMode;
+  effectiveModeAfter: MetaCatalogSyncMode;
+  /** Propiedad vigente (degradada mientras nadie la haya declarado). */
+  current: CatalogOwnershipView;
+  /** Modelo propuesto + partición de campos. null si la migración está bloqueada. */
+  proposedModel: CatalogOwnershipModel | null;
+  proposedOwnedFields: WritableField[];
+  proposedExternalFields: WritableField[];
+  /** Fuentes detectadas (metadata saneada) y si el detector pudo correr. */
+  detectionAvailable: boolean;
+  detectedSources: MetaCatalogDetectedSource[];
+  blockers: MetaCatalogOwnershipMigrationBlocker[];
+}
+
+/** Vista SANEADA de la corrida para el panel (el doc está cerrado al cliente por rules). */
+export interface MetaCatalogOwnershipMigrationRunSummary {
+  runId: string;
+  mode: MetaCatalogOwnershipMigrationMode;
+  status: MetaCatalogOwnershipMigrationStatus;
+  pagesDone: number;
+  counters: MetaCatalogOwnershipMigrationCounters;
+  /** Cuántos productos quedarían/quedaron en cada estado (solo los que cambian). */
+  porEstado: Record<string, number>;
+  plan: MetaCatalogOwnershipMigrationPlan;
+  /** true si el apply ya escribió `catalogSync.ownership` (idempotente: una sola vez). */
+  ownershipWritten: boolean;
+  hasCursor: boolean;
+  startedAtMs: number | null;
+  updatedAtMs: number | null;
+  finishedAtMs: number | null;
+  lastError: string | null;
+}
+
+// ---------------------------------------------------------------------------
+// Reconciliación PERIÓDICA del estado actual (ADR-0015 §6)
+// ---------------------------------------------------------------------------
+
+export type MetaCatalogVerificationStatus = 'running' | 'completed' | 'failed';
+/**
+ * Fases de la corrida. `remote`: barrido paginado del catálogo remoto (solo GET) que verifica
+ * los productos mapeados que Meta devuelve. `missing`: barrido LOCAL de los mapeados que el
+ * barrido remoto no tocó (artículos que el feed borró). `done`: terminada.
+ */
+export type MetaCatalogVerificationPhase = 'remote' | 'missing' | 'done';
+
+/**
+ * Contadores HONESTOS de una corrida de verificación. `verified` cuenta SOLO productos con
+ * lectura remota real y todos sus campos observables coincidentes. `unchanged` es el
+ * subconjunto cuyo estado ya era el mismo (la corrida diaria no re-alerta). `errors` cuenta
+ * escrituras de estado que fallaron: una corrida con errores jamás se presenta limpia.
+ */
+export interface MetaCatalogVerificationCounters {
+  remoteItems: number;
+  matched: number;
+  /** Artículos remotos sin producto local mapeado: se CUENTAN, no se tocan. */
+  remoteOnly: number;
+  verified: number;
+  drifted: number;
+  driftedExternal: number;
+  remoteMissing: number;
+  unverifiable: number;
+  unchanged: number;
+  cursorResets: number;
+  errors: number;
+}
+
+/** Vista SANEADA de la corrida para el panel (el doc está cerrado al cliente por rules). */
+export interface MetaCatalogVerificationRunSummary {
+  runId: string;
+  status: MetaCatalogVerificationStatus;
+  phase: MetaCatalogVerificationPhase;
+  pagesDone: number;
+  counters: MetaCatalogVerificationCounters;
+  /** true si la corrida quedó a mitad (hay cursor persistido para reanudar). */
+  hasCursor: boolean;
+  /**
+   * true si la detección de artículos borrados se SALTEÓ por evidencia incompleta (errores de
+   * escritura durante el barrido remoto): jamás se declara `remote_missing` a ciegas.
+   */
+  missingDetectionSkipped: boolean;
+  startedAtMs: number | null;
+  updatedAtMs: number | null;
+  finishedAtMs: number | null;
+  lastError: string | null;
+}

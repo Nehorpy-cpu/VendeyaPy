@@ -50,7 +50,12 @@ import { recordAudit } from '../audit/audit.js';
 import { coverageSettings } from './coverage.js';
 import { coverageHold } from './coverageTestHooks.js';
 import { getCheckoutConfig, formatTransferInstructions } from '../orders/checkoutConfig.js';
-import { createPendingOrder, ProductNoVendibleError } from '../orders/createPendingOrder.js';
+import {
+  assertOrdenSinDerivaCritica,
+  createPendingOrder,
+  ProductNoVendibleError,
+  ProductoConDerivaCriticaError,
+} from '../orders/createPendingOrder.js';
 import { getWhatsAppClient } from '../messaging/whatsappClient.js';
 import { appendMessage } from './messages.js';
 
@@ -95,6 +100,40 @@ export function direccionTextualDe(req: Pick<CoverageRequest, 'location'>): Addr
     neighborhood: '',
     reference: '',
     coordinates: null,
+  };
+}
+
+/**
+ * ADR-0015 §8: por qué NO se pudo crear el pedido con la cobertura ya aprobada. La deriva es
+ * subclase de `ProductNoVendibleError` a propósito (mismo freno, misma retención del job), pero
+ * chequear solo la clase base hacía que el equipo leyera "producto no disponible" cuando el
+ * problema es que el PRECIO publicado no coincide con el nuestro y el producto está perfectamente
+ * en stock. La razón que se avisa tiene que ser la real: con la otra, un vendedor sale a buscar
+ * inventario que nunca faltó. PURA y exportada para tests.
+ */
+export function avisoReanudacionBloqueada(
+  error: ProductNoVendibleError,
+  customerId: string,
+  requestId: string,
+): { motivo: 'catalog_drift' | 'no_vendible'; notifId: string; title: string; body: string } {
+  const cantidad = error.productNames.length;
+  const cliente = `…${customerId.slice(-4)}`;
+  if (error instanceof ProductoConDerivaCriticaError) {
+    return {
+      motivo: 'catalog_drift',
+      // dedupeKey propio: un caso de deriva y uno de stock del mismo request son avisos distintos.
+      notifId: `covdrift-${customerId}-${requestId}`,
+      title: '🏷️ Un pedido con cobertura aprobada quedó sin confirmar el precio',
+      body:
+        `No pudimos confirmar el precio o la disponibilidad publicada de ${cantidad === 1 ? 'un producto' : `${cantidad} productos`} ` +
+        `del carrito del cliente ${cliente}. El pedido NO se creó: revisá el dato en el origen y resolvelo a mano.`,
+    };
+  }
+  return {
+    motivo: 'no_vendible',
+    notifId: `covstock-${customerId}-${requestId}`,
+    title: '🛒 Un pedido con cobertura aprobada no se pudo crear',
+    body: `El carrito del cliente ${cliente} tiene ${cantidad === 1 ? 'un producto que ya no está disponible' : 'productos que ya no están disponibles'}. Revisá la conversación y resolvelo a mano.`,
   };
 }
 
@@ -724,6 +763,28 @@ export async function processCoverageResumeJob(tenantId: string, jobId: string):
     //    KILL-SWITCH-1: precondición de cobertura DENTRO de la transacción de creación
     //    idempotente (mismo patrón createPendingOrder — sin segunda lógica de pedidos).
     const orderSnap = await db().doc(paths.order(tenantId, orderId)).get();
+    // ADR-0015 §8 — POR QUÉ el freno también acá: esta rama REUSA la orden reservada y NO pasa por
+    // createPendingOrder, donde vive el único chequeo de deriva. La secuencia real que lo destapó:
+    // la orden nace a las 04:00 sin deriva, el job se corta (kill-switch a mitad o crash), la
+    // corrida de verificación de la tarde marca el producto `drifted_external` y la reanudación de
+    // la noche mandaba banco y total de un precio público que ya no podemos afirmar. Lo mismo si el
+    // job reintenta tras un fallo. Se evalúa lo que pide LA ORDEN (es lo que se va a cobrar), no el
+    // carrito vivo, que pudo cambiar después. FAIL-CLOSED igual que el camino que crea la orden: acá
+    // hay dinero en juego, así que "no pude leer la proyección" NO vale como "no hay deriva".
+    if (orderSnap.exists) {
+      // Mismo freno —una sola definición— que aplica `createPendingOrder` cuando reusa una orden
+      // reservada: una orden reservada sin ítems legibles cuenta como `unverifiable`, y lo que se
+      // lanza es la MISMA excepción, así que el catch de abajo ya sabe retener el job
+      // (`held_by_seller`), limpiar la marca anti-doble-checkout y avisar con la razón REAL
+      // (precio publicado, no falta de stock). Cero segunda lógica de pedidos, cero instrucciones
+      // de pago enviadas, y la orden reservada queda intacta para resolver a mano.
+      await assertOrdenSinDerivaCritica(
+        tenantId,
+        orderId,
+        (orderSnap.data() as { items?: Array<{ productId?: string; productName?: string }> }).items,
+        { jobId, motivo: 'reanudacion_sobre_orden_creada' },
+      );
+    }
     const order = orderSnap.exists
       ? (orderSnap.data() as { totals: { total: number } })
       : await createPendingOrder(tenantId, customerId, conQuote ? (cartCongelado as OrderCartInput) : cart, {
@@ -799,7 +860,15 @@ export async function processCoverageResumeJob(tenantId: string, jobId: string):
     // PERMANENTE: reintentar no lo arregla. Se deja el job para revisión humana en vez de
     // consumir los `attempts` en un loop que siempre va a fallar.
     if (e instanceof ProductNoVendibleError) {
-      logger.warn('Cobertura: reanudación detenida, producto no vendible en el carrito', { tenantId, jobId, cantidad: e.productNames.length });
+      // La razón honesta: deriva del dato público (precio publicado ≠ local) o producto que dejó
+      // de ser vendible. Frenan igual, pero se resuelven distinto y el aviso tiene que decir cuál es.
+      const aviso = avisoReanudacionBloqueada(e, customerId, req.id);
+      logger.warn(
+        aviso.motivo === 'catalog_drift'
+          ? 'Cobertura: reanudación detenida, dato público del catálogo sin confirmar'
+          : 'Cobertura: reanudación detenida, producto no vendible en el carrito',
+        { tenantId, jobId, motivo: aviso.motivo, cantidad: e.productNames.length },
+      );
       await db().doc(paths.session(tenantId, customerId)).set({ context: { coverageResumeInProgress: null }, updatedAt: Timestamp.now() }, { merge: true }).catch(() => {});
       await setJob(tenantId, jobId, { status: 'held_by_seller' }).catch(() => {});
       // El espejo del request debe reflejar el mismo estado terminal que el job (si no, el
@@ -807,14 +876,14 @@ export async function processCoverageResumeJob(tenantId: string, jobId: string):
       await setResume(tenantId, req.id, 'held_by_seller', null).catch(() => {});
       // Y AVISAR: el cliente mandó su ubicación, se le aprobó la cobertura y su pedido no se
       // puede crear. Sin campana esto queda invisible hasta que el cliente vuelva a escribir.
-      const notifId = `covstock-${customerId}-${req.id}`;
+      const notifId = aviso.notifId;
       await db().doc(`${paths.notifications(tenantId)}/${notifId}`).create({
         id: notifId,
         tenantId,
         category: 'handoff',
         type: 'handoff_coverage_stale',
-        title: '🛒 Un pedido con cobertura aprobada no se pudo crear',
-        body: `El carrito del cliente …${customerId.slice(-4)} tiene ${e.productNames.length === 1 ? 'un producto que ya no está disponible' : 'productos que ya no están disponibles'}. Revisá la conversación y resolvelo a mano.`,
+        title: aviso.title,
+        body: aviso.body,
         dedupeKey: notifId,
         customerId,
         read: false,

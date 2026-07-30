@@ -13,6 +13,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import type { Product } from '@vpw/shared';
+import { normalizarOwnershipStatus } from '@/lib/catalog';
 import CatalogPage from './page';
 
 const listProductsMock = vi.fn();
@@ -26,10 +27,12 @@ const importItemsMock = vi.fn();
 const confirmMappingMock = vi.fn();
 const reconcileJobMock = vi.fn();
 const runImportMock = vi.fn();
+const ownershipMock = vi.fn();
 vi.mock('@/lib/catalog', async (importOriginal) => {
   const real = await importOriginal<typeof import('@/lib/catalog')>();
   return {
     ...real,
+    fetchCatalogOwnershipStatus: (...a: unknown[]) => ownershipMock(...a),
     listProducts: (...a: unknown[]) => listProductsMock(...a),
     listCategories: (...a: unknown[]) => listCategoriesMock(...a),
     listProductFinancials: (...a: unknown[]) => listFinancialsMock(...a),
@@ -49,6 +52,7 @@ vi.mock('@/components/MetaReconciliation', () => ({ MetaReconciliation: () => nu
 vi.mock('@/components/OutboxIncidents', () => ({ OutboxIncidents: () => null }));
 vi.mock('@/components/MetaCatalogImport', () => ({ MetaCatalogImport: () => null }));
 vi.mock('@/components/CatalogQualityCenter', () => ({ CatalogQualityCenter: () => null }));
+vi.mock('@/components/CatalogOwnershipCard', () => ({ CatalogOwnershipCard: () => null }));
 vi.mock('@/components/ProductForm', () => ({ ProductForm: () => null }));
 
 vi.mock('@/lib/active-company', () => ({
@@ -112,6 +116,10 @@ function renderPage() {
  * happy-dom no ejecuta el activation behavior del checkbox en un click sintético (React
  * nunca ve el onChange). Workaround estándar: setear `checked` vía el setter del PROTOTIPO
  * (esquiva el value-tracker de React) y recién ahí disparar el click.
+ *
+ * Los checkboxes se buscan con `findByLabelText` (no `getBy`) desde ADR-0015: la selección
+ * masiva es fail-CLOSED, así que la columna recién existe cuando la consulta de propiedad
+ * respondió — antes no se sabe si VendeYaPy puede publicar algo.
  */
 function tildarCheckbox(el: HTMLElement) {
   const input = el as HTMLInputElement;
@@ -128,6 +136,21 @@ beforeEach(() => {
   listCategoriesMock.mockResolvedValue([]);
   listFinancialsMock.mockResolvedValue({});
   setSyncEnabledMock.mockResolvedValue({ ok: true, enabled: true, blockers: [] });
+  // ADR-0015: la selección masiva solo existe si VendeYaPy gobierna algún campo publicable.
+  // El bloqueo por propiedad tiene su propio archivo (page.ownership.test.tsx).
+  ownershipMock.mockResolvedValue(
+    normalizarOwnershipStatus({
+      enabled: true,
+      configMode: 'live',
+      ownership: {
+        model: 'vendeyapy_managed',
+        writable: ['title', 'description', 'price', 'currency', 'availability', 'inventory', 'brand', 'category', 'image', 'url'],
+        modeCeiling: 'live',
+        degraded: false,
+        reasons: [],
+      },
+    }),
+  );
 });
 
 describe('CatalogPage — selección masiva de elegibles', () => {
@@ -136,7 +159,7 @@ describe('CatalogPage — selección masiva de elegibles', () => {
     await screen.findByText('Alfa Elegible');
 
     // El header ya declara cuántos elegibles hay (2: evaluado sin bloqueos + conservador OK).
-    tildarCheckbox(screen.getByLabelText('Seleccionar los 2 productos elegibles para habilitar sincronización'));
+    tildarCheckbox(await screen.findByLabelText('Seleccionar los 2 productos elegibles para habilitar sincronización'));
 
     expect(screen.getByLabelText('Seleccionar Alfa Elegible para habilitar sincronización')).toBeChecked();
     expect(screen.getByLabelText('Seleccionar Beta Sin Evaluar para habilitar sincronización')).toBeChecked();
@@ -155,7 +178,7 @@ describe('CatalogPage — selección masiva de elegibles', () => {
   it('la barra masiva muestra elegibles seleccionados y excluidos AGRUPADOS por razón', async () => {
     renderPage();
     await screen.findByText('Alfa Elegible');
-    tildarCheckbox(screen.getByLabelText('Seleccionar los 2 productos elegibles para habilitar sincronización'));
+    tildarCheckbox(await screen.findByLabelText('Seleccionar los 2 productos elegibles para habilitar sincronización'));
 
     const barra = screen.getByRole('region', { name: 'Habilitación masiva de sincronización' });
     expect(barra).toHaveTextContent('2 productos seleccionados');
@@ -183,7 +206,7 @@ describe('CatalogPage — selección masiva de elegibles', () => {
     );
     renderPage();
     await screen.findByText('Alfa Elegible');
-    tildarCheckbox(screen.getByLabelText('Seleccionar los 2 productos elegibles para habilitar sincronización'));
+    tildarCheckbox(await screen.findByLabelText('Seleccionar los 2 productos elegibles para habilitar sincronización'));
     fireEvent.click(screen.getByRole('button', { name: 'Habilitar sincronización (2)' }));
     await screen.findByRole('dialog');
     fireEvent.click(screen.getByRole('button', { name: 'Sí, habilitar' }));
@@ -210,7 +233,7 @@ describe('CatalogPage — selección masiva de elegibles', () => {
   it('cancelar la confirmación no habilita nada', async () => {
     renderPage();
     await screen.findByText('Alfa Elegible');
-    tildarCheckbox(screen.getByLabelText('Seleccionar los 2 productos elegibles para habilitar sincronización'));
+    tildarCheckbox(await screen.findByLabelText('Seleccionar los 2 productos elegibles para habilitar sincronización'));
     fireEvent.click(screen.getByRole('button', { name: 'Habilitar sincronización (2)' }));
     await screen.findByRole('dialog');
     fireEvent.click(screen.getByRole('button', { name: 'Cancelar' }));
@@ -221,7 +244,7 @@ describe('CatalogPage — selección masiva de elegibles', () => {
   it('"Quitar selección" limpia la barra sin llamar a nada', async () => {
     renderPage();
     await screen.findByText('Alfa Elegible');
-    tildarCheckbox(screen.getByLabelText('Seleccionar los 2 productos elegibles para habilitar sincronización'));
+    tildarCheckbox(await screen.findByLabelText('Seleccionar los 2 productos elegibles para habilitar sincronización'));
     expect(screen.getByText('2 productos seleccionados')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Quitar selección' }));
     expect(screen.queryByText('2 productos seleccionados')).not.toBeInTheDocument();

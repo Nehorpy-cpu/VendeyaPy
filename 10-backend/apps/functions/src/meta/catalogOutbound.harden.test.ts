@@ -10,8 +10,13 @@ import {
   type CatalogBatchRequest,
 } from './catalogOutbound.js';
 import { assertItemsBatchBody, assertBatchRequestShape } from './catalogClient.js';
-import { localPublicView, planCatalogSync } from './catalog.js';
+import { localPublicView, planCatalogSync as planConPropiedad } from './catalog.js';
+import { normalizeCatalogOwnership, WRITABLE_FIELDS } from './catalogOwnership.js';
 import type { MetaRemoteCatalogItem } from './catalogClient.js';
+
+/** (ADR-0015) Escenario de estos tests: VendeYaPy gobierna todos los campos públicos. */
+const PROPIEDAD_TOTAL = normalizeCatalogOwnership({ model: 'vendeyapy_managed', ownedFields: [...WRITABLE_FIELDS], external: null });
+const planCatalogSync = (products: Product[], remotos: MetaRemoteCatalogItem[]) => planConPropiedad(products, remotos, PROPIEDAD_TOTAL);
 
 /**
  * META-CATALOG-OUTBOUND-CONTRACT-HARDEN-1 — defectos hallados sobre el contrato ya corregido:

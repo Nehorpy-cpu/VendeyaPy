@@ -121,6 +121,25 @@ export const paths = {
   /** Corridas de mantenimiento: backfill de locks + quality (HARDEN-1, ADR-0014 §4c). */
   metaCatalogMaintenanceRuns: (tenantId: string) => `tenants/${tenantId}/metaCatalogMaintenanceRuns`,
   metaCatalogMaintenanceRun: (tenantId: string, runId: string) => `tenants/${tenantId}/metaCatalogMaintenanceRuns/${runId}`,
+  /**
+   * Detección de FUENTES EXTERNAS del catálogo (ADR-0015 §4). Guarda SOLO metadata saneada
+   * (identificador, nombre saneado, host sin query, horario, columnas): jamás la URL firmada,
+   * su query string, el token ni el archivo crudo. El id del check deriva de la huella.
+   */
+  metaCatalogSourceChecks: (tenantId: string) => `tenants/${tenantId}/metaCatalogSourceChecks`,
+  metaCatalogSourceCheck: (tenantId: string, checkId: string) => `tenants/${tenantId}/metaCatalogSourceChecks/${checkId}`,
+  /**
+   * Corridas de RECONCILIACIÓN periódica del estado actual (ADR-0015 §6): barrido paginado
+   * del catálogo remoto (solo GET) que actualiza `metaSyncState` de los productos mapeados.
+   */
+  metaCatalogVerificationRuns: (tenantId: string) => `tenants/${tenantId}/metaCatalogVerificationRuns`,
+  metaCatalogVerificationRun: (tenantId: string, runId: string) => `tenants/${tenantId}/metaCatalogVerificationRuns/${runId}`,
+  /**
+   * Corridas de MIGRACIÓN de la propiedad por campos (ADR-0015 §9): preview/apply que declara
+   * el modelo, reconoce la fuente externa y siembra el estado actual de los productos.
+   */
+  metaCatalogOwnershipRuns: (tenantId: string) => `tenants/${tenantId}/metaCatalogOwnershipRuns`,
+  metaCatalogOwnershipRun: (tenantId: string, runId: string) => `tenants/${tenantId}/metaCatalogOwnershipRuns/${runId}`,
   trackingSources: (tenantId: string) => `tenants/${tenantId}/trackingSources`,
   trackingSource: (tenantId: string, id: string) => `tenants/${tenantId}/trackingSources/${id}`,
   businessEvents: (tenantId: string) => `tenants/${tenantId}/businessEvents`,

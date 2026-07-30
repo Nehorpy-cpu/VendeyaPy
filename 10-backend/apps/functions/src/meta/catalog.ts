@@ -39,6 +39,7 @@ import {
   buildCatalogUpdatePatch,
   canonicalHttpsUrl,
   createBlockers,
+  CREATE_PAYLOAD_FIELDS,
   MAX_ID_LENGTH,
   outboundAvailability,
   outboundBrand,
@@ -54,6 +55,14 @@ import {
   type UpdateBlocker,
 } from './catalogOutbound.js';
 import { stableHash, verifyJobOutcome } from './catalogOutbox.js';
+import {
+  effectiveMode,
+  type CatalogOwnershipModel,
+  type EffectiveOwnership,
+  type OwnershipDegradedReason,
+  type WritableField as OwnedField,
+} from './catalogOwnership.js';
+import { outboundFieldsNotOwned, ownershipFingerprint } from './catalogOwnershipGates.js';
 import { enqueueCatalogPlan } from './catalogOutboxWorker.js';
 
 const MAX_STORED_ENTRIES = 500; // techo del run doc (y de la respuesta al panel)
@@ -140,6 +149,12 @@ export type CatalogBlockReason =
   | 'brand_missing'
   | 'description_missing'
   | 'no_writable_change'
+  /**
+   * (ADR-0015) La acción necesitaba escribir campos que VendeYaPy NO gobierna: los publica una
+   * fuente externa reconocida, o la propiedad todavía no está declarada. No es un defecto del
+   * producto — es que ese campo no es nuestro y proponerlo sería proponer un loop.
+   */
+  | 'externally_owned'
   /** El producto tiene datos que el contrato de Meta no admite: queda fuera, sin romper el plan. */
   | 'serialization_failed';
 
@@ -157,6 +172,13 @@ export interface CatalogPlanEntry {
   /** Coincidencia por NOMBRE con otro retailer_id: sugerencia, jamás auto-vincula. */
   suggestion?: { remoteRetailerId: string; remoteName: string };
   changedFields?: string[];
+  /**
+   * (ADR-0015) Campos —en el vocabulario del contrato de ESCRITURA— que esta entrada habría
+   * necesitado y que VendeYaPy no gobierna. Se REPORTAN aunque la acción siga adelante con el
+   * resto: el dueño tiene que ver qué quedó afuera y por qué, en vez de descubrir un día que
+   * el precio nunca se propagó.
+   */
+  notOwnedFields?: string[];
   /** Vista LOCAL en términos de lectura (para el diff y para confirmar la convergencia). */
   payload?: Record<string, unknown>;
   /** Request de ESCRITURA ya serializado según el contrato. Solo en acciones accionables. */
@@ -189,6 +211,27 @@ export interface CatalogRemoteSnapshot {
   brand: string;
 }
 
+/**
+ * Propiedad con la que se planificó, SANEADA para el panel y para la huella del preview
+ * (ADR-0015 §7). Jamás incluye la URL del feed, su query string ni token alguno.
+ */
+export interface CatalogPlanOwnership {
+  model: CatalogOwnershipModel;
+  /** Huella de la propiedad efectiva: participa de `planFingerprint`. */
+  fingerprint: string;
+  /** Campos públicos que VendeYaPy gobierna (vocabulario del catálogo). */
+  ownedFields: OwnedField[];
+  /** Campos públicos que gobierna la fuente externa reconocida. */
+  externalFields: OwnedField[];
+  degraded: boolean;
+  reasons: OwnershipDegradedReason[];
+  /**
+   * Acciones que la propiedad IMPIDIÓ proponer. Es el número que explica un plan sin trabajo:
+   * "no hay nada para hacer" y "no nos toca hacerlo" son cosas distintas.
+   */
+  blockedActions: number;
+}
+
 export interface CatalogSyncPlan {
   entries: CatalogPlanEntry[];
   /** Items que existen en Meta sin producto local con ese SKU. Solo se REPORTAN. */
@@ -198,6 +241,8 @@ export interface CatalogSyncPlan {
   /** Productos SIN opt-in (`syncToMeta !== true`): quedan totalmente fuera del plan. */
   excludedNotManaged: number;
   summary: Record<CatalogPlanAction | 'remoteOnly', number>;
+  /** Propiedad EFECTIVA con la que se planificó (ADR-0015 §7). */
+  ownership: CatalogPlanOwnership;
 }
 
 const normName = (s: string) => s.trim().toLowerCase().replace(/\s+/g, ' ');
@@ -247,8 +292,12 @@ export function priceEquals(local: string, remote: string): boolean {
  * Compara la URL local (ya canónica) contra la remota, canonizando también el lado de Meta.
  * Sin URL local ⇒ no se gestiona el campo. Sin URL remota ⇒ no se puede afirmar que difiere
  * (Meta puede no exponerla en el GET): no se marca cambio para no entrar en un bucle.
+ *
+ * EXPORTADA (ADR-0015 §5): la verificación periódica compara los mismos campos que el diff.
+ * Con dos implementaciones habría dos verdades sobre el mismo campo — el plan diría
+ * "sin cambios" y el estado diría `drifted`, o al revés.
  */
-function urlEquals(local: string, remoteUrl: string): boolean {
+export function urlEquals(local: string, remoteUrl: string): boolean {
   if (!local) return true;
   if (!remoteUrl) return true;
   return local === (canonicalHttpsUrl(remoteUrl) ?? remoteUrl);
@@ -313,7 +362,12 @@ function diffPublicFields(payload: Record<string, unknown>, remote: MetaRemoteCa
   return changed;
 }
 
-export function planCatalogSync(products: Product[], remoteItems: MetaRemoteCatalogItem[]): CatalogSyncPlan {
+/**
+ * Plan del ciclo. `ownership` es OBLIGATORIA y ya viene normalizada (fail-closed de nivel 2):
+ * no tiene default a propósito — un planificador que asumiera propiedad total por omisión
+ * sería exactamente el bug que ADR-0015 vino a cerrar.
+ */
+export function planCatalogSync(products: Product[], remoteItems: MetaRemoteCatalogItem[], ownership: EffectiveOwnership): CatalogSyncPlan {
   const remoteByRetailerId = new Map<string, MetaRemoteCatalogItem>();
   for (const r of remoteItems) if (r.retailerId) remoteByRetailerId.set(r.retailerId, r);
   const remoteByName = new Map<string, MetaRemoteCatalogItem>();
@@ -342,6 +396,21 @@ export function planCatalogSync(products: Product[], remoteItems: MetaRemoteCata
 
   const entries: CatalogPlanEntry[] = [];
   let ignoredArchived = 0;
+  /** Acciones que existían pero no se proponen porque los campos no son nuestros. */
+  let blockedByOwnership = 0;
+
+  // ═══ GATE DE PROPIEDAD (ADR-0015 §7) ═══
+  // Un campo que no gobernamos NO se propone, ni siquiera como sugerencia: proponer un update
+  // sobre un campo que publica un feed diario ES el loop —el feed revierte de madrugada, el
+  // plan lo vuelve a detectar, el apply lo vuelve a escribir— y nadie se entera nunca.
+  const ajenos = (campos: readonly string[]) => outboundFieldsNotOwned(ownership, campos);
+  // El motivo se le muestra al dueño: "todavía no declaraste quién manda" y "manda otro" son
+  // problemas distintos y se arreglan en lugares distintos.
+  const notaPropiedad = ownership.degraded ? 'propiedad_no_declarada' : 'campos_gobernados_por_fuente_externa';
+  const bloqueadoPorPropiedad = (base: Omit<CatalogPlanEntry, 'action'>, sinPropiedad: string[], extra: Partial<CatalogPlanEntry> = {}): void => {
+    blockedByOwnership++;
+    entries.push({ ...base, action: 'blocked', blockedReasons: ['externally_owned'], notOwnedFields: sinPropiedad, note: notaPropiedad, ...extra });
+  };
 
   for (const p of gestionados) {
     // AISLAMIENTO POR PRODUCTO: serializar puede lanzar (datos que el contrato de Meta no
@@ -398,6 +467,14 @@ export function planCatalogSync(products: Product[], remoteItems: MetaRemoteCata
       const identityOk = !reasons.includes('sku_missing') && !reasons.includes('sku_duplicated') && !reasons.includes('retailer_id_duplicated') && !reasons.includes('identity_too_long');
       const wantsOut = productAvailability(p) === 'out of stock';
       if (remote && identityOk && wantsOut && remote.availability !== 'out of stock') {
+        // Apagar TAMBIÉN es escribir: si `availability` la publica el feed, el apagado no es
+        // nuestro. Se dice con todas las letras en vez de emitir un UPDATE que la fuente
+        // externa revertiría mañana.
+        const sinPropiedad = ajenos(['availability']);
+        if (sinPropiedad.length) {
+          bloqueadoPorPropiedad(base, sinPropiedad, { blockedReasons: [...reasons, 'externally_owned'], remoteItemId: remote.id });
+          return;
+        }
         entries.push({
           ...base,
           action: 'disable',
@@ -444,6 +521,15 @@ export function planCatalogSync(products: Product[], remoteItems: MetaRemoteCata
         entries.push({ ...base, action: 'unchanged', note: 'no_vendible_sin_item_remoto', remoteItemId: null });
         return;
       }
+      // CREAR publica el artículo ENTERO: exige gobernar TODOS los campos que el create emite.
+      // Se pregunta ANTES de mirar los obligatorios porque el orden es el del diagnóstico
+      // honesto: pedirle una descripción al dueño cuando el problema es que la descripción la
+      // publica el feed lo manda a arreglar algo que no está roto.
+      const createSinPropiedad = ajenos(CREATE_PAYLOAD_FIELDS);
+      if (createSinPropiedad.length) {
+        bloqueadoPorPropiedad(base, createSinPropiedad, { remoteItemId: null });
+        return;
+      }
       // CREAR exige TODOS los obligatorios del contrato de Meta (link, marca, descripción,
       // imagen…). Falta alguno ⇒ bloqueado con el motivo exacto; jamás se inventa un valor.
       const faltantes = createBlockers(p).map(createBlockerToPlanReason);
@@ -462,10 +548,23 @@ export function planCatalogSync(products: Product[], remoteItems: MetaRemoteCata
       return;
     }
     const disabling = payload.availability === 'out of stock' && remote.availability !== 'out of stock';
+    // El patch se recorta a lo NUESTRO. Un híbrido donde gobernamos el precio pero el feed
+    // gobierna el título manda `{ id, price }` y reporta el título como ajeno: se propaga lo
+    // que nos toca y se dice qué quedó afuera. Sin un solo campo propio no hay patch posible.
+    const escribibles = disabling ? ['availability'] : toWritableFields(changed);
+    const sinPropiedad = ajenos(escribibles);
+    const propios = escribibles.filter((f) => !sinPropiedad.includes(f));
+    // Solo se culpa a la propiedad cuando la propiedad ES la causa. Si no quedó nada que
+    // escribir por otro motivo, el mensaje correcto lo da `updateBlockers` (`no_writable_change`).
+    if (!propios.length && sinPropiedad.length) {
+      bloqueadoPorPropiedad(base, sinPropiedad, { changedFields: changed, payload, remoteItemId: remote.id });
+      return;
+    }
     if (!disabling) {
       // Un campo cambiado cuyo valor local no es publicable (descripción vacía, URL
-      // inválida) bloquea SOLO a este producto, con el motivo exacto.
-      const impedimentos = updateBlockers(p, toWritableFields(changed));
+      // inválida) bloquea SOLO a este producto, con el motivo exacto. Se evalúa sobre los
+      // campos PROPIOS: un ajeno no puede bloquear un update que ni siquiera lo incluye.
+      const impedimentos = updateBlockers(p, propios);
       if (impedimentos.length) {
         entries.push({ ...base, action: 'blocked', blockedReasons: impedimentos.map(createBlockerToPlanReason), changedFields: changed, note: 'update_incompleto' });
         return;
@@ -475,9 +574,10 @@ export function planCatalogSync(products: Product[], remoteItems: MetaRemoteCata
       ...base,
       action: disabling ? 'disable' : 'update',
       changedFields: changed,
+      ...(sinPropiedad.length ? { notOwnedFields: sinPropiedad } : {}),
       payload,
-      // El request lleva SOLO lo que cambió (o solo availability si es un apagado).
-      request: disabling ? buildCatalogDisablePatch(p) : buildCatalogUpdatePatch(p, toWritableFields(changed)),
+      // El request lleva SOLO lo que cambió Y es nuestro (o solo availability si es un apagado).
+      request: disabling ? buildCatalogDisablePatch(p) : buildCatalogUpdatePatch(p, propios),
       remoteItemId: remote.id,
     });
   }
@@ -499,7 +599,22 @@ export function planCatalogSync(products: Product[], remoteItems: MetaRemoteCata
   const summary: CatalogSyncPlan['summary'] = { create: 0, update: 0, disable: 0, unchanged: 0, blocked: 0, remoteOnly: remoteOnly.length };
   for (const e of entries) summary[e.action]++;
 
-  return { entries, remoteOnly, ignoredArchived, excludedNotManaged: excluidos, summary };
+  return {
+    entries,
+    remoteOnly,
+    ignoredArchived,
+    excludedNotManaged: excluidos,
+    summary,
+    ownership: {
+      model: ownership.model,
+      fingerprint: ownershipFingerprint(ownership),
+      ownedFields: ownership.writable,
+      externalFields: ownership.external,
+      degraded: ownership.degraded,
+      reasons: ownership.reasons,
+      blockedActions: blockedByOwnership,
+    },
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -535,12 +650,20 @@ export interface CatalogSyncRunResult {
    */
   status: 'disabled' | 'apply_blocked' | 'error' | 'planned' | 'queued' | 'partial_failure';
   configMode: CatalogSyncMode;
-  reason?: 'mode_not_live' | 'missing_token' | 'catalog_unreachable' | 'batch_failed' | 'state_persist_failed' | PreviewBlockReason;
+  /**
+   * Modo REALMENTE ejecutable = config ∧ techo de la propiedad (ADR-0015). Un documento en
+   * `live` con el catálogo gobernado por una fuente externa reporta `dry_run` acá: el panel
+   * tiene que mostrar lo que va a pasar, no lo que alguien escribió en la config.
+   */
+  effectiveMode?: CatalogSyncMode;
+  reason?: 'mode_not_live' | 'ownership_not_live' | 'missing_token' | 'catalog_unreachable' | 'batch_failed' | 'state_persist_failed' | PreviewBlockReason;
   /** Detalle SANEADO (jamás token ni datos internos). */
   errorDetail?: string;
   catalogId?: string;
   summary?: CatalogSyncPlan['summary'];
-  entries?: Array<Pick<CatalogPlanEntry, 'productId' | 'sku' | 'productName' | 'action' | 'blockedReasons' | 'changedFields' | 'suggestion' | 'note'>>;
+  /** Propiedad SANEADA con la que se planificó: qué gobierna cada lado y por qué. */
+  ownership?: CatalogPlanOwnership;
+  entries?: Array<Pick<CatalogPlanEntry, 'productId' | 'sku' | 'productName' | 'action' | 'blockedReasons' | 'changedFields' | 'notOwnedFields' | 'suggestion' | 'note'>>;
   ignoredArchived?: number;
   /** Productos sin opt-in de sync: excluidos del plan (fail-closed). */
   excludedNotManaged?: number;
@@ -588,6 +711,9 @@ export function planFingerprint(tenantId: string, catalogId: string, plan: Catal
       remoteItemId: e.remoteItemId ?? null,
       changedFields: e.changedFields ? [...e.changedFields].sort() : null,
       blockedReasons: e.blockedReasons ? [...e.blockedReasons].sort() : null,
+      // Lo que quedó afuera por propiedad también define el plan aprobado: si mañana el dueño
+      // reclama un campo que hoy publica el feed, lo previsualizado ya no es lo mismo.
+      notOwnedFields: e.notOwnedFields ? [...e.notOwnedFields].sort() : null,
       request: e.request ?? null,
       // Snapshot remoto del item afectado: "Meta modificado" invalida el preview aunque el
       // request a enviar no cambie (el dueño aprueba contra un remoto concreto).
@@ -595,7 +721,11 @@ export function planFingerprint(tenantId: string, catalogId: string, plan: Catal
     }))
     // El orden del plan es determinístico, pero la huella no debe depender de él.
     .sort((a, b) => (a.productId < b.productId ? -1 : a.productId > b.productId ? 1 : 0));
-  return stableHash({ v: 1, tenantId, catalogId, entries });
+  // La PROPIEDAD participa de la huella (ADR-0015 §7): un preview se aprueba bajo permisos
+  // concretos. Si entre la previsualización y el apply alguien cambia quién gobierna qué, el
+  // plan aprobado dejó de existir aunque las acciones se vean idénticas — y encolarlo sería
+  // ejecutar con permisos que ya nadie autorizó.
+  return stableHash({ v: 2, tenantId, catalogId, ownership: plan.ownership.fingerprint, entries });
 }
 
 /** Evidencia que el apply debe presentar (viene del resultado del dry_run). */
@@ -662,6 +792,7 @@ function slimEntries(entries: CatalogPlanEntry[]): NonNullable<CatalogSyncRunRes
     action: e.action,
     ...(e.blockedReasons ? { blockedReasons: e.blockedReasons } : {}),
     ...(e.changedFields ? { changedFields: e.changedFields } : {}),
+    ...(e.notOwnedFields ? { notOwnedFields: e.notOwnedFields } : {}),
     ...(e.suggestion ? { suggestion: e.suggestion } : {}),
     ...(e.note ? { note: e.note } : {}),
   }));
@@ -735,12 +866,19 @@ export async function runCatalogSync(
     return { runId, requestedMode: opts.mode, status: 'disabled', configMode: 'off' };
   }
 
-  const base: CatalogSyncRunResult = { runId, requestedMode: opts.mode, status: 'planned', configMode: cfg.mode, catalogId: cfg.catalogId };
+  // 1b) MODO EFECTIVO (ADR-0015 §7): la config propone, la propiedad dispone. Con el catálogo
+  //     gobernado por una fuente externa —o con la propiedad sin declarar— el techo es
+  //     `dry_run` y ningún apply pasa de acá, diga lo que diga el documento.
+  const modoEfectivo = effectiveMode(cfg.mode, cfg.ownership);
+  const base: CatalogSyncRunResult = { runId, requestedMode: opts.mode, status: 'planned', configMode: cfg.mode, effectiveMode: modoEfectivo, catalogId: cfg.catalogId };
 
-  // 2) apply exige mode 'live' explícito en la config (dry_run jamás escala solo).
-  if (opts.mode === 'apply' && cfg.mode !== 'live') {
-    const res: CatalogSyncRunResult = { ...base, status: 'apply_blocked', reason: 'mode_not_live' };
-    await writeRunDoc(tenantId, runId, { status: res.status, requestedMode: opts.mode, configMode: cfg.mode, reason: res.reason, actorUid: actor?.uid ?? null, startedAt, finishedAt: Timestamp.now() });
+  // 2) apply exige mode 'live' EFECTIVO (dry_run jamás escala solo, y la propiedad tampoco).
+  if (opts.mode === 'apply' && modoEfectivo !== 'live') {
+    // Se distingue el motivo: "está en dry_run" se arregla en la config; "no gobernás estos
+    // campos" se arregla declarando la propiedad (o no se arregla, y está bien que así sea).
+    const reason = cfg.mode === 'live' ? ('ownership_not_live' as const) : ('mode_not_live' as const);
+    const res: CatalogSyncRunResult = { ...base, status: 'apply_blocked', reason };
+    await writeRunDoc(tenantId, runId, { status: res.status, requestedMode: opts.mode, configMode: cfg.mode, effectiveMode: modoEfectivo, reason: res.reason, actorUid: actor?.uid ?? null, startedAt, finishedAt: Timestamp.now() });
     await auditRun(tenantId, runId, res, actor);
     return res;
   }
@@ -812,7 +950,7 @@ export async function runCatalogSync(
   // 4) Plan puro local vs remoto. El id SIEMPRE es el del doc (no confiar en data().id).
   const snap = await db().collection(paths.products(tenantId)).get();
   const products = snap.docs.map((d) => ({ ...(d.data() as Product), id: d.id }));
-  const plan = planCatalogSync(products, remoteItems);
+  const plan = planCatalogSync(products, remoteItems, cfg.ownership);
   // Huella del plan COMPLETO (pre-truncado): la evidencia que un apply futuro debe presentar.
   const planHash = planFingerprint(tenantId, cfg.catalogId, plan);
 
@@ -820,6 +958,7 @@ export async function runCatalogSync(
     ...base,
     status: 'planned',
     summary: plan.summary,
+    ownership: plan.ownership,
     entries: slimEntries(plan.entries),
     ignoredArchived: plan.ignoredArchived,
     excludedNotManaged: plan.excludedNotManaged,
@@ -831,8 +970,11 @@ export async function runCatalogSync(
     status: 'planned',
     requestedMode: opts.mode,
     configMode: cfg.mode,
+    effectiveMode: modoEfectivo,
     catalogId: cfg.catalogId,
     summary: plan.summary,
+    // Propiedad SANEADA: modelo, campos de cada lado y huella. Ninguna URL, ningún token.
+    ownership: plan.ownership,
     ignoredArchived: plan.ignoredArchived,
     excludedNotManaged: plan.excludedNotManaged,
     remoteOnly: plan.remoteOnly.slice(0, MAX_STORED_ENTRIES),
@@ -916,7 +1058,8 @@ export async function runCatalogSync(
       payload: e.payload ?? { retailer_id: e.sku, availability: 'out of stock' },
       remoteItemId: e.remoteItemId ?? null,
     })),
-    { catalogId: cfg.catalogId },
+    // La propiedad viaja al encolado: cada job congela su huella y se revalida antes del POST.
+    { catalogId: cfg.catalogId, ownership: cfg.ownership },
     actor,
   );
 

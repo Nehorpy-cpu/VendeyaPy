@@ -260,6 +260,35 @@ export type AttributionType = (typeof ATTRIBUTION_TYPE)[number];
 export const META_SYNC_STATUS = ['not_synced', 'pending', 'queued', 'processing', 'synced', 'needs_review', 'failed', 'disabled'] as const;
 export type MetaSyncStatus = (typeof META_SYNC_STATUS)[number];
 
+// ---------------------------------------------------------------------------
+// Estado ACTUAL de un producto contra el catálogo remoto (ADR-0015 §5)
+// ---------------------------------------------------------------------------
+// `metaSyncStatus` (arriba) es el eje HISTÓRICO: lo que pasó con nuestros jobs de escritura,
+// y un job `succeeded` es evidencia inmutable. Este es el eje ACTUAL: qué muestra Meta HOY,
+// y CADUCA. Confundirlos fue el bug de origen — `synced` afirmaba el pasado y nada lo volvía
+// a mirar, así que un artículo revertido por el feed externo seguía en verde.
+//
+// `stale` NO está acá a propósito: se DERIVA en lectura (metaVerifiedAt más viejo que el TTL)
+// y jamás se persiste. Si un job de verificación falla, el estado guardado envejece solo y
+// deja de afirmar — persistir `stale` dependería de que ese mismo job funcione.
+export const META_SYNC_STATE = ['verified', 'drifted', 'drifted_external', 'remote_missing', 'unverifiable'] as const;
+/** Estado PERSISTIDO (siempre producto de una lectura remota real). */
+export type MetaSyncState = (typeof META_SYNC_STATE)[number];
+/** Estado EFECTIVO en lectura = el persistido + `stale` derivado por TTL. Nunca se guarda. */
+export type MetaSyncStateEffective = MetaSyncState | 'stale';
+
+/** Quién gobierna el campo que divergió (ADR-0015 §1). `unknown` ⇒ nadie lo declaró. */
+export const META_DRIFT_OWNER = ['vendeyapy', 'external', 'unknown'] as const;
+export type MetaDriftOwner = (typeof META_DRIFT_OWNER)[number];
+
+/**
+ * Severidad de la deriva. `commercial` = precio/moneda/disponibilidad/stock: el bot no puede
+ * afirmarlos ni cerrar la venta (ADR-0015 §8). `cosmetic` = nombre/descripción/marca/imagen/
+ * URL/categoría: advertencia administrativa, NO corta la conversación.
+ */
+export const META_DRIFT_SEVERITY = ['commercial', 'cosmetic'] as const;
+export type MetaDriftSeverity = (typeof META_DRIFT_SEVERITY)[number];
+
 export const META_ASSET_TYPE = [
   'business',
   'ad_account',

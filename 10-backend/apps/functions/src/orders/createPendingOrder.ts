@@ -14,6 +14,7 @@ import type { Order, OrderItem, OrderFinancials, OrderFinancialsItem, Address, O
 import { db, paths } from '../lib/firebase.js';
 import { logger } from '../lib/logger.js';
 import { getProductCost } from '../catalog/financials.js';
+import { CAMPOS_CRITICOS, driftGuardCableado, leerDeriva, resumenSaneado, type VeredictoDeriva } from '../catalog/driftGuard.js';
 
 /**
  * El carrito contiene productos que ya no se pueden vender (desactivados o sin stock desde
@@ -24,6 +25,58 @@ export class ProductNoVendibleError extends Error {
     super(`Productos no disponibles: ${productNames.join(', ')}`);
     this.name = 'ProductNoVendibleError';
   }
+}
+
+/**
+ * ADR-0015 §8: el precio / la disponibilidad / el stock PÚBLICO de algún producto del carrito los
+ * gobierna una fuente externa que hoy publica otra cosa, así que no podemos confirmarlos.
+ *
+ * Extiende `ProductNoVendibleError` A PROPÓSITO: para todo lo que ya sabe frenar un checkout con
+ * productos que hoy no se pueden vender solos —el motor y el worker de reanudación de cobertura,
+ * que lo deja `held_by_seller` y avisa— este es exactamente el mismo caso, y no queremos una
+ * segunda lógica de pedidos. Quien necesite distinguirlo (el motor, para derivar con la razón
+ * estructurada correcta) lo chequea PRIMERO por ser la subclase.
+ */
+export class ProductoConDerivaCriticaError extends ProductNoVendibleError {
+  constructor(readonly veredicto: VeredictoDeriva) {
+    super(veredicto.bloqueantes.map((b) => b.productName));
+    this.name = 'ProductoConDerivaCriticaError';
+    this.message = `Deriva crítica del dato público en ${veredicto.bloqueantes.length} producto(s)`;
+  }
+}
+
+/**
+ * ADR-0015 §8 — freno sobre una orden YA CREADA, la que se va a cobrar. Lanza
+ * `ProductoConDerivaCriticaError` si el dato público de algún ítem hoy no se puede afirmar. NO
+ * escribe ni modifica nada: la orden existente es intocable (COVERAGE-1D).
+ *
+ * Vive acá, y no copiado en cada rama que reusa un pedido, para que exista UNA sola definición de
+ * "este pedido no puede seguir cobrándose solo": si un día cambia el criterio, cambia en un lugar.
+ *
+ * Reglas:
+ *  · Sin proyección de deriva cableada no se evalúa nada — un tenant que jamás enchufó esto
+ *    (credipower) no cambia en un ápice, igual que en el resto del módulo.
+ *  · Una orden sin ítems legibles se trata como `unverifiable`: no podemos decir QUÉ estamos por
+ *    cobrar, y mandar el total de algo que no sabemos atribuir es justo lo que este guard impide.
+ *  · FAIL-CLOSED en la lectura: acá hay dinero comprometido, así que "no pude leer la proyección"
+ *    no vale como "no hay deriva".
+ */
+export async function assertOrdenSinDerivaCritica(
+  tenantId: string,
+  orderId: string,
+  items: readonly { productId?: string; productName?: string }[] | undefined,
+  ctx: Record<string, unknown> = {},
+): Promise<void> {
+  if (!driftGuardCableado()) return;
+  const consultados = (items ?? [])
+    .filter((i): i is { productId: string; productName?: string } => typeof i?.productId === 'string' && i.productId !== '')
+    .map((i) => ({ id: i.productId, name: i.productName || i.productId }));
+  const deriva: VeredictoDeriva = consultados.length
+    ? await leerDeriva(tenantId, consultados, { failClosed: true })
+    : { bloqueantes: [{ productId: orderId, productName: 'pedido sin ítems', reason: 'unverifiable', fields: [...CAMPOS_CRITICOS] }], advertencias: [] };
+  if (!deriva.bloqueantes.length) return;
+  logger.warn('Checkout frenado: deriva crítica sobre una orden ya creada', { tenantId, orderId, ...ctx, ...resumenSaneado(deriva) });
+  throw new ProductoConDerivaCriticaError(deriva);
 }
 
 // Dirección vacía: la recolección de domicilio es de la fase de logística (futuro).
@@ -84,7 +137,23 @@ export async function createPendingOrder(
   // otro worker ya creó (ni sus finanzas congeladas) — si existe, se reusa tal cual.
   if (opts.orderId) {
     const existente = await db().doc(paths.order(tenantId, orderId)).get();
-    if (existente.exists) return existente.data() as Order;
+    if (existente.exists) {
+      const orden = existente.data() as Order;
+      // POR QUÉ SE CONSERVA EL EARLY-RETURN y qué agrega el chequeo de acá abajo:
+      //  · se conserva porque es la garantía COVERAGE-1D: la orden que otro worker ya creó —y sus
+      //    finanzas congeladas— no se reescribe JAMÁS. Este camino sigue devolviéndola intacta,
+      //    sin tocar un solo campo ni volver a calcular totales.
+      //  · se agrega el chequeo porque devolverla intacta hace que el llamador CONTINÚE el flujo
+      //    comercial (manda el total y los datos bancarios) sobre un producto que puede estar en
+      //    deriva crítica, salteándose las dos revalidaciones de más abajo. La ventana es angosta
+      //    —el único llamador con `orderId` (la reanudación de cobertura) ya evalúa la deriva
+      //    antes— pero se cierra igual: es exactamente el patrón que dejó pasar el bug original,
+      //    otro worker creando la orden entre una lectura y la otra.
+      // Se evalúa lo que pide LA ORDEN EXISTENTE (es lo que se va a cobrar), no el carrito que
+      // llegó por parámetro, que pudo cambiar después de que esa orden naciera.
+      await assertOrdenSinDerivaCritica(tenantId, orderId, orden.items, { customerId, motivo: 'orden_reservada_ya_existente' });
+      return orden;
+    }
   }
 
   // REVALIDACIÓN DE VENDIBILIDAD (META-CATALOG-RECONCILIATION-1): el carrito puede haberse
@@ -103,6 +172,20 @@ export async function createPendingOrder(
   if (noVendibles.length) {
     logger.warn('Checkout bloqueado: producto no vendible en el carrito', { tenantId, customerId, cantidad: noVendibles.length });
     throw new ProductNoVendibleError(noVendibles);
+  }
+
+  // REVALIDACIÓN DE HONESTIDAD DEL DATO PÚBLICO (ADR-0015 §8). Va acá y no solo en el motor
+  // porque este es el ÚNICO punto por el que nace un pedido: cubre el checkout del bot y la
+  // reanudación tras la aprobación de cobertura (donde el carrito se congeló mucho antes). Es una
+  // proyección local, sin llamadas a Meta: el camino crítico jamás depende de una lectura externa,
+  // y el precio que se cobra sigue siendo el LOCAL — lo que cambia es que no se cobra a ciegas.
+  // `failClosed`: acá "no hay deriva" y "no pude leer si la hay" NO son lo mismo. Este es el punto
+  // donde nace el compromiso comercial, así que un error de la proyección frena el pedido en vez de
+  // dejarlo pasar (el camino conversacional sí sigue fail-open: una respuesta de más no cobra nada).
+  const deriva = await leerDeriva(tenantId, cart.items.map((i) => ({ id: i.productId, name: i.name })), { failClosed: true });
+  if (deriva.bloqueantes.length) {
+    logger.warn('Checkout bloqueado: deriva crítica del dato público', { tenantId, customerId, ...resumenSaneado(deriva) });
+    throw new ProductoConDerivaCriticaError(deriva);
   }
 
   // El costo (privado) se lee de productFinancials y se "congela" en orderFinancials.

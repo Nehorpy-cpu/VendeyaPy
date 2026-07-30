@@ -8,7 +8,7 @@
  */
 
 import { Timestamp, type Transaction } from 'firebase-admin/firestore';
-import type { Session } from '@vpw/shared';
+import type { Session, HandoffNotificationType } from '@vpw/shared';
 import { db, paths } from '../lib/firebase.js';
 import { logger } from '../lib/logger.js';
 import { appendMessage, markConversationRead } from './messages.js';
@@ -21,8 +21,12 @@ export interface HandoffResult {
 /** Mantengo el alias por compatibilidad con código existente. */
 export type ReleaseResult = HandoffResult;
 
-/** HANDOFF-2 / AI-FALLBACK-HONESTO-1: razón estructurada de todo takeover (auditable en la sesión). */
-export type HandoffReason = 'customer_requested' | 'payment_verification' | 'coverage_review' | 'seller_manual' | 'ai_unavailable';
+/**
+ * HANDOFF-2 / AI-FALLBACK-HONESTO-1: razón estructurada de todo takeover (auditable en la sesión).
+ * ADR-0015 §8 suma `catalog_drift`: el precio/disponibilidad/stock público de un producto lo
+ * gobierna una fuente externa que hoy publica otra cosa — el bot no puede confirmarlo solo.
+ */
+export type HandoffReason = 'customer_requested' | 'payment_verification' | 'coverage_review' | 'seller_manual' | 'ai_unavailable' | 'catalog_drift';
 
 export interface ExecuteHandoffOptions {
   reason: HandoffReason;
@@ -174,6 +178,50 @@ export async function executeHandoff(
   return result;
 }
 
+/** Motivos de aviso soportados por la campana (mismo id determinístico, distinto copy). */
+export type HandoffNotifyMotivo = 'customer_requested' | 'ai_unavailable' | 'coverage_review' | 'catalog_drift';
+
+/**
+ * Copy por motivo. Tabla en vez de ternarios encadenados: agregar un motivo (ADR-0015 §8) no
+ * puede obligar a releer una expresión de cuatro ramas para saber qué se le muestra al owner.
+ * Ningún cuerpo incluye el texto del mensaje del cliente, su teléfono completo ni datos internos.
+ */
+const COPY_HANDOFF: Record<
+  HandoffNotifyMotivo,
+  { type: HandoffNotificationType; title: string; body: (cliente: string, sellerName: string | null) => string }
+> = {
+  coverage_review: {
+    type: 'handoff_coverage_review',
+    title: '📍 Un cliente espera confirmación de cobertura',
+    body: (cliente) =>
+      `El cliente ${cliente} compartió su ubicación para confirmar la cobertura antes de pagar. Revisala desde Conversaciones (el bot quedó en pausa).`,
+  },
+  ai_unavailable: {
+    type: 'handoff_ai_unavailable',
+    title: '🙋 Un cliente necesita atención humana',
+    body: (cliente, sellerName) =>
+      sellerName
+        ? `El asistente no pudo completar la consulta del cliente ${cliente} y lo derivó a ${sellerName}. El bot quedó en pausa: respondele desde Conversaciones.`
+        : `El asistente no pudo completar la consulta del cliente ${cliente} y no hay un vendedor disponible para derivarlo. Revisá la conversación desde Conversaciones.`,
+  },
+  customer_requested: {
+    type: 'handoff_customer_requested',
+    title: '🙋 Un cliente pidió atención humana',
+    body: (cliente, sellerName) =>
+      sellerName
+        ? `El cliente ${cliente} pidió hablar con ${sellerName}. El bot quedó en pausa: respondele desde Conversaciones.`
+        : `El cliente ${cliente} pidió hablar con una persona. El bot quedó en pausa: respondele desde Conversaciones.`,
+  },
+  // ADR-0015 §8: el dato público lo publica una fuente externa y hoy no coincide con el interno.
+  // El aviso NO propone escribir en Meta: la corrección va en el ORIGEN que genera la publicación.
+  catalog_drift: {
+    type: 'handoff_catalog_drift',
+    title: '🏷️ Un precio publicado no se pudo confirmar',
+    body: (cliente, sellerName) =>
+      `El precio o la disponibilidad publicados de un producto que consultó el cliente ${cliente} no coinciden con los datos internos, así que el bot no los afirmó ni cerró la venta${sellerName ? ` y lo derivó a ${sellerName}` : ''}. Confirmalo desde Conversaciones y corregí el dato en su origen.`,
+  },
+};
+
 /**
  * HANDOFF-2: aviso a la campana del panel — IDEMPOTENTE por id determinístico
  * `handoff-{customerId}-{sourceId}`: un webhook repetido jamás duplica el aviso.
@@ -185,7 +233,7 @@ export async function notifyHandoffRequested(
   sellerName: string | null,
   sourceId: string | null,
   /** Motivo del aviso (cambia tipo/título/cuerpo, misma idempotencia por sourceId). */
-  motivo: 'customer_requested' | 'ai_unavailable' | 'coverage_review' = 'customer_requested',
+  motivo: HandoffNotifyMotivo = 'customer_requested',
   /** COVERAGE-1C: uid del SELLER destinatario (server-controlled) — las rules le abren la campana. */
   targetUid: string | null = null,
 ): Promise<boolean> {
@@ -194,26 +242,15 @@ export async function notifyHandoffRequested(
   const safe = String(sourceId ?? fallback).replace(/[^a-zA-Z0-9_.-]/g, '-').slice(-120);
   const id = `handoff-${customerId}-${safe}`;
   const cliente = `…${customerId.slice(-4)}`;
-  const esIa = motivo === 'ai_unavailable';
-  const esCobertura = motivo === 'coverage_review';
+  const copy = COPY_HANDOFF[motivo] || COPY_HANDOFF.customer_requested;
   try {
     await db().doc(`${paths.notifications(tenantId)}/${id}`).create({
       id,
       tenantId,
       category: 'handoff',
-      type: esCobertura ? 'handoff_coverage_review' : esIa ? 'handoff_ai_unavailable' : 'handoff_customer_requested',
-      title: esCobertura
-        ? '📍 Un cliente espera confirmación de cobertura'
-        : esIa ? '🙋 Un cliente necesita atención humana' : '🙋 Un cliente pidió atención humana',
-      body: esCobertura
-        ? `El cliente ${cliente} compartió su ubicación para confirmar la cobertura antes de pagar. Revisala desde Conversaciones (el bot quedó en pausa).`
-        : esIa
-        ? sellerName
-          ? `El asistente no pudo completar la consulta del cliente ${cliente} y lo derivó a ${sellerName}. El bot quedó en pausa: respondele desde Conversaciones.`
-          : `El asistente no pudo completar la consulta del cliente ${cliente} y no hay un vendedor disponible para derivarlo. Revisá la conversación desde Conversaciones.`
-        : sellerName
-          ? `El cliente ${cliente} pidió hablar con ${sellerName}. El bot quedó en pausa: respondele desde Conversaciones.`
-          : `El cliente ${cliente} pidió hablar con una persona. El bot quedó en pausa: respondele desde Conversaciones.`,
+      type: copy.type,
+      title: copy.title,
+      body: copy.body(cliente, sellerName),
       dedupeKey: id,
       customerId,
       ...(targetUid ? { targetUid } : {}),

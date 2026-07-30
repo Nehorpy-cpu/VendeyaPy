@@ -12,8 +12,15 @@ export type TrialNotificationType = 'trial_ending_soon' | 'trial_ending_today' |
  * HANDOFF-2 / AI-FALLBACK-HONESTO-1 / COVERAGE-1B: avisos de atención humana.
  * HARDEN-1 agrega `handoff_coverage_stale`: la reanudación de una decisión quedó cancelada por
  * cambio de activación y el chat necesita atención manual.
+ * ADR-0015 §8 agrega `handoff_catalog_drift`: el dato público de un producto lo gobierna una
+ * fuente externa que hoy publica otra cosa — se corrige EN EL ORIGEN, no escribiendo en Meta.
  */
-export type HandoffNotificationType = 'handoff_customer_requested' | 'handoff_ai_unavailable' | 'handoff_coverage_review' | 'handoff_coverage_stale';
+export type HandoffNotificationType =
+  | 'handoff_customer_requested'
+  | 'handoff_ai_unavailable'
+  | 'handoff_coverage_review'
+  | 'handoff_coverage_stale'
+  | 'handoff_catalog_drift';
 
 /**
  * META-CATALOG-GENERIC-ONBOARDING-QUALITY-1: aviso AGREGADO del centro de calidad del
@@ -22,12 +29,36 @@ export type HandoffNotificationType = 'handoff_customer_requested' | 'handoff_ai
  */
 export type CatalogQualityNotificationType = 'catalog_quality_summary';
 
+/**
+ * ADR-0015 §4: aviso AGREGADO de GOBIERNO del catálogo. Apareció una fuente externa que nadie
+ * reconoció, o la reconocida cambió de forma, así que las escrituras hacia Meta quedaron
+ * detenidas. UNA sola notificación viva por tenant (id determinístico), que se autocierra
+ * cuando lo observado vuelve a coincidir con lo declarado. Solo lleva ids NO secretos del feed:
+ * jamás su URL, su query string ni su token.
+ */
+export type CatalogSourceNotificationType = 'catalog_source_changed';
+
+/**
+ * ADR-0015 §6: la reconciliación NO puede correr y eso bloquea la venta. Config CONTRADICTORIA:
+ * una persona declaró que un sistema externo gobierna los campos publicados (el guard del bot
+ * queda activo) y no hay catálogo de Meta que leer, así que nada puede refrescar la evidencia y
+ * los productos vinculados caducan sin salida. UNA sola notificación viva por tenant, que se
+ * autocierra cuando se configura el catálogo o se retira la declaración externa. NO se degrada la
+ * propiedad sola para destrabar: cambiar el modelo es decisión humana (§4).
+ */
+export type CatalogVerificationNotificationType = 'catalog_verification_blocked';
+
 export interface Notification {
   id: string;
   tenantId: string;
-  /** Categoría (`trial` | `handoff` | `catalog_quality`; extensible a futuro). */
-  category: 'trial' | 'handoff' | 'catalog_quality';
-  type: TrialNotificationType | HandoffNotificationType | CatalogQualityNotificationType;
+  /** Categoría (`trial` | `handoff` | `catalog_quality` | `catalog_source` | `catalog_verification`). */
+  category: 'trial' | 'handoff' | 'catalog_quality' | 'catalog_source' | 'catalog_verification';
+  type:
+    | TrialNotificationType
+    | HandoffNotificationType
+    | CatalogQualityNotificationType
+    | CatalogSourceNotificationType
+    | CatalogVerificationNotificationType;
   title: string;
   body: string;
   /** Clave determinística de idempotencia (= id del doc). 1 por (tenant, tipo) por trial. */
@@ -47,4 +78,9 @@ export interface Notification {
   warningCount?: number;
   /** AUTOCIERRE: estampado por el backend cuando blocking+warning llegan a 0. */
   resolvedAt?: Timestamp | null;
+  // --- Solo category 'catalog_source' (server-set, ADR-0015 §4) ---
+  /** Ids NO SECRETOS de los data sources afectados (jamás URL, query string ni token). */
+  sourceIds?: string[];
+  /** Doc de `metaCatalogSourceChecks` con la evidencia saneada del hallazgo. */
+  sourceCheckId?: string;
 }

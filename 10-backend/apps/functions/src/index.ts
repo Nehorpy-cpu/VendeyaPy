@@ -9,9 +9,31 @@
  */
 
 import { initializeApp } from 'firebase-admin/app';
+import { setDriftProjection } from './catalog/driftGuard.js';
+import { metaDriftProjection } from './meta/catalogDriftProjection.js';
+import { wireCatalogSourceDetector } from './meta/catalogSourceGate.js';
 
 // Inicializar Firebase Admin una sola vez por instancia
 initializeApp();
+
+// ADR-0015 §8: se cablea la proyección de deriva del catálogo (propiedad por campos + estado
+// derivado de la reconciliación) que consumen el guard del bot y la revalidación del checkout.
+// Es el ÚNICO punto de cableado: sin esta línea el guard queda inerte y el motor se comporta
+// exactamente como antes. No dispara ninguna lectura por sí misma.
+//
+// El import es ESTÁTICO a propósito (el cableado tiene que existir sí o sí antes del primer
+// pedido, y un import diferido puede dejar el guard inerte justo cuando hace falta). Lo que se
+// cuida en cambio es el PESO: `catalogDriftProjection` solo puede alcanzar módulos livianos —
+// nada de cliente HTTP del catálogo ni de reconciliación paginada — para no cargarle ~106 KB de
+// catálogo (y axios) al cold start de funciones que no tienen nada que ver con esto. Ese límite
+// lo custodia `meta/catalogDriftProjection.arranque.test.ts`.
+setDriftProjection(metaDriftProjection);
+
+// ADR-0015 §4: se cablea el detector REAL de fuentes externas (lectura GET del catálogo, solo
+// metadata SANEADA). Es el ÚNICO punto de cableado: sin esta línea la migración de propiedad
+// reporta `detection_unavailable` y jamás propone `external_managed`. No dispara ninguna
+// lectura por sí misma — la hace el callable de migración cuando alguien lo ejecuta.
+wireCatalogSourceDetector();
 
 // ===== Webhooks externos =====
 // export { whatsappWebhook } from './functions/whatsapp/whatsappWebhook.js';
@@ -188,6 +210,35 @@ export {
   metaCatalogMaintenanceRun,
   metaCatalogMaintenanceStatus,
 } from './functions/meta/catalogMaintenanceCallables.js';
+
+// Migración de la PROPIEDAD POR CAMPOS del catálogo (META-CATALOG-OWNERSHIP-MODEL-1,
+// ADR-0015 §9): preview por defecto (no escribe nada) que propone el modelo, reconoce la
+// fuente externa detectada y siembra el estado actual honesto; apply solo con confirm:true,
+// sin bloqueos y con precondiciones frescas. Jamás escribe en Meta.
+export {
+  metaCatalogOwnershipMigrationRun,
+  metaCatalogOwnershipMigrationStatus,
+} from './functions/meta/catalogOwnershipMigrationCallables.js';
+
+// Propiedad EFECTIVA del catálogo, SOLO LECTURA (manager+). Es la tarjeta de propiedad del
+// panel y el insumo del bloqueo del opt-in: sin este callable la lectura fallaba siempre y el
+// bloqueo quedaba fail-OPEN. No llama a Graph, no escribe nada y jamás devuelve URLs ni tokens.
+export { metaCatalogOwnershipStatus } from './functions/meta/catalogOwnershipStatusCallable.js';
+
+// Reconciliación PERIÓDICA del estado actual (ADR-0015 §6): barrido paginado del catálogo
+// remoto (SOLO GET) que actualiza metaSyncState/metaVerifiedAt/metaDrift de los productos
+// mapeados — importados y vinculados manualmente. Nunca escribe en Meta ni borra nada.
+export {
+  metaCatalogVerificationRun,
+  metaCatalogVerificationStatus,
+} from './functions/meta/catalogVerificationCallables.js';
+
+// Scheduler de la reconciliación (ADR-0015 §6), dos veces por día contra un TTL de 24 h. Sin
+// él, declarar la propiedad dejaba todo el catálogo `stale` (sin `metaVerifiedAt`) y `stale`
+// bloquea la venta automática: la venta se apagaba de forma permanente. Solo LEE de Meta, es
+// fail-closed por config (un tenant sin catalogSync —credipower— no gasta ni una llamada) y
+// tiene presupuesto acotado por corrida y por tenant.
+export { metaCatalogVerificationMaintenance } from './functions/scheduled/metaCatalogVerification.js';
 
 // Outbox de escrituras hacia el Meta Catalog (META-CATALOG-OUTBOX-1): confirmar el plan ENCOLA
 // jobs persistidos; el mantenimiento los reclama con lease, los envía y los confirma contra el

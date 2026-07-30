@@ -174,6 +174,61 @@ describe('CatalogQualityCenter — estados', () => {
     expect(onEditar).toHaveBeenCalledWith('p9');
   });
 
+  it('deriva: un producto SIN datos faltantes pero publicado distinto NO se muestra en verde', async () => {
+    // Caso Odyssey: ficha completa (el agregado no reporta nada) y precio publicado distinto.
+    // Antes de ADR-0015 esta pantalla decía "tus productos están completos".
+    fetchSummary.mockResolvedValue(resumen());
+    const odyssey = prod({
+      id: 'odyssey',
+      name: 'Armaf Odyssey Mega',
+      metaSyncStatus: 'synced',
+      metaSyncState: 'drifted_external',
+      metaDrift: {
+        fields: ['price'],
+        owner: 'external',
+        severity: 'commercial',
+        observed: [{ field: 'price', owner: 'external', severity: 'commercial', local: '250000 PYG', remote: '130000 PYG' }],
+      },
+    } as unknown as Partial<ProductConCalidad>);
+    const { onEditar } = renderCentro([odyssey]);
+
+    await screen.findByText(/1 publicado distinto a lo tuyo/);
+    expect(screen.queryByText('Sin datos pendientes: tus productos están completos.')).not.toBeInTheDocument();
+
+    // El detalle sale sin abrir nada: valores de acá y publicados, y la corrección en el origen.
+    expect(screen.getByText('Publicado distinto a lo tuyo (1)')).toBeInTheDocument();
+    expect(screen.getByText('Armaf Odyssey Mega')).toBeInTheDocument();
+    expect(screen.getByText('₲ 250.000')).toBeInTheDocument();
+    expect(screen.getByText('₲ 130.000')).toBeInTheDocument();
+    expect(screen.getByText(/Corregilo en el origen/)).toBeInTheDocument();
+    // Cubre importados Y vinculados a mano: el texto lo dice y el dato sale del producto.
+    expect(screen.getByText(/los que importaste y los que vinculaste a mano/)).toBeInTheDocument();
+    // Jamás propone tocar el catálogo de Meta a mano.
+    expect(document.body.textContent ?? '').not.toMatch(/edit\w*\s+(?:el\s+|la\s+)?\w*\s*en Meta/i);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Ver el producto' }));
+    expect(onEditar).toHaveBeenCalledWith('odyssey');
+  });
+
+  it('verificación vencida: se cuenta aparte y NO se presenta como "publicado distinto"', async () => {
+    // `stale` se deriva en lectura: un `verified` viejo deja de afirmar que coincide, pero
+    // meterlo en la lista de divergencias inflaría el aviso y le sacaría peso a lo que sí
+    // está publicado distinto.
+    fetchSummary.mockResolvedValue(resumen());
+    const viejo = prod({
+      id: 'viejo',
+      name: 'Producto Viejo',
+      metaSyncState: 'verified',
+      metaVerifiedAt: { _seconds: Math.floor(Date.now() / 1000) - 40 * 60 * 60 },
+    } as unknown as Partial<ProductConCalidad>);
+    renderCentro([viejo]);
+
+    await screen.findByText(/1 sin poder verificar contra lo publicado/);
+    expect(screen.getByText('Sin verificar contra lo publicado')).toBeInTheDocument();
+    expect(screen.queryByText(/Publicado distinto a lo tuyo/)).not.toBeInTheDocument();
+    expect(screen.queryByText('Sin datos pendientes: tus productos están completos.')).not.toBeInTheDocument();
+  });
+
   it('truncado: avisa que hay más productos con observaciones que los listados', async () => {
     fetchSummary.mockResolvedValue(
       resumen({

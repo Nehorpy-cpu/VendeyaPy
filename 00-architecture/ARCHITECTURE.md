@@ -705,11 +705,24 @@ cliente por Rules** (solo Cloud Functions):
 | `metaCatalogImportState/current` | Puntero del run de importación activo (un solo run por tenant; claim con generación de fencing) | 0014 |
 | `metaCatalogMaintenanceRuns/{runId}` | Corridas de mantenimiento preview/apply (backfill de locks y quality; paginadas y reanudables) | 0014 |
 
+| `metaCatalogSourceChecks/{checkId}` | Detección de fuentes externas (feeds/data sources) con metadata SANEADA | 0015 |
+
 El producto (`products/{productId}`, §4.3) suma además: identidad remota
 (`metaRetailerId`/`metaCatalogId`/`metaProductItemId`), estado de sincronización
 (`syncToMeta`, `metaSyncStatus`, `metaSyncCurrentJobId`, `stockPendingReview`), la marca
 neutral `brand` (la ficha de vertical —p. ej. `perfume`— es opcional y NO es requisito
-universal) y el bloque de calidad `quality` calculado SOLO por servidor (ADR-0014).
+universal), el bloque de calidad `quality` calculado SOLO por servidor (ADR-0014) y el
+**estado actual de sincronización** (`metaSyncState`, `metaVerifiedAt`, `metaDrift`) que
+distingue lo verificado por lectura de lo escrito en el pasado (ADR-0015).
+
+**Propiedad del catálogo (ADR-0015).** `config/meta.catalogSync` suma `ownership`
+(`model` ∈ {`vendeyapy_managed`, `external_managed`, `hybrid`}, `ownedFields`, `external`,
+`lastSourceCheckAt`) y retira el uso efectivo de `sourceOfTruth`. Un campo público tiene
+exactamente un propietario; costo, márgenes, `productFinancials`, `aiFicha` y notas internas
+**nunca** se publican ni se delegan. Fail-closed de dos niveles: config inválida ⇒ sync
+apagada (nivel 1, existente); `ownership` ausente/inválida ⇒ cero campos escribibles y modo
+efectivo `dry_run` (nivel 2). De las fuentes externas se persiste **solo metadata saneada**:
+jamás URL firmada, query string, token, credenciales ni el archivo crudo.
 
 ## 5. Estrategia de autenticación
 

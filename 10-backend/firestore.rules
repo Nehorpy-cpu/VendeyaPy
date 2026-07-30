@@ -369,6 +369,19 @@ service cloud.firestore {
       // CERRADA al cliente: preview/apply y su progreso viajan SOLO por callable (owner).
       match /metaCatalogMaintenanceRuns/{id} { allow read, write: if false; }
 
+      // Detección de fuentes externas del catálogo (ADR-0015 §4): CERRADA al cliente. El doc
+      // es la evidencia de QUIÉN gobierna el catálogo y su huella; escribirlo desde el
+      // navegador permitiría "reconocer" una fuente ajena y desbloquear escrituras sin
+      // decisión humana. El panel lo consulta por callable, ya saneado.
+      match /metaCatalogSourceChecks/{id} { allow read, write: if false; }
+      // Reconciliación periódica del estado actual (ADR-0015 §6): solo lee Meta y actualiza
+      // el estado local. CERRADA al cliente: el progreso viaja saneado por callable.
+      match /metaCatalogVerificationRuns/{id} { allow read, write: if false; }
+      // Migración de la propiedad por campos (ADR-0015 §9): el run guarda la PROPUESTA que el
+      // apply va a escribir en `catalogSync.ownership`. CERRADA al cliente — tocarla desde el
+      // navegador sería declararse dueño de campos públicos sin pasar por el callable owner.
+      match /metaCatalogOwnershipRuns/{id} { allow read, write: if false; }
+
       // Eventos del negocio + Conversions API (D6): manager+ lee; escribe Cloud Functions.
       match /businessEvents/{id} { allow read: if isTenantManager(tenantId) || isPlatformAdmin(); allow write: if false; }
       match /metaConversionEvents/{id} { allow read: if isTenantManager(tenantId) || isPlatformAdmin(); allow write: if false; }

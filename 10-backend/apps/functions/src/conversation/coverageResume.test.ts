@@ -1,11 +1,13 @@
 import { describe, it, expect } from 'vitest';
 import {
   direccionTextualDe,
+  avisoReanudacionBloqueada,
   MENSAJE_COBERTURA_APROBADA_INTRO,
   MENSAJE_COBERTURA_RECHAZADA_DEFAULT,
   MENSAJE_CARRITO_VACIO_APROBADO,
   MENSAJE_COBERTURA_VENCIDA,
 } from './coverageResume.js';
+import { ProductNoVendibleError, ProductoConDerivaCriticaError } from '../orders/createPendingOrder.js';
 import type { CoverageRequest } from '@vpw/shared';
 
 /**
@@ -55,6 +57,45 @@ describe('coverageResume — mensajes seguros', () => {
   it('aprobado/vacío/vencido: sin datos bancarios embebidos ni afirmaciones de pago', () => {
     for (const m of [MENSAJE_COBERTURA_APROBADA_INTRO, MENSAJE_CARRITO_VACIO_APROBADO, MENSAJE_COBERTURA_VENCIDA]) {
       expect(m).not.toMatch(/cuenta|CI\/RUC|pagado|PAID/i);
+    }
+  });
+});
+
+/**
+ * ADR-0015 §8 — la deriva es SUBCLASE de ProductNoVendibleError (mismo freno, misma retención del
+ * job). Chequear solo la clase base hacía que la campana dijera "producto no disponible" cuando el
+ * producto está en stock y lo que no coincide es el PRECIO publicado: el vendedor salía a buscar
+ * inventario que nunca faltó. La razón avisada tiene que ser la real.
+ */
+describe('coverageResume — razón honesta cuando el pedido aprobado no se puede crear', () => {
+  const DERIVA = new ProductoConDerivaCriticaError({
+    bloqueantes: [{ productId: 'p1', productName: 'Producto Uno', reason: 'drifted_external', fields: ['price'] }],
+    advertencias: [],
+  });
+
+  it('deriva del dato público ⇒ motivo catalog_drift, mensaje de PRECIO y dedupeKey propio', () => {
+    const a = avisoReanudacionBloqueada(DERIVA, '595000005678', 'covr_1');
+    expect(a.motivo).toBe('catalog_drift');
+    expect(a.notifId).toBe('covdrift-595000005678-covr_1');
+    expect(a.title).toMatch(/precio/i);
+    expect(a.body).toMatch(/precio o la disponibilidad publicada/i);
+    expect(a.body).not.toMatch(/ya no está disponible|no están disponibles/i); // razón equivocada
+  });
+
+  it('producto realmente no vendible ⇒ motivo no_vendible y el mensaje de stock de siempre', () => {
+    const a = avisoReanudacionBloqueada(new ProductNoVendibleError(['Producto Uno']), '595000005678', 'covr_1');
+    expect(a.motivo).toBe('no_vendible');
+    expect(a.notifId).toBe('covstock-595000005678-covr_1');
+    expect(a.body).toMatch(/ya no está disponible/i);
+  });
+
+  it('el aviso es SANEADO: teléfono enmascarado y ni un precio (local o publicado)', () => {
+    for (const e of [DERIVA, new ProductNoVendibleError(['Producto Uno', 'Producto Dos'])]) {
+      const a = avisoReanudacionBloqueada(e, '595000005678', 'covr_1');
+      expect(`${a.title} ${a.body}`).not.toContain('595000005678');
+      expect(`${a.title} ${a.body}`).toContain('…5678');
+      // Ningún importe: los 4 dígitos que quedan son los del teléfono enmascarado, nada más.
+      expect(`${a.title} ${a.body}`).not.toMatch(/\d{5,}/);
     }
   });
 });

@@ -102,7 +102,20 @@ const SEVERITY: Record<Notification['type'], number> = {
   handoff_coverage_stale: 7, // HARDEN-1: aprobación sin reanudar y chat posiblemente mudo — atender YA
   handoff_coverage_review: 6, // cliente queriendo PAGAR a la espera de cobertura: lo más urgente
   handoff_ai_unavailable: 5, // el bot no pudo atender
+  // ADR-0015 §8: el dato público lo gobierna una fuente externa y hoy dice otra cosa — el cliente
+  // está esperando un precio/stock que solo una persona puede confirmar (se corrige en el ORIGEN).
+  handoff_catalog_drift: 5,
   handoff_customer_requested: 4,
+  // ADR-0015 §4: una fuente externa sin reconocer (o que cambió) DETUVO las escrituras hacia
+  // Meta. No hay un cliente esperando, pero el catálogo quedó sin poder publicarse: por encima
+  // de la calidad (que es trabajo de fondo) y por debajo de cualquier handoff.
+  catalog_source_changed: 4,
+  // ADR-0015 §6: no se puede verificar el catálogo (gobierno externo declarado y ningún catálogo
+  // que leer), así que la venta automática de los productos vinculados queda bloqueada hasta que
+  // una persona corrija la config. Mismo escalón que la fuente sin reconocer: el gobierno del
+  // catálogo quedó roto y solo un humano lo destraba. Cuando hay un cliente esperando por esto,
+  // el aviso que salta es `handoff_catalog_drift`, que ya está más arriba.
+  catalog_verification_blocked: 4,
   // Calidad del catálogo (agregada, autocerrable): productos que no pueden venderse/publicarse.
   // Debajo de los handoff (un cliente esperando manda) y a la par del trial vencido.
   catalog_quality_summary: 3,

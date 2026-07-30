@@ -21,6 +21,19 @@ import type {
   QualitySeverity,
 } from '@vpw/shared';
 import { firebaseDb, firebaseFunctions } from './firebase';
+import {
+  CAMPOS_PUBLICOS,
+  describirHorario,
+  esCampoCritico,
+  esCampoPublico,
+  esEstadoMeta,
+  etiquetaCampo,
+  sanitizarTextoPublico,
+  valorMostrable,
+  type CampoPublico,
+  type EstadoMeta,
+  type ModeloPropiedad,
+} from './catalogOwnership';
 
 const productsCol = (tenantId: string) => collection(firebaseDb(), 'tenants', tenantId, 'products');
 const categoriesCol = (tenantId: string) =>
@@ -672,4 +685,397 @@ export async function fetchCatalogQualitySummary(tenantId: string): Promise<Cata
   const call = httpsCallable(firebaseFunctions(), 'metaCatalogQualitySummary');
   const res = await call({ tenantId });
   return normalizarQualitySummary(res.data);
+}
+
+// --- Propiedad por campos del catálogo (ADR-0015) -----------------------------
+// El backend de este programa se implementa EN PARALELO: el panel codea contra el shape
+// del ADR y normaliza tolerante (igual que `normalizarImportRun`), aceptando la propiedad
+// anidada en `ownership` o plana en el nivel superior y las dos ortografías de cada lista.
+// Regla dura: de la fuente externa solo se muestra METADATA SANEADA — jamás la URL del feed,
+// su query string ni un token, aunque el backend los mande por error.
+
+export type { CampoPublico, EstadoMeta, ModeloPropiedad } from './catalogOwnership';
+
+/** Fuente externa que publica el catálogo, tal como la muestra el panel (ya saneada). */
+export interface FuenteExternaView {
+  /** Identificador NO secreto del feed/data source (para distinguir dos fuentes). */
+  id: string;
+  kind: 'meta_feed' | 'commerce_manager' | 'other_api' | 'desconocida';
+  /** Nombre SANEADO. Nunca una URL, una query string ni un token. */
+  nombre: string;
+  /** Horario legible ("todos los días a las 03:33 (America/Asuncion)") o '' si no se sabe. */
+  horario: string;
+  /** Datos públicos que publica esta fuente. */
+  campos: CampoPublico[];
+  /** true si una persona la reconoció explícitamente (hay quién y cuándo). */
+  reconocida: boolean;
+  /** true si la fuente BORRA en Meta lo que no está en su archivo. */
+  borraFaltantes: boolean;
+  /** Artículos que publica, si el backend lo informa. */
+  articulos: number | null;
+}
+
+/** Estado de propiedad del catálogo del tenant, normalizado para el panel. */
+export interface CatalogOwnershipStatus {
+  /** false ⇒ el tenant no tiene sincronización de catálogo configurada: nada se lee ni se escribe. */
+  configurado: boolean;
+  model: ModeloPropiedad;
+  /** Datos que VendeYaPy PUEDE publicar hoy. Vacío ⇒ no existe envío posible a Meta. */
+  propios: CampoPublico[];
+  /** Datos gobernados por la fuente externa reconocida. */
+  externos: CampoPublico[];
+  /**
+   * REALIDAD (ADR-0015 §8): true si una persona reconoció una fuente externa que gobierna el
+   * catálogo publicado. Se lee del eje `declared` del callable, que NO pasa por el interruptor
+   * de sincronización: apagar lo NUESTRO no apaga el feed del tenant.
+   */
+  gobiernoExterno: boolean;
+  /**
+   * PERMISO: true si nuestra sincronización está apagada (nivel 1 fail-closed) — no publicamos
+   * ni comparamos nada por nuestra cuenta. Es un motivo de bloqueo DISTINTO de "nadie declaró la
+   * propiedad", y confundirlos hacía que la tarjeta negara un feed ya reconocido.
+   */
+  sincronizacionApagada: boolean;
+  fuentes: FuenteExternaView[];
+  /** Fuentes detectadas que nadie reconoció: bloquean cualquier escritura hasta revisarlas. */
+  sinReconocer: number;
+  modoConfigurado: CatalogSyncMode;
+  /** Modo EFECTIVO: el techo de la propiedad nunca puede ser superado por la config. */
+  modoEfectivo: CatalogSyncMode;
+  degradado: boolean;
+  /** Motivos crudos de la degradación (se traducen con `etiquetaMotivo`). */
+  motivos: string[];
+  /** Cuándo se leyó por última vez el catálogo publicado (null = nunca). */
+  verificadoEn: Date | null;
+}
+
+export type CatalogSyncMode = 'off' | 'dry_run' | 'live';
+
+const MODELOS: readonly ModeloPropiedad[] = ['vendeyapy_managed', 'external_managed', 'hybrid'];
+const KINDS: readonly FuenteExternaView['kind'][] = ['meta_feed', 'commerce_manager', 'other_api'];
+
+function modoValido(v: unknown): CatalogSyncMode | null {
+  return v === 'off' || v === 'dry_run' || v === 'live' ? v : null;
+}
+
+/** Lista canónica de campos públicos: solo válidos, sin repetidos, orden estable. */
+function camposDe(raw: unknown): CampoPublico[] {
+  if (!Array.isArray(raw)) return [];
+  const s = new Set<CampoPublico>();
+  for (const x of raw) if (esCampoPublico(x)) s.add(x);
+  return CAMPOS_PUBLICOS.filter((f) => s.has(f));
+}
+
+/**
+ * Fecha tolerante: Timestamp serializado por el callable (`_seconds`/`seconds`), ISO, milis
+ * o Date. Cualquier otra cosa ⇒ null (el panel dice "todavía no verificamos", no inventa).
+ */
+export function aFecha(raw: unknown): Date | null {
+  if (raw instanceof Date) return Number.isNaN(raw.getTime()) ? null : raw;
+  if (typeof raw === 'number' && Number.isFinite(raw)) {
+    // Segundos (10 dígitos) contra milisegundos: sin esto, 1785...  caía en 1970.
+    const ms = raw < 1e12 ? raw * 1000 : raw;
+    const d = new Date(ms);
+    return Number.isNaN(d.getTime()) ? null : d;
+  }
+  if (typeof raw === 'string') {
+    const d = new Date(raw);
+    return Number.isNaN(d.getTime()) ? null : d;
+  }
+  if (raw && typeof raw === 'object') {
+    const r = raw as Record<string, unknown>;
+    const seg = typeof r._seconds === 'number' ? r._seconds : typeof r.seconds === 'number' ? r.seconds : null;
+    if (seg != null) return aFecha(seg * 1000);
+  }
+  return null;
+}
+
+/**
+ * Una fuente externa lista para mostrar. `idsReconocidos` son los ids que una persona
+ * reconoció en la declaración de propiedad: una fuente DETECTADA cuyo id está en esa lista ya
+ * está reconocida aunque el backend no repita el flag en cada entrada. Sin esto, un catálogo
+ * con dos feeds reconocidos mostraba "hay 1 fuente que nadie reconoció" para siempre.
+ */
+function fuenteDe(raw: unknown, idsReconocidos?: ReadonlySet<string>): FuenteExternaView | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const r = raw as Record<string, unknown>;
+  const kindRaw = typeof r.kind === 'string' ? r.kind : '';
+  const ids = Array.isArray(r.acknowledgedSourceIds)
+    ? r.acknowledgedSourceIds.filter((x): x is string => typeof x === 'string' && !!x.trim())
+    : [];
+  const id = sanitizarTextoPublico(typeof r.id === 'string' ? r.id : (r.sourceId ?? ids[0]), 64);
+  const nombre = sanitizarTextoPublico(r.name ?? r.nombre ?? r.label ?? r.nombreSaneado, 80);
+  return {
+    id,
+    kind: (KINDS as readonly string[]).includes(kindRaw) ? (kindRaw as FuenteExternaView['kind']) : 'desconocida',
+    nombre,
+    // `schedule`+`timezone` separados es la forma de MetaCatalogDetectedSource (@vpw/shared).
+    horario: describirHorario(r.scheduleLabel ?? r.schedule ?? r.horario, r.timezone),
+    campos: camposDe(r.declaredFields ?? r.detectedFields ?? r.fields ?? r.campos),
+    // Reconocida = hay rastro humano. `acknowledged:false` explícito gana sobre todo.
+    reconocida:
+      r.acknowledged === true ||
+      (r.acknowledged !== false &&
+        ((typeof r.acknowledgedByUid === 'string' ? !!r.acknowledgedByUid.trim() : false) ||
+          (!!id && idsReconocidos?.has(id) === true))),
+    borraFaltantes: r.deletionEnabled === true || r.deletesMissingItems === true || r.borraFaltantes === true,
+    articulos: typeof r.itemCount === 'number' && Number.isFinite(r.itemCount) ? r.itemCount : null,
+  };
+}
+
+/**
+ * Normaliza el estado de propiedad al shape del panel. PURA (sin Firebase) — exportada para
+ * testearla directo. FAIL-CLOSED en la presentación: si no se entiende qué llegó, el modelo
+ * reportado es `external_managed` con CERO campos propios, que es el supuesto seguro (si no
+ * sabemos quién manda, asumimos que no somos nosotros).
+ */
+export function normalizarOwnershipStatus(raw: unknown): CatalogOwnershipStatus {
+  const top = (raw ?? {}) as Record<string, unknown>;
+  const own = (top.ownership && typeof top.ownership === 'object' && !Array.isArray(top.ownership)
+    ? (top.ownership as Record<string, unknown>)
+    : top) as Record<string, unknown>;
+
+  const modelRaw = typeof own.model === 'string' ? own.model : '';
+  const model: ModeloPropiedad = (MODELOS as readonly string[]).includes(modelRaw)
+    ? (modelRaw as ModeloPropiedad)
+    : 'external_managed';
+
+  const motivos = Array.isArray(own.reasons)
+    ? own.reasons.filter((x): x is string => typeof x === 'string' && !!x.trim())
+    : [];
+  const degradado = own.degraded === true || (own.degraded !== false && motivos.length > 0);
+
+  // Fuentes: la reconocida del contrato (`externalSource`) + las detectadas por la lectura.
+  const detectadas = Array.isArray(top.detectedSources)
+    ? top.detectedSources
+    : Array.isArray(own.detectedSources)
+      ? own.detectedSources
+      : Array.isArray(top.sources)
+        ? top.sources
+        : [];
+  // EJE REALIDAD del callable (`declared`): quién gobierna el catálogo AFUERA, leído SIN el gate
+  // de ejecución. Con la sync apagada `ownership` viaja degradada (es el eje PERMISO, y ahí está
+  // bien que no haya nada), pero el feed que una persona reconoció sigue publicando: sin esto la
+  // tarjeta decía "todavía nadie declaró quién administra el catálogo" y le mentía al owner.
+  const declarado = (top.declared && typeof top.declared === 'object' && !Array.isArray(top.declared)
+    ? (top.declared as Record<string, unknown>)
+    : {}) as Record<string, unknown>;
+  // La declaración humana puede llegar como `externalSource` (EffectiveOwnership del backend), en
+  // el eje `declared`, o como `external` objeto (la config cruda del ADR §1). Ojo: `external`
+  // TAMBIÉN puede ser la lista de campos externos — solo se toma como declaración si es un objeto.
+  const declaracion =
+    own.externalSource ??
+    top.externalSource ??
+    declarado.externalSource ??
+    (own.external && typeof own.external === 'object' && !Array.isArray(own.external) ? own.external : null);
+  const idsReconocidos = new Set<string>(
+    (Array.isArray((declaracion as Record<string, unknown> | null)?.acknowledgedSourceIds)
+      ? ((declaracion as Record<string, unknown>).acknowledgedSourceIds as unknown[])
+      : []
+    )
+      .map((x) => sanitizarTextoPublico(x, 64))
+      .filter((x) => !!x),
+  );
+  const fuentes: FuenteExternaView[] = [];
+  const reconocida = fuenteDe(declaracion, idsReconocidos);
+  if (reconocida) fuentes.push({ ...reconocida, reconocida: true });
+  for (const d of detectadas) {
+    const f = fuenteDe(d, idsReconocidos);
+    if (!f) continue;
+    // Misma fuente ya listada por el reconocimiento: no se duplica en pantalla.
+    if (f.id && fuentes.some((x) => x.id === f.id)) continue;
+    fuentes.push(f);
+  }
+
+  // Degradado ⇒ cero campos propios SIEMPRE, aunque el backend mande una lista.
+  const propios = degradado ? [] : camposDe(own.writable ?? own.ownedFields ?? own.propios);
+  // Campos externos según el eje PERMISO (la propiedad efectiva, que pasa por el gate de sync)…
+  const externosDeGate = camposDe(own.external ?? own.externalFields ?? own.externos);
+  // …y según el eje REALIDAD (la declaración humana, sin gate). Con la sync encendida las dos
+  // listas coinciden; con la sync apagada la primera viaja vacía y esta es la única que dice
+  // quién gobierna el catálogo publicado.
+  const externosReales = camposDe(declarado.externalFields ?? declarado.external ?? declarado.externos);
+  const externos = externosDeGate.length
+    ? externosDeGate
+    : externosReales.length
+      ? externosReales
+      : camposDe(fuentes.flatMap((f) => f.campos as string[]));
+  const gobiernoExterno = externosReales.length > 0 || fuentes.some((f) => f.reconocida);
+
+  // El callable puede devolver la config anidada (`config: { mode, enabled }`) o plana.
+  const cfg = (top.config && typeof top.config === 'object' && !Array.isArray(top.config)
+    ? (top.config as Record<string, unknown>)
+    : {}) as Record<string, unknown>;
+  const modoConfigurado = modoValido(top.configMode ?? top.mode ?? cfg.mode ?? own.mode) ?? 'off';
+  const techo = modoValido(own.modeCeiling) ?? (degradado ? 'dry_run' : 'live');
+  const modoEfectivo =
+    modoValido(top.effectiveMode ?? cfg.effectiveMode) ??
+    (modoConfigurado === 'off' ? 'off' : modoConfigurado === 'live' && techo === 'live' ? 'live' : 'dry_run');
+
+  const señales =
+    modoConfigurado !== 'off' ||
+    fuentes.length > 0 ||
+    propios.length > 0 ||
+    externos.length > 0 ||
+    motivos.length > 0 ||
+    (MODELOS as readonly string[]).includes(modelRaw);
+  // Un gobierno externo RECONOCIDO alcanza para considerar el catálogo conectado aunque nuestra
+  // sync esté apagada: responder "esta empresa no tiene un catálogo de Meta conectado" mientras
+  // el sitio del tenant lo publica todas las madrugadas es la misma mentira con otra cara.
+  const configurado =
+    gobiernoExterno || (top.enabled !== false && cfg.enabled !== false && top.configured !== false && señales);
+  const sincronizacionApagada = top.enabled === false || cfg.enabled === false || modoEfectivo === 'off';
+
+  return {
+    configurado,
+    model,
+    propios,
+    externos,
+    gobiernoExterno,
+    sincronizacionApagada,
+    fuentes,
+    sinReconocer: fuentes.filter((f) => !f.reconocida).length,
+    modoConfigurado,
+    modoEfectivo,
+    degradado,
+    motivos,
+    verificadoEn: aFecha(
+      top.lastSourceCheckAtMs ?? top.lastSourceCheckAt ?? own.lastSourceCheckAt ?? top.lastVerifiedAt ?? top.verifiedAt,
+    ),
+  };
+}
+
+/**
+ * Estado de propiedad del catálogo del tenant. SOLO LECTURA: no cambia el modelo, no reconoce
+ * fuentes y no escribe en Meta.
+ *
+ * Contrato del callable `metaCatalogOwnershipStatus` (el backend lo expone en paralelo):
+ *   { ok, enabled, configMode, effectiveMode, lastSourceCheckAt,
+ *     ownership: EffectiveOwnership,               // PERMISO: {model, writable[], external[], externalSource, modeCeiling, degraded, reasons[]}
+ *     declared: { externalFields[], externalSource }, // REALIDAD: gobierno externo declarado, SIN el gate de sync
+ *     detectedSources: MetaCatalogDetectedSource[] } // vista SANEADA de @vpw/shared
+ * `normalizarOwnershipStatus` tolera además la config anidada (`config:{mode,enabled}`), la
+ * propiedad plana y la declaración externa en `ownership.external` como objeto.
+ *
+ * Si el callable NO existe o falla, la promesa rechaza a propósito: la UI queda FAIL-CLOSED
+ * (bloquea el opt-in y el envío diciendo que no pudo verificar), nunca fail-open.
+ */
+export async function fetchCatalogOwnershipStatus(tenantId: string): Promise<CatalogOwnershipStatus> {
+  const call = httpsCallable(firebaseFunctions(), 'metaCatalogOwnershipStatus');
+  const res = await call({ tenantId });
+  return normalizarOwnershipStatus(res.data);
+}
+
+// --- Estado ACTUAL de un producto contra lo publicado (ADR-0015 §5) -----------
+
+/** Un dato que quedó distinto entre lo local y lo publicado, listo para mostrar. */
+export interface CampoDivergente {
+  campo: string;
+  /** Etiqueta legible ("Precio"). */
+  etiqueta: string;
+  /** Quién gobierna ese dato (define a quién hay que ir a corregir). */
+  duenio: 'externa' | 'vendeyapy' | 'desconocido';
+  /** true si la divergencia frena la venta automática (plata y disponibilidad). */
+  critico: boolean;
+  /** Valor de acá, ya formateado y saneado. */
+  local: string;
+  /** Valor publicado en Meta, ya formateado y saneado. */
+  publicado: string;
+}
+
+export interface ProductoDerivaView {
+  estado: EstadoMeta;
+  campos: CampoDivergente[];
+  /** Cuándo LEÍMOS Meta para comparar (distinto de la última escritura confirmada). */
+  verificadoEn: Date | null;
+  /** true si alguna divergencia frena la venta automática. */
+  critico: boolean;
+}
+
+/**
+ * Caducidad de la verificación (ADR-0015 §5): el TTL documentado es el menor entre 24 horas y
+ * el período de la fuente externa. El panel usa ese techo de 24 h — con un feed diario coincide.
+ */
+export const TTL_VERIFICACION_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Lee `metaSyncState` / `metaDrift` / `metaVerifiedAt` de un producto. Devuelve null si el
+ * producto todavía no tiene ninguna proyección de estado actual (backend sin desplegar o
+ * artículo nunca verificado): el panel muestra el estado operativo de siempre, jamás inventa
+ * un "coincide". PURA — exportada para testearla (`ahora` inyectable para fijar la caducidad).
+ */
+export function normalizarDerivaProducto(raw: unknown, ahora: number = Date.now()): ProductoDerivaView | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const p = raw as Record<string, unknown>;
+  const estadoRaw = p.metaSyncState ?? p.metaState;
+  const driftRaw = (p.metaDrift ?? p.drift) as Record<string, unknown> | undefined;
+  // Forma CANÓNICA del backend (ADR-0015 §5): `fields` es la lista de NOMBRES de campo y los
+  // valores viajan saneados en `observed`. Se prioriza `observed` porque es la única que trae
+  // los valores; las otras formas se conservan por tolerancia (docs viejos / vistas previas).
+  const listaRaw = Array.isArray(driftRaw?.observed)
+    ? driftRaw!.observed
+    : Array.isArray(driftRaw?.fields)
+      ? driftRaw!.fields
+      : Array.isArray(driftRaw?.campos)
+        ? driftRaw!.campos
+        : Array.isArray(p.metaDrift)
+          ? (p.metaDrift as unknown[])
+          : [];
+  if (!esEstadoMeta(estadoRaw) && listaRaw.length === 0) return null;
+
+  const campos: CampoDivergente[] = [];
+  for (const it of listaRaw) {
+    // `fields: string[]` (forma canónica sin valores): el dueño y la severidad viven en la
+    // RAÍZ de la deriva. Sin este caso, un producto derivado se mostraría sin ningún campo.
+    const f = (typeof it === 'string' ? { field: it } : it) as Record<string, unknown> | null;
+    if (!f || typeof f !== 'object') continue;
+    const campo = typeof f.field === 'string' ? f.field : typeof f.campo === 'string' ? f.campo : '';
+    if (!campo) continue;
+    const duenioRaw =
+      typeof f.owner === 'string'
+        ? f.owner
+        : typeof f.duenio === 'string'
+          ? f.duenio
+          : typeof driftRaw?.owner === 'string'
+            ? (driftRaw.owner as string)
+            : '';
+    const duenio: CampoDivergente['duenio'] =
+      duenioRaw === 'external' || duenioRaw === 'externa'
+        ? 'externa'
+        : duenioRaw === 'vendeyapy' || duenioRaw === 'vendeyapy_managed'
+          ? 'vendeyapy'
+          : 'desconocido';
+    // La severidad se toma SOLO de la entrada del campo: la de la raíz es el agregado (la más
+    // grave de todas) y aplicarla a cada campo pintaría de crítico un cambio de nombre.
+    const sev = typeof f.severity === 'string' ? f.severity : '';
+    campos.push({
+      campo,
+      etiqueta: etiquetaCampo(campo),
+      duenio,
+      // La severidad del backend manda; sin ella, la lista de campos críticos del ADR.
+      // `commercial` es el vocabulario del backend (precio/moneda/disponibilidad/stock):
+      // omitirlo dejaría pasar una divergencia de plata como si fuera cosmética.
+      critico: sev ? sev === 'commercial' || sev === 'critical' || sev === 'blocking' : esCampoCritico(campo),
+      local: valorMostrable(campo, f.local ?? f.localValue ?? f.expected),
+      publicado: valorMostrable(campo, f.remote ?? f.remoteValue ?? f.published ?? f.observed),
+    });
+  }
+
+  const base: EstadoMeta = esEstadoMeta(estadoRaw)
+    ? estadoRaw
+    : campos.some((c) => c.duenio === 'externa')
+      ? 'drifted_external'
+      : 'drifted';
+  const verificadoEn = aFecha(p.metaVerifiedAt ?? driftRaw?.lastSeenAt ?? driftRaw?.detectedAt ?? driftRaw?.observedAt);
+  // CADUCIDAD DERIVADA EN LECTURA (ADR-0015 §5): `stale` jamás se persiste, así que si el
+  // panel no lo derivara mostraría "coincide" para siempre con una comprobación de la semana
+  // pasada. Solo degrada `verified`: envejecer una deriva YA detectada la escondería, que es
+  // exactamente la falla opuesta a la que este programa viene a arreglar.
+  const vencida = verificadoEn == null || ahora - verificadoEn.getTime() > TTL_VERIFICACION_MS;
+  return {
+    estado: base === 'verified' && vencida ? 'stale' : base,
+    campos,
+    verificadoEn,
+    critico: campos.some((c) => c.critico),
+  };
 }

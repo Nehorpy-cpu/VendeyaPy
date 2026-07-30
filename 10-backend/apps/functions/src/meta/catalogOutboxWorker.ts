@@ -39,6 +39,9 @@ import {
   type MetaRemoteCatalogItem,
 } from './catalogClient.js';
 import type { CatalogBatchRequest } from './catalogOutbound.js';
+import { effectiveMode, type EffectiveOwnership } from './catalogOwnership.js';
+import { assertPatchOwned, ownershipFingerprint } from './catalogOwnershipGates.js';
+import { alertarFuenteDelCatalogo, checkCatalogSources } from './catalogSourceGate.js';
 import { catalogHold } from './catalogTestHooks.js';
 import {
   attentionRequiredFor,
@@ -119,6 +122,9 @@ function gateContextOf(tenantId: string, cfg: MetaCatalogSyncConfig, product: Pr
   return {
     tenantId,
     config: { enabled: cfg.enabled, mode: cfg.mode, catalogId: cfg.catalogId },
+    // La propiedad viaja SIEMPRE con la config (ya normalizada, nunca null): el gate la
+    // necesita para el modo efectivo, la huella del snapshot y los campos del patch.
+    ownership: cfg.ownership,
     product: product
       ? {
           exists: true,
@@ -306,7 +312,7 @@ export async function enqueueCatalogPlan(
   tenantId: string,
   runId: string,
   entries: readonly EnqueueEntry[],
-  cfg: { catalogId: string },
+  cfg: { catalogId: string; ownership: EffectiveOwnership },
   actor?: { uid?: string | null; role?: string | null },
 ): Promise<EnqueueResult> {
   const now = Timestamp.now();
@@ -315,10 +321,28 @@ export async function enqueueCatalogPlan(
   let awaitingReview = 0;
   let blocked = 0;
 
+  // ═══ TECHO DE PROPIEDAD (ADR-0015 §7) ═══
+  // Sin un solo campo propio no existe patch posible, así que tampoco existe job. Es la
+  // barrera que vuelve INALCANZABLE el loop diario: con `external_managed` no hay nada que
+  // encolar aunque alguien ponga `mode:'live'` por error, y aunque el plan traiga entradas.
+  // No se proyecta error en los productos: no es culpa de ellos, es que el campo no es nuestro.
+  const huellaPropiedad = ownershipFingerprint(cfg.ownership);
+  if (!cfg.ownership.writable.length) {
+    if (entries.length) {
+      logger.warn('Outbox de catálogo: la propiedad efectiva no habilita ninguna escritura; nada se encola', {
+        tenantId, runId, model: cfg.ownership.model, degraded: cfg.ownership.degraded, descartadas: entries.length,
+      });
+    }
+    return { queued: 0, deduplicated: 0, awaitingReview: 0, blocked: entries.length, statePersisted: true };
+  }
+
   for (const e of entries) {
-    // Última barrera de contrato ANTES de persistir: un patch inválido no llega ni al outbox.
+    // Última barrera de contrato Y de propiedad ANTES de persistir: ni un patch inválido ni un
+    // patch con un campo ajeno llegan al outbox. La propiedad se verifica sobre las claves
+    // REALES del request, no sobre lo que el planificador creyó que iba a mandar.
     try {
       assertBatchRequestShape(e.request, `producto ${e.productId}`);
+      assertPatchOwned(cfg.ownership, e.request.data, `producto ${e.productId}`);
     } catch (err) {
       blocked++;
       const detalle = err instanceof Error ? err.message.slice(0, 300) : 'request inválido';
@@ -374,6 +398,9 @@ export async function enqueueCatalogPlan(
         action: e.action,
         intendedPatch,
         intendedContentHash,
+        // SNAPSHOT DE PROPIEDAD congelado: el permiso con el que se aprobó este envío.
+        ownershipFingerprint: huellaPropiedad,
+        ownedFields: [...cfg.ownership.writable],
         productSnapshotHash: stableHash(e.payload),
         runId,
         requestedByUid: actor?.uid ?? null,
@@ -451,7 +478,7 @@ async function claimJob(
   jobId: string,
   owner: string,
   publicView: PublicViewFn,
-): Promise<ClaimOutcome | { rechazado: MetaCatalogOutboxStatus | 'ocupado' | 'inexistente' | 'no_encolado' }> {
+): Promise<ClaimOutcome | { rechazado: MetaCatalogOutboxStatus | 'ocupado' | 'inexistente' | 'no_encolado'; motivo?: OutboxReason | null }> {
   const now = Timestamp.now();
   return db().runTransaction(async (tx) => {
     const cfgSnap = await tx.get(db().doc(`tenants/${tenantId}/config/meta`));
@@ -477,7 +504,9 @@ async function claimJob(
     const gate = outboxGate(job, gateContextOf(tenantId, cfg, product, publicView));
     if (!gate.go) {
       tx.update(snap.ref, { status: gate.status, reason: gate.reason, attentionRequired: attentionRequiredFor(gate.status), leaseUntil: null, leaseOwner: null, updatedAt: now });
-      return { rechazado: gate.status };
+      // El motivo viaja al llamador: si la cola se vació por PROPIEDAD, reportar
+      // `nothing_queued` sería mentir — había trabajo y lo frenó un permiso.
+      return { rechazado: gate.status, motivo: gate.reason };
     }
 
     // `attempts` es la GENERACIÓN inmutable de este claim: todo settlement posterior la exige.
@@ -504,6 +533,8 @@ export interface DrainResult {
   released: number;
   failed: number;
   handles: string[];
+  /** Jobs excluidos del lote porque la propiedad cambió o dejó de cubrir su patch. */
+  ownershipBlocked?: number;
   /** Motivo por el que no se envió nada (si aplica). */
   skipped?: OutboxReason | 'nothing_queued' | 'client_unavailable';
 }
@@ -524,7 +555,11 @@ export async function drainCatalogOutbox(
   // Gate barato ANTES de leer la cola: con la config apagada no se toca nada.
   const cfg0 = await readConfig(tenantId);
   if (!cfg0.enabled) return { ...vacio, skipped: 'config_disabled' };
-  if (cfg0.mode !== 'live') return { ...vacio, skipped: 'mode_not_live' };
+  // MODO EFECTIVO: el techo de la propiedad no lo supera la config. Un tenant gobernado por
+  // un feed externo ni siquiera lee la cola — no hay nada que pueda salir.
+  if (effectiveMode(cfg0.mode, cfg0.ownership) !== 'live') {
+    return { ...vacio, skipped: cfg0.mode === 'live' ? 'ownership_not_writable' : 'mode_not_live' };
+  }
 
   // Orden por `updatedAt` ASC: el más viejo primero. Ordenar por id dejaba a los jobs que
   // vuelven a la cola (rate limit) ocupando siempre los mismos lugares del lote, y los de
@@ -541,15 +576,28 @@ export async function drainCatalogOutbox(
   const reclamados: ClaimOutcome[] = [];
   /** Jobs que el gate rechazó: su producto también tiene que reflejar el estado nuevo. */
   const rechazados: string[] = [];
+  /** Rechazos por PROPIEDAD en el claim: se reportan como tales, no como "no había nada". */
+  let bloqueadosEnClaim = 0;
+  let motivoClaim: OutboxReason | null = null;
   for (const d of candidatos.docs) {
     const r = await claimJob(tenantId, d.id, owner, publicView);
-    if ('job' in r) reclamados.push(r);
-    else rechazados.push(d.id);
+    if ('job' in r) {
+      reclamados.push(r);
+      continue;
+    }
+    rechazados.push(d.id);
+    if (r.motivo === 'ownership_changed' || r.motivo === 'ownership_not_writable') {
+      bloqueadosEnClaim++;
+      motivoClaim = r.motivo;
+    }
   }
   // Sin esto, un producto cuyo job quedó `cancelled`/`stale`/`held` en el claim seguía
   // mostrándose "En cola" para siempre: el estado visible nunca se enteraba.
   if (rechazados.length) await refreshProductStates(tenantId, rechazados);
-  if (!reclamados.length) return { ...vacio, skipped: 'nothing_queued' };
+  if (bloqueadosEnClaim) await alertarPropiedadCambiada(tenantId, bloqueadosEnClaim);
+  if (!reclamados.length) {
+    return { ...vacio, ...(bloqueadosEnClaim ? { ownershipBlocked: bloqueadosEnClaim } : {}), skipped: motivoClaim ?? 'nothing_queued' };
+  }
 
   // El lote respeta cantidad Y bytes. Lo que no entra vuelve a la cola intacto.
   const { chunk } = chunkJobsForBatch(
@@ -594,14 +642,37 @@ export async function drainCatalogOutbox(
   await catalogHold(tenantId, 'outbox_pre_submit');
 
   // KILL-SWITCH INMEDIATO PRE-META: la config se re-lee justo antes del POST. Entre el claim
-  // y este punto alguien pudo apagar la sync o cambiar el catálogo, y el claim ya no vale.
+  // y este punto alguien pudo apagar la sync, cambiar el catálogo O CAMBIAR LA PROPIEDAD, y el
+  // claim ya no vale. Los jobs vuelven a la cola sin haber tocado Meta: el gate del próximo
+  // claim los mandará a revisión con el motivo exacto — nunca salen con permisos viejos.
   const cfgPre = await readConfig(tenantId);
-  if (!cfgPre.enabled || cfgPre.mode !== 'live' || cfgPre.catalogId !== cfg0.catalogId) {
+  const propiedadCambio = ownershipFingerprint(cfgPre.ownership) !== ownershipFingerprint(cfg0.ownership);
+  if (!cfgPre.enabled || effectiveMode(cfgPre.mode, cfgPre.ownership) !== 'live' || cfgPre.catalogId !== cfg0.catalogId || propiedadCambio) {
     for (const r of reclamados.filter((x) => enLote.has(x.job.id))) {
       if ((await liberar(r)).propio) released++;
     }
-    logger.info('Outbox de catálogo: la configuración cambió antes del envío; nada salió', { tenantId });
-    return { ...vacio, released, skipped: !cfgPre.enabled ? 'config_disabled' : 'mode_not_live' };
+    logger.info('Outbox de catálogo: la configuración cambió antes del envío; nada salió', { tenantId, propiedadCambio });
+    const motivo: OutboxReason = !cfgPre.enabled
+      ? 'config_disabled'
+      : propiedadCambio
+        ? 'ownership_changed'
+        : cfgPre.mode === 'live'
+          ? 'ownership_not_writable'
+          : 'mode_not_live';
+    return { ...vacio, released, skipped: motivo };
+  }
+
+  // VERIFICACIÓN DE FUENTES EXTERNAS INMEDIATAMENTE ANTES DEL POST (ADR-0015 §4). Es una
+  // lectura (GET) del catálogo: si apareció una fuente que nadie reconoció, o la reconocida
+  // cambió de forma, NO se escribe. Los jobs vuelven a la cola intactos (no es culpa suya) y
+  // el aviso agregado queda abierto hasta que una persona decida. Jamás se desactiva un feed
+  // ni se cambia el modelo de propiedad por nuestra cuenta.
+  const fuentes = await verificarFuentesAntesDelPost(tenantId, cfg0.catalogId, cfgPre.ownership, client);
+  if (fuentes === 'blocked') {
+    for (const r of reclamados.filter((x) => enLote.has(x.job.id))) {
+      if ((await liberar(r)).propio) released++;
+    }
+    return { ...vacio, released, skipped: 'external_source_changed' };
   }
 
   // REVALIDACIÓN TRANSACCIONAL COMPLETA, JOB POR JOB, INMEDIATAMENTE ANTES DE ARMAR EL LOTE.
@@ -611,14 +682,29 @@ export async function drainCatalogOutbox(
   // del lote sale igual.
   const vigentes: ClaimOutcome[] = [];
   const excluidos: string[] = [];
+  /** Excluidos por PROPIEDAD: se alertan aparte — no son un error del producto ni de la red. */
+  let ownershipBlocked = bloqueadosEnClaim;
+  let motivoPropiedad: OutboxReason | null = motivoClaim;
   for (const r of reclamados) {
     if (!enLote.has(r.job.id)) continue;
     const veredicto = await revalidarAntesDelPost(tenantId, r, publicView);
-    if (veredicto === 'ok') vigentes.push(r);
-    else excluidos.push(r.job.id);
+    if (veredicto.ok) {
+      vigentes.push(r);
+      continue;
+    }
+    excluidos.push(r.job.id);
+    if (veredicto.reason === 'ownership_changed' || veredicto.reason === 'ownership_not_writable') {
+      ownershipBlocked++;
+      motivoPropiedad = veredicto.reason;
+    }
   }
   if (excluidos.length) await refreshProductStates(tenantId, excluidos);
-  if (!vigentes.length) return { ...vacio, released, skipped: 'nothing_queued' };
+  // Los rechazados EN EL CLAIM ya se alertaron arriba: acá solo los que cayeron en la
+  // revalidación previa al POST (avisar dos veces por el mismo lote sería ruido).
+  if (ownershipBlocked > bloqueadosEnClaim) await alertarPropiedadCambiada(tenantId, ownershipBlocked - bloqueadosEnClaim);
+  // Reportar `nothing_queued` cuando la cola se vació por PROPIEDAD sería mentir: había
+  // trabajo, y lo frenó un permiso. El motivo real es lo que después explica la bandeja.
+  if (!vigentes.length) return { ...vacio, released, ownershipBlocked, skipped: motivoPropiedad ?? 'nothing_queued' };
 
   // Se envía el patch CONGELADO en el job, nunca una re-serialización del producto: si el
   // producto cambió, el gate ya lo dejó `stale` y este job no llegó hasta acá.
@@ -667,7 +753,7 @@ export async function drainCatalogOutbox(
       }
     }
     await refreshProductStates(tenantId, vigentes.map((r) => r.job.id));
-    return { claimed: reclamados.length, submitted: 0, released, failed, handles: [], skipped: clase === 'rate_limited' ? 'rate_limited' : undefined };
+    return { claimed: reclamados.length, submitted: 0, released, failed, handles: [], ownershipBlocked, skipped: clase === 'rate_limited' ? 'rate_limited' : undefined };
   }
 
   await catalogHold(tenantId, 'outbox_post_submit');
@@ -693,13 +779,79 @@ export async function drainCatalogOutbox(
   await refreshProductStates(tenantId, vigentes.map((r) => r.job.id));
 
   logger.info('Outbox de catálogo drenado', { tenantId, reclamados: reclamados.length, enviados: submitted, liberados: released });
-  return { claimed: reclamados.length, submitted, released, failed: 0, handles };
+  return { claimed: reclamados.length, submitted, released, failed: 0, handles, ownershipBlocked };
 }
 
 /**
+ * Alerta por envíos frenados por la PROPIEDAD (ADR-0015 §7). Los jobs ya quedaron en
+ * `needs_action` —bandeja de incidencias, `attentionRequired:true`— y nunca se reintentan
+ * solos; esto deja además el rastro auditable de que hubo escrituras detenidas porque los
+ * permisos cambiaron. Metadata SANEADA: cantidad y motivo, ningún artículo ni fuente.
+ */
+async function alertarPropiedadCambiada(tenantId: string, jobs: number): Promise<void> {
+  logger.warn('Outbox de catálogo: envíos frenados porque la propiedad de los campos cambió', { tenantId, jobs });
+  try {
+    await recordAudit({
+      tenantId,
+      action: 'meta.catalog_sync',
+      actorUid: null,
+      actorRole: null,
+      targetType: 'metaCatalogOutbox',
+      targetId: `ownership_${Timestamp.now().toMillis()}`,
+      summary: `Envíos frenados: la propiedad de los campos cambió (${jobs} job(s) a revisión)`,
+      metadata: { jobs, reason: 'ownership_changed' },
+    });
+  } catch (e) {
+    logger.warn('Outbox de catálogo: no se pudo auditar el bloqueo por propiedad', { tenantId, error: e instanceof Error ? e.message : 'desconocido' });
+  }
+}
+
+/**
+ * Verificación de FUENTES EXTERNAS justo antes del POST (ADR-0015 §4). Devuelve:
+ *  - `'ok'`      — las fuentes observadas son las reconocidas (o no hay ninguna y nadie declaró
+ *                  una): se puede escribir. Un aviso previo, si existía, se autocierra.
+ *  - `'blocked'` — hay una fuente sin reconocer o la reconocida cambió: NO se escribe, y el
+ *                  aviso agregado queda abierto (idempotente: el mismo hallazgo no re-alerta).
+ *
+ * Si la LECTURA falla, se devuelve `'ok'`: este chequeo detecta un cambio de gobierno, no es un
+ * kill-switch de disponibilidad. Un parpadeo del Graph no puede frenar una cola que ya pasó
+ * todos los gates de propiedad — esos siguen siendo los que deciden qué campo puede salir.
+ */
+async function verificarFuentesAntesDelPost(
+  tenantId: string,
+  catalogId: string,
+  ownership: EffectiveOwnership,
+  client: MetaCatalogClient,
+): Promise<'ok' | 'blocked'> {
+  try {
+    const r = await checkCatalogSources({ tenantId, catalogId, ownership, client });
+    await alertarFuenteDelCatalogo(tenantId, r.comparison, r.checkId);
+    if (!r.blocksWrites) return 'ok';
+    logger.warn('Outbox de catálogo: envío detenido — la fuente que publica el catálogo no es la reconocida', {
+      tenantId,
+      estado: r.comparison.status,
+      // Ids NO secretos del data source. Nunca host, URL, query string ni token.
+      fuentes: r.comparison.affectedSourceIds.slice(0, 5),
+      listadoIncompleto: r.comparison.incompleteListing,
+    });
+    return 'blocked';
+  } catch (e) {
+    logger.warn('Outbox de catálogo: no se pudieron verificar las fuentes externas; se sigue con los gates de propiedad', {
+      tenantId,
+      error: e instanceof Error ? e.message.slice(0, 200) : 'desconocido',
+    });
+    return 'ok';
+  }
+}
+
+/** Veredicto de la revalidación previa al POST. El motivo viaja para poder alertar por él. */
+type VeredictoPrevio = { ok: true } | { ok: false; reason: OutboxReason | null };
+
+/**
  * Última revalidación antes de que el job entre al lote. TRANSACCIONAL y COMPLETA: propiedad
- * del claim, estado del job, tenant, catálogo, existencia del producto, opt-in, revisión de
- * stock y snapshot público. Lo que ya no corresponde se asienta acá mismo con su motivo.
+ * del claim, estado del job, tenant, catálogo, MODO EFECTIVO, huella de la propiedad, campos
+ * del patch, existencia del producto, opt-in, revisión de stock y snapshot público. Lo que ya
+ * no corresponde se asienta acá mismo con su motivo.
  *
  * LÍMITE INEVITABLE: entre este commit y el POST externo hay una ventana de milisegundos. Un
  * cambio hecho exactamente ahí puede llegar a Meta igual — es irreducible sin transacciones
@@ -710,27 +862,27 @@ async function revalidarAntesDelPost(
   tenantId: string,
   r: ClaimOutcome,
   publicView: PublicViewFn,
-): Promise<'ok' | 'excluido'> {
+): Promise<VeredictoPrevio> {
   const ref = jobRef(tenantId, r.job.id);
   try {
-    return await db().runTransaction(async (tx) => {
+    return await db().runTransaction(async (tx): Promise<VeredictoPrevio> => {
       const cfgSnap = await tx.get(db().doc(`tenants/${tenantId}/config/meta`));
       const jobSnap = await tx.get(ref);
       const job = jobSnap.exists ? (jobSnap.data() as MetaCatalogOutboxJob) : null;
       // Perdió el claim (el sweep normalizó su lease, o una persona reconcilió): cero escrituras.
-      if (!job || job.status !== 'processing' || (job.attempts ?? 0) !== r.gen) return 'excluido' as const;
+      if (!job || job.status !== 'processing' || (job.attempts ?? 0) !== r.gen) return { ok: false, reason: null };
 
       const productSnap = await tx.get(db().doc(paths.product(tenantId, job.productId)));
       const product = productSnap.exists ? ({ ...(productSnap.data() as Product), id: productSnap.id }) : null;
       const cfg = normalizeCatalogSyncConfig((cfgSnap.data() as { catalogSync?: unknown } | undefined)?.catalogSync);
       const gate = outboxGate(job, gateContextOf(tenantId, cfg, product, publicView));
-      if (gate.go) return 'ok' as const;
+      if (gate.go) return { ok: true };
       // `held` (config apagada a mitad) NO es culpa del job y NO tocó Meta: se le devuelve el
       // intento. Sin esto, cinco apagones de configuración lo mandaban a revisión humana con
       // un motivo falso de "envío ambiguo".
       const devolverIntento = gate.status === 'held' ? { attempts: Math.max(0, r.gen - 1) } : {};
       tx.update(ref, { status: gate.status, reason: gate.reason, attentionRequired: attentionRequiredFor(gate.status), ...devolverIntento, leaseUntil: null, leaseOwner: null, updatedAt: Timestamp.now() });
-      return 'excluido' as const;
+      return { ok: false, reason: gate.reason };
     });
   } catch (e) {
     logger.warn('Outbox de catálogo: no se pudo revalidar un job antes del envío; vuelve a la cola', { tenantId, jobId: r.job.id, error: e instanceof Error ? e.message : 'desconocido' });
@@ -738,7 +890,7 @@ async function revalidarAntesDelPost(
     // su intento devuelto y sin lease — dejarlo `processing` lo habría dejado varado hasta que
     // el sweep lo declarara ambiguo, que es exactamente lo contrario de lo que pasó.
     await settleIfOwner(ref, r.gen, 'processing', { status: 'queued', attentionRequired: false, attempts: Math.max(0, r.gen - 1), leaseUntil: null, leaseOwner: null }).catch(() => {});
-    return 'excluido';
+    return { ok: false, reason: null };
   }
 }
 

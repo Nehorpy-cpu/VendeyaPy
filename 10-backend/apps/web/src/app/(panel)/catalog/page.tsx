@@ -10,6 +10,7 @@ import {
   listProducts,
   listCategories,
   listProductFinancials,
+  fetchCatalogOwnershipStatus,
   upsertProduct,
   deleteProduct,
   productMargin,
@@ -32,7 +33,9 @@ import { ProductForm } from '@/components/ProductForm';
 import { MetaReconciliation } from '@/components/MetaReconciliation';
 import { OutboxIncidents } from '@/components/OutboxIncidents';
 import { CatalogQualityCenter } from '@/components/CatalogQualityCenter';
+import { CatalogOwnershipCard } from '@/components/CatalogOwnershipCard';
 import { MetaCatalogImport } from '@/components/MetaCatalogImport';
+import { ProductMetaCell, motivoSinCamposPropios } from '@/components/ProductMetaCell';
 import { ConfirmModal } from '@/components/ui';
 
 const gs = (n: number | null | undefined) =>
@@ -118,6 +121,25 @@ export default function CatalogPage() {
     enabled: !!tenantId,
   });
   const finMap = financialsQ.data ?? {};
+  /**
+   * ADR-0015: propiedad por campos. La MISMA queryKey que usa la tarjeta (react-query
+   * deduplica: una sola llamada). Con cero campos propios no existe patch posible, así que el
+   * panel bloquea el opt-in, la tanda masiva y el envío, y muestra el motivo.
+   *
+   * FAIL-CLOSED: mientras no se sabe (cargando o error) TAMBIÉN se bloquea. El gate real vive
+   * en el backend, pero un panel que ofrece "sincronizar" y "enviar" cuando no pudo leer la
+   * propiedad promete algo que no puede cumplir — y con el catálogo gobernado por un feed
+   * externo, esa promesa es justamente la que abre el loop diario de escrituras.
+   */
+  const ownershipQ = useQuery({
+    queryKey: ['catalogOwnership', tenantId],
+    queryFn: () => fetchCatalogOwnershipStatus(tenantId!),
+    enabled: !!tenantId,
+    retry: false,
+  });
+  const ownership = ownershipQ.data ?? null;
+  const ownershipCargando = ownershipQ.isLoading;
+  const motivoBloqueoEnvio = motivoSinCamposPropios(ownership, { cargando: ownershipCargando });
 
   const saveMut = useMutation({
     mutationFn: (input: ProductInput) => upsertProduct(tenantId!, input),
@@ -145,6 +167,10 @@ export default function CatalogPage() {
   const [confirmApply, setConfirmApply] = useState(false);
   // META-CATALOG-RECONCILIATION-1: opt-in de sincronización por producto (fail-closed).
   const puedeReconciliar = !!claims.role && ROLES_RECONCILIACION.has(claims.role);
+  // Sin campos propios —o sin poder leer quién los gobierna— no hay envío posible: tildar
+  // productos para "habilitar sincronización" sería ofrecer una acción que no puede terminar en
+  // nada. Se oculta la selección; el porqué lo explica la tarjeta de propiedad y cada fila.
+  const puedeSeleccionar = puedeReconciliar && !motivoBloqueoEnvio;
   const [confirmSync, setConfirmSync] = useState<Product | null>(null);
   const [syncPreview, setSyncPreview] = useState<SetSyncEnabledResult | null>(null);
   const syncFlagMut = useMutation({
@@ -359,6 +385,10 @@ export default function CatalogPage() {
         </div>
       )}
 
+      {/* Quién publica cada dato del catálogo (ADR-0015): va primero porque condiciona todo
+          lo demás — con el catálogo gobernado afuera, "enviar a Meta" no es una opción. */}
+      <CatalogOwnershipCard tenantId={tenantId} products={activeProducts} />
+
       {/* Centro de calidad: agregado server-side + detalle de observaciones por producto. */}
       <CatalogQualityCenter
         tenantId={tenantId}
@@ -460,7 +490,14 @@ export default function CatalogPage() {
 
               {syncRun.status === 'planned' && (
                 <div className="flex flex-wrap items-center gap-3 border-t border-ink-100 pt-3">
-                  {syncRun.configMode === 'live' ? (
+                  {/* Bloqueo por propiedad: sin campos propios no existe patch posible, así que
+                      el envío ni se ofrece. El backend lo rechaza igual; acá se explica por qué. */}
+                  {motivoBloqueoEnvio ? (
+                    <p className="text-xs text-ink-700">
+                      <span className="font-semibold">No se puede enviar nada a Meta:</span> {motivoBloqueoEnvio} Esta
+                      previsualización es solo para que veas las diferencias.
+                    </p>
+                  ) : syncRun.configMode === 'live' ? (
                     // El envío real solo se ofrece con evidencia (planHash) y con algo para
                     // enviar: va atado a ESTA previsualización, con cantidad y producto a la vista.
                     !syncRun.planHash || applySummary(syncRun).count === 0 ? (
@@ -522,7 +559,7 @@ export default function CatalogPage() {
       </div>
 
       {/* Barra de habilitación masiva: aparece con la selección o mientras corre la tanda. */}
-      {puedeReconciliar && (seleccion.size > 0 || masivo.fase !== 'idle') && (
+      {puedeSeleccionar && (seleccion.size > 0 || masivo.fase !== 'idle') && (
         <section
           aria-label="Habilitación masiva de sincronización"
           className="space-y-2 rounded-2xl border border-mint-200 bg-mint-50/40 p-4"
@@ -631,7 +668,7 @@ export default function CatalogPage() {
           <table className="min-w-full text-sm">
             <thead className="border-b border-ink-100 bg-ink-50/60 text-left text-xs uppercase tracking-wide text-ink-500">
               <tr>
-                {puedeReconciliar && (
+                {puedeSeleccionar && (
                   <th scope="col" className="w-10 px-4 py-3">
                     {/* Selecciona SOLO los elegibles visibles (sin bloqueos y sin sync activa). */}
                     <input
@@ -677,7 +714,7 @@ export default function CatalogPage() {
                 const marca = p.brand ?? p.perfume?.brand ?? '';
                 return (
                   <tr key={p.id} className="hover:bg-ink-50/50">
-                    {puedeReconciliar && (
+                    {puedeSeleccionar && (
                       <td className="px-4 py-3 align-top">
                         <input
                           type="checkbox"
@@ -770,23 +807,16 @@ export default function CatalogPage() {
                       </span>
                     </td>
                     <td className="px-4 py-3">
-                      <div className="flex flex-col items-start gap-1">
-                        {p.syncToMeta === true ? (
-                          <SyncBadge status={p.metaSyncStatus} error={p.metaSyncError} />
-                        ) : (
-                          <span className="inline-flex rounded-full bg-ink-50 px-2 py-0.5 text-xs font-semibold text-ink-500">No se sincroniza</span>
-                        )}
-                        {p.metaRetailerId && <span className="text-[11px] text-ink-500">↔ {p.metaRetailerId}</span>}
-                        {puedeReconciliar && (
-                          <button
-                            onClick={() => (p.syncToMeta === true ? syncFlagMut.mutate({ productId: p.id, enabled: false }) : setConfirmSync(p))}
-                            disabled={syncFlagMut.isPending}
-                            className="text-[11px] font-medium text-mint-700 underline-offset-2 hover:underline disabled:opacity-50"
-                          >
-                            {p.syncToMeta === true ? 'Dejar de sincronizar' : 'Sincronizar con Meta…'}
-                          </button>
-                        )}
-                      </div>
+                      {/* Estado ACTUAL contra lo publicado + propiedad + opt-in (ADR-0015). */}
+                      <ProductMetaCell
+                        product={p}
+                        ownership={ownership}
+                        ownershipCargando={ownershipCargando}
+                        puedeReconciliar={puedeReconciliar}
+                        ocupado={syncFlagMut.isPending}
+                        onHabilitar={(prod) => setConfirmSync(prod)}
+                        onDeshabilitar={(prod) => syncFlagMut.mutate({ productId: prod.id, enabled: false })}
+                      />
                     </td>
                     <td className="px-4 py-3 text-right">
                       <button onClick={() => setEditing(p)} className="mr-3 font-medium text-mint-700 hover:text-mint-600">Editar</button>
@@ -974,34 +1004,8 @@ function applySummary(run: CatalogSyncRun): { count: number; label: string; conf
   return { count, label: `Enviar ${count} cambios a Meta…`, confirm: `¿Enviar ${count} cambios al catálogo real de Meta?` };
 }
 
-/**
- * Estado de sincronización de UN producto. META-CATALOG-OUTBOX-1: confirmar el plan encola
- * trabajo, así que el vendedor tiene que poder distinguir "todavía no salió" de "Meta lo
- * confirmó". `Sincronizado` significa CONFIRMADO contra Meta — nunca "lo mandamos".
- */
-const SYNC_BADGE: Record<string, { label: string; clase: string; ayuda: string }> = {
-  queued: { label: 'En cola', clase: 'bg-amber-50 text-amber-700', ayuda: 'El cambio está esperando su turno para enviarse a Meta.' },
-  // `processing` cubre desde que el worker toma el cambio hasta que Meta lo confirma: puede
-  // estar todavía preparando el envío, así que decir "ya salió" sería afirmar de más.
-  processing: { label: 'Procesando', clase: 'bg-amber-50 text-amber-700', ayuda: 'Lo estamos enviando a Meta. Falta la confirmación.' },
-  synced: { label: 'Confirmado', clase: 'bg-mint-50 text-mint-700', ayuda: 'Meta confirmó que el artículo quedó igual que acá.' },
-  disabled: { label: 'Oculto en Meta', clase: 'bg-ink-50 text-ink-500', ayuda: 'El artículo quedó sin stock en el catálogo de Meta.' },
-  needs_review: { label: 'Requiere revisión', clase: 'bg-amber-50 text-amber-800', ayuda: 'No se pudo confirmar solo: revisá el producto antes de reintentar.' },
-  failed: { label: 'Error', clase: 'bg-coral-50 text-coral-600', ayuda: 'Meta rechazó el cambio.' },
-  pending: { label: 'Procesando', clase: 'bg-amber-50 text-amber-700', ayuda: 'Lo estamos enviando a Meta. Falta la confirmación.' },
-};
-
-function SyncBadge({ status, error }: { status?: string; error?: string | null }) {
-  const s = status ? SYNC_BADGE[status] : undefined;
-  if (!s) {
-    return <span className="inline-flex rounded-full bg-mint-50 px-2 py-0.5 text-xs font-semibold text-mint-700">Se sincroniza</span>;
-  }
-  return (
-    <span title={error || s.ayuda} className={`inline-flex rounded-full px-2 py-0.5 text-xs font-semibold ${s.clase}`}>
-      {s.label}
-    </span>
-  );
-}
+// El estado por producto (badge operativo + deriva contra lo publicado + opt-in) vive en
+// components/ProductMetaCell.tsx desde ADR-0015: la columna dejó de ser un badge suelto.
 
 function blockReasonLabel(r: string): string {
   switch (r) {
@@ -1019,6 +1023,9 @@ function blockReasonLabel(r: string): string {
     case 'product_url_missing': return 'sin enlace al producto';
     case 'product_url_not_https': return 'el enlace al producto no es HTTPS';
     case 'no_writable_change': return 'no hay cambios publicables';
+    // (ADR-0015) No es un defecto del producto: esos campos los publica otro sistema, así que
+    // corregirlos acá no cambiaría nada en Meta. Se corrigen en el origen.
+    case 'externally_owned': return 'estos campos los administra otra fuente (no los escribimos)';
     case 'serialization_failed': return 'los datos del producto no entran en el formato de Meta';
     default: return r;
   }

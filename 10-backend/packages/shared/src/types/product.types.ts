@@ -3,7 +3,16 @@
  * Ver ARCHITECTURE.md §4.3.
  */
 
-import type { ProductStatus, Currency, PerfumeGender, PriceRange, MetaSyncStatus } from '../enums.js';
+import type {
+  ProductStatus,
+  Currency,
+  PerfumeGender,
+  PriceRange,
+  MetaSyncStatus,
+  MetaSyncState,
+  MetaDriftOwner,
+  MetaDriftSeverity,
+} from '../enums.js';
 import type { Timestamp } from './common.types.js';
 
 export interface ProductInventory {
@@ -140,6 +149,49 @@ export interface ProductAiFicha {
   perfil?: string;
 }
 
+// ---------------------------------------------------------------------------
+// Deriva contra el catálogo remoto (ADR-0015 §5)
+// ---------------------------------------------------------------------------
+
+/**
+ * UN campo divergente con los valores observados. Los valores van SANEADOS y RECORTADOS: son
+ * para que una persona entienda la diferencia, no una copia del remoto. De las URLs se guarda
+ * host + path — jamás la query string (un feed puede firmar sus imágenes) ni credenciales.
+ */
+export interface MetaDriftObservation {
+  /** Campo público del contrato de propiedad ('price', 'availability', 'title'…). */
+  field: string;
+  /** Valor local saneado (lo que VendeYaPy cree). */
+  local: string;
+  /** Valor remoto saneado (lo que Meta muestra HOY). */
+  remote: string;
+  owner: MetaDriftOwner;
+  severity: MetaDriftSeverity;
+}
+
+/**
+ * Deriva vigente del producto contra Meta. `detectedAt` es la PRIMERA detección de ESTA
+ * deriva (misma firma de campos + dueño): una corrida diaria que vuelve a ver la misma
+ * divergencia no la re-fecha ni genera un aviso nuevo — es el mismo incidente.
+ */
+export interface MetaDrift {
+  /** Campos divergentes, ordenados (firma estable de la deriva). */
+  fields: string[];
+  /** Dueño AGREGADO: `vendeyapy` si alguno de los campos divergentes es nuestro. */
+  owner: MetaDriftOwner;
+  /** `commercial` si alguno de los campos divergentes lo es (manda el más grave). */
+  severity: MetaDriftSeverity;
+  detectedAt: Timestamp;
+  /** Última corrida que volvió a ver esta misma deriva. */
+  lastSeenAt: Timestamp;
+  observed: MetaDriftObservation[];
+  /**
+   * Id NO SECRETO de la fuente externa reconocida relacionada (feed/data source), si la hay.
+   * Jamás la URL del feed, su query string ni su token.
+   */
+  externalSourceId?: string | null;
+}
+
 export interface Product {
   id: string;
   tenantId: string;
@@ -205,8 +257,35 @@ export interface Product {
    */
   metaRetailerId?: string | null;
   metaProductItemId?: string | null;
+  /**
+   * Última ESCRITURA NUESTRA confirmada contra Meta (ADR-0015 §5). Conserva exactamente su
+   * significado histórico: "en este momento un job del outbox terminó `succeeded` y la
+   * confirmación contra el catálogo dio bien". NO dice nada sobre lo que Meta muestra HOY —
+   * eso lo dice `metaVerifiedAt`. Nunca lo escribe la verificación ni la reconciliación.
+   */
   metaLastSyncAt?: Timestamp | null;
   metaSyncError?: string;
+  /**
+   * (ADR-0015 §5) Estado ACTUAL contra el catálogo remoto. Eje SEPARADO de `metaSyncStatus`
+   * (histórico de nuestros jobs, inmutable). `verified` SOLO se escribe tras una lectura
+   * remota real; `stale` jamás se persiste — se deriva en lectura comparando `metaVerifiedAt`
+   * contra el TTL, así un job de verificación que falla envejece el estado en vez de dejarlo
+   * mintiendo. SERVER-SET: lo escribe la reconciliación (Admin SDK); el cliente jamás.
+   *
+   * `null` es un valor LEGÍTIMO y significa "no hay proyección vigente": lo escribe la
+   * reconciliación cuando el producto pierde su vínculo remoto. Sin esa salida un
+   * `remote_missing` sobreviviría al desvínculo, caducaría a `stale` y apagaría la venta
+   * automática de ese producto para siempre.
+   */
+  metaSyncState?: MetaSyncState | null;
+  /**
+   * Cuándo LEÍMOS Meta y comparamos este producto (≠ `metaLastSyncAt`, que es la última
+   * escritura confirmada). Es la base de la caducidad derivada: sin este valor, o con uno más
+   * viejo que el TTL, el estado efectivo es `stale`.
+   */
+  metaVerifiedAt?: Timestamp | null;
+  /** Deriva vigente contra Meta. null ⇒ no hay divergencia conocida. SERVER-SET. */
+  metaDrift?: MetaDrift | null;
   /**
    * Producto importado desde Meta cuyo STOCK todavía no fue validado por una persona.
    * No se inventa cantidad en la importación: este flag bloquea la habilitación de sync

@@ -15,6 +15,8 @@ import {
   verifyManagedField,
   type MetaCatalogOutboxJob,
 } from './catalogOutbox.js';
+import { normalizeCatalogOwnership, WRITABLE_FIELDS } from './catalogOwnership.js';
+import { ownershipFingerprint } from './catalogOwnershipGates.js';
 
 /**
  * META-CATALOG-OUTBOX-1 — contrato del outbox persistido de escrituras VendeyaPy → Meta.
@@ -48,6 +50,12 @@ const CLAVE = {
   intendedContentHash: 'h1',
 };
 
+/**
+ * (ADR-0015) Propiedad total de VendeYaPy: el escenario histórico de estos tests. El job
+ * congela SU huella al encolarse y el gate la recalcula antes del POST.
+ */
+const PROPIEDAD_TOTAL = normalizeCatalogOwnership({ model: 'vendeyapy_managed', ownedFields: [...WRITABLE_FIELDS], external: null });
+
 const job = (over: Partial<MetaCatalogOutboxJob> = {}): MetaCatalogOutboxJob =>
   ({
     id: 'mco_x',
@@ -58,6 +66,8 @@ const job = (over: Partial<MetaCatalogOutboxJob> = {}): MetaCatalogOutboxJob =>
     action: 'update',
     intendedPatch: { id: 'ARM-744646-5202', price: '250000 PYG' },
     intendedContentHash: 'h1',
+    ownershipFingerprint: ownershipFingerprint(PROPIEDAD_TOTAL),
+    ownedFields: [...PROPIEDAD_TOTAL.writable],
     productSnapshotHash: 'snap1',
     status: 'queued',
     attempts: 0,
@@ -265,6 +275,7 @@ describe('verifyJobOutcome — solo los campos del patch', () => {
 const CTX_OK = {
   tenantId: 'arfagi',
   config: { enabled: true, mode: 'live' as const, catalogId: '1032991642570797' },
+  ownership: PROPIEDAD_TOTAL,
   product: { exists: true, syncToMeta: true, stockPendingReview: false, snapshotHash: 'snap1' },
 };
 
@@ -288,7 +299,7 @@ describe('outboxGate — fail-closed antes de escribir', () => {
   });
 
   it('la configuración apagada gana sobre cualquier otro motivo (cero escrituras)', () => {
-    const r = outboxGate(job(), { tenantId: 'arfagi', config: { enabled: false, mode: 'live', catalogId: '999' }, product: null });
+    const r = outboxGate(job(), { tenantId: 'arfagi', config: { enabled: false, mode: 'live', catalogId: '999' }, ownership: PROPIEDAD_TOTAL, product: null });
     expect(r).toEqual({ go: false, status: 'held', reason: 'config_disabled' });
   });
 

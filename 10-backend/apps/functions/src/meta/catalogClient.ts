@@ -16,6 +16,10 @@
  *  - Este cliente solo TRANSPORTA: los requests los serializa `catalogOutbound.ts`
  *    (contrato de escritura: CREATE / UPDATE parcial / disable por availability).
  *    Ningún builder emite DELETE y el fake lo rechaza: borrar es una operación aparte.
+ *  - DETECCIÓN DE FUENTES EXTERNAS (ADR-0015 §4): `listDataSources` lee los data sources del
+ *    catálogo por GET y devuelve SOLO metadata SANEADA. La URL del schedule lleva el token en
+ *    el query string —y a veces en el path—, así que de ella sobrevive únicamente el hostname:
+ *    nada más se devuelve, se loguea ni se persiste.
  */
 
 import axios from 'axios';
@@ -24,6 +28,7 @@ import { db, paths } from '../lib/firebase.js';
 import { getSecretStore } from '../lib/secretStore.js';
 import { logger } from '../lib/logger.js';
 import { canonicalHttpsUrl, ITEMS_BATCH_ALLOW_UPSERT, ITEMS_BATCH_ITEM_TYPE, MAX_ID_LENGTH, type CatalogBatchRequest } from './catalogOutbound.js';
+import { WRITABLE_FIELDS, type ExternalSourceKind, type WritableField } from './catalogOwnership.js';
 
 const DEFAULT_GRAPH_VERSION = 'v23.0';
 const TIMEOUT_MS = 10_000;
@@ -74,6 +79,237 @@ export interface MetaCatalogItemsPage {
   nextCursor: string | null;
 }
 
+// ---------------------------------------------------------------------------
+// Detección de FUENTES EXTERNAS del catálogo (ADR-0015 §4) — metadata SANEADA
+// ---------------------------------------------------------------------------
+
+/** Periodicidad declarada por Meta. `UNKNOWN` = vino algo que no reconocemos (no se inventa). */
+export type CatalogSourceInterval = 'HOURLY' | 'DAILY' | 'WEEKLY' | 'MONTHLY' | 'UNKNOWN';
+
+/** Horario del feed. Es lo único del `schedule` que sobrevive: la URL se descarta entera. */
+export interface CatalogSourceSchedule {
+  interval: CatalogSourceInterval;
+  hour: number | null;
+  minute: number | null;
+  timezone: string | null;
+}
+
+/**
+ * Metadata SANEADA de una fuente de datos del catálogo. Es lo ÚNICO que sale del cliente y lo
+ * único que se persiste: ni URL firmada, ni query string, ni token, ni nombre de archivo, ni
+ * una línea del CSV. Lo que no está acá, no existe para el resto del sistema.
+ */
+export interface SanitizedCatalogSource {
+  /** Todo lo que cuelga de `/product_feeds` es un feed de Meta. El tipo NO se infiere. */
+  kind: ExternalSourceKind;
+  /** Identificador NO secreto del data source (el que reconoce un humano en la config). */
+  sourceId: string;
+  /** Nombre humano del feed ya sanitizado (sin URLs, sin blobs opacos). Puede quedar vacío. */
+  nombreSaneado: string;
+  schedule: CatalogSourceSchedule | null;
+  /** SOLO el hostname de la URL del feed (sin esquema, sin path, sin query). null si no hay. */
+  host: string | null;
+  /** Extensión del archivo (`csv`, `xml`…). Del `file_name` no sobrevive nada más. */
+  fileExtension: string | null;
+  /** `PRIMARY_FEED` / `SUPPLEMENTARY_FEED` cuando el Graph lo expone. Enum, jamás texto libre. */
+  ingestionSourceType: string | null;
+  /**
+   * Campos públicos que la fuente publica, SOLO si son inferibles de columnas declaradas.
+   * Vacío significa "no inferible", NUNCA "no publica nada": la propiedad la declara un humano.
+   */
+  detectedFields: WritableField[];
+  /** Creación del feed en ISO-8601 (un feed recién creado es señal para mirar). */
+  createdAt: string | null;
+  detectedAt: string;
+}
+
+/** Una verificación completa de fuentes externas de un catálogo. */
+export interface CatalogSourcesObservation {
+  catalogId: string;
+  sources: SanitizedCatalogSource[];
+  /** `feed_count` que declara el propio catálogo. null = no se pudo corroborar. */
+  feedCount: number | null;
+  /**
+   * false ⇒ el listado PUDO quedar incompleto (paginación topeada, entradas sin id usable o
+   * `feed_count` mayor que lo listado). Con esto en false JAMÁS se puede afirmar "no hay
+   * fuente nueva": una fuente oculta es exactamente el riesgo que la detección existe para tapar.
+   */
+  complete: boolean;
+  detectedAt: string;
+}
+
+/** Campos NO SECRETOS que pedimos de cada data source. */
+export const DATA_SOURCE_FIELDS_BASE = 'id,name,file_name,schedule,created_time';
+/** No existe en todas las versiones del Graph: si Meta lo rechaza, se reintenta sin él. */
+export const DATA_SOURCE_FIELD_INGESTION = 'ingestion_source_type';
+/** Un catálogo real tiene un puñado de feeds; más páginas que esto es una anomalía. */
+const MAX_SOURCE_PAGES = 5;
+const NOMBRE_SANEADO_MAX = 60;
+
+const SOURCE_ID_RE = /^[A-Za-z0-9._-]{1,64}$/;
+const TIMEZONE_RE = /^[A-Za-z][A-Za-z0-9_+-]*(?:\/[A-Za-z0-9_+-]+)*$/;
+const INGESTION_TYPE_RE = /^[A-Z][A-Z_]{0,39}$/;
+const INTERVALOS: readonly string[] = ['HOURLY', 'DAILY', 'WEEKLY', 'MONTHLY'];
+/** Palabras que jamás deben sobrevivir en una etiqueta humana que vamos a persistir. */
+const PALABRA_CREDENCIAL = /\b(?:token|secret|password|passwd|apikey|api_key|signature|hmac|bearer|auth)\b/gi;
+
+/**
+ * Nombre del feed listo para persistir. Un humano puede haberlo bautizado pegando la URL
+ * firmada entera, así que se limpia en capas: URLs, restos de query string, blobs opacos
+ * (un token es una tirada larga sin espacios), palabras de credencial y por último una
+ * whitelist de caracteres de etiqueta. Lo que queda es texto humano o nada.
+ */
+export function sanitizeSourceName(raw: unknown): string {
+  if (typeof raw !== 'string') return '';
+  return raw
+    .replace(/[a-z][a-z0-9+.-]*:\/\/\S*/gi, ' ')
+    .replace(/[?&]\S*/g, ' ')
+    .replace(/[A-Za-z0-9_-]{24,}/g, ' ')
+    .replace(PALABRA_CREDENCIAL, ' ')
+    .replace(/[^\p{L}\p{N} .,()_-]/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, NOMBRE_SANEADO_MAX)
+    .trim();
+}
+
+/**
+ * De la URL del feed sobrevive SOLO el hostname. El query string lleva el token (es el caso
+ * real que motivó el ADR) pero el path también puede llevarlo (`/feeds/<firma>/products.csv`),
+ * así que no se conserva ni el path ni el puerto ni el userinfo: nada salvo el host.
+ */
+export function hostFromFeedUrl(raw: unknown): string | null {
+  if (typeof raw !== 'string' || !raw.trim()) return null;
+  try {
+    const host = new URL(raw.trim()).hostname.toLowerCase();
+    return /^[a-z0-9.-]{1,253}$/.test(host) ? host : null;
+  } catch {
+    return null;
+  }
+}
+
+function enteroEnRango(v: unknown, min: number, max: number): number | null {
+  const n = typeof v === 'number' ? v : typeof v === 'string' && v.trim() !== '' ? Number(v) : NaN;
+  return Number.isInteger(n) && n >= min && n <= max ? n : null;
+}
+
+/** Horario + host del `schedule` crudo. Meta manda hora y minuto como strings ("3", "33"). */
+export function sanitizeSourceSchedule(raw: unknown): { schedule: CatalogSourceSchedule | null; host: string | null } {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { schedule: null, host: null };
+  const r = raw as Record<string, unknown>;
+  const iv = typeof r.interval === 'string' ? r.interval.trim().toUpperCase() : '';
+  const tz = typeof r.timezone === 'string' ? r.timezone.trim() : '';
+  return {
+    schedule: {
+      interval: (INTERVALOS.includes(iv) ? iv : 'UNKNOWN') as CatalogSourceInterval,
+      hour: enteroEnRango(r.hour, 0, 23),
+      minute: enteroEnRango(r.minute, 0, 59),
+      timezone: tz.length <= 64 && TIMEZONE_RE.test(tz) ? tz : null,
+    },
+    host: hostFromFeedUrl(r.url),
+  };
+}
+
+/**
+ * Columnas típicas de un feed → campo público del contrato. Solo se usa cuando la fuente
+ * DECLARA sus columnas; jamás se abre el archivo para averiguarlas.
+ */
+const COLUMNA_A_CAMPO: Readonly<Record<string, WritableField>> = {
+  title: 'title',
+  name: 'title',
+  description: 'description',
+  price: 'price',
+  sale_price: 'price',
+  currency: 'currency',
+  availability: 'availability',
+  inventory: 'inventory',
+  quantity_to_sell_on_facebook: 'inventory',
+  brand: 'brand',
+  google_product_category: 'category',
+  fb_product_category: 'category',
+  product_type: 'category',
+  image_link: 'image',
+  additional_image_link: 'image',
+  link: 'url',
+};
+
+/** Campos públicos inferibles de las columnas declaradas. Orden canónico de WRITABLE_FIELDS. */
+export function inferFieldsFromColumns(raw: unknown): WritableField[] {
+  if (!Array.isArray(raw)) return [];
+  const out = new Set<WritableField>();
+  for (const c of raw) {
+    if (typeof c !== 'string') continue;
+    const campo = COLUMNA_A_CAMPO[c.trim().toLowerCase()];
+    if (campo) out.add(campo);
+  }
+  return WRITABLE_FIELDS.filter((f) => out.has(f));
+}
+
+/** Del `file_name` solo sobrevive la extensión: el resto sale del último tramo de la URL. */
+function extensionDeArchivo(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null;
+  const ext = /\.([A-Za-z0-9]{1,8})(?:$|[?#])/.exec(raw.trim())?.[1];
+  return ext ? ext.toLowerCase() : null;
+}
+
+function isoOrNull(raw: unknown): string | null {
+  if (typeof raw !== 'string' || !raw.trim()) return null;
+  const t = Date.parse(raw.trim());
+  return Number.isFinite(t) ? new Date(t).toISOString() : null;
+}
+
+const PATRON_ESQUEMA = /:\/\//;
+const PATRON_QUERY = /[?&][A-Za-z0-9_.-]+=/;
+
+/**
+ * ÚLTIMA BARRERA antes de devolver o persistir metadata de una fuente: mismo espíritu que
+ * `assertItemsBatchBody`, que corre igual en el cliente real y en el fake. Si una regresión
+ * futura dejara pasar un esquema de URL, un query string o una palabra de credencial, esto
+ * lanza en vez de escribirlo en Firestore. No debería poder dispararse: es un guard de bug.
+ */
+export function assertSanitizedSource(s: SanitizedCatalogSource): void {
+  const textos = [s.sourceId, s.nombreSaneado, s.host ?? '', s.fileExtension ?? '', s.ingestionSourceType ?? '', s.schedule?.timezone ?? '', s.createdAt ?? ''];
+  for (const t of textos) {
+    if (PATRON_ESQUEMA.test(t) || PATRON_QUERY.test(t)) {
+      throw new MetaCatalogApiError('Detección de fuentes: metadata sin sanear (URL o query string); se aborta antes de devolverla.', 'http', null, null, false);
+    }
+  }
+  PALABRA_CREDENCIAL.lastIndex = 0; // el flag /g mantiene estado entre llamadas
+  if (PALABRA_CREDENCIAL.test(s.nombreSaneado)) {
+    throw new MetaCatalogApiError('Detección de fuentes: el nombre saneado menciona una credencial; se aborta antes de devolverlo.', 'http', null, null, false);
+  }
+}
+
+/**
+ * Data source crudo del Graph → metadata saneada. Devuelve null si la entrada no tiene un
+ * identificador usable: sin id no hay fuente que un humano pueda reconocer, y contarla como
+ * "ninguna fuente" sería mentir — por eso el llamador la trata como listado INCOMPLETO.
+ */
+export function sanitizeDataSource(raw: unknown, detectedAt: string): SanitizedCatalogSource | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const r = raw as Record<string, unknown>;
+  const sourceId = typeof r.id === 'string' ? r.id.trim() : typeof r.id === 'number' ? String(r.id) : '';
+  if (!SOURCE_ID_RE.test(sourceId)) return null;
+  // `update_schedule` es el hermano incremental de `schedule`: si el catálogo usa ese, el
+  // horario real está ahí. Se lee de forma defensiva aunque no lo pidamos explícitamente.
+  const { schedule, host } = sanitizeSourceSchedule(r.schedule ?? r.update_schedule);
+  const ingestion = typeof r.ingestion_source_type === 'string' ? r.ingestion_source_type.trim().toUpperCase() : '';
+  const saneada: SanitizedCatalogSource = {
+    kind: 'meta_feed',
+    sourceId,
+    nombreSaneado: sanitizeSourceName(r.name),
+    schedule,
+    host,
+    fileExtension: extensionDeArchivo(r.file_name),
+    ingestionSourceType: INGESTION_TYPE_RE.test(ingestion) ? ingestion : null,
+    detectedFields: inferFieldsFromColumns(r.columns),
+    createdAt: isoOrNull(r.created_time),
+    detectedAt,
+  };
+  assertSanitizedSource(saneada);
+  return saneada;
+}
+
 export interface MetaCatalogClient {
   /**
    * Llamadas HTTP realizadas a Meta desde que se creó el cliente. Cuenta CADA request, no cada
@@ -93,6 +329,12 @@ export interface MetaCatalogClient {
    * y fail-closed para el plan/preview/outbox (un diff con listado parcial mentiría).
    */
   listItemsPage(catalogId: string, cursor?: string | null): Promise<MetaCatalogItemsPage>;
+  /**
+   * Lista las FUENTES DE DATOS del catálogo (`/product_feeds`) devolviendo SOLO metadata
+   * saneada (ADR-0015 §4). Es una lectura: jamás desactiva ni modifica un feed. La URL firmada
+   * del schedule NO se devuelve — de ella queda únicamente el hostname.
+   */
+  listDataSources(catalogId: string): Promise<CatalogSourcesObservation>;
   /** Envía un lote de escrituras ya serializadas. JAMÁS borra items. */
   submitItemsBatch(catalogId: string, requests: CatalogBatchRequest[]): Promise<{ handles: string[] }>;
   /** Estado best-effort de un batch asíncrono (errores por item si Meta ya los reportó). */
@@ -194,14 +436,18 @@ export class HttpMetaCatalogClient implements MetaCatalogClient {
     return this.llamadas;
   }
 
+  /** Reloj inyectable: `detectedAt` de la detección de fuentes tiene que ser determinístico. */
+  private readonly now: () => string;
+
   constructor(
     private readonly accessToken: string,
-    opts?: { version?: string; transport?: CatalogTransport; sleep?: (ms: number) => Promise<void> },
+    opts?: { version?: string; transport?: CatalogTransport; sleep?: (ms: number) => Promise<void>; now?: () => string },
   ) {
     const version = opts?.version ?? process.env.META_CATALOG_GRAPH_VERSION ?? DEFAULT_GRAPH_VERSION;
     this.base = `https://graph.facebook.com/${version}`;
     this.transport = opts?.transport ?? axiosTransport;
     this.sleep = opts?.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
+    this.now = opts?.now ?? (() => new Date().toISOString());
   }
 
   /**
@@ -317,6 +563,67 @@ export class HttpMetaCatalogClient implements MetaCatalogClient {
     return { items: (data.data ?? []).map(toRemoteItem), nextCursor: next };
   }
 
+  /** Una página de `/product_feeds`, con la misma validación de host que el resto del cliente. */
+  private async getFeedsPage(url: string): Promise<{ data?: Array<Record<string, unknown>>; paging?: { next?: string } }> {
+    const data = ((await this.request('GET', url)) ?? {}) as { data?: Array<Record<string, unknown>>; paging?: { next?: string } };
+    const next = data.paging?.next;
+    if (next && !next.startsWith(GRAPH_CURSOR_PREFIX)) {
+      throw new MetaCatalogApiError('Meta Catalog: cursor de fuentes con host inesperado; detección abortada.', 'http', null, null, false);
+    }
+    return data;
+  }
+
+  /**
+   * `feed_count` del propio catálogo: corrobora que el listado no quedó corto. Es una
+   * comprobación OPCIONAL — si el Graph no la expone o falla, la detección igual vale; lo que
+   * no puede pasar es que un conteo MAYOR al listado se lea como "no hay fuentes nuevas".
+   */
+  private async feedCount(catalogId: string): Promise<number | null> {
+    try {
+      const d = ((await this.request('GET', `${this.base}/${catalogId}?fields=feed_count`)) ?? {}) as { feed_count?: unknown };
+      const n = typeof d.feed_count === 'number' ? d.feed_count : Number(d.feed_count);
+      return Number.isInteger(n) && n >= 0 ? n : null;
+    } catch {
+      return null;
+    }
+  }
+
+  async listDataSources(catalogId: string): Promise<CatalogSourcesObservation> {
+    const detectedAt = this.now();
+    const base = `${this.base}/${catalogId}/product_feeds?limit=${PAGE_LIMIT}&fields=`;
+    let data: { data?: Array<Record<string, unknown>>; paging?: { next?: string } };
+    try {
+      data = await this.getFeedsPage(`${base}${DATA_SOURCE_FIELDS_BASE},${DATA_SOURCE_FIELD_INGESTION}`);
+    } catch (e) {
+      // `ingestion_source_type` no existe en todas las versiones del Graph y un campo
+      // desconocido se rechaza con 400/code 100. Se reintenta UNA vez con el set base: si el
+      // problema era otro (catálogo inexistente, permiso), el segundo GET vuelve a fallar.
+      if (!(e instanceof MetaCatalogApiError && e.status === 400 && e.fbCode === 100)) throw e;
+      data = await this.getFeedsPage(`${base}${DATA_SOURCE_FIELDS_BASE}`);
+    }
+    const sources: SanitizedCatalogSource[] = [];
+    let inutilizables = 0;
+    let paginas = 0;
+    let next: string | null = null;
+    for (;;) {
+      for (const raw of data.data ?? []) {
+        const s = sanitizeDataSource(raw, detectedAt);
+        if (s) sources.push(s);
+        else inutilizables++;
+      }
+      next = data.paging?.next ?? null;
+      paginas++;
+      if (!next || paginas >= MAX_SOURCE_PAGES) break;
+      data = await this.getFeedsPage(next);
+    }
+    const feedCount = await this.feedCount(catalogId);
+    // FAIL-CLOSED de la detección: si quedaron páginas sin leer, entradas sin id usable o el
+    // catálogo declara más feeds de los que listamos, el resultado NO habilita a concluir que
+    // no hay fuente nueva. Se reporta incompleto y el comparador lo trata como tal.
+    const complete = !next && inutilizables === 0 && (feedCount === null || feedCount <= sources.length);
+    return { catalogId, sources, feedCount, complete, detectedAt };
+  }
+
   async submitItemsBatch(catalogId: string, requests: CatalogBatchRequest[]): Promise<{ handles: string[] }> {
     const body = {
       item_type: ITEMS_BATCH_ITEM_TYPE,
@@ -372,7 +679,18 @@ export interface CatalogFixture {
    *  - `after_accept`: Meta ACEPTÓ y procesó, pero el cliente vio un timeout. El escrito
    *    EXISTE aunque el llamador no lo sepa. Es el caso que obliga a mirar antes de reintentar.
    */
-  failWith?: { op: 'getCatalog' | 'listItems' | 'batch' | 'batchStatus'; status?: number; code?: number; message?: string; when?: 'before_accept' | 'after_accept' };
+  failWith?: { op: 'getCatalog' | 'listItems' | 'batch' | 'batchStatus' | 'listDataSources'; status?: number; code?: number; message?: string; when?: 'before_accept' | 'after_accept' };
+  /**
+   * Data sources CRUDOS (forma del Graph, con URL firmada y todo) para el E2E de detección:
+   * permite simular 0 feeds, 1 feed, un feed NUEVO y un feed con el schedule cambiado sin
+   * tocar la red. El fake los sanea con la MISMA función que el cliente real, así que el
+   * emulador ejercita también la barrera de saneamiento.
+   */
+  dataSources?: Array<Record<string, unknown>>;
+  /** `feed_count` que declara el catálogo: mayor que `dataSources` ⇒ listado INCOMPLETO. */
+  feedCount?: number;
+  /** Reloj del fixture: fija `detectedAt` para que el E2E sea determinístico. */
+  dataSourcesDetectedAt?: string;
   /**
    * Con esto en true el fake APLICA el batch sobre `items` (como haría Meta), normalizando la
    * URL igual que Meta. Sin esto, el camino "enviado → confirmado" no se puede ejercitar: la
@@ -507,7 +825,7 @@ export class FakeMetaCatalogClient implements MetaCatalogClient {
     }
   }
 
-  private failIf(fx: CatalogFixture, op: 'getCatalog' | 'listItems' | 'batch' | 'batchStatus', when: 'before_accept' | 'after_accept' = 'before_accept'): void {
+  private failIf(fx: CatalogFixture, op: 'getCatalog' | 'listItems' | 'batch' | 'batchStatus' | 'listDataSources', when: 'before_accept' | 'after_accept' = 'before_accept'): void {
     const f = fx.failWith;
     if (f?.op === op && (f.when ?? 'before_accept') === when) {
       const status = f.status ?? 400;
@@ -563,6 +881,28 @@ export class FakeMetaCatalogClient implements MetaCatalogClient {
     const items = all.slice(start, start + pageSize);
     const nextCursor = start + pageSize < all.length ? `page:${pageIndex + 1}` : null;
     return { items, nextCursor };
+  }
+
+  /**
+   * Detección de fuentes contra el fixture. Sanea con la MISMA función que el cliente real —
+   * dos saneadores distintos se desincronizan y uno de los dos termina filtrando el token.
+   */
+  async listDataSources(catalogId: string): Promise<CatalogSourcesObservation> {
+    const fx = await this.fixture();
+    // Una llamada por el listado + una por `feed_count`, igual que el cliente real.
+    this.llamadas += 2;
+    this.failIf(fx, 'listDataSources');
+    const detectedAt = fx.dataSourcesDetectedAt ?? new Date().toISOString();
+    const sources: SanitizedCatalogSource[] = [];
+    let inutilizables = 0;
+    for (const raw of fx.dataSources ?? []) {
+      const s = sanitizeDataSource(raw, detectedAt);
+      if (s) sources.push(s);
+      else inutilizables++;
+    }
+    const feedCount = typeof fx.feedCount === 'number' ? fx.feedCount : (fx.dataSources ?? []).length;
+    const complete = inutilizables === 0 && feedCount <= sources.length;
+    return { catalogId, sources, feedCount, complete, detectedAt };
   }
 
   async submitItemsBatch(catalogId: string, requests: CatalogBatchRequest[]): Promise<{ handles: string[] }> {

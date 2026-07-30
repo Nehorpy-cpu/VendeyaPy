@@ -57,8 +57,12 @@ export interface SessionContext {
   humanTakeover: boolean;
   /** F3: oferta de carrito pendiente de confirmación (ausente/null = no hay oferta vigente). */
   pendingCartConfirmation?: PendingCartConfirmation | null;
-  /** HANDOFF-2 / AI-FALLBACK-HONESTO-1: razón estructurada del takeover vigente (null al liberar). */
-  handoffReason?: 'customer_requested' | 'payment_verification' | 'coverage_review' | 'seller_manual' | 'ai_unavailable' | null;
+  /**
+   * HANDOFF-2 / AI-FALLBACK-HONESTO-1: razón estructurada del takeover vigente (null al liberar).
+   * ADR-0015 §8 suma `catalog_drift`: el precio/stock público lo gobierna una fuente externa que
+   * hoy dice otra cosa ⇒ no se afirma el dato ni se cierra la venta sin una persona.
+   */
+  handoffReason?: 'customer_requested' | 'payment_verification' | 'coverage_review' | 'seller_manual' | 'ai_unavailable' | 'catalog_drift' | null;
   /** HANDOFF-2: nombre del vendedor al que se derivó (auditoría mínima). */
   handoffSellerName?: string | null;
   /** HANDOFF-2: momento del handoff vigente. */

@@ -87,7 +87,16 @@ const runDocOf = async (tenant, runId) => (await db.doc(`tenants/${tenant}/metaC
 const auditsOf = async (tenant) => (await db.collection(`tenants/${tenant}/auditLogs`).where('action', '==', 'meta.catalog_sync').get()).docs.map((d) => d.data());
 const entryOf = (run, productId) => (run?.entries ?? []).find((e) => e.productId === productId) ?? null;
 const setConfig = (catalogSync) => db.doc(`tenants/${T}/config/meta`).set({ catalogSync }, { merge: true });
-const VALID_CFG = { enabled: true, mode: 'dry_run', catalogId: CATALOG_ID, sourceOfTruth: 'vendeyapy' };
+/**
+ * (ADR-0015) `ownership` es OBLIGATORIA: sin ella la config queda con propiedad DEGRADADA
+ * —cero campos escribibles y techo `dry_run`— y ningún apply pasa. Este E2E describe un
+ * tenant que administra sus propios campos públicos, así que declara la matriz completa.
+ * `sourceOfTruth` sobrevive como literal LEGACY: ya no decide nada (la autoridad es
+ * `ownership`), por eso el caso fail-closed de más abajo dejó de apoyarse en él.
+ */
+const OWNED_FIELDS = ['title', 'description', 'price', 'currency', 'availability', 'inventory', 'brand', 'category', 'image', 'url'];
+const OWNERSHIP_PROPIA = { model: 'vendeyapy_managed', ownedFields: OWNED_FIELDS, external: null };
+const VALID_CFG = { enabled: true, mode: 'dry_run', catalogId: CATALOG_ID, sourceOfTruth: 'vendeyapy', ownership: OWNERSHIP_PROPIA };
 
 // ═══ Setup ═══
 console.log('\n═══ META-CATALOG-LIVE-1 · E2E con cliente fake (cero Meta real) ═══\n');
@@ -169,10 +178,14 @@ const ownerBoutique = await signIn('owner@boutique.com');
   const { result } = await call('runTenantJob', owner, { action: 'catalogSync', tenantId: T });
   check('3. Sin config ⇒ disabled (fail-closed), sin tocar Meta', result?.result?.status === 'disabled', `status=${result?.result?.status}`);
 }
-await setConfig({ ...VALID_CFG, sourceOfTruth: 'meta' });
+// (ADR-0015) `sourceOfTruth` quedó LEGACY y ya no apaga nada: la autoridad de escritura es
+// `ownership`, que se verifica en su propia sección (B2). Este slot conserva un caso
+// fail-closed de FORMA igual de duro y que tampoco puede dejar run docs: un `enabled` truthy
+// que no es booleano jamás habilita la sincronización.
+await setConfig({ ...VALID_CFG, enabled: 'true' });
 {
   const { result } = await call('runTenantJob', owner, { action: 'catalogSync' });
-  check('4. sourceOfTruth invertida ⇒ disabled (jamás Meta→VendeyaPy)', result?.result?.status === 'disabled');
+  check('4. enabled truthy NO booleano ⇒ disabled (fail-closed de forma)', result?.result?.status === 'disabled');
 }
 await setConfig({ ...VALID_CFG, mode: 'off' });
 {
@@ -914,10 +927,14 @@ const waitHold = async (point) => {
   // rota en una confirmación posterior): assertBatchRequestShape la rechaza. Se importa el
   // build compilado con URL file:// (requisito de ESM en Windows).
   const { enqueueCatalogPlan } = await import(new URL('../lib/meta/catalogOutboxWorker.js', import.meta.url).href);
+  const { normalizeCatalogOwnership } = await import(new URL('../lib/meta/catalogOwnership.js', import.meta.url).href);
   const res = await enqueueCatalogPlan(T, 'run-h2-e', [{
     productId: 'MCE2E-B', sku: 'MCE2E-B', action: 'update',
     request: { method: 'UPDATE', data: { id: 'MCE2E-B', costPrice: 999 } }, payload: {}, remoteItemId: null,
-  }], { catalogId: CATALOG_ID });
+    // (ADR-0015) El encolado exige la propiedad EFECTIVA normalizada. Se arma con el mismo
+    // normalizador de producción para que este atajo del E2E no invente permisos que la
+    // config real no da.
+  }], { catalogId: CATALOG_ID, ownership: normalizeCatalogOwnership(OWNERSHIP_PROPIA) });
   const despues = await productOf('MCE2E-B');
   check('OB-86. una confirmación inválida NO pisa el estado del ciclo activo', res.blocked === 1 && despues?.metaSyncStatus === antes?.metaSyncStatus && despues?.metaSyncCurrentJobId === jobA.id, `blocked=${res.blocked} status=${despues?.metaSyncStatus} vigente=${despues?.metaSyncCurrentJobId?.slice(-9)}`);
 }

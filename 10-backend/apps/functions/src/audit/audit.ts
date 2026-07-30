@@ -82,6 +82,13 @@ export const AUDIT_ACTIONS = [
   // HARDEN-1 (ADR-0014 §4c): cada invocación del mantenimiento de catálogo
   // (preview/apply de backfill de locks + quality, con contadores y conflictos).
   'meta.catalog_maintenance_run',
+  // META-CATALOG-OWNERSHIP-MODEL-1 (ADR-0015 §9): cada invocación de la migración de propiedad
+  // por campos (preview/apply). El apply es el acto HUMANO que reconoce la fuente externa: sin
+  // esta entrada no quedaría constancia de quién declaró quién gobierna el catálogo.
+  'meta.catalog_ownership_migration_run',
+  // ADR-0015 §6: cada invocación de la reconciliación periódica del estado actual (solo
+  // lee Meta y actualiza metaSyncState/metaDrift; jamás escribe en Meta ni borra nada).
+  'meta.catalog_verification_run',
   'whatsapp.activation_requested',
   'whatsapp.activation_completed',
   'whatsapp.activation_cancelled',

@@ -1,7 +1,18 @@
 import { describe, it, expect } from 'vitest';
 import type { Product } from '@vpw/shared';
-import { localPublicView, planCatalogSync, priceEquals, productAvailability } from './catalog.js';
+import { localPublicView, planCatalogSync as planConPropiedad, priceEquals, productAvailability } from './catalog.js';
+import { normalizeCatalogOwnership, WRITABLE_FIELDS } from './catalogOwnership.js';
 import type { MetaRemoteCatalogItem } from './catalogClient.js';
+
+/**
+ * (ADR-0015) `planCatalogSync` exige la propiedad EFECTIVA y no tiene default: un planificador
+ * que asumiera permiso por omisión sería justamente el bug que el ADR vino a cerrar. Estos
+ * tests describen el escenario `vendeyapy_managed` con TODOS los campos públicos propios —el
+ * comportamiento histórico—, así que las aserciones siguen valiendo tal cual. Los casos de
+ * propiedad externa, híbrida o sin declarar viven en `catalogOwnership.gates.test.ts`.
+ */
+const PROPIEDAD_TOTAL = normalizeCatalogOwnership({ model: 'vendeyapy_managed', ownedFields: [...WRITABLE_FIELDS], external: null });
+const planCatalogSync = (products: Product[], remotos: MetaRemoteCatalogItem[]) => planConPropiedad(products, remotos, PROPIEDAD_TOTAL);
 
 /**
  * META-CATALOG-LIVE-1 — plan y payload PUROS:

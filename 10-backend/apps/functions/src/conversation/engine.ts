@@ -42,9 +42,11 @@ import { veredictoOcasion, respuestaOcasionNoConviene, respuestaOcasionConviene 
 import { esPosiblePedidoHumano, procesarPedidoHumano } from './humanRequest.js';
 import { derivarPorIaNoDisponible, esConsultaDerivable } from './aiUnavailable.js';
 import { esConsultaCobertura, RESPUESTA_COBERTURA_SEGURA } from './coverageGuard.js';
+import { leerDeriva, driftGuardCableado, derivaActivaPara, evaluarDerivaSiAplica, resumenSaneado, SIN_DERIVA, type VeredictoDeriva } from '../catalog/driftGuard.js';
+import { derivarPorDerivaCritica } from './driftHandoff.js';
 import { gateCoberturaCheckout, clasificarTextoEnEspera, manejarTurnoEnEsperaUbicacion, actualizarUbicacionEnRevision } from './coverage.js';
 import type { CoverageSessionPointer } from '@vpw/shared';
-import { createPendingOrder, ProductNoVendibleError } from '../orders/createPendingOrder.js';
+import { createPendingOrder, assertOrdenSinDerivaCritica, ProductNoVendibleError, ProductoConDerivaCriticaError } from '../orders/createPendingOrder.js';
 import { resolveCheckoutReuse } from '../orders/checkoutReuse.js';
 import { getCheckoutConfig, formatTransferInstructions } from '../orders/checkoutConfig.js';
 import { captureTrackingCode } from '../tracking/tracking.js';
@@ -369,6 +371,12 @@ export async function decidirRespuesta(
   locationRequest?: boolean;
   /** KILL-SWITCH-1: activación del reply de cobertura (process.ts re-lee el flag antes de enviar). */
   coverageActivationId?: string | null;
+  /**
+   * ADR-0015 §8: deriva CRÍTICA detectada en el camino del checkout. El motor no deriva por su
+   * cuenta (la transición canónica escribe la sesión y handleMessage debe respetarla): devuelve
+   * el veredicto SANEADO y handleMessage hace el pase con `executeHandoff`.
+   */
+  driftBlock?: VeredictoDeriva;
 }> {
   const t = text.toLowerCase();
 
@@ -417,6 +425,36 @@ export async function decidirRespuesta(
     // en revisión) y JAMÁS dispara un request/REQUOTE sobre una orden abierta.
     const decision = await resolveCheckoutReuse(tenantId, customerId, prev.pendingOrderId ?? null, prev.cart);
     if (decision.kind === 'reuse') {
+      // ADR-0015 §8: reenviar los datos bancarios y el total de un pedido abierto AFIRMA un precio
+      // igual que crear la orden — y este camino retorna ANTES de createPendingOrder, donde vive el
+      // freno. Sin esto, "pagar" repetido sobre una orden ya creada seguía mandando banco y total de
+      // un producto cuyo dato público no podemos confirmar. Se revisa lo que pide LA ORDEN (es lo
+      // que se está por cobrar), no el carrito actual.
+      //
+      // Se usa `assertOrdenSinDerivaCritica` —la MISMA definición que aplican createPendingOrder y
+      // la reanudación por cobertura— y no el evaluador conversacional: acá hay dinero
+      // comprometido, así que es FAIL-CLOSED. Antes esta rama usaba `evaluarDerivaSiAplica`, que
+      // ante un error de lectura de la proyección devuelve "sin deriva": un parpadeo de Firestore
+      // alcanzaba para reenviar banco y total de un precio que no se pudo verificar. Como manda el
+      // ADR, la rama de reuso vuelve a preguntar. De paso hereda la otra regla del helper: una
+      // orden sin ítems legibles es `unverifiable`, porque mandar el total de algo que no sabemos
+      // atribuir es exactamente lo que este guard impide.
+      try {
+        await assertOrdenSinDerivaCritica(tenantId, decision.order.id, decision.order.items, {
+          customerId,
+          motivo: 'checkout_idempotente_reuse',
+        });
+      } catch (e) {
+        if (!(e instanceof ProductoConDerivaCriticaError)) throw e;
+        return {
+          reply: '',
+          // Se conserva el estado del pago (el pedido sigue abierto): el pase a humano lo hace
+          // handleMessage y nadie degrada un AWAITING_PAYMENT por este camino.
+          nextState: prev.state ?? 'CART',
+          pendingOrderId: decision.order.id, // el puntero se repara igual: la orden no desaparece
+          driftBlock: e.veredicto,
+        };
+      }
       const config = await getCheckoutConfig(tenantId);
       logger.info('Checkout idempotente: se reenvía la orden pendiente', { tenantId, customerId, orderId: decision.order.id, repaired: decision.repaired });
       return {
@@ -484,6 +522,14 @@ export async function decidirRespuesta(
     try {
       order = await createPendingOrder(tenantId, customerId, prev.cart);
     } catch (e) {
+      // ADR-0015 §8: el precio/disponibilidad/stock público de algún producto del carrito lo
+      // gobierna una fuente externa que HOY publica otra cosa ⇒ la orden no nace y los datos
+      // bancarios no salen. Se evalúa ANTES que ProductNoVendibleError porque la deriva es una
+      // subclase suya a propósito (mismo freno del pedido, distinta razón y distinto mensaje):
+      // el pase a humano lo hace handleMessage con el servicio canónico.
+      if (e instanceof ProductoConDerivaCriticaError) {
+        return { reply: '', nextState: 'CART', driftBlock: e.veredicto };
+      }
       // El carrito quedó con algo que ya no se puede vender (desactivado / sin stock desde que
       // se armó). Respuesta honesta, SIN crear pedido ni prometer disponibilidad.
       if (e instanceof ProductNoVendibleError) {
@@ -609,6 +655,14 @@ export async function decidirRespuesta(
   }
 
   if (seleccion) {
+    // ADR-0015 §8: agregar ANUNCIA un total, así que es una afirmación de precio más. El guard del
+    // turno ya cubre el producto nombrado y la oferta vigente; acá se cierra el caso legacy (sesión
+    // vieja sin oferta guardada que resuelve por `lastShownSkus`), que no pasa por ninguno de los dos.
+    const derivaSel = await evaluarDerivaSiAplica(tenantId, [{ id: seleccion.id, name: seleccion.name }]);
+    if (derivaSel.bloqueantes.length) {
+      // Sin tocar el carrito: la ADR pide conservarlo tal cual y derivar.
+      return { reply: '', nextState: prev.state ?? 'BROWSING', pendingCart: null, driftBlock: derivaSel };
+    }
     const cart = addToCart(prev.cart, seleccion);
     const unidades = cart.items.reduce((n, i) => n + i.quantity, 0);
     return {
@@ -698,7 +752,7 @@ export async function interceptarReclamoCarrito(
   text: string,
   prev: { cart: Cart; pendingVigente: PendingCartConfirmation | null; nowMs: number; enPago?: boolean },
   tipo: 'fuerte' | 'debil',
-): Promise<{ reply: string; nextState: SessionState; pendingCart?: PendingCartConfirmation | null; lastShownSkus?: string[] } | null> {
+): Promise<{ reply: string; nextState: SessionState; pendingCart?: PendingCartConfirmation | null; lastShownSkus?: string[]; driftBlock?: VeredictoDeriva } | null> {
   const nombrado = (await findProductByName(tenantId, text)) ?? null;
   if (tipo === 'debil') {
     if (!nombrado) return null;
@@ -707,6 +761,7 @@ export async function interceptarReclamoCarrito(
 
   // Post-checkout (AWAITING_PAYMENT) el carrito de la sesión conserva lo ya pedido (review F4):
   // un reclamo acá NO puede ofrecer "pagar" ni re-agregar — el pedido existe y lo ve el vendedor.
+  // Esta rama no cotiza nada, así que tampoco necesita preguntar por la deriva.
   if (prev.enPago) {
     return {
       reply:
@@ -715,6 +770,19 @@ export async function interceptarReclamoCarrito(
       nextState: 'AWAITING_PAYMENT',
       pendingCart: null,
     };
+  }
+
+  // ADR-0015 §8: de acá para abajo TODAS las ramas afirman precios — el del producto reclamado
+  // ("¿Querés que agregue el *X* (₲ …)?") y el detalle+total del carrito. Este interceptor corre
+  // ANTES del guard del turno (el guard solo evalúa si ningún interceptor resolvió el turno), así
+  // que la consulta de deriva tiene que hacerla él mismo o el precio divergente sale igual.
+  const enJuegoReclamo = [
+    ...(nombrado ? [{ id: nombrado.id, name: nombrado.name }] : []),
+    ...prev.cart.items.map((i) => ({ id: i.productId, name: i.name })),
+  ];
+  const derivaReclamo = await evaluarDerivaSiAplica(tenantId, enJuegoReclamo);
+  if (derivaReclamo.bloqueantes.length) {
+    return { reply: '', nextState: 'CART', pendingCart: null, driftBlock: derivaReclamo };
   }
 
   const items = prev.cart.items;
@@ -787,7 +855,7 @@ export async function interceptarPreguntaProductoOcasion(
   t: string,
   prev: { pendingVigente: PendingCartConfirmation | null; lastShownSkus: string[]; nowMs: number },
 ): Promise<
-  | { tipo: 'respuesta'; result: { reply: string; nextState: SessionState; pendingCart: PendingCartConfirmation | null; lastShownSkus: string[] } }
+  | { tipo: 'respuesta'; result: { reply: string; nextState: SessionState; pendingCart: PendingCartConfirmation | null; lastShownSkus: string[]; driftBlock?: VeredictoDeriva } }
   | { tipo: 'delegar' }
   | null
 > {
@@ -817,6 +885,18 @@ export async function interceptarPreguntaProductoOcasion(
     if (porOrdinal) producto = await getProductById(tenantId, porOrdinal.id);
   }
   if (!producto) return null;
+
+  // ADR-0015 §8: este interceptor también corre ANTES del guard del turno y sus dos respuestas
+  // afirman disponibilidad ("¿Te lo agrego?") y, con alternativa, un precio. Se pregunta acá, con
+  // el producto ya resuelto. La ALTERNATIVA no hace falta chequearla: sale de `searchCatalog`, que
+  // ya excluye lo que no podemos afirmar.
+  const derivaOcasion = await evaluarDerivaSiAplica(tenantId, [{ id: producto.id, name: producto.name }]);
+  if (derivaOcasion.bloqueantes.length) {
+    return {
+      tipo: 'respuesta',
+      result: { reply: '', nextState: 'VIEWING_PRODUCT', pendingCart: null, lastShownSkus: [], driftBlock: derivaOcasion },
+    };
+  }
 
   const ocasion = detectarOcasionContexto(text);
   if (!ocasion) {
@@ -858,6 +938,38 @@ export async function interceptarPreguntaProductoOcasion(
       lastShownSkus: [producto.id],
     },
   };
+}
+
+/**
+ * ADR-0015 §8: productos "en juego" en el turno y su deriva. Sin adivinar y sin lecturas de más:
+ *  - el producto que NOMBRA el mensaje (solo si el texto trae tokens de entidad — un "hola" no
+ *    dispara un escaneo del catálogo),
+ *  - los del carrito cuando el turno es de carrito/agregado (formatear el carrito AFIRMA precios),
+ *  - los de la oferta vigente cuando el cliente la está respondiendo (un "sí" agrega y anuncia un
+ *    total: eso también es afirmar un precio).
+ * Devuelve el veredicto SANEADO (ids, campos y estado; jamás valores remotos). Pura salvo la
+ * lectura del catálogo y de la proyección. Exportada para tests.
+ */
+export async function evaluarDerivaDelTurno(
+  tenantId: string,
+  text: string,
+  t: string,
+  prev: { cart: Cart; pending: PendingCartConfirmation | null },
+): Promise<VeredictoDeriva> {
+  // Gate BARATO primero: un tenant sin campos comerciales gobernados por una fuente externa no
+  // paga ni una lectura de catálogo por este guard.
+  if (!(await derivaActivaPara(tenantId))) return SIN_DERIVA;
+  const enJuego = new Map<string, string>();
+  if (quiereVerCarrito(t) || quiereAgregar(t)) {
+    for (const i of prev.cart.items) enJuego.set(i.productId, i.name);
+  }
+  for (const p of prev.pending?.products ?? []) enJuego.set(p.id, p.name);
+  if (queryTokens(text).length > 0) {
+    const nombrado = await findProductByName(tenantId, text);
+    if (nombrado) enJuego.set(nombrado.id, nombrado.name);
+  }
+  if (enJuego.size === 0) return SIN_DERIVA;
+  return leerDeriva(tenantId, [...enJuego].map(([id, name]) => ({ id, name })));
 }
 
 export async function handleMessage(input: ConversationInput): Promise<ConversationResult> {
@@ -1056,7 +1168,8 @@ export async function handleMessage(input: ConversationInput): Promise<Conversat
     );
     if (r) {
       result = r;
-      logger.info('Reclamo de carrito → respuesta determinística con estado real', { tenantId, customerId, tipo: reclamo });
+      // Con deriva el interceptor no responde el estado del carrito: lo loguea el bloque de abajo.
+      if (!r.driftBlock) logger.info('Reclamo de carrito → respuesta determinística con estado real', { tenantId, customerId, tipo: reclamo });
     }
   }
   // COVERAGE-1B: request `awaiting_location` vigente → dirección escrita, cancelación, "¿cómo
@@ -1122,7 +1235,7 @@ export async function handleMessage(input: ConversationInput): Promise<Conversat
     });
     if (po?.tipo === 'respuesta') {
       result = po.result;
-      logger.info('Pregunta producto+ocasión → respuesta determinística por ficha', { tenantId, customerId });
+      if (!po.result.driftBlock) logger.info('Pregunta producto+ocasión → respuesta determinística por ficha', { tenantId, customerId });
     } else if (po?.tipo === 'delegar') {
       delegarPreguntaProducto = true;
     }
@@ -1137,6 +1250,64 @@ export async function handleMessage(input: ConversationInput): Promise<Conversat
   if (!result && (!esNuevo || nuevoConIntencion) && !confirmandoSeleccion && !quierePagar(t) && !quiereAgregar(t) && esConsultaCobertura(text)) {
     result = { reply: RESPUESTA_COBERTURA_SEGURA, nextState: existing?.state ?? 'BROWSING', pendingCart: null };
     logger.info('Consulta de cobertura → respuesta segura determinística (sin IA)', { tenantId, customer: `…${customerId.slice(-4)}` });
+  }
+  // DRIFT-GUARD (ADR-0015 §8): un producto cuyo precio/disponibilidad/stock público gobierna una
+  // fuente externa que HOY dice otra cosa no se afirma como confirmado. Ubicación DELIBERADA:
+  //  - DESPUÉS de todos los guards que ya existían (pedido de humano, reclamo de carrito, cobertura
+  //    en espera de ubicación, producto+ocasión y consulta de cobertura): ninguno pierde su turno;
+  //  - ANTES de la IA: un turno que igual se deriva no gasta una llamada al modelo;
+  //  - con el camino de pago PURO excluido: ese es del checkout (reuse → cobertura → orden), donde
+  //    el freno fail-closed vive en createPendingOrder, en la rama de reuso y en la reanudación por
+  //    cobertura del vendedor;
+  //  - en AWAITING_PAYMENT sigue mandando el flujo de pago/comprobante (mismo criterio CAT-2B),
+  //    CON UNA excepción: la VISTA DE CARRITO. El gate por estado dejaba pasar un caso concreto —
+  //    el cliente que ya pidió pagar y después escribe "carrito" recibía `formatCart`, o sea el
+  //    detalle por ítem Y el total, AFIRMANDO justo el precio que no podemos sostener. Ese turno no
+  //    pertenece al flujo de pago (no manda banco, no toca la orden, no lee un comprobante) y todo
+  //    el que SÍ le pertenece —pagar, comprobante, cobertura, reclamo, pedido de humano— ya retornó
+  //    o ya tiene su interceptor ANTES de esta línea: cubrirlo no le roba el turno a nadie.
+  // El filtro de vendibilidad no se mueve: esto no hace ofrecible nada que hoy no lo sea.
+  //
+  // POR QUÉ la exclusión NO puede mirar `quierePagar` sola (hallazgo del review de cierre): la
+  // condición del guard tiene que seguir la MISMA precedencia que `decidirRespuesta`, y ahí la
+  // VISTA DE CARRITO (paso 2) se atiende ANTES que el checkout (paso 3). Un solo mensaje dispara
+  // las dos intenciones —"quiero pagar mi pedido", "pagar, qué llevo?", "quiero comprar, mostrame
+  // mi carrito", "dale pago mi compra"— y ese turno NO termina en el checkout: termina en
+  // `formatCart`, con el detalle por ítem y el total, afirmando como confirmado justo el precio en
+  // deriva e invitando a cerrar. Es la intersección de intenciones, no un estado de sesión: pasaba
+  // en CART igual que en AWAITING_PAYMENT. Solo se excluye el pago PURO, que es el único que
+  // realmente llega al checkout.
+  const vistaDeCarrito = quiereVerCarrito(t);
+  const pagoPuro = quierePagar(t) && !vistaDeCarrito;
+  if (
+    !result &&
+    driftGuardCableado() &&
+    (!esNuevo || nuevoConIntencion) &&
+    !pagoPuro &&
+    (existing?.state !== 'AWAITING_PAYMENT' || vistaDeCarrito)
+  ) {
+    const veredicto = await evaluarDerivaDelTurno(tenantId, text, t, {
+      cart: prevCart,
+      pending: respondeOferta ? pendingActivo : null,
+    });
+    if (veredicto.bloqueantes.length) {
+      // Se conserva el estado actual: el pase a humano lo ejecuta el bloque de derivación de abajo.
+      result = { reply: '', nextState: existing?.state ?? 'BROWSING', driftBlock: veredicto };
+      logger.info('Deriva crítica del catálogo → el bot no cotiza y deriva', {
+        tenantId,
+        customer: `…${customerId.slice(-4)}`,
+        ...resumenSaneado(veredicto),
+      });
+    } else if (veredicto.advertencias.length) {
+      // Divergencia COSMÉTICA (nombre, mayúsculas, descripción, imagen): advertencia
+      // administrativa. No cambia una sola palabra de lo que lee el cliente.
+      logger.warn('Deriva cosmética del catálogo (no corta la conversación)', {
+        tenantId,
+        customer: `…${customerId.slice(-4)}`,
+        productos: veredicto.advertencias.length,
+        campos: [...new Set(veredicto.advertencias.flatMap((a) => a.fields))].sort(),
+      });
+    }
   }
   if (!result && (!esNuevo || nuevoConIntencion) && !confirmandoSeleccion && (delegarPreguntaProducto || ruleEngineWouldFallback(text, t))) {
     const ai = await delegarAlSalesAgent();
@@ -1222,6 +1393,42 @@ export async function handleMessage(input: ConversationInput): Promise<Conversat
       }
     }
   }
+  // ADR-0015 §8: deriva CRÍTICA (venga del guard conversacional o del freno del checkout) →
+  // transición REAL por el servicio canónico HANDOFF-2 con razón estructurada `catalog_drift` y
+  // aviso idempotente. La confirmación al cliente sale recién DESPUÉS de que el takeover persistió;
+  // el carrito y la conversación quedan intactos y no se cobra ni se promete nada.
+  if (result.driftBlock) {
+    const d = await derivarPorDerivaCritica(tenantId, customerId, result.driftBlock, {
+      messageId: input.messageId ?? null,
+      simulation: input.simulation === true,
+    });
+    if (d.takeover && !input.simulation) {
+      // El estado del handoff ya quedó persistido por el servicio canónico: NO se pisa la sesión
+      // (el tail genérico escribiría humanTakeover=false del snapshot previo).
+      let replyD = d.reply;
+      if (nuevoConIntencion && replyD.trim()) {
+        replyD = saludoBreve(agentConfig.greetingMessage) + '\n\n' + sinSaludoInicial(replyD);
+      }
+      if (replyD.trim()) {
+        await appendMessage(tenantId, customerId, {
+          direction: 'out',
+          author: 'bot',
+          text: replyD,
+          state: existing?.state ?? 'IDLE',
+          humanTakeover: true,
+          countUnread: true,
+          channel,
+          receivedVia: input.receivedByPhoneNumberId ?? null,
+        });
+      }
+      logger.info('Deriva de catálogo → derivado a humano', { tenantId, customer: `…${customerId.slice(-4)}` });
+      return { reply: replyD, state: existing?.state ?? 'IDLE' };
+    }
+    // Simulación (cero efectos) o sin vendedor/persistencia: sigue el flujo normal de sesión con
+    // el mismo mensaje honesto — jamás se cotiza el precio en disputa por este camino.
+    result = { ...result, reply: d.reply, driftBlock: undefined };
+  }
+
   const { nextState } = result;
   let reply = result.reply;
   // F6: primer mensaje con intención → bienvenida BREVE + la respuesta a la intención, en el

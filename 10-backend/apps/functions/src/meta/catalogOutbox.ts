@@ -26,6 +26,8 @@ import type { Timestamp } from 'firebase-admin/firestore';
 import type { MetaSyncStatus } from '@vpw/shared';
 import { MetaCatalogApiError, type MetaRemoteCatalogItem } from './catalogClient.js';
 import { canonicalHttpsUrl, WRITABLE_FIELDS, type CatalogBatchMethod } from './catalogOutbound.js';
+import { effectiveMode, type EffectiveOwnership } from './catalogOwnership.js';
+import { ownershipFingerprint, patchFieldsNotOwned } from './catalogOwnershipGates.js';
 
 // ---------------------------------------------------------------------------
 // Modelo
@@ -113,6 +115,15 @@ export interface MetaCatalogOutboxJob {
   /** `data` del request de escritura, ya normalizado por el contrato. Solo campos públicos. */
   intendedPatch: Record<string, unknown>;
   intendedContentHash: string;
+  /**
+   * SNAPSHOT DE PROPIEDAD (ADR-0015 §7): huella saneada de la propiedad vigente al ENCOLAR.
+   * Se recalcula inmediatamente antes del POST; si difiere, la propiedad cambió mientras el
+   * job estaba en vuelo y este envío perdió su permiso. Un job sin huella (encolado por una
+   * versión anterior a este contrato) también queda fuera: fail-closed, no se asume permiso.
+   */
+  ownershipFingerprint: string;
+  /** Campos públicos que VendeYaPy gobernaba al encolar. Diagnóstico del panel, sin secretos. */
+  ownedFields: string[];
   /** Hash de la vista pública del producto que originó el job (detección de `stale`). */
   productSnapshotHash: string;
   /** Corrida de preview que lo encoló (trazabilidad). */
@@ -155,6 +166,16 @@ export type OutboxReason =
   | 'sync_disabled'
   | 'stock_pending_review'
   | 'product_changed'
+  /** La propiedad cambió mientras el job estaba en vuelo: sus permisos ya no valen. */
+  | 'ownership_changed'
+  /** VendeYaPy no gobierna algún campo del patch (o ninguno): no existe escritura posible. */
+  | 'ownership_not_writable'
+  /**
+   * (ADR-0015 §4) La verificación previa al POST encontró una fuente externa que nadie
+   * reconoció, o la reconocida cambió de forma. No se escribe hasta que una persona la mire:
+   * publicar contra un catálogo que gobierna otro es cómo nace el loop diario.
+   */
+  | 'external_source_changed'
   | 'contract_violation'
   | 'item_rejected'
   | 'remote_differs'
@@ -333,6 +354,11 @@ export interface OutboxGateContext {
   /** Tenant que está PROCESANDO el job. Si no es el dueño, no se evalúa nada más. */
   tenantId: string;
   config: { enabled: boolean; mode: 'off' | 'dry_run' | 'live'; catalogId: string };
+  /**
+   * Propiedad EFECTIVA vigente AHORA (ADR-0015), ya normalizada por `catalogSyncConfig`.
+   * Nunca se infiere ni se completa acá: si viene degradada, no se escribe nada.
+   */
+  ownership: EffectiveOwnership;
   /** `null` = el producto ya no existe. */
   product: { exists: boolean; syncToMeta?: boolean; stockPendingReview?: boolean; snapshotHash: string } | null;
 }
@@ -350,13 +376,33 @@ export type OutboxGateResult =
  * Se ejecuta DOS veces: fuera y DENTRO de la transacción del claim (el estado pudo cambiar en
  * el medio) — mismo estándar que el claim de la saga de cotización.
  */
-export function outboxGate(job: Pick<MetaCatalogOutboxJob, 'tenantId' | 'catalogId' | 'productSnapshotHash'>, ctx: OutboxGateContext): OutboxGateResult {
+export function outboxGate(
+  job: Pick<MetaCatalogOutboxJob, 'tenantId' | 'catalogId' | 'productSnapshotHash' | 'ownershipFingerprint' | 'intendedPatch'>,
+  ctx: OutboxGateContext,
+): OutboxGateResult {
   // AISLAMIENTO DE TENANT, primero de todo: procesar un job ajeno significaría haber leído la
   // config y el producto del tenant equivocado, así que ninguna otra verificación vale nada.
   if (job.tenantId !== ctx.tenantId) return { go: false, status: 'needs_action', reason: 'tenant_mismatch' };
   if (!ctx.config.enabled) return { go: false, status: 'held', reason: 'config_disabled' };
-  if (ctx.config.mode !== 'live') return { go: false, status: 'held', reason: 'mode_not_live' };
+  // El MODO EFECTIVO manda: el techo de la propiedad no lo puede superar la config de
+  // ejecución. Con el catálogo gobernado por una fuente externa —o con la propiedad sin
+  // declarar— el techo es `dry_run` y no sale nada, aunque el documento diga `live`. Es lo
+  // que vuelve INALCANZABLE el loop diario feed↔VendeYaPy (ADR-0015 §7).
+  if (effectiveMode(ctx.config.mode, ctx.ownership) !== 'live') {
+    return { go: false, status: 'held', reason: ctx.config.mode === 'live' ? 'ownership_not_writable' : 'mode_not_live' };
+  }
   if (ctx.config.catalogId !== job.catalogId) return { go: false, status: 'needs_action', reason: 'catalog_mismatch' };
+  // SNAPSHOT DE PROPIEDAD: el job se aprobó con permisos CONCRETOS. Si cambiaron mientras
+  // estaba en vuelo, no se envía y no vuelve solo a la cola — lo mira una persona. `held`
+  // sería mentir: esto no se arregla esperando, se arregla decidiendo.
+  if (job.ownershipFingerprint !== ownershipFingerprint(ctx.ownership)) {
+    return { go: false, status: 'needs_action', reason: 'ownership_changed' };
+  }
+  // DEFENSA EN PROFUNDIDAD, campo por campo del patch CONGELADO: la huella podría coincidir
+  // por un error de normalización, pero un campo ajeno no puede viajar ni así.
+  if (patchFieldsNotOwned(ctx.ownership, job.intendedPatch).length) {
+    return { go: false, status: 'needs_action', reason: 'ownership_not_writable' };
+  }
   if (!ctx.product || !ctx.product.exists) return { go: false, status: 'cancelled', reason: 'product_missing' };
   if (ctx.product.syncToMeta !== true) return { go: false, status: 'cancelled', reason: 'sync_disabled' };
   if (ctx.product.stockPendingReview === true) return { go: false, status: 'cancelled', reason: 'stock_pending_review' };

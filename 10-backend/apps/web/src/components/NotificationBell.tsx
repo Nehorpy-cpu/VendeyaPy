@@ -11,7 +11,42 @@ import Link from 'next/link';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useActiveCompany } from '@/lib/active-company';
 import { useAuth } from '@/lib/auth-context';
+import type { Notification } from '@vpw/shared';
 import { listNotifications, markNotificationRead, selectUnreadSorted } from '@/lib/notifications';
+
+/**
+ * Dónde se RESUELVE cada categoría de aviso. Es un Record EXHAUSTIVO del tipo compartido a
+ * propósito: la versión anterior preguntaba por dos categorías de catálogo y mandaba todo lo demás
+ * a Planes POR DESCARTE, así que `catalog_source` —el aviso de ADR-0015 §4: apareció una fuente
+ * externa que nadie reconoció y las escrituras hacia Meta quedaron DETENIDAS— ofrecía "Ver planes"
+ * justo cuando lo que había que arreglar era el catálogo. Con el Record tipado, sumar una
+ * categoría al tipo compartido rompe la COMPILACIÓN acá en vez de mandar el aviso nuevo al peor
+ * lugar posible.
+ */
+const CTA_POR_CATEGORIA: Record<Notification['category'], { href: string; label: string }> = {
+  trial: { href: '/billing', label: 'Ver planes' },
+  handoff: { href: '/conversations', label: 'Ver conversación' },
+  catalog_quality: { href: '/catalog', label: 'Ver catálogo' },
+  // ADR-0015 §4: la fuente externa se reconoce (o se rechaza) desde la tarjeta de propiedad del
+  // Catálogo — es el único lugar donde el owner puede destrabar las escrituras.
+  catalog_source: { href: '/catalog', label: 'Ver catálogo' },
+  // ADR-0015 §6: la config contradictoria que impide verificar también se corrige desde Catálogo.
+  catalog_verification: { href: '/catalog', label: 'Ver catálogo' },
+};
+
+/**
+ * CTA de UN aviso. `null` ⇒ NO se muestra ningún link. Una categoría que este panel no conoce
+ * (backend más nuevo que el panel desplegado) es un destino que no sabemos, y adivinarlo es
+ * exactamente el modo de falla que este Record cierra: el aviso se sigue leyendo y se sigue
+ * pudiendo marcar como leído, sin mandar a nadie a la pantalla equivocada.
+ */
+export function ctaDeNotificacion(nf: Pick<Notification, 'category' | 'customerId'>): { href: string; label: string } | null {
+  const cta = CTA_POR_CATEGORIA[nf.category] as { href: string; label: string } | undefined;
+  if (!cta) return null;
+  // HANDOFF-2: el aviso de atención humana abre LA conversación de ese cliente cuando la trae.
+  if (nf.category === 'handoff' && nf.customerId) return { ...cta, href: `${cta.href}?c=${nf.customerId}` };
+  return cta;
+}
 
 function BellIcon({ className }: { className?: string }) {
   return (
@@ -63,36 +98,36 @@ export function NotificationBell() {
           <div className="absolute right-0 z-20 mt-2 w-80 overflow-hidden rounded-2xl border border-ink-100 bg-white shadow-float">
             <div className="border-b border-ink-100 px-4 py-2.5 text-xs font-semibold uppercase tracking-wide text-ink-500">Notificaciones</div>
             <ul className="max-h-80 divide-y divide-ink-100 overflow-y-auto">
-              {unread.map((nf) => (
-                <li key={nf.id} className="px-4 py-3">
-                  <div className="text-sm font-semibold text-ink-900">{nf.title}</div>
-                  <p className="mt-0.5 text-xs leading-snug text-ink-500">{nf.body}</p>
-                  <div className="mt-2 flex items-center gap-3">
-                    {/* HANDOFF-2: el CTA depende de la categoría — un pedido de atención humana
-                        lleva a Conversaciones; la calidad del catálogo, al Catálogo. */}
-                    <Link
-                      href={
-                        nf.category === 'handoff'
-                          ? `/conversations${nf.customerId ? `?c=${nf.customerId}` : ''}`
-                          : nf.category === 'catalog_quality'
-                            ? '/catalog'
-                            : '/billing'
-                      }
-                      onClick={() => setOpen(false)}
-                      className="text-xs font-semibold text-mint-700 hover:text-mint-600"
-                    >
-                      {nf.category === 'handoff' ? 'Ver conversación' : nf.category === 'catalog_quality' ? 'Ver catálogo' : 'Ver planes'}
-                    </Link>
-                    <button
-                      onClick={() => markRead.mutate(nf.id)}
-                      disabled={markRead.isPending}
-                      className="text-xs font-medium text-ink-500 hover:text-ink-700 disabled:opacity-50"
-                    >
-                      Marcar como leído
-                    </button>
-                  </div>
-                </li>
-              ))}
+              {unread.map((nf) => {
+                // El CTA depende de la CATEGORÍA (no del tipo): un pedido de atención humana lleva
+                // a Conversaciones y cualquier cosa del catálogo, al Catálogo. Ver
+                // `CTA_POR_CATEGORIA` arriba para por qué esto no puede volver a ser un descarte.
+                const cta = ctaDeNotificacion(nf);
+                return (
+                  <li key={nf.id} className="px-4 py-3">
+                    <div className="text-sm font-semibold text-ink-900">{nf.title}</div>
+                    <p className="mt-0.5 text-xs leading-snug text-ink-500">{nf.body}</p>
+                    <div className="mt-2 flex items-center gap-3">
+                      {cta && (
+                        <Link
+                          href={cta.href}
+                          onClick={() => setOpen(false)}
+                          className="text-xs font-semibold text-mint-700 hover:text-mint-600"
+                        >
+                          {cta.label}
+                        </Link>
+                      )}
+                      <button
+                        onClick={() => markRead.mutate(nf.id)}
+                        disabled={markRead.isPending}
+                        className="text-xs font-medium text-ink-500 hover:text-ink-700 disabled:opacity-50"
+                      >
+                        Marcar como leído
+                      </button>
+                    </div>
+                  </li>
+                );
+              })}
             </ul>
           </div>
         </>

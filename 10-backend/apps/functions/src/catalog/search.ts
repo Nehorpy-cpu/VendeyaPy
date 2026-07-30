@@ -12,6 +12,7 @@ import type { Product } from '@vpw/shared';
 import { db, paths } from '../lib/firebase.js';
 import { splitByQueryMatch, bestNameMatch, hayConsultaDeEntidad } from './match.js';
 import { fichaScore } from './fichaRank.js';
+import { filtrarOfrecibles } from './driftGuard.js';
 
 export interface CatalogFilters {
   /** F1B: texto libre del cliente (nombre/marca). Los matches van PRIMERO y no se filtran por género/precio. */
@@ -122,7 +123,14 @@ export async function searchCatalog(
     });
   }
 
-  return componerResultados(activos, filters, finMap);
+  // ADR-0015 §8: cada línea de un listado AFIRMA un precio, y este es el único embudo por el que
+  // salen los productos que se muestran — el listado rule-based, la alternativa de CAT-2B y, sobre
+  // todo, la tool `buscar_productos` del sales agent (lo que la IA no ve, no lo puede cotizar).
+  // Filtrar acá es el cambio más chico que cubre los tres caminos sin duplicar la regla en cada uno.
+  // Se filtra DESPUÉS de componer/recortar: pedir la deriva de todo el catálogo sería una lectura
+  // por producto en cada búsqueda; sobre el tope (3-5) el costo es despreciable y el resultado
+  // honesto (a lo sumo se muestra un producto menos, igual que con uno sin stock).
+  return filtrarOfrecibles(tenantId, componerResultados(activos, filters, finMap));
 }
 
 /**

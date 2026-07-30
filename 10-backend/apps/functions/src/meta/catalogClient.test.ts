@@ -12,6 +12,10 @@ vi.mock('../lib/logger.js', () => ({
 import { HttpMetaCatalogClient, MetaCatalogApiError, type CatalogHttpResponse } from './catalogClient.js';
 import { logger } from '../lib/logger.js';
 
+/** Token del feed: es el que viaja en el query string de la URL firmada del schedule. */
+const FEED_TOKEN = 'fd-9c2f4b7e8a1d6053aa77bb99cc';
+const FEED_URL = `https://tienda.ejemplo.com.py/feeds/products.csv?access_token=${FEED_TOKEN}&v=2`;
+
 const TOKEN = 'EAAB-super-secreto-jamas-en-logs';
 
 /** Transporte de mentira: devuelve las respuestas en orden y registra cada request. */
@@ -153,6 +157,106 @@ describe('HttpMetaCatalogClient — transporte y saneamiento', () => {
     expect(calls[0].url).toBe('https://graph.facebook.com/v23.0/42/check_batch_request_status?handle=h1');
     expect(st.errors[0]).toEqual({ retailerId: 'SKU-A', message: 'imagen inaccesible' });
     expect(st.errors[1].retailerId).toBe(''); // entrada malformada no rompe
+  });
+
+  it('listDataSources: la URL firmada del schedule NO sale — solo el hostname', async () => {
+    const { transport, calls } = makeTransport([
+      ok({
+        data: [
+          {
+            id: '778899',
+            name: `Feed diario ${FEED_URL}`,
+            file_name: `products-${FEED_TOKEN}.csv`,
+            created_time: '2026-05-01T10:00:00+0000',
+            ingestion_source_type: 'PRIMARY_FEED',
+            schedule: { interval: 'DAILY', hour: '3', minute: '33', timezone: 'America/Asuncion', url: FEED_URL },
+          },
+        ],
+      }),
+      ok({ feed_count: 1 }),
+    ]);
+    const c = new HttpMetaCatalogClient(TOKEN, { version: 'v23.0', transport, sleep: async () => {}, now: () => '2026-07-30T12:00:00.000Z' });
+    const obs = await c.listDataSources('42');
+
+    expect(JSON.stringify(obs)).not.toContain(FEED_TOKEN);
+    expect(JSON.stringify(obs)).not.toContain('access_token');
+    expect(obs.sources[0]).toEqual({
+      kind: 'meta_feed',
+      sourceId: '778899',
+      nombreSaneado: 'Feed diario',
+      schedule: { interval: 'DAILY', hour: 3, minute: 33, timezone: 'America/Asuncion' },
+      host: 'tienda.ejemplo.com.py',
+      fileExtension: 'csv',
+      ingestionSourceType: 'PRIMARY_FEED',
+      detectedFields: [],
+      createdAt: '2026-05-01T10:00:00.000Z',
+      detectedAt: '2026-07-30T12:00:00.000Z',
+    });
+    expect(obs.complete).toBe(true);
+    // El token de Meta sigue viajando por header y el pedido no lleva nada sensible.
+    expect(calls[0].url).toBe('https://graph.facebook.com/v23.0/42/product_feeds?limit=100&fields=id,name,file_name,schedule,created_time,ingestion_source_type');
+    expect(calls[1].url).toBe('https://graph.facebook.com/v23.0/42?fields=feed_count');
+  });
+
+  it('listDataSources: campo ingestion_source_type no soportado ⇒ reintenta UNA vez con el set base', async () => {
+    const { transport, calls } = makeTransport([
+      fbError(400, 100, 'Tried accessing nonexisting field (ingestion_source_type)'),
+      ok({ data: [{ id: '1', name: 'Feed', schedule: { interval: 'DAILY', url: 'https://x.com.py/f.csv' } }] }),
+      ok({ feed_count: 1 }),
+    ]);
+    const c = new HttpMetaCatalogClient(TOKEN, { version: 'v23.0', transport, sleep: async () => {}, now: () => 'T' });
+    const obs = await c.listDataSources('42');
+    expect(obs.sources.map((s) => s.sourceId)).toEqual(['1']);
+    expect(calls[1].url.endsWith('fields=id,name,file_name,schedule,created_time')).toBe(true);
+    expect(calls.length).toBe(3);
+  });
+
+  it('listDataSources: un 4xx que NO es campo desconocido se propaga sin segundo intento', async () => {
+    const { transport, calls } = makeTransport([fbError(403, 200, 'sin permiso de catálogo')]);
+    const c = new HttpMetaCatalogClient(TOKEN, { version: 'v23.0', transport, sleep: async () => {}, now: () => 'T' });
+    const err = await c.listDataSources('42').catch((e) => e);
+    expect(err).toBeInstanceOf(MetaCatalogApiError);
+    expect(calls.length).toBe(1);
+  });
+
+  it('listDataSources: feed_count mayor que lo listado ⇒ observación INCOMPLETA', async () => {
+    const { transport } = makeTransport([ok({ data: [{ id: '1' }] }), ok({ feed_count: 3 })]);
+    const c = new HttpMetaCatalogClient(TOKEN, { version: 'v23.0', transport, sleep: async () => {}, now: () => 'T' });
+    const obs = await c.listDataSources('42');
+    expect(obs.feedCount).toBe(3);
+    expect(obs.complete).toBe(false);
+  });
+
+  it('listDataSources: feed_count que falla NO invalida la detección (corroboración opcional)', async () => {
+    const { transport } = makeTransport([ok({ data: [{ id: '1' }] }), fbError(400, 100, 'campo inexistente')]);
+    const c = new HttpMetaCatalogClient(TOKEN, { version: 'v23.0', transport, sleep: async () => {}, now: () => 'T' });
+    const obs = await c.listDataSources('42');
+    expect(obs.feedCount).toBeNull();
+    expect(obs.complete).toBe(true);
+  });
+
+  it('listDataSources: catálogo sin feeds ⇒ observación vacía y COMPLETA', async () => {
+    const { transport } = makeTransport([ok({ data: [] }), ok({ feed_count: 0 })]);
+    const c = new HttpMetaCatalogClient(TOKEN, { version: 'v23.0', transport, sleep: async () => {}, now: () => 'T' });
+    const obs = await c.listDataSources('42');
+    expect(obs.sources).toEqual([]);
+    expect(obs.complete).toBe(true);
+  });
+
+  it('listDataSources: cursor de fuentes con host ajeno ⇒ aborta SIN seguirlo', async () => {
+    const { transport, calls } = makeTransport([ok({ data: [{ id: '1' }], paging: { next: 'https://evil.example/steal' } })]);
+    const c = new HttpMetaCatalogClient(TOKEN, { version: 'v23.0', transport, sleep: async () => {}, now: () => 'T' });
+    const err = await c.listDataSources('42').catch((e) => e);
+    expect(err).toBeInstanceOf(MetaCatalogApiError);
+    expect(calls.length).toBe(1);
+  });
+
+  it('listDataSources: entrada sin id usable ⇒ se descarta y la observación queda INCOMPLETA', async () => {
+    const { transport } = makeTransport([ok({ data: [{ id: '1' }, { name: 'sin id' }] }), ok({ feed_count: 2 })]);
+    const c = new HttpMetaCatalogClient(TOKEN, { version: 'v23.0', transport, sleep: async () => {}, now: () => 'T' });
+    const obs = await c.listDataSources('42');
+    expect(obs.sources.length).toBe(1);
+    expect(obs.complete).toBe(false);
   });
 
   it('submitItemsBatch postea item_type + allow_upsert EXPLÍCITO + requests, y devuelve handles', async () => {
