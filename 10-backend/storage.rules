@@ -7,6 +7,8 @@ rules_version = '2';
 //   /tenants/{tenantId}/products/{productId}/{filename}   — imágenes de productos
 //   /tenants/{tenantId}/invoices/{invoiceId}.pdf          — facturas generadas
 //   /tenants/{tenantId}/exports/{filename}                — exports CSV/Excel
+//   /tenants/{tenantId}/orders/{orderId}/comprobantes/…   — comprobantes legacy (ORDER-1B)
+//   /tenants/{tenantId}/attachments/…                     — adjuntos de conversación (ADR-0016)
 //   /platform/...                                          — assets de plataforma
 // ============================================================================
 
@@ -80,6 +82,22 @@ service firebase.storage {
     match /tenants/{tenantId}/orders/{orderId}/comprobantes/{filename} {
       allow read: if isTenantStaff(tenantId) || isPlatformAdmin();
       allow write: if false; // Solo Admin SDK
+    }
+
+    // Adjuntos de conversación (ADR-0016 §6): los BYTES de las imágenes y PDF que manda el
+    // CLIENTE por WhatsApp. Ruta privada tenants/{tenantId}/attachments/{partition}/{attachmentId},
+    // con el id OPACO (nunca el mediaId crudo, nunca el teléfono, nunca el nombre original).
+    //
+    // read Y write en `false` A PROPÓSITO — no es un olvido:
+    //  · write: los escribe SOLO el Admin SDK durante la ingesta (webhook → Storage).
+    //  · read: los bytes NO salen por el SDK de Storage. El panel pide el archivo a un callable
+    //    que autoriza por claims, resuelve el `attachmentId` contra el registro del tenant,
+    //    reverifica que el path pertenezca a ESE tenant y recién ahí firma una URL de vida corta.
+    //    Si el cliente pudiera leer directo, adivinar o filtrar un path saltearía esa cadena
+    //    entera de autorización (y el PDF se serviría sin el Content-Disposition de descarga).
+    // El wildcard recursivo cubre cualquier esquema de partición futuro sin reabrir la familia.
+    match /tenants/{tenantId}/attachments/{allPaths=**} {
+      allow read, write: if false; // Admin SDK escribe; la lectura sale por URL firmada del callable
     }
 
     // Assets de plataforma (logos, banners de la propia VentaporWhatsapp)

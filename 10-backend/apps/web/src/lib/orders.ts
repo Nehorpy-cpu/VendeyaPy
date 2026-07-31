@@ -27,6 +27,28 @@ export const isPaidStatus = (s: OrderStatus) => PAID_STATUSES.includes(s);
 export const UNPAID_STATUSES: OrderStatus[] = ['PENDING_PAYMENT', 'PENDING_VERIFICATION'];
 export const canTenantEditOrder = (s: OrderStatus) => UNPAID_STATUSES.includes(s);
 export const canTenantCancelOrder = (s: OrderStatus) => UNPAID_STATUSES.includes(s);
+/** Rótulo legible de cada estado (canónico para las pantallas nuevas del panel). */
+export const ORDER_STATUS_LABEL: Record<OrderStatus, string> = {
+  PENDING_PAYMENT: 'Esperando pago',
+  PENDING_VERIFICATION: 'Comprobante por verificar',
+  PAID: 'Pagado',
+  PREPARING: 'Preparando',
+  ASSIGNED: 'Asignado',
+  IN_TRANSIT: 'En camino',
+  DELIVERED: 'Entregado',
+  CANCELLED: 'Cancelado',
+  REFUNDED: 'Reembolsado',
+};
+
+/**
+ * ADR-0016 §4: estados de pedido que ADMITEN vincular un comprobante. Es el mismo conjunto que
+ * `UNPAID_STATUSES` pero con nombre propio porque responde otra pregunta (¿puede recibir un
+ * comprobante?) y podría divergir sin arrastrar a la edición/cancelación. Un pedido `PAID` o
+ * terminal nunca entra: vincular ahí sería fabricar evidencia sobre un pago ya cerrado.
+ */
+export const RECEIPT_ELIGIBLE_STATUSES: OrderStatus[] = ['PENDING_PAYMENT', 'PENDING_VERIFICATION'];
+export const admiteComprobante = (s: OrderStatus) => RECEIPT_ELIGIBLE_STATUSES.includes(s);
+
 /** Siguiente paso operativo sugerido (forward-only). Terminales no avanzan. */
 export const NEXT_STATUS: Partial<Record<OrderStatus, OrderStatus>> = {
   PAID: 'PREPARING',
@@ -89,15 +111,10 @@ export function comprobanteEstado(o: Pick<Order, 'payment'>): 'image' | 'pending
   return ref.startsWith('tenants/') ? 'image' : 'pending';
 }
 
-/**
- * ¿El texto es el mensaje que GENERA nuestro backend al recibir una imagen (comprobanteImage.ts)?
- * Review OCV-1: el cliente puede escribir texto libre que empiece con 📷 — solo los dos formatos
- * exactos del sistema muestran la card, y aun así la card NO afirma que sea un pago (el botón
- * real está gateado por la orden). Sniffing de texto porque Message no tiene campo estructurado.
- */
-export function esMensajeImagenCliente(text: string): boolean {
-  return /^📷 (Imagen recibida \(posible comprobante\)$|Comprobante: )/.test(text);
-}
+// ADR-0016: acá vivía `esMensajeImagenCliente`, que decidía si un mensaje tenía adjunto mirando
+// el PREFIJO DE SU TEXTO. Se eliminó a propósito: cualquier cliente podía escribir a mano
+// "📷 Imagen recibida (posible comprobante)" y fabricar una tarjeta de comprobante en el panel.
+// El único origen de verdad de un adjunto es `Message.attachmentIds` (ver lib/attachments.ts).
 
 /** Enlace TEMPORAL para ver el comprobante (callable seguro; nunca write, nunca se persiste). */
 export async function getComprobanteViewUrl(tenantId: string, orderId: string): Promise<{ url: string; expiresAt: number }> {
@@ -132,19 +149,26 @@ const OPEN_ORDER_STATUSES: ReadonlySet<OrderStatus> = new Set<OrderStatus>([
 ]);
 
 /**
- * Pedido abierto más reciente de UN cliente (para el banner del chat). Solo `where` por
- * customerId (sin orderBy → no necesita índice compuesto); filtro/orden en el cliente.
+ * Pedidos abiertos de UN cliente, del más nuevo al más viejo. Solo `where` por customerId (sin
+ * orderBy → no necesita índice compuesto); filtro/orden en el cliente.
  * Límite alto a propósito: sin orderBy, Firestore recorta por ID de documento (aleatorio
  * respecto a la fecha) — con un límite chico un cliente recurrente podía dejar el pedido
  * nuevo fuera de la ventana (review adversarial).
+ *
+ * ADR-0016: la LISTA (y no solo el primero) es lo que necesita el panel de adjuntos — cuando hay
+ * más de un pedido admisible hay AMBIGÜEDAD y la UI está obligada a pedir una elección explícita.
  */
-export async function getCustomerOpenOrder(tenantId: string, customerId: string): Promise<Order | null> {
+export async function listCustomerOpenOrders(tenantId: string, customerId: string): Promise<Order[]> {
   const snap = await getDocs(query(ordersCol(tenantId), where('customerId', '==', customerId), fbLimit(300)));
-  const open = snap.docs
+  return snap.docs
     .map((d) => d.data() as Order)
     .filter((o) => OPEN_ORDER_STATUSES.has(o.status))
     .sort((a, b) => (b.createdAt?.toMillis?.() ?? 0) - (a.createdAt?.toMillis?.() ?? 0));
-  return open[0] ?? null;
+}
+
+/** Pedido abierto más reciente de UN cliente (banner del chat). */
+export async function getCustomerOpenOrder(tenantId: string, customerId: string): Promise<Order | null> {
+  return (await listCustomerOpenOrders(tenantId, customerId))[0] ?? null;
 }
 
 /**

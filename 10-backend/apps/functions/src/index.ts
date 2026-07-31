@@ -12,6 +12,7 @@ import { initializeApp } from 'firebase-admin/app';
 import { setDriftProjection } from './catalog/driftGuard.js';
 import { metaDriftProjection } from './meta/catalogDriftProjection.js';
 import { wireCatalogSourceDetector } from './meta/catalogSourceGate.js';
+import { wireReceiptAttachmentGate } from './orders/receiptAttachmentGate.js';
 
 // Inicializar Firebase Admin una sola vez por instancia
 initializeApp();
@@ -34,6 +35,14 @@ setDriftProjection(metaDriftProjection);
 // reporta `detection_unavailable` y jamás propone `external_managed`. No dispara ninguna
 // lectura por sí misma — la hace el callable de migración cuando alguien lo ejecuta.
 wireCatalogSourceDetector();
+
+// ADR-0016 §4: se cablea el gate REAL de clasificación de adjuntos. La ingesta (meta/) guarda el
+// archivo siempre; este gate —que vive en orders/ porque necesita saber de pedidos y de contexto
+// de pago— decide si además se PROPONE como comprobante. Es el ÚNICO punto de cableado: sin esta
+// línea corre el gate por defecto y todo adjunto queda como medio normal (seguro, pero sin
+// sugerencias). Nunca mueve un pedido ni confirma un pago, y no dispara ninguna lectura por sí
+// misma: solo corre cuando entra un archivo ya almacenado.
+wireReceiptAttachmentGate();
 
 // ===== Webhooks externos =====
 // export { whatsappWebhook } from './functions/whatsapp/whatsappWebhook.js';
@@ -122,6 +131,11 @@ export { checkoutConfigUpdate, agentConfigUpdate, channelConfigUpdate } from './
 // Ciclo de vida de pedidos (ORDER-1): rules cierra el update directo; TODA mutación de orders
 // va por estas callables auditadas que hacen cumplir la máquina de estados (orders/lifecycle.ts).
 export { orderUpdate, orderCancel, orderUpdateStatus, adminOrderCorrect, orderGetComprobanteViewUrl } from './functions/orders/orderCallables.js';
+
+// Adjuntos de conversación (ADR-0016 §5): el pago SIEMPRE es humano. Owner/manager/seller marcan
+// o desmarcan un adjunto como comprobante de un pedido; marcar llega hasta PENDING_VERIFICATION
+// y NUNCA confirma el pago (eso sigue siendo orderUpdateStatus → confirmPayment).
+export { attachmentMarkAsReceipt, attachmentUnmarkReceipt } from './functions/attachments/attachmentCallables.js';
 
 // Observabilidad (Fase 5): bitácora de auditoría de cambios de catálogo.
 export { onProductWriteAudit } from './functions/products/onProductWriteAudit.js';
@@ -277,3 +291,12 @@ export { coverageQuoteAndApprove, coverageQuoteResolveUnknown, coverageQuoteAtte
 export { onCoverageResumeJob } from './functions/coverage/onCoverageResumeJob.js';
 export { coverageMaintenanceDaily } from './functions/scheduled/coverageMaintenance.js';
 export { devRunCoverageMaintenance } from './functions/coverage/devCoverageMaintenance.js';
+
+// Adjuntos de conversación (ADR-0016). Única puerta de salida de los bytes de archivos de
+// clientes: `storage.rules` deniega la lectura directa y este callable autoriza por claims,
+// resuelve el id contra el registro del tenant, reverifica la pertenencia del path y firma una
+// URL de ≤10 min que jamás se persiste. Acepta adjuntos nuevos y comprobantes legacy.
+export { attachmentGetViewUrl } from './functions/attachments/mediaViewCallable.js';
+// Purga de retención: APAGADA por defecto y por tenant. Nunca borra evidencia de pago, adjuntos
+// atados a un pedido ni nada sin `retentionUntil` explícito (⇒ cero backfill).
+export { attachmentRetentionMaintenance } from './functions/attachments/mediaRetentionMaintenance.js';

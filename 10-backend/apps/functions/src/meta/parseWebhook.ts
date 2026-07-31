@@ -11,6 +11,8 @@
  *  - Instagram messaging webhooks: object=instagram, entry[].messaging[].
  */
 
+import { sanitizeAttachmentCaption, sanitizeAttachmentFilename, normalizeMimeType } from '@vpw/shared';
+
 export type InboundPlatform = 'whatsapp' | 'instagram' | 'messenger';
 
 export interface MetaAdReferral {
@@ -19,11 +21,38 @@ export interface MetaAdReferral {
   sourceUrl: string | null; // WA: referral.source_url
 }
 
-/** Imagen entrante (ORDER-1B: comprobantes de pago). Solo WhatsApp por ahora. */
-export interface InboundImage {
-  mediaId: string; // id del media en Graph (para descargarlo con el token del tenant)
-  mimeType: string | null;
-  caption: string | null;
+/**
+ * ADJUNTO entrante genérico (ADR-0016). Reemplaza a la vieja `InboundImage`: el parser normaliza
+ * `image` Y `document` a la MISMA forma porque en este punto todavía no existe ninguna
+ * interpretación de negocio — un PDF de banco y una foto de producto entran por la misma puerta.
+ * (Los PDF se descartaban en silencio: defecto #3 de la auditoría.)
+ *
+ * `declaredMime` se llama así a propósito: es lo que DICE el proveedor y no se cree. El MIME con
+ * autoridad sale de los magic bytes del archivo ya descargado (`mediaClient`).
+ */
+export interface InboundAttachment {
+  kind: 'image' | 'document';
+  /** Id del media en Graph (para descargarlo con el token del tenant). Nunca va a logs. */
+  mediaId: string;
+  declaredMime: string | null;
+  /** Nombre original SANEADO (documentos). Decorativo: jamás se usa para construir rutas. */
+  filename: string | null;
+  /** Caption SANEADO. ADR-0016 §9: se persiste pero NO se envía a la IA. */
+  caption: string;
+  /** Hash que declara Meta. Se conserva como evidencia; el checksum real lo calcula el servidor. */
+  sha256: string | null;
+}
+
+/**
+ * Tipos que TODAVÍA no se soportan. No se descartan en silencio (ese era el defecto que hacía
+ * creer al cliente que había avisado): dejan un mensaje estructurado visible en el chat y, cuando
+ * corresponde, una respuesta que le dice al cliente qué hacer.
+ */
+export const UNSUPPORTED_INBOUND_KINDS = ['audio', 'video', 'sticker'] as const;
+export type UnsupportedInboundKind = (typeof UNSUPPORTED_INBOUND_KINDS)[number];
+
+export interface InboundUnsupported {
+  kind: UnsupportedInboundKind;
 }
 
 /**
@@ -48,8 +77,13 @@ export interface NormalizedInbound {
   messageId: string; // WA: messages[].id (wamid) · IG/Messenger: message.mid → idempotencia
   timestamp: number | null; // WA: segundos (string) · IG/Messenger: ms (number)
   adReferral: MetaAdReferral | null;
-  /** Presente SOLO en mensajes de imagen (text queda con el caption o ''). */
-  image?: InboundImage;
+  /**
+   * Presente SOLO en mensajes con archivo (imagen o documento). `text` queda '' AUNQUE haya
+   * caption: el caption viaja en el adjunto y NO se envía a la IA (ADR-0016 §9).
+   */
+  attachment?: InboundAttachment;
+  /** Presente SOLO en tipos aún no soportados (audio/video/sticker). `text` queda ''. */
+  unsupported?: InboundUnsupported;
   /** Presente SOLO en mensajes de ubicación nativa (text queda ''). */
   location?: InboundLocation;
   rawMessage: unknown; // el objeto de ESE mensaje (debug/auditoría; sin tokens)
@@ -82,16 +116,42 @@ function waText(msg: Any): string | null {
     case 'button':
       return str(msg?.button?.text); // botón de plantilla (quick reply)
     default:
-      return null; // audio/video/sticker/document/location/etc → ignorado (image se maneja aparte, ORDER-1B)
+      // image/document → `waAttachment`; audio/video/sticker → `waUnsupported`;
+      // location → `waLocation`. El resto (reaction/system/order/…) sigue ignorado.
+      return null;
   }
 }
 
-/** ORDER-1B: mensajes `image` (comprobantes). Sin mediaId no sirve → null (ignorado). */
-function waImage(msg: Any): InboundImage | null {
-  if (msg?.type !== 'image') return null;
-  const mediaId = str(msg?.image?.id);
+/**
+ * ADR-0016: mensajes `image` y `document` → adjunto genérico. Sin mediaId no hay nada que bajar
+ * ⇒ null (el mensaje se ignora, igual que antes).
+ */
+function waAttachment(msg: Any): InboundAttachment | null {
+  const kind: InboundAttachment['kind'] | null =
+    msg?.type === 'image' ? 'image' : msg?.type === 'document' ? 'document' : null;
+  if (kind === null) return null;
+  const media = msg?.[kind];
+  const mediaId = str(media?.id);
   if (!mediaId) return null;
-  return { mediaId, mimeType: str(msg?.image?.mime_type), caption: str(msg?.image?.caption) };
+  // El saneo ocurre ACÁ, antes de que el payload se persista en el inbox: un caption de 1 MB o con
+  // marcas bidi nunca llega a tocar Firestore. `sanitize*` es idempotente, así que la ingesta
+  // puede volver a aplicarlo sin efectos raros.
+  return {
+    kind,
+    mediaId,
+    declaredMime: normalizeMimeType(media?.mime_type),
+    filename: sanitizeAttachmentFilename(media?.filename),
+    caption: sanitizeAttachmentCaption(media?.caption),
+    sha256: str(media?.sha256),
+  };
+}
+
+/** Tipos aún no soportados: se normalizan para dejar rastro, NO para procesarlos. */
+function waUnsupported(msg: Any): InboundUnsupported | null {
+  const type = msg?.type;
+  return (UNSUPPORTED_INBOUND_KINDS as readonly string[]).includes(type)
+    ? { kind: type as UnsupportedInboundKind }
+    : null;
 }
 
 const LOCATION_NAME_MAX = 128;
@@ -157,10 +217,13 @@ function parseWhatsApp(entries: Any[], out: NormalizedInbound[]): number {
       const messages = Array.isArray(value?.messages) ? value.messages : [];
       for (const msg of messages) {
         const text = waText(msg);
-        const image = waImage(msg);
+        const attachment = waAttachment(msg);
         const location = waLocation(msg);
+        const unsupported = waUnsupported(msg);
         const from = str(msg?.from);
-        if (from === null || (text === null && image === null && location === null)) {
+        // ADR-0016: el criterio de "mensaje útil" es texto O adjunto O ubicación O un tipo no
+        // soportado (que igual deja rastro). Antes un PDF caía acá y desaparecía sin dejar nada.
+        if (from === null || (text === null && !attachment && !location && !unsupported)) {
           ignored++;
           continue;
         }
@@ -168,15 +231,22 @@ function parseWhatsApp(entries: Any[], out: NormalizedInbound[]): number {
           platform: 'whatsapp',
           externalId,
           from,
-          text: text ?? image?.caption ?? '',
+          // El caption NO se promueve a `text`: si lo hiciera, terminaría en el prompt de la IA
+          // por el camino normal del motor (ADR-0016 §9 lo prohíbe explícitamente).
+          text: text ?? '',
           messageId: str(msg?.id) ?? '',
           timestamp: toNum(msg?.timestamp),
           adReferral: waReferral(msg?.referral),
-          ...(image ? { image } : {}),
+          ...(attachment ? { attachment } : {}),
+          ...(unsupported ? { unsupported } : {}),
           ...(location ? { location } : {}),
           // PRIVACIDAD (COVERAGE-1B): las coordenadas exactas viajan SOLO en `location` (validadas);
           // el crudo de un mensaje de ubicación se redacta para no duplicar PII en el inbox.
-          rawMessage: location ? { type: 'location', redacted: true } : msg,
+          // ADR-0016: ídem para adjuntos — el crudo repetiría mediaId y caption en el inbox.
+          rawMessage:
+            location || attachment || unsupported
+              ? { type: str(msg?.type) ?? 'unknown', redacted: true }
+              : msg,
         });
       }
     }
@@ -210,6 +280,48 @@ function parseMessaging(platform: InboundPlatform, entries: Any[], out: Normaliz
     }
   }
   return ignored;
+}
+
+/**
+ * Adjunto a partir del payload YA PERSISTIDO en el inbox (`metaWebhookInbox`).
+ *
+ * Acepta DOS formas a propósito: la nueva (`payload.attachment`) y la LEGACY (`payload.image`,
+ * ORDER-1B). Los eventos que quedaron en vuelo cuando se despliega este cambio tienen la vieja
+ * y perderlos sería exactamente el bug que este programa arregla. Es puro ⇒ testeable sin E/S.
+ */
+export function attachmentFromInboxPayload(payload: unknown): InboundAttachment | null {
+  const p = payload as Any;
+  const nuevo = p?.attachment;
+  const mediaIdNuevo = str(nuevo?.mediaId);
+  if (mediaIdNuevo) {
+    const kind: InboundAttachment['kind'] = nuevo?.kind === 'document' ? 'document' : 'image';
+    return {
+      kind,
+      mediaId: mediaIdNuevo,
+      declaredMime: normalizeMimeType(nuevo?.declaredMime),
+      filename: sanitizeAttachmentFilename(nuevo?.filename),
+      caption: sanitizeAttachmentCaption(nuevo?.caption),
+      sha256: str(nuevo?.sha256),
+    };
+  }
+  const legacyMediaId = str(p?.image?.mediaId);
+  if (!legacyMediaId) return null;
+  return {
+    kind: 'image',
+    mediaId: legacyMediaId,
+    declaredMime: normalizeMimeType(p?.image?.mimeType),
+    filename: null,
+    caption: sanitizeAttachmentCaption(p?.image?.caption),
+    sha256: null,
+  };
+}
+
+/** Tipo no soportado a partir del payload del inbox (no existe forma legacy: antes se perdían). */
+export function unsupportedFromInboxPayload(payload: unknown): InboundUnsupported | null {
+  const kind = (payload as Any)?.unsupported?.kind;
+  return (UNSUPPORTED_INBOUND_KINDS as readonly string[]).includes(kind)
+    ? { kind: kind as UnsupportedInboundKind }
+    : null;
 }
 
 export function parseMetaWebhookPayload(payload: unknown): ParseResult {

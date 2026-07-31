@@ -60,6 +60,31 @@ export interface OrderInvoice {
   number: string | null;
 }
 
+/**
+ * ADR-0016 §1/§5 — Adjuntos de conversación asociados a ESTE pedido. Es la superficie que el
+ * panel de Pedidos lee para saber que hay un comprobante: los bytes NO viven acá y el pedido
+ * jamás guarda una ruta de Storage — solo ids OPACOS que se abren por `attachmentGetViewUrl`.
+ *
+ * POR QUÉ existe además de `payment.comprobanteUrl`: ese campo es de UN solo valor y nació para
+ * los comprobantes legacy (`tenants/{t}/orders/{o}/comprobantes/…`). El contrato nuevo es
+ * MULTI-ADJUNTO —«un segundo envío acumula, no reemplaza»— y separa dos cosas que no son lo
+ * mismo: lo que el sistema SUGIRIÓ y lo que una persona DECIDIÓ. Meter las dos en un campo de
+ * un valor obligaba a elegir cuál gana y a mantener dos fuentes de la misma verdad.
+ */
+export interface OrderReceiptAttachments {
+  /**
+   * SUGERENCIAS del gate determinístico. **No son comprobante**: el pedido no se movió por
+   * estar acá y nadie confirmó nada. El panel debe mostrarlas como propuesta a revisar.
+   */
+  candidateIds: string[];
+  /** Vinculados por una PERSONA autorizada (owner/manager/seller). Son la evidencia elegida. */
+  linkedIds: string[];
+  /** Cuál de los vinculados produjo el `PENDING_VERIFICATION` vigente (null = lo produjo otra cosa). */
+  statusDrivenBy: string | null;
+  /** Última vez que cambió esta metadata (server-set). */
+  updatedAt?: Timestamp;
+}
+
 export interface Order {
   id: string;
   tenantId: string;
@@ -79,6 +104,12 @@ export interface Order {
   attribution?: Attribution;
   /** COVERAGE-1D: la orden nació de una cobertura APROBADA (referencia auditable; SIN coordenadas). */
   coverage?: { requestId: string; locationFingerprint: string | null };
+  /**
+   * ADR-0016 §5: adjuntos propuestos/vinculados como comprobante. OPCIONAL: los pedidos
+   * anteriores al ADR no lo tienen y siguen renderizando. Leer SIEMPRE con
+   * `readOrderReceiptAttachments` (proyección defensiva compartida), nunca campo por campo.
+   */
+  receiptAttachments?: OrderReceiptAttachments;
   notes: string;
   createdAt: Timestamp;
   updatedAt: Timestamp;

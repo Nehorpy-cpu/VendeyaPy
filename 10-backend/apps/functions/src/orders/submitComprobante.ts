@@ -1,14 +1,25 @@
 /**
  * orders/submitComprobante.ts — Recibe el comprobante y deriva al vendedor (F6b.2)
  * ================================================================================
- * El cliente envía el comprobante de la transferencia. Esto:
+ * ⚠️ CONTRATO RETIRADO PARA PRODUCCIÓN (ADR-0016 §2 y §5). Esta función mueve el pedido a
+ * `PENDING_VERIFICATION`, crea el handoff y activa `humanTakeover` **sin ninguna decisión
+ * humana**: exactamente lo que el ADR prohíbe («la ingesta jamás cambia por sí sola el estado de
+ * un pedido»; «el pago siempre es humano»). El camino de producción que la reemplazó es
+ * `functions/attachments/attachmentCallables.ts` → `orders/receiptStore.ts`, donde una persona
+ * autorizada (OWNER/MANAGER/SELLER) vincula el adjunto y recién ahí el pedido se mueve.
+ *
+ * ÚNICO llamador admitido: `functions/payments/devSubmitComprobante.ts`, que está detrás de
+ * `guardDevEndpoint` (404 fuera del emulador salvo `ENABLE_DEV_ENDPOINTS` + secreto) y que
+ * sostiene los verificadores locales (`scripts/verify-human-handoff.mjs`). Por eso NO se borra.
+ *
+ * Cualquier `import` nuevo desde código de producción reconecta el comportamiento que ADR-0016
+ * desarmó: si necesitás mover un pedido por un comprobante, usá el callable humano.
+ *
+ * Qué hace, cuando corre desde el endpoint dev:
  *  1. Marca la orden PENDING_VERIFICATION y guarda la ref del comprobante.
  *  2. Activa humanTakeover en la sesión → el bot deja de responder ese chat.
  *  3. Crea un registro de handoff y asigna un vendedor (la cola del vendedor).
  *  4. (Producción) notifica al vendedor por WhatsApp; en dev solo se loguea.
- *
- * La FOTO real del comprobante llega por el webhook de WhatsApp (F1). Mientras tanto
- * el endpoint de prueba pasa una ref simulada.
  */
 
 import { Timestamp } from 'firebase-admin/firestore';

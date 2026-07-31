@@ -49,6 +49,18 @@ export const AUDIT_ACTIONS = [
   'order.payment_confirmed_manual',
   'order.admin_corrected',
   'order.comprobante_received',
+  // WHATSAPP-MEDIA-SAFE-FOUNDATION-1 (ADR-0016 §5): decisión HUMANA sobre un adjunto. Marcar
+  // lleva el pedido a PENDING_VERIFICATION y NO confirma el pago; desmarcar preserva el archivo
+  // como medio normal. Sin estas entradas no quedaría constancia de quién declaró qué es un
+  // comprobante.
+  'order.receipt_marked',
+  'order.receipt_unmarked',
+  // ADR-0016 §6: cada emisión de una URL temporal sobre un archivo de cliente (adjunto nuevo o
+  // comprobante legacy). Sin la URL, sin el path: quién, sobre qué y hasta cuándo.
+  'attachment.view_url_issued',
+  // ADR-0016 §D: corrida de la purga de retención. Borrar bytes de clientes es irreversible, así
+  // que queda constancia aunque el saldo del día sea cero.
+  'attachment.retention_purged',
   'meta.number_added',
   'meta.number_deactivated',
   'billing.activation_requested',

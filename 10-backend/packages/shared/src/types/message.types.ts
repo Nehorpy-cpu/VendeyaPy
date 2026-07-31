@@ -36,6 +36,17 @@ export interface Message {
   waMessageId?: string | null;
   /** HUMAN-HANDOFF: true = outbound retenido por modo mock. */
   viaMock?: boolean;
+  /**
+   * ADR-0016: punteros a `tenants/{t}/attachments/{attachmentId}`. SOLO punteros — el adjunto
+   * tiene identidad y ciclo de vida propios. OPCIONALES a propósito: los mensajes históricos no
+   * los tienen y deben seguir siendo válidos y renderizables.
+   */
+  attachmentIds?: string[];
+  /**
+   * Denormalizado para listar sin resolver los punteros. El panel JAMÁS infiere un adjunto desde
+   * el texto del mensaje (`📷 Imagen recibida` era falsificable escribiéndolo a mano).
+   */
+  hasAttachments?: boolean;
 }
 
 /**

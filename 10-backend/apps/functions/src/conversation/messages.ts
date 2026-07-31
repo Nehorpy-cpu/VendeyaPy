@@ -36,11 +36,32 @@ export interface AppendMessageInput {
   waMessageId?: string | null;
   /** HUMAN-HANDOFF-1: true = el outbound quedó retenido por modo mock (no salió a Meta). */
   viaMock?: boolean;
+  /**
+   * ADR-0016: id DETERMINÍSTICO del documento. Con él, el mensaje se escribe con `create()` y un
+   * reintento del webhook NO duplica la burbuja en el chat. Sin él (default) se usa un id
+   * aleatorio y el comportamiento es el de siempre.
+   */
+  docId?: string | null;
+  /**
+   * ADR-0016: punteros a `tenants/{t}/attachments/{id}`. Si el doc ya existía (reintento o
+   * segundo adjunto del mismo mensaje del proveedor), se acumulan con `arrayUnion` — nunca se
+   * pisan: un segundo envío ACUMULA, no reemplaza.
+   */
+  attachmentIds?: string[];
 }
 
 function preview(text: string): string {
   const t = text.replace(/\s+/g, ' ').trim();
   return t.length > 80 ? t.slice(0, 77) + '…' : t;
+}
+
+/** Marcador NEUTRAL para la bandeja cuando el mensaje es solo un archivo (sin caption). Es un
+ *  resumen denormalizado, NO evidencia: la autoridad sobre el adjunto es `hasAttachments`. */
+const PREVIEW_SOLO_ADJUNTO = '📎 Adjunto';
+
+function isAlreadyExists(e: unknown): boolean {
+  const code = (e as { code?: number | string } | null)?.code;
+  return code === 6 || code === 'already-exists' || /already.?exists/i.test(String(e));
 }
 
 /** Guarda un mensaje y actualiza el resumen de conversación del cliente. */
@@ -50,8 +71,10 @@ export async function appendMessage(
   input: AppendMessageInput,
 ): Promise<Message> {
   const now = input.now ?? Timestamp.now();
-  const ref = db().collection(paths.messages(tenantId, customerId)).doc();
+  const col = db().collection(paths.messages(tenantId, customerId));
+  const ref = input.docId ? col.doc(input.docId) : col.doc();
   const channel: MessageChannel = input.channel ?? 'whatsapp';
+  const attachmentIds = input.attachmentIds?.filter((id) => typeof id === 'string' && id !== '') ?? [];
   const msg: Message = {
     id: ref.id,
     tenantId,
@@ -61,6 +84,7 @@ export async function appendMessage(
     text: input.text,
     channel,
     createdAt: now,
+    ...(attachmentIds.length ? { attachmentIds, hasAttachments: true } : {}),
   };
   // Metadata adicional opcional (MULTI-NUMBER-1 / HUMAN-HANDOFF-1): solo los campos presentes.
   const extra: Record<string, unknown> = {};
@@ -69,12 +93,32 @@ export async function appendMessage(
   if (input.senderName) extra['senderName'] = input.senderName;
   if (input.waMessageId) extra['waMessageId'] = input.waMessageId;
   if (input.viaMock) extra['viaMock'] = true;
-  await ref.set(Object.keys(extra).length ? { ...msg, ...extra } : msg);
+  const doc = Object.keys(extra).length ? { ...msg, ...extra } : msg;
+
+  if (input.docId) {
+    try {
+      await ref.create(doc);
+    } catch (e) {
+      if (!isAlreadyExists(e)) throw e;
+      // Reintento del webhook o SEGUNDO adjunto del mismo mensaje del proveedor. No se duplica
+      // la burbuja ni se vuelve a tocar el resumen (evita inflar `unreadForSeller`); solo se
+      // acumulan los punteros nuevos, que es idempotente.
+      if (attachmentIds.length) {
+        await ref.set(
+          { attachmentIds: FieldValue.arrayUnion(...attachmentIds), hasAttachments: true },
+          { merge: true },
+        );
+      }
+      return msg;
+    }
+  } else {
+    await ref.set(doc);
+  }
 
   // Resumen denormalizado (deep-merge sobre el doc del cliente).
   const conv: Record<string, unknown> = {
     lastMessageAt: now,
-    lastMessagePreview: preview(input.text),
+    lastMessagePreview: preview(input.text) || (attachmentIds.length ? PREVIEW_SOLO_ADJUNTO : ''),
     lastMessageDirection: input.direction,
     channel,
   };

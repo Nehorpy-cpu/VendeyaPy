@@ -58,6 +58,30 @@ const notifsHandoff = async () => (await db.collection(`tenants/${T}/notificatio
   .map((d) => ({ id: d.id, ...d.data() })).filter((n) => n.category === 'handoff' && [CUST, CUST2].includes(n.customerId));
 const waitFor = async (pred, maxMs = 15000) => { const end = Date.now() + maxMs; while (Date.now() < end) { if (await pred()) return true; await sleep(600); } return false; };
 
+/**
+ * Borra TODO rastro conversacional de los clientes de este fixture (mensajes, sesión, ficha) y sus
+ * avisos. Se llama al EMPEZAR y al TERMINAR.
+ *
+ * POR QUÉ AL EMPEZAR: sin esto el script no era re-ejecutable y fallaba en cualquier segunda
+ * corrida sobre el mismo emulador. Dos efectos se acumulaban entre corridas:
+ *   · la sesión quedaba con `humanTakeover: true`, así que el pedido de la corrida siguiente
+ *     entraba con el bot YA en silencio ⇒ ni handoff nuevo ni notificación (checks 1, 2 y 6);
+ *   · `msgsOf` conservaba las confirmaciones viejas, y el conteo de "Te paso con Aaron Test"
+ *     crecía sin parar (2, 4, 5…) ⇒ el check 3 medía historia, no el dedup por wamid.
+ * El estado del tenant ya se restauraba; lo que faltaba era el de la CONVERSACIÓN, que es
+ * justamente el sujeto de esta prueba.
+ */
+async function limpiarConversaciones() {
+  for (const c of [CUST, CUST2]) {
+    const msgs = await db.collection(`tenants/${T}/customers/${c}/messages`).get();
+    for (const d of msgs.docs) await d.ref.delete().catch(() => {});
+    await db.doc(`tenants/${T}/customers/${c}/sessions/active`).delete().catch(() => {});
+    await db.doc(`tenants/${T}/customers/${c}`).delete().catch(() => {});
+  }
+  for (const n of await notifsHandoff()) await db.doc(`tenants/${T}/notifications/${n.id}`).delete().catch(() => {});
+}
+await limpiarConversaciones();
+
 // ---- Snapshot (convivencia con otros verifies) ----
 const beforeTenant = (await db.doc(`tenants/${T}`).get()).data() ?? {};
 const beforeChannels = (await db.doc(`tenants/${T}/config/channels`).get()).data() ?? null;
@@ -173,7 +197,7 @@ await db.doc(`tenants/${T}`).set(beforeTenant);
 if (beforeChannels) await db.doc(`tenants/${T}/config/channels`).set(beforeChannels); else await db.doc(`tenants/${T}/config/channels`).delete();
 if (beforeAgent) await db.doc(`tenants/${T}/config/agent`).set(beforeAgent); else await db.doc(`tenants/${T}/config/agent`).delete();
 if (beforeCheckout) await db.doc(`tenants/${T}/config/checkout`).set(beforeCheckout); else await db.doc(`tenants/${T}/config/checkout`).delete();
-for (const n of await notifsHandoff()) await db.doc(`tenants/${T}/notifications/${n.id}`).delete().catch(() => {});
+await limpiarConversaciones();
 
 const ok = results.every(Boolean);
 console.log(`\nRESULTADO HANDOFF-2 (pedido de humano): ${ok ? `TODO OK ✅ (${results.length}/${results.length})` : `FALLOS ❌ (${results.filter(Boolean).length}/${results.length})`}`);

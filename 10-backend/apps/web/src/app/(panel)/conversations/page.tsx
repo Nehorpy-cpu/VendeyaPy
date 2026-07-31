@@ -1,6 +1,6 @@
 'use client';
 
-import { Suspense, useCallback, useEffect, useRef, useState } from 'react';
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import type { Customer, Message } from '@vpw/shared';
@@ -17,18 +17,12 @@ import {
 } from '@/lib/conversations';
 import { listTenantWhatsappNumbers } from '@/lib/whatsapp-activation';
 import { getChannelConfig } from '@/lib/channels';
-import { getCustomerOpenOrder, comprobanteEstado, esMensajeImagenCliente } from '@/lib/orders';
+import { listCustomerOpenOrders, comprobanteEstado, ORDER_STATUS_LABEL } from '@/lib/orders';
+import { listConversationAttachments, indexAttachments } from '@/lib/attachments';
 import { composerGateActivo, COMPOSER_GATE_HELP, COMPOSER_GATE_HELP_SOLO_LECTURA, type ManualShippingGate } from '@/lib/shippingQuote';
 import { ComprobanteViewer } from '@/components/ComprobanteViewer';
 import { CoverageReviewCard } from '@/components/CoverageReviewCard';
-
-const ORDER_STATUS_LABEL: Record<string, string> = {
-  PENDING_PAYMENT: 'Esperando pago',
-  PENDING_VERIFICATION: 'Comprobante por verificar',
-  PAID: 'Pagado',
-  PREPARING: 'Preparando',
-  SHIPPED: 'Enviado',
-};
+import { MessageBubble } from '@/components/conversations/MessageBubble';
 
 function hhmm(ts: unknown): string {
   try {
@@ -54,7 +48,7 @@ const CHANNEL_LABEL: Record<string, string> = {
 
 function ConversationsInner() {
   const { tenantId, loading: companyLoading } = useActiveCompany();
-  const { user } = useAuth();
+  const { user, claims } = useAuth();
   const qc = useQueryClient();
   const params = useSearchParams();
   const [selected, setSelected] = useState<string | null>(null);
@@ -99,12 +93,56 @@ function ConversationsInner() {
     refetchInterval: 4000,
   });
 
+  /**
+   * ADR-0016: los adjuntos viven en `tenants/{t}/attachments` (raíz del tenant), NO adentro del
+   * mensaje. Se leen por conversación y cada burbuja resuelve sus punteros contra este índice.
+   * Si la lectura falla (permisos, red), la burbuja muestra el error con reintento — nunca una
+   * tarjeta a medias ni un adjunto inventado desde el texto.
+   */
+  const attachmentsQ = useQuery({
+    queryKey: ['attachments', tenantId, selected],
+    queryFn: () => listConversationAttachments(tenantId!, selected!),
+    enabled: !!tenantId && !!selected,
+    refetchInterval: 10000,
+  });
+  const attachmentsById = useMemo(() => indexAttachments(attachmentsQ.data ?? []), [attachmentsQ.data]);
+
   const refreshAll = () => {
     qc.invalidateQueries({ queryKey: ['messages', tenantId, selected] });
     qc.invalidateQueries({ queryKey: ['customer', tenantId, selected] });
     qc.invalidateQueries({ queryKey: ['conversations', tenantId] });
     qc.invalidateQueries({ queryKey: ['customers', tenantId] });
   };
+
+  /** Después de una acción humana sobre un adjunto: adjunto + pedidos del cliente. */
+  const refreshAttachments = useCallback(() => {
+    qc.invalidateQueries({ queryKey: ['attachments', tenantId, selected] });
+    qc.invalidateQueries({ queryKey: ['customerOpenOrders', tenantId, selected] });
+    qc.invalidateQueries({ queryKey: ['orders', tenantId] });
+  }, [qc, tenantId, selected]);
+  // `refetch` es estable en react-query: se aísla para que el reintento no cambie de identidad
+  // en cada render y no re-renderice todas las burbujas.
+  const refetchAttachments = attachmentsQ.refetch;
+  const retryAttachments = useCallback(() => { void refetchAttachments(); }, [refetchAttachments]);
+
+  /**
+   * Los mensajes se refrescan más seguido que los adjuntos: un mensaje con punteros puede llegar
+   * ANTES que su adjunto a esta caché y, sin esto, la burbuja mostraría un error alarmante
+   * ("no encontramos el archivo") durante la ventana entre un refresco y el otro.
+   * Se fuerza UNA sola relectura por id nuevo faltante (el Set corta cualquier bucle de refetch);
+   * si después de eso sigue sin aparecer, entonces sí es un faltante real y se informa.
+   */
+  const idsReintentados = useRef<Set<string>>(new Set());
+  useEffect(() => { idsReintentados.current = new Set(); }, [selected]);
+  useEffect(() => {
+    if (!attachmentsQ.isSuccess || attachmentsQ.isFetching) return;
+    const faltantes = (messagesQ.data ?? [])
+      .flatMap((m) => m.attachmentIds ?? [])
+      .filter((id) => !attachmentsById.has(id) && !idsReintentados.current.has(id));
+    if (faltantes.length === 0) return;
+    faltantes.forEach((id) => idsReintentados.current.add(id));
+    void refetchAttachments();
+  }, [messagesQ.data, attachmentsById, attachmentsQ.isSuccess, attachmentsQ.isFetching, refetchAttachments]);
 
   const takeMut = useMutation({
     mutationFn: () => takeoverChat(tenantId!, selected!),
@@ -181,14 +219,18 @@ function ConversationsInner() {
   });
   const isMock = channelQ.data?.whatsappSendMode === 'mock' || lastViaMock;
 
-  // Pedido abierto del cliente (banner con link a Pedidos). El comprobante activa el handoff
+  // Pedidos abiertos del cliente (banner con link a Pedidos). El comprobante activa el handoff
   // sobre un pedido PENDING_VERIFICATION: esto le da contexto al vendedor sin salir del chat.
+  // ADR-0016: se lee la LISTA, no solo el primero — las acciones de adjunto necesitan saber si
+  // hay ambigüedad entre pedidos para obligar a una elección explícita.
   const orderQ = useQuery({
-    queryKey: ['customerOpenOrder', tenantId, selected],
-    queryFn: () => getCustomerOpenOrder(tenantId!, selected!).catch(() => null),
+    queryKey: ['customerOpenOrders', tenantId, selected],
+    queryFn: () => listCustomerOpenOrders(tenantId!, selected!).catch(() => []),
     enabled: !!tenantId && !!selected,
     refetchInterval: 15000,
   });
+  const openOrders = useMemo(() => orderQ.data ?? [], [orderQ.data]);
+  const openOrder = openOrders[0] ?? null;
 
   // Autoscroll al final cuando llegan mensajes (endRef se declara junto al gate del composer)
   useEffect(() => {
@@ -335,17 +377,21 @@ function ConversationsInner() {
               )}
 
               {/* HUMAN-HANDOFF-1: pedido abierto del cliente — contexto del comprobante sin salir del chat */}
-              {orderQ.data && (
+              {openOrder && (
                 <div className="flex items-center justify-between gap-2 border-b border-amber-100 bg-amber-50/70 px-4 py-2 text-xs">
                   <span className="min-w-0 truncate text-ink-700">
-                    🧾 Pedido <span className="font-mono">{orderQ.data.id.slice(0, 12)}…</span> ·{' '}
-                    <span className="font-semibold">{ORDER_STATUS_LABEL[orderQ.data.status] ?? orderQ.data.status}</span> · ₲{' '}
-                    {orderQ.data.totals?.total?.toLocaleString('es-PY') ?? '—'}
+                    🧾 Pedido <span className="font-mono">{openOrder.id.slice(0, 12)}…</span> ·{' '}
+                    <span className="font-semibold">{ORDER_STATUS_LABEL[openOrder.status] ?? openOrder.status}</span> · ₲{' '}
+                    {openOrder.totals?.total?.toLocaleString('es-PY') ?? '—'}
+                    {openOrders.length > 1 && (
+                      <span className="ml-1 text-ink-500">(+{openOrders.length - 1} abiertos)</span>
+                    )}
                   </span>
                   <span className="flex shrink-0 items-center gap-2">
-                    {/* ORDER-COMPROBANTE-VIEW-1: la foto del pago, sin salir del chat (enlace temporal) */}
-                    {comprobanteEstado(orderQ.data) === 'image' && (
-                      <ComprobanteViewer tenantId={tenantId} orderId={orderQ.data.id} compact />
+                    {/* ORDER-COMPROBANTE-VIEW-1: comprobantes LEGACY (ruta vieja del pedido) — siguen
+                        abriendo con su visor. ADR-0016 §7: compatibilidad aditiva, no se reescribe historia. */}
+                    {comprobanteEstado(openOrder) === 'image' && (
+                      <ComprobanteViewer tenantId={tenantId} orderId={openOrder.id} compact />
                     )}
                     <a href="/orders" className="font-semibold text-amber-700 hover:underline">
                       Ver en Pedidos →
@@ -359,7 +405,22 @@ function ConversationsInner() {
                 {messagesQ.isSuccess && (messagesQ.data?.length ?? 0) === 0 && (
                   <div className="text-center text-sm text-ink-400">Sin mensajes.</div>
                 )}
-                {messagesQ.data?.map((m: Message) => <Bubble key={m.id} m={m} />)}
+                {messagesQ.data?.map((m: Message) => (
+                  <MessageBubble
+                    key={m.id}
+                    m={m}
+                    tenantId={tenantId}
+                    attachmentsById={attachmentsById}
+                    // `isFetching` (y no solo `isLoading`): mientras se está releyendo, un id que
+                    // todavía no llegó se muestra como "cargando", nunca como error.
+                    attachmentsLoading={attachmentsQ.isLoading || attachmentsQ.isFetching}
+                    attachmentsFailed={attachmentsQ.isError}
+                    onRetryAttachments={retryAttachments}
+                    role={claims.role}
+                    orders={openOrders}
+                    onAttachmentChanged={refreshAttachments}
+                  />
+                ))}
                 <div ref={endRef} />
               </div>
 
@@ -421,48 +482,6 @@ function ConversationsInner() {
             </>
           )}
         </div>
-      </div>
-    </div>
-  );
-}
-
-function Bubble({ m }: { m: Message }) {
-  if (m.author === 'system') {
-    return (
-      <div className="text-center">
-        <span className="inline-block rounded-full bg-ink-100 px-3 py-1 text-[11px] text-ink-600">{m.text}</span>
-      </div>
-    );
-  }
-  // ORDER-COMPROBANTE-VIEW-1: la imagen del cliente se muestra como card. SOLO los formatos
-  // exactos del sistema (comprobanteImage.ts) — texto libre del cliente con 📷 va como burbuja
-  // normal (review OCV-1: el prefijo es spoofeable). La card no afirma que sea un pago: la foto
-  // real se ve con "Ver comprobante" en la barra del pedido, gateado por la orden.
-  if (m.direction === 'in' && esMensajeImagenCliente(m.text)) {
-    return (
-      <div className="text-left">
-        <div className="inline-block max-w-[80%] rounded-2xl border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
-          <div className="text-[10px] font-semibold uppercase tracking-wide text-amber-700">📎 Imagen del cliente</div>
-          <div className="mt-0.5 whitespace-pre-wrap">{m.text}</div>
-          <div className="mt-1 text-[10px] text-amber-700/80">Si corresponde a un pedido, podés verla con “Ver comprobante” en la barra del pedido ↑</div>
-        </div>
-        <div className="mt-0.5 text-[10px] text-ink-400">{hhmm(m.createdAt)}</div>
-      </div>
-    );
-  }
-  const mine = m.direction === 'out'; // bot o vendedor (sale de nosotros)
-  const tone =
-    m.author === 'seller' ? 'bg-amber-500 text-white' : mine ? 'bg-mint-600 text-white' : 'border border-ink-100 bg-white text-ink-800';
-  const authorLabel = m.author === 'seller' ? (m.senderName ?? 'Vendedor') : m.author === 'bot' ? null : null;
-  return (
-    <div className={mine ? 'text-right' : 'text-left'}>
-      <div className={'inline-block max-w-[80%] whitespace-pre-wrap rounded-2xl px-3 py-2 text-sm ' + tone}>
-        {authorLabel && <div className="mb-0.5 text-[10px] font-semibold opacity-80">🧑‍💼 {authorLabel}</div>}
-        {m.text}
-      </div>
-      <div className="mt-0.5 text-[10px] text-ink-400">
-        {hhmm(m.createdAt)}
-        {m.author === 'seller' && m.viaMock && <span title="Modo prueba: no salió a WhatsApp"> · retenido (prueba)</span>}
       </div>
     </div>
   );

@@ -1,11 +1,13 @@
 /**
- * verify-coverage-state.mjs — COVERAGE-1B end-to-end (emulador limpio).
+ * verify-coverage-state.mjs — COVERAGE-1B end-to-end (emulador).
  * Máquina de cobertura ANTES del pago: flag OFF ⇒ checkout intacto; flag ON ⇒ "pagar" pide
  * ubicación (nativa o dirección escrita) SIN crear orden ni mostrar banco, y la ubicación
  * registrada deriva a revisión humana (handoff coverage_review + campana), con la ubicación
  * exacta SOLO en coverageRequests (jamás en historial/IA/notificaciones).
  *
  * Requiere: emulador (auth+functions+firestore) + seed-users + load-catalog (tenant perfumeria).
+ * Es RE-EJECUTABLE sobre el mismo emulador (limpia lo suyo al empezar y al terminar, y restaura
+ * la config al salir).
  */
 import { initializeApp } from 'firebase-admin/app';
 import { getFirestore, Timestamp } from 'firebase-admin/firestore';
@@ -70,6 +72,35 @@ const setCoverage = (coverage) => db.doc(`tenants/${T}/config/checkout`).set({
   ...(coverage !== undefined ? { coverage } : {}),
 });
 
+const PREFIJO = '59599400'; // los clientes de este fixture son exclusivos de este script
+const CUST = (n) => `${PREFIJO}${String(n).padStart(4, '0')}`;
+
+/**
+ * Borra TODO lo que este script escribe para SUS clientes: la conversación completa (mensajes,
+ * sesión y ficha) y los documentos tenant-scoped que llevan su customerId (pedidos, solicitudes
+ * de cobertura, avisos). Se llama AL EMPEZAR y AL TERMINAR.
+ *
+ * POR QUÉ AL EMPEZAR: sin esto el script solo pasaba en la PRIMERA corrida sobre un emulador
+ * recién levantado. En la segunda, la historia acumulada rompía los checks que CUENTAN:
+ *   · los pedidos de la corrida anterior seguían ahí ⇒ `ordersOf` daba 2 donde el contrato exige
+ *     exactamente 1 (checks 1 y 2b);
+ *   · los mensajes viejos inflaban `outsCount`/`msgsOf` ⇒ los "outs antes → outs después" de la
+ *     ubicación inerte medían historia acumulada en vez del turno.
+ * La config del tenant ya se restauraba al salir; lo que faltaba era el estado del CLIENTE, que es
+ * justamente el sujeto de esta prueba. Mismo molde que `limpiarConversaciones()` de verify-handoff2.
+ */
+const limpiar = async () => {
+  for (const ref of (await db.collection(`tenants/${T}/customers`).listDocuments()).filter((r) => r.id.startsWith(PREFIJO))) {
+    for (const sub of await ref.listCollections()) for (const d of await sub.listDocuments()) await d.delete().catch(() => {});
+    await ref.delete().catch(() => {});
+  }
+  for (const coll of ['orders', 'coverageRequests', 'notifications']) {
+    const snap = await db.collection(`tenants/${T}/${coll}`).get();
+    for (const d of snap.docs) { if (String(d.data().customerId ?? '').startsWith(PREFIJO)) await d.ref.delete().catch(() => {}); }
+  }
+};
+await limpiar();
+
 // ---- Snapshot + setup ----
 const beforeTenant = (await db.doc(`tenants/${T}`).get()).data() ?? {};
 const beforeChannels = (await db.doc(`tenants/${T}/config/channels`).get()).data() ?? null;
@@ -95,8 +126,6 @@ const rConn = await call('adminSetManualWhatsappConnection', admin, {
 if (!rConn.result?.ok) { console.error('setup: conexión manual falló', rConn); process.exit(1); }
 await db.doc(`tenants/${T}/metaConnections/main`).set({ status: 'active' }, { merge: true });
 const ai0 = await aiCount();
-
-const CUST = (n) => `59599400${String(n).padStart(4, '0')}`;
 
 // Inbox helpers (OFF-INERTE): el evento se conserva 'ignored' con payload.location=null (redacción).
 const inboxIdDe = (wamid) => ('whatsapp_' + wamid).replace(new RegExp('[^A-Za-z0-9_.:=+-]', 'g'), '_').slice(0, 256);
@@ -376,10 +405,7 @@ await db.doc(`tenants/${T}`).set(beforeTenant);
 if (beforeChannels) await db.doc(`tenants/${T}/config/channels`).set(beforeChannels); else await db.doc(`tenants/${T}/config/channels`).delete();
 if (beforeAgent) await db.doc(`tenants/${T}/config/agent`).set(beforeAgent); else await db.doc(`tenants/${T}/config/agent`).delete();
 if (beforeCheckout) await db.doc(`tenants/${T}/config/checkout`).set(beforeCheckout); else await db.doc(`tenants/${T}/config/checkout`).delete();
-{
-  const notifs = await db.collection(`tenants/${T}/notifications`).get();
-  for (const d of notifs.docs) { if ((d.data().category ?? '') === 'handoff' && String(d.data().customerId ?? '').startsWith('59599400')) await d.ref.delete().catch(() => {}); }
-}
+await limpiar();
 
 const ok = results.every(Boolean);
 console.log(`\nRESULTADO COVERAGE-1B (máquina de cobertura, flag off/on): ${ok ? `TODO OK ✅ (${results.length}/${results.length})` : `FALLOS ❌ (${results.filter(Boolean).length}/${results.length})`}`);

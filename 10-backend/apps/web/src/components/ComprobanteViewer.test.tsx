@@ -7,7 +7,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { ComprobanteViewer } from './ComprobanteViewer';
-import { comprobanteEstado, esMensajeImagenCliente } from '@/lib/orders';
+import { comprobanteEstado } from '@/lib/orders';
 import type { Order } from '@vpw/shared';
 
 const getComprobanteViewUrl = vi.fn();
@@ -36,18 +36,9 @@ describe('comprobanteEstado — qué muestra la UI', () => {
   });
 });
 
-describe('esMensajeImagenCliente — solo los formatos exactos del sistema (review OCV-1)', () => {
-  it('acepta los dos textos que genera comprobanteImage.ts', () => {
-    expect(esMensajeImagenCliente('📷 Imagen recibida (posible comprobante)')).toBe(true);
-    expect(esMensajeImagenCliente('📷 Comprobante: pago del pedido')).toBe(true);
-  });
-  it('rechaza texto libre del cliente que empiece con 📷 (spoofeo)', () => {
-    expect(esMensajeImagenCliente('📷 mirá la foto que te mando después')).toBe(false);
-    expect(esMensajeImagenCliente('📷')).toBe(false);
-    expect(esMensajeImagenCliente('📷 Imagen recibida (posible comprobante) jaja')).toBe(false);
-    expect(esMensajeImagenCliente('hola')).toBe(false);
-  });
-});
+// ADR-0016: los tests de `esMensajeImagenCliente` se movieron —y se endurecieron— a
+// `components/conversations/MessageBubble.test.tsx`: ahora NINGÚN texto, ni el que generaba
+// nuestro backend, dibuja una tarjeta de adjunto. El único origen de verdad es `attachmentIds`.
 
 describe('ComprobanteViewer', () => {
   beforeEach(() => getComprobanteViewUrl.mockReset());

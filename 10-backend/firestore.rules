@@ -194,6 +194,26 @@ service cloud.firestore {
         }
       }
 
+      // Adjuntos de conversación (ADR-0016 / §4.12): METADATA de las imágenes y PDF que manda el
+      // cliente por WhatsApp. Viven en la raíz del tenant —no bajo el mensaje— porque su ciclo de
+      // vida es MUTABLE (ingesta → clasificación → retención) mientras el chat se lee inmutable.
+      //
+      // Lectura: el MISMO staff que ve la conversación (owner/manager/seller), igual criterio que
+      // `customers/{c}/messages`. El TENANT_VIEWER no ve archivos de clientes. `isTenantStaff` ya
+      // exige `userTenantId() == tenantId`, así que no hay lectura cross-tenant por construcción.
+      //
+      // Escritura CERRADA por completo (solo Admin SDK / callables auditados): clasificar un
+      // adjunto como comprobante es una decisión de negocio que valida pedido, estado admisible,
+      // `customerId` y no-PAID — invariantes que una regla de Firestore no puede hacer cumplir.
+      // Si el panel pudiera escribir acá, alcanzaría con un update para inventar un comprobante.
+      //
+      // Los BYTES no salen por acá: storage.rules los cierra y solo un callable autorizado firma
+      // una URL de vida corta (que jamás se persiste).
+      match /attachments/{attachmentId} {
+        allow read: if isTenantStaff(tenantId) || isPlatformAdmin();
+        allow write: if false; // Solo Admin SDK
+      }
+
       // Órdenes: SOLO lectura desde el cliente (ORDER-1). Toda mutación va por callables
       // auditados (orderUpdate / orderCancel / orderUpdateStatus / adminOrderCorrect), que
       // hacen cumplir la máquina de estados (orders/lifecycle.ts): editar/cancelar solo

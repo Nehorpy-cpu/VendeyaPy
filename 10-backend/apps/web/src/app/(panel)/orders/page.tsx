@@ -13,6 +13,7 @@ import {
   comprobanteEstado,
 } from '@/lib/orders';
 import { ComprobanteViewer } from '@/components/ComprobanteViewer';
+import { OrderReceipts } from '@/components/orders/OrderReceipts';
 
 const gs = (n: number | null | undefined) => (n == null ? '—' : '₲ ' + Math.round(n).toLocaleString('es-PY'));
 
@@ -249,7 +250,9 @@ export default function OrdersPage() {
               {!isSeller && <div className="text-ink-500">Ganancia: {orderProfit(detail.id) == null ? '⚠️ incompleta' : gs(orderProfit(detail.id))}</div>}
             </div>
 
-            {/* ORDER-COMPROBANTE-VIEW-1: comprobante del cliente — imagen por enlace temporal seguro */}
+            {/* ORDER-COMPROBANTE-VIEW-1: comprobante LEGACY (`payment.comprobanteUrl`) — sigue
+                abriendo por el visor de pedido, sin cambios. ADR-0016 §7: no se reescribe historia
+                ni se rompe ningún camino que hoy funciona. */}
             {comprobanteEstado(detail) !== 'none' && (
               <div className="mt-4 flex items-center justify-between gap-3 rounded-xl border border-mint-100 bg-mint-50/50 px-4 py-3">
                 <div className="min-w-0">
@@ -263,6 +266,11 @@ export default function OrdersPage() {
                 {comprobanteEstado(detail) === 'image' && <ComprobanteViewer tenantId={tenantId} orderId={detail.id} />}
               </div>
             )}
+
+            {/* ADR-0016 §3 y §5: comprobantes VINCULADOS y candidatos del pedido, que viven como
+                adjuntos con identidad propia. Sin esto, un comprobante marcado desde Conversaciones
+                era invisible justo donde se decide el pago. */}
+            <OrderReceipts tenantId={tenantId} order={detail} />
 
             {/* ORDER-2: acciones según estado. Sin borrar, nunca: pagado/entregado = registro permanente. */}
             <div className="mt-5 border-t border-ink-100 pt-4">

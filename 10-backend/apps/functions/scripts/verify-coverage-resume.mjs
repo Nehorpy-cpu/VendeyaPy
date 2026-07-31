@@ -1,11 +1,13 @@
 /**
- * verify-coverage-resume.mjs — COVERAGE-1D end-to-end (emulador limpio).
+ * verify-coverage-resume.mjs — COVERAGE-1D end-to-end (emulador).
  * Consumidor del outbox de reanudación: approved → UNA orden + UNA instrucción (idempotente ante
  * retriggers), rejected → mensaje honesto sin orden/banco, held_by_seller ante takeover ajeno con
  * reactivación al liberar, mensajería con outbox (sent/failed/unknown, sin reenvíos de ACK
  * perdido), expiración + purga de coordenadas por mantenimiento, y feature OFF ⇒ cero proceso.
  *
  * Requiere: emulador (auth+functions+firestore) + seed-users + load-catalog (tenant perfumeria).
+ * Es RE-EJECUTABLE sobre el mismo emulador (limpia lo suyo al empezar y al terminar, y restaura
+ * la config al salir).
  */
 import { initializeApp } from 'firebase-admin/app';
 import { getFirestore, Timestamp } from 'firebase-admin/firestore';
@@ -62,6 +64,8 @@ const jobOf = async (id) => (await db.doc(`tenants/${T}/coverageResumeJobs/${id}
 const outboxDe = async (reqId) => (await db.collection(`tenants/${T}/coverageMessageOutbox`).get()).docs
   .map((d) => d.data()).filter((m) => m.coverageRequestId === reqId);
 const ordersOf = async (c) => (await db.collection(`tenants/${T}/orders`).where('customerId', '==', c).get()).docs.map((d) => d.data());
+/** ADR-0016: los archivos del cliente viven en la raíz del tenant, no bajo el mensaje. */
+const adjuntosDe = async (c) => (await db.collection(`tenants/${T}/attachments`).where('customerId', '==', c).get()).docs.map((d) => d.data());
 const waitFor = async (pred, maxMs = 20000) => { const end = Date.now() + maxMs; while (Date.now() < end) { if (await pred()) return true; await sleep(700); } return false; };
 const sendAndWait = async (from, text, maxMs = 15000) => { const antes = await outsCount(from); await postText(from, text); const ok = await waitFor(async () => (await outsCount(from)) > antes, maxMs); return ok ? (await msgsOf(from)).filter((m) => m.direction === 'out').pop().text : null; };
 const armarCarrito = async (from) => {
@@ -114,15 +118,30 @@ if (!rConn.result?.ok) {
 await db.doc(`tenants/${T}/metaConnections/main`).set({ status: 'active' }, { merge: true });
 const owner = await signIn('owner@perfumeria.com');
 
-const CUST = (n) => `59599420${String(n).padStart(4, '0')}`;
+const PREFIJO = '59599420'; // los clientes de este fixture son exclusivos de este script
+const CUST = (n) => `${PREFIJO}${String(n).padStart(4, '0')}`;
+/**
+ * Borra TODO lo que este script escribe para SUS clientes. Se llama AL EMPEZAR y AL TERMINAR.
+ *
+ * POR QUÉ AL EMPEZAR: sin esto el script solo pasaba en la PRIMERA corrida sobre un emulador
+ * recién levantado, porque los checks de "UNA sola" terminaban midiendo historia acumulada:
+ *   · los pedidos de la corrida anterior seguían ahí ⇒ `ordersOf` daba 2 donde el contrato exige
+ *     exactamente 1 (checks 1, 5, 10, 11…);
+ *   · los mensajes viejos hacían que `outsCon(…, 'transferir')` contara las instrucciones de
+ *     pago de la corrida anterior además de la de este turno.
+ * Mismo molde que `limpiarConversaciones()` de verify-handoff2: conversación completa (mensajes,
+ * sesión y ficha) + todo documento tenant-scoped con el customerId del fixture.
+ */
 const limpiar = async () => {
-  for (const coll of ['coverageRequests', 'coverageResumeJobs', 'coverageMessageOutbox']) {
-    const snap = await db.collection(`tenants/${T}/${coll}`).get();
-    for (const d of snap.docs) { if (String(d.data().customerId ?? '').startsWith('59599420')) await d.ref.delete().catch(() => {}); }
+  for (const ref of (await db.collection(`tenants/${T}/customers`).listDocuments()).filter((r) => r.id.startsWith(PREFIJO))) {
+    for (const sub of await ref.listCollections()) for (const d of await sub.listDocuments()) await d.delete().catch(() => {});
+    await ref.delete().catch(() => {});
   }
-  const notifs = await db.collection(`tenants/${T}/notifications`).get();
-  for (const d of notifs.docs) { if (String(d.data().customerId ?? '').startsWith('59599420')) await d.ref.delete().catch(() => {}); }
-  for (let i = 1; i <= 14; i++) await db.doc(`tenants/${T}/customers/${CUST(i)}/sessions/active`).delete().catch(() => {});
+  // ADR-0016: los adjuntos son tenant-scoped; sin esto quedarían archivos del script en el tenant.
+  for (const coll of ['orders', 'coverageRequests', 'coverageResumeJobs', 'coverageMessageOutbox', 'notifications', 'attachments']) {
+    const snap = await db.collection(`tenants/${T}/${coll}`).get();
+    for (const d of snap.docs) { if (String(d.data().customerId ?? '').startsWith(PREFIJO)) await d.ref.delete().catch(() => {}); }
+  }
 };
 await limpiar();
 
@@ -163,13 +182,26 @@ await waitFor(async () => (await jobOf(r1.id))?.status === 'done', 12000);
 check('5. retrigger del mismo job → misma orden, sin instrucción duplicada (outbox already_sent)',
   (await ordersOf(C1)).length === 1 && (await outsCon(C1, 'transferir')) === 1 && (await jobOf(r1.id))?.status === 'done');
 
-// ===== 6. Comprobante posterior → payment_verification intacto =====
+// ===== 6. Comprobante posterior a la reanudación (contrato ADR-0016) =====
+// CAMBIO DE CONTRATO, no relajación: hasta ADR-0016 alcanzaba con que llegara una imagen para que
+// el pedido saltara SOLO a PENDING_VERIFICATION y el handoff `payment_verification` sacara al bot
+// del chat. Ese era el defecto #1 de la auditoría (una foto de producto congelaba el pedido).
+// Ahora recibir un archivo NUNCA mueve un pedido: como la reanudación dejó la sesión en
+// AWAITING_PAYMENT con su `pendingOrderId`, el gate lo PROPONE como comprobante del MISMO pedido
+// —sugerencia visible— y recién una persona autorizada lo vincula. A PAID no se llega por acá.
 await postImage(C1);
-await waitFor(async () => (await ordersOf(C1))[0]?.status === 'PENDING_VERIFICATION');
-const ses1b = await sessionOf(C1);
-check('6. comprobante tras la reanudación → PENDING_VERIFICATION + handoff payment_verification (jamás PAID)',
-  (await ordersOf(C1))[0]?.status === 'PENDING_VERIFICATION' && ses1b?.context?.handoffReason === 'payment_verification' &&
-  (await ordersOf(C1))[0]?.payment?.paidAt === null);
+const propuesto = await waitFor(async () => (await adjuntosDe(C1)).some((a) => a.classification?.value === 'payment_receipt_candidate'));
+const adj1 = (await adjuntosDe(C1)).find((a) => a.classification?.value === 'payment_receipt_candidate') ?? null;
+const ord1 = (await ordersOf(C1))[0];
+check('6. comprobante tras la reanudación → se PROPONE sobre el pedido correcto SIN moverlo (ADR-0016)',
+  propuesto && adj1?.orderCandidateId === o1.id && adj1?.ingestState === 'stored' &&
+  ord1?.status === 'PENDING_PAYMENT' && ord1?.payment?.paidAt === null,
+  `class=${adj1?.classification?.value} candidato=${adj1?.orderCandidateId === o1.id} pedido=${ord1?.status}`);
+const marcado = await call('attachmentMarkAsReceipt', owner, { attachmentId: adj1?.attachmentId, orderId: o1.id });
+const ord1b = (await ordersOf(C1))[0];
+check('6b. y SOLO la acción humana lo lleva a PENDING_VERIFICATION (jamás a PAID)',
+  marcado.result?.ok === true && ord1b?.status === 'PENDING_VERIFICATION' && ord1b?.payment?.paidAt === null,
+  `err=${marcado.err} status=${ord1b?.status}`);
 
 // ===== 7. REJECTED: sin orden/banco, mensaje honesto (custom), puntero limpio =====
 await setCoverage({ enabled: true, expiryHours: 24, activationId: ACT, rejectedMessage: 'No llegamos a esa zona por ahora 🙏 Podés pasarnos otra dirección.' });

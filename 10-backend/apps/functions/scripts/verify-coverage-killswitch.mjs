@@ -1,5 +1,5 @@
 /**
- * verify-coverage-killswitch.mjs — COVERAGE-KILL-SWITCH-ATOMICITY-1 end-to-end (emulador limpio).
+ * verify-coverage-killswitch.mjs — COVERAGE-KILL-SWITCH-ATOMICITY-1 end-to-end (emulador).
  * El apagado de emergencia (enabled=false o rotación de activationId) que COMMITEA antes de cada
  * punto de decisión gana SIEMPRE: se pausa la ejecución en 9 checkpoints reales (hooks
  * solo-emulador), se cambia el flag y se verifica que la validación EN-TRANSACCIÓN posterior
@@ -7,6 +7,8 @@
  * no muestra banco y no llama a Meta. El camino con flag intacto sigue funcionando igual.
  *
  * Requiere: emulador (auth+functions+firestore) + seed-users + load-catalog (tenant perfumeria).
+ * Es RE-EJECUTABLE sobre el mismo emulador (limpia lo suyo al empezar y al terminar, y restaura
+ * la config al salir).
  */
 import { initializeApp } from 'firebase-admin/app';
 import { getFirestore, Timestamp } from 'firebase-admin/firestore';
@@ -117,15 +119,28 @@ if (!rConn.result?.ok) { console.error('setup: conexión manual falló', rConn);
 await db.doc(`tenants/${T}/metaConnections/main`).set({ status: 'active' }, { merge: true });
 const owner = await signIn('owner@perfumeria.com');
 
-const CUST = (n) => `59599430${String(n).padStart(4, '0')}`;
+const PREFIJO = '59599430'; // los clientes de este fixture son exclusivos de este script
+const CUST = (n) => `${PREFIJO}${String(n).padStart(4, '0')}`;
+/**
+ * Borra TODO lo que este script escribe para SUS clientes (y suelta los hooks del kill-switch).
+ * Se llama AL EMPEZAR y AL TERMINAR.
+ *
+ * POR QUÉ AL EMPEZAR: sin esto el script solo pasaba en la PRIMERA corrida sobre un emulador
+ * recién levantado. Los checkpoints se afirman comparando el ANTES y el DESPUÉS del turno
+ * (`outs=N→M`, `orders.length === 1`), así que la historia de la corrida anterior —mensajes y
+ * pedidos que nadie borraba— entraba en la cuenta y los volvía falsos.
+ * Mismo molde que `limpiarConversaciones()` de verify-handoff2: conversación completa (mensajes,
+ * sesión y ficha) + todo documento tenant-scoped con el customerId del fixture.
+ */
 const limpiar = async () => {
-  for (const coll of ['coverageRequests', 'coverageResumeJobs', 'coverageMessageOutbox']) {
-    const snap = await db.collection(`tenants/${T}/${coll}`).get();
-    for (const d of snap.docs) { if (String(d.data().customerId ?? '').startsWith('59599430')) await d.ref.delete().catch(() => {}); }
+  for (const ref of (await db.collection(`tenants/${T}/customers`).listDocuments()).filter((r) => r.id.startsWith(PREFIJO))) {
+    for (const sub of await ref.listCollections()) for (const d of await sub.listDocuments()) await d.delete().catch(() => {});
+    await ref.delete().catch(() => {});
   }
-  const notifs = await db.collection(`tenants/${T}/notifications`).get();
-  for (const d of notifs.docs) { if (String(d.data().customerId ?? '').startsWith('59599430')) await d.ref.delete().catch(() => {}); }
-  for (let i = 1; i <= 12; i++) await db.doc(`tenants/${T}/customers/${CUST(i)}/sessions/active`).delete().catch(() => {});
+  for (const coll of ['orders', 'coverageRequests', 'coverageResumeJobs', 'coverageMessageOutbox', 'notifications']) {
+    const snap = await db.collection(`tenants/${T}/${coll}`).get();
+    for (const d of snap.docs) { if (String(d.data().customerId ?? '').startsWith(PREFIJO)) await d.ref.delete().catch(() => {}); }
+  }
   await clearHold();
 };
 await limpiar();

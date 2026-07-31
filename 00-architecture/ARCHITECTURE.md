@@ -728,6 +728,81 @@ apagada (nivel 1, existente); `ownership` ausente/inválida ⇒ cero campos escr
 efectivo `dry_run` (nivel 2). De las fuentes externas se persiste **solo metadata saneada**:
 jamás URL firmada, query string, token, credenciales ni el archivo crudo.
 
+### 4.12 Esquema: `tenants/{tenantId}/attachments/{attachmentId}` (ADR-0016)
+
+Adjuntos de conversación (imágenes y PDF que manda el cliente por WhatsApp). Viven en la raíz del
+tenant —no como subcolección del mensaje— para permitir consulta tenant-scoped sin `collectionGroup`,
+admitir N adjuntos por mensaje y por pedido, y separar el ciclo de vida MUTABLE del adjunto del
+historial de chat, que se lee como inmutable.
+
+| Campo | Tipo | Notas |
+|---|---|---|
+| `attachmentId` | string | Determinístico sobre `(tenant, canal, providerMessageId, providerMediaId)`; se escribe con `create()` ⇒ un reintento del webhook falla en vez de duplicar |
+| `customerId` / `conversationId` / `messageId` | string | Origen dentro de la conversación |
+| `class` | `image` \| `document` \| `unknown` | Clase técnica, no de negocio |
+| `ingestState` | `received` \| `downloading` \| `verifying` \| `stored` \| `rejected` \| `download_failed` | Eje 1 |
+| `classification` | `unclassified` \| `generic_media` \| `payment_receipt_candidate` \| `payment_receipt_linked` \| `rejected` | Eje 2, con `source` (`rule`\|`human`) y `confidence` |
+| `mime.declared` / `mime.verified` | string | El declarado por Graph **no se cree**: se verifica por magic bytes |
+| `bytes`, `checksum` | number / string | Tamaño real medido durante el stream |
+| `storage.path` | string \| null | **Jamás una URL firmada** |
+| `orderCandidateId` | string \| null | Pedido propuesto; no implica vínculo oficial |
+| `caption` | string | Saneado; **no se envía a la IA** |
+| `retentionUntil` / `purgedAt` | Timestamp \| null | Retención configurable por tenant, purga OFF por defecto |
+| `lastError` | string \| null | Saneado, para que un fallo sea visible y recuperable |
+
+`Message` recibe solo punteros: `attachmentIds: string[]` y `hasAttachments: boolean`. El panel
+**nunca** infiere un adjunto desde el texto del mensaje.
+
+**Storage.** Ruta privada `tenants/{tenantId}/attachments/{partition}/{attachmentId}`: el `tenantId`
+es siempre el primer segmento y el id es opaco (nunca mediaId crudo, teléfono ni nombre original).
+El cliente no lee ni escribe Storage; los bytes salen solo por un callable autorizado que firma una
+URL de vida corta, nunca persistida, con whitelist estricta que acepta **dos** familias de path: los
+adjuntos nuevos y los comprobantes legacy (`tenants/{t}/orders/{orderId}/comprobantes/…`).
+
+**Regla de negocio (ADR-0016).** La ingesta jamás cambia por sí sola el estado de un pedido.
+`payment_receipt_candidate` es una sugerencia visible que **no** convierte el archivo en comprobante
+oficial ni mueve el pedido; solo una acción humana de OWNER/MANAGER/SELLER lo vincula y lo pasa a
+`PENDING_VERIFICATION` —y ni siquiera eso confirma el pago—. Una imagen fuera del contexto explícito
+de pago queda `generic_media` aunque visualmente parezca un comprobante.
+
+**Lado pedido: `orders/{orderId}.receiptAttachments`.** Campo **opcional** del tipo `Order` (los
+pedidos anteriores al ADR no lo tienen y siguen renderizando) con `candidateIds` (sugerencias del
+gate), `linkedIds` (vinculados por una persona) y `statusDrivenBy`. **Es la superficie que el panel
+de Pedidos lee** para saber que hay un comprobante: solo ids OPACOS —nunca una ruta de Storage,
+nunca una URL— que se abren con `attachmentGetViewUrl({ attachmentId })`. Se lee SIEMPRE con
+`readOrderReceiptAttachments` de `@vpw/shared` (misma proyección defensiva en backend y panel: dos
+copias derivan). `payment.comprobanteUrl` queda como está, para los comprobantes legacy: es de un
+solo valor y este eje es multi-adjunto. Invariantes:
+
+- **El estado lo sostiene la LISTA, no un puntero.** Con varios comprobantes vinculados, el pedido
+  permanece en `PENDING_VERIFICATION` mientras quede **al menos uno** en `linkedIds`; desmarcar el
+  que figura en `statusDrivenBy` traspasa el puntero en vez de revertir el pedido. Solo al vaciarse
+  `linkedIds` se vuelve a `PENDING_PAYMENT`.
+- **Desmarcar nunca se traba, revertir sí se protege.** Si `statusDrivenBy` es `null` —el pedido ya
+  estaba en `PENDING_VERIFICATION` por el flujo legacy/dev, así que marcar no movió nada y el
+  puntero nunca se escribió— el desmarcado **procede** y el pedido **no** se revierte: revocar una
+  clasificación humana siempre tiene que poder hacerse, y el estado sigue siendo de quien lo
+  produjo. Lo único que se rechaza es desmarcar cuando OTRO adjunto figura declarado como origen
+  del estado (`other_evidence_drives_status`).
+- **Las dos listas se mantienen coherentes.** Desmarcar saca el adjunto de `linkedIds` *y* de
+  `candidateIds`: al quedar `orderCandidateId: null` el adjunto vuelve a ser purgable, y un pedido
+  no puede seguir listando bytes que el job de retención puede borrar.
+- **Cero ambigüedad, siempre.** El gate exige exactamente **un** pedido admisible del mismo
+  `customerId`; el `pendingOrderId` de la sesión no exime de ese chequeo (se pisa en cada checkout,
+  así que como desambiguador mandaba el comprobante al pedido equivocado). Solo sirve para detectar
+  que apunta a un pedido de otra persona.
+- **Un adjunto purgado no se vincula.** La purga borra bytes y deja `ingestState: 'stored'`; marcar
+  como comprobante exige además `purgedAt === null`.
+- **Proponer un candidato deja SEÑAL operativa.** Al cliente se le responde que «un vendedor lo
+  revisa», así que el vínculo candidato crea un aviso en la campana existente
+  (`tenants/{t}/notifications`, categoría `handoff`, id determinístico `receipt-candidate-{attId}`
+  ⇒ idempotente). **No** mueve el pedido, **no** hace handoff (el bot sigue respondiendo) y es
+  best-effort: si el aviso falla, el archivo ya está guardado y visible igual.
+- **Formatos y tamaño se declaran UNA vez.** `config/receiptGate` aporta solo la ventana temporal;
+  los formatos y el tope de bytes efectivos salen de la INTERSECCIÓN con `config/attachments.ingest`
+  (mínimo de bytes, formatos comunes). El gate nunca puede ser más permisivo que lo que la ingesta
+  llega a guardar; una restricción propia del gate sí se respeta.
+
 ## 5. Estrategia de autenticación
 
 ### 5.1 Roles y permisos

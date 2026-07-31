@@ -58,6 +58,13 @@ export interface WebhookInboxEvent {
   payload: unknown; // payload crudo
   errorMessage: string;
   receivedAt: Timestamp;
+  /**
+   * Cuándo una corrida TOMÓ el evento (pasó a `processing`). Es lo que permite distinguir «se está
+   * procesando ahora» de «la corrida que lo tomó murió y lo dejó clavado»: sin esta marca, un
+   * evento con adjunto podía quedar en `processing` para siempre y el archivo del cliente perderse.
+   * Opcional porque los eventos anteriores no la tienen (ahí manda `receivedAt`).
+   */
+  processingStartedAt?: Timestamp | null;
   processedAt: Timestamp | null;
   expiresAt: Timestamp | null;
 }

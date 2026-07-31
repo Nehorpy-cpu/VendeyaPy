@@ -22,7 +22,7 @@ process.env.TENANT_SECRETS_ENCRYPTION_KEY ??= 'test-tenant-encryption-key-000000
 
 import { randomBytes, createCipheriv, scryptSync } from 'node:crypto';
 import { initializeApp } from 'firebase-admin/app';
-import { getFirestore, Timestamp } from 'firebase-admin/firestore';
+import { getFirestore, Timestamp, FieldValue } from 'firebase-admin/firestore';
 
 initializeApp({ projectId: 'demo-aiafg' });
 const db = getFirestore();
@@ -140,19 +140,46 @@ const dbg5B = (await db.doc(`tenants/${B}/_debug/lastWhatsappSend`).get()).data(
 check('5. cross-tenant: inbound de A resuelve a A (su phone_number_id) y NO dispara a B',
   dbg5A?.phoneNumberId === PNID_A && dbg5A.phoneNumberId !== PNID_B && dbg5B === null, `A=${dbg5A?.phoneNumberId} B=${dbg5B ? 'disparó' : 'intacto'}`);
 
-// 6. límite de mensajes: usage 500 SOBRE el tope del free trial (maxWhatsappMessagesPerMonth=50) →
-//    inbound bloqueado, sin envío ni incremento (el gate frena por estar sobre la cuota).
+// 6. límite de mensajes: usage 500 SOBRE el tope → inbound bloqueado, sin envío ni incremento.
+//
+// EL TOPE SE ESTABLECE ACÁ, NO SE HEREDA. Antes este check daba por sentado que el tenant seguía
+// en el free trial (50 mensajes/mes) tal como lo deja `seed-users`. Eso lo volvía dependiente del
+// ORDEN de la batería: verify-meta-catalog / verify-ownership-model / verify-catalog-onboarding
+// provisionan `perfumeria` en el plan `growth` (20.000 mensajes/mes) y no lo restauran —con razón,
+// necesitan features premium—, así que después de correr cualquiera de ellos 500 quedaba MUY por
+// debajo del tope, el gate no frenaba y este check fallaba. El defecto era del fixture, no del
+// gate: la precondición se declara con `limitOverrides` (surgical: no miente sobre el plan) y se
+// revierte enseguida. La afirmación no cambia: bloqueado, sin envío y sin incremento.
+const planPrevio6 = (await db.doc(`tenants/${A}`).get()).data() ?? {};
 await setupTenant(A, PNID_A, { mode: 'live' });
+await db.doc(`tenants/${A}`).set({ limitOverrides: { maxWhatsappMessagesPerMonth: 50 } }, { merge: true });
+// `resolveEntitlements` cachea 30 s en memoria: sin esta espera el callable seguiría viendo el
+// tope anterior y el check mediría la cache, no el gate (mismo patrón que verify-meta-catalog).
+console.log('   (esperando 31s a que expire la cache de entitlements…)');
+await sleep(31_000);
 await db.doc(`tenants/${A}`).set({ usage: { messagesThisMonth: 500, currentPeriodStart: Timestamp.now() } }, { merge: true });
 const dbg6 = await sendAndGetDebug(A, PNID_A, '595900000006', { timeoutMs: 8_000 });
 const usage6 = (await db.doc(`tenants/${A}`).get()).data()?.usage?.messagesThisMonth;
 check('6. límite de mensajes → inbound bloqueado, sin envío ni incremento (usage queda 500)',
   dbg6 === null && usage6 === 500, `dbg=${dbg6 ? 'envió' : 'no'} usage=${usage6}`);
+// Se revierte el tope y se baja el contador: los checks 7-9 vuelven a mandar por este mismo tenant
+// y con 500 acumulados quedarían bloqueados por la cuota que acaba de sembrarse (la cache todavía
+// tiene el tope 50 durante ~30 s, así que lo que los desbloquea es el contador en 0).
+await db.doc(`tenants/${A}`).set({
+  limitOverrides: planPrevio6.limitOverrides ?? FieldValue.delete(),
+  usage: { messagesThisMonth: 0, currentPeriodStart: Timestamp.now() },
+}, { merge: true });
 
-// 7. mock → nunca intenta envío real (reason mode_mock, sin phone_number_id).
+// 7. mock → nunca intenta envío real (mode/reason mock y traza marcada viaMock).
+// La afirmación original exigía además que la traza NO llevara phone_number_id. Eso dejó de ser
+// cierto —a propósito— con MULTI-NUMBER-1 (916b84e): en el emulador el Mock resuelve igual las
+// credenciales y REGISTRA el número resuelto, que es justamente lo que hace inspeccionable el
+// aislamiento multi-número (el check 5 de este mismo archivo se apoya en ese dato). El invariante
+// real de "no envía real" es el transporte Mock, y así se afirma acá, con un assert más estricto.
 await setupTenant(A, PNID_A, { mode: 'mock' });
 const dbg7 = await sendAndGetDebug(A, PNID_A, '595900000007');
-check('7. sendMode=mock → no envía real (reason mode_mock)', dbg7?.reason === 'mode_mock' && !dbg7?.phoneNumberId, JSON.stringify(dbg7));
+check('7. sendMode=mock → no envía real (transporte Mock: mode+reason mock y viaMock)',
+  dbg7?.reason === 'mode_mock' && dbg7?.mode === 'mock' && dbg7?.viaMock === true, JSON.stringify(dbg7));
 
 // 8. conexión no activa en live → Mock con reason not_connected.
 await setupTenant(B, PNID_B, { mode: 'live', status: 'not_connected' });

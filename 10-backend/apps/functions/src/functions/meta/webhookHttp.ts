@@ -86,7 +86,11 @@ export const metaWebhook = onRequest({ region: 'us-central1', cors: false }, asy
         messageId: m.messageId,
         timestamp: m.timestamp,
         ...(m.adReferral ? { adReferral: m.adReferral } : {}),
-        ...(m.image ? { image: m.image } : {}), // ORDER-1B: comprobante por imagen
+        // ADR-0016: adjunto genérico (imagen o PDF) ya saneado por el parser. El mediaId viaja
+        // porque la descarga ocurre en el trigger; process.ts lo anula una vez guardado el archivo.
+        ...(m.attachment ? { attachment: m.attachment } : {}),
+        // Tipos aún no soportados (audio/video/sticker): viajan para dejar rastro en el chat.
+        ...(m.unsupported ? { unsupported: m.unsupported } : {}),
         // COVERAGE-1B: ubicación nativa VALIDADA (tránsito hacia el trigger; process.ts la anula
         // del inbox al terminar — la ubicación exacta persiste SOLO en coverageRequests).
         ...(m.location ? { location: m.location } : {}),

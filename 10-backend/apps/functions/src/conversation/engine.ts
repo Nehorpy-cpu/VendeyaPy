@@ -10,7 +10,7 @@
  */
 
 import { Timestamp } from 'firebase-admin/firestore';
-import type { Session, SessionState, Product, Cart, MessageChannel, PendingCartConfirmation } from '@vpw/shared';
+import type { Session, SessionState, Product, Cart, MessageChannel, PendingCartConfirmation, AgentConfig } from '@vpw/shared';
 import { db, paths } from '../lib/firebase.js';
 import { logger } from '../lib/logger.js';
 import {
@@ -69,6 +69,18 @@ export interface ConversationInput {
    * El fallback por IA-no-disponible se REPRESENTA (mismo texto) sin takeover ni aviso reales.
    */
   simulation?: boolean;
+  /**
+   * ADR-0016 §9: el turno lo trae un ADJUNTO y `text` es su CAPTION. Cambia DOS cosas, las dos
+   * por seguridad:
+   *
+   *  1. NO se persiste el inbound. La burbuja del chat ya la creó la ingesta, con el marcador del
+   *     sistema y el puntero al adjunto. Si el caption quedara como texto de un mensaje, entraría
+   *     al prompt del modelo por el historial en el turno SIGUIENTE (prompt injection con un pie
+   *     de foto). Mismo criterio que la dirección exacta en COVERAGE-1B.
+   *  2. NO se delega en el modelo. El caption decide con las REGLAS determinísticas —una pregunta
+   *     con foto no puede quedar sin respuesta— pero jamás se envía a la IA.
+   */
+  attachmentCaption?: boolean;
 }
 
 export interface ConversationResult {
@@ -972,6 +984,26 @@ export async function evaluarDerivaDelTurno(
   return leerDeriva(tenantId, [...enJuego].map(([id, name]) => ({ id, name })));
 }
 
+/**
+ * ¿El bot tiene que quedarse CALLADO en esta conversación? Es la regla de HANDOFF-2 y vive en un
+ * solo lugar a propósito: un vendedor tomó el chat, o el bot está apagado desde el panel.
+ */
+const enSilencio = (session: Session | null, agentConfig: AgentConfig): boolean =>
+  (session?.context?.humanTakeover ?? false) || !agentConfig.botEnabled;
+
+/**
+ * Misma pregunta que la de arriba, pero leyendo el estado REAL (sesión + config del agente).
+ *
+ * Se exporta porque el camino de ADJUNTOS puede cerrar un turno SIN pasar por el motor —un archivo
+ * sin caption no abre turno— y aun así tiene algo que decirle al cliente. Sin esto, el acuse del
+ * adjunto salía igual con el chat tomado por un vendedor: reimplementar la regla allá garantizaba
+ * que las dos versiones se desincronizaran a la primera condición nueva.
+ */
+export async function botSilenciadoEnChat(tenantId: string, customerId: string): Promise<boolean> {
+  const snap = await db().doc(paths.session(tenantId, customerId)).get();
+  return enSilencio(snap.exists ? (snap.data() as Session) : null, await getAgentConfig(tenantId));
+}
+
 export async function handleMessage(input: ConversationInput): Promise<ConversationResult> {
   const { tenantId, from, text } = input;
   const channel: MessageChannel = input.channel ?? 'whatsapp';
@@ -988,7 +1020,7 @@ export async function handleMessage(input: ConversationInput): Promise<Conversat
   const humanTakeover = existing?.context?.humanTakeover ?? false;
   // Config del agente (editable desde el panel): on/off + saludo.
   const agentConfig = await getAgentConfig(tenantId);
-  const botSilent = humanTakeover || !agentConfig.botEnabled;
+  const botSilent = enSilencio(existing, agentConfig);
 
   // COVERAGE-1B: turno mientras se espera la ubicación. La clasificación es PURA y corre ANTES
   // de persistir el inbound: si el texto ES una dirección, el historial recibe SOLO el
@@ -1015,17 +1047,22 @@ export async function handleMessage(input: ConversationInput): Promise<Conversat
       : clasifBase;
 
   // Guardar SIEMPRE el mensaje entrante del cliente (incluso si el bot está en pausa).
-  await appendMessage(tenantId, customerId, {
-    direction: 'in',
-    author: 'customer',
-    text: clasifCobertura === 'direccion' ? '📍 Dirección recibida' : text,
-    now,
-    state: existing?.state ?? null,
-    humanTakeover,
-    countUnread: botSilent, // si el bot no atiende, el vendedor tiene algo pendiente
-    channel,
-    receivedVia: input.receivedByPhoneNumberId ?? null,
-  });
+  // EXCEPCIÓN (ADR-0016 §9): si el turno es el caption de un adjunto, la burbuja ya existe —la
+  // creó la ingesta con el marcador del sistema y el puntero al archivo— y el caption NO puede
+  // quedar como texto de un mensaje: el historial de la IA sale de acá.
+  if (!input.attachmentCaption) {
+    await appendMessage(tenantId, customerId, {
+      direction: 'in',
+      author: 'customer',
+      text: clasifCobertura === 'direccion' ? '📍 Dirección recibida' : text,
+      now,
+      state: existing?.state ?? null,
+      humanTakeover,
+      countUnread: botSilent, // si el bot no atiende, el vendedor tiene algo pendiente
+      channel,
+      receivedVia: input.receivedByPhoneNumberId ?? null,
+    });
+  }
 
   // Tracking propio (P11): si el mensaje trae un código/cupón, atribuir la venta a esa fuente.
   try { await captureTrackingCode(tenantId, customerId, text); } catch { /* no crítico */ }
@@ -1067,7 +1104,14 @@ export async function handleMessage(input: ConversationInput): Promise<Conversat
 
   // F1: la IA recibe HISTORIAL (últimos AI_HISTORY_MAX mensajes, el inbound actual ya está
   // persistido por el appendMessage de arriba). Lazy: solo se lee si algún camino delega.
-  const delegarAlSalesAgent = async () => {
+  const delegarAlSalesAgent = async (): ReturnType<typeof runSalesAgent> => {
+    // ADR-0016 §9: «El caption se sanea y se persiste, pero no se envía a la IA». Este turno lo
+    // trae un archivo ⇒ ni el caption ni el historial van al modelo. Se reusa `feature_unavailable`
+    // (la IA no participa de este turno) y NO `quota_exhausted`, que dispara derivación a humano.
+    if (input.attachmentCaption) {
+      logger.info('Turno de adjunto: la IA no participa (ADR-0016 §9)', { tenantId });
+      return { used: false, reason: 'feature_unavailable' };
+    }
     const historial = await listRecentMessages(tenantId, customerId, AI_HISTORY_MAX);
     return runSalesAgent({ tenantId, agentConfig, messages: buildAiHistory(historial, text) });
   };
