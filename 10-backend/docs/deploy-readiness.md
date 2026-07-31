@@ -1,5 +1,20 @@
 # Deploy readiness — Firebase (Hosting + Functions + Firestore + Auth) · dominio Hostinger
 
+> # ⛔ DOCUMENTO HISTÓRICO — NO USAR PARA DESPLEGAR
+>
+> Se escribió **antes** de que existiera el proyecto productivo real y **antes** de los deploys de
+> 2026-07. Sus comandos y valores están vencidos y **causan daño si se copian**:
+> - dice que prod es **`vpw-prod`** — el proyecto real es **`vpw-prod-dd6ff`**;
+> - despliega functions con **`--only functions` sin selector**, lo que **crea en producción
+>   funciones que no deben existir** allí (`devRunMetaCatalogOutbox`);
+> - da `NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN = vpw-prod.firebaseapp.com`, valor **incorrecto** (el real
+>   es `vpw-prod-dd6ff.firebaseapp.com`), y no menciona el `.env.production.local` temporal ni que
+>   Next lo resuelve **por encima** del `.env.local` demo de la máquina;
+> - describe el IAM público de Functions de una forma que ya no refleja lo desplegado.
+>
+> **El runbook vigente y único para producción es `../../docs/HANDOFF.md` §5.** Este archivo se conserva
+> solo como registro de la auditoría original.
+
 > Auditoría READ-ONLY (DEPLOY-READINESS-AUDIT). Mapea el estado real para pasar de local/emulador a
 > producción **sin romper** seguridad, billing, Meta/WhatsApp, AI ni multi-tenant. **No se hizo deploy.**
 > Estados: ✅ listo · ⚠️ falta configurar · ⛔ bloqueado por externo · ⛔🚫 NO hacer en producción.
@@ -96,8 +111,8 @@ identificador de proyecto, no credencial; la seguridad la dan rules + Auth).
 | Var | Marca | Notas |
 |---|---|---|
 | `NEXT_PUBLIC_FIREBASE_API_KEY` | 🌐 | SDK config de vpw-prod (Console → Project Settings) |
-| `NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN` | 🌐 | `vpw-prod.firebaseapp.com` |
-| `NEXT_PUBLIC_FIREBASE_PROJECT_ID` | 🌐 | `vpw-prod` |
+| `NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN` | 🌐 | ⛔ VENCIDO — el valor real es `vpw-prod-dd6ff.firebaseapp.com` (obtenelo con `firebase apps:sdkconfig WEB --project vpw-prod-dd6ff`) |
+| `NEXT_PUBLIC_FIREBASE_PROJECT_ID` | 🌐 | ⛔ VENCIDO — el valor real es `vpw-prod-dd6ff` |
 | `NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET` | 🌐 | usar el EXACTO de la consola (`.appspot.com` o `.firebasestorage.app`) |
 | `NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID` | 🌐 | SDK config |
 | `NEXT_PUBLIC_FIREBASE_APP_ID` | 🌐 | SDK config |

@@ -704,8 +704,12 @@ cliente por Rules** (solo Cloud Functions):
 | `metaCatalogImportRuns/{runId}` | Corridas de importación paginada reanudable (cursor persistido) | 0014 |
 | `metaCatalogImportState/current` | Puntero del run de importación activo (un solo run por tenant; claim con generación de fencing) | 0014 |
 | `metaCatalogMaintenanceRuns/{runId}` | Corridas de mantenimiento preview/apply (backfill de locks y quality; paginadas y reanudables) | 0014 |
+| `metaCatalogSourceChecks/{checkId}` | Detección de fuentes externas (feeds/data sources) con metadata SANEADA — jamás URL firmada, query string, token ni CSV crudo | 0015 |
+| `metaCatalogVerificationRuns/{runId}` | Corridas de reconciliación periódica del estado actual (solo GET a Meta; paginadas, reanudables, claim con lease) | 0015 |
+| `metaCatalogOwnershipRuns/{runId}` | Corridas preview/apply de la migración de propiedad por campos | 0015 |
 
-| `metaCatalogSourceChecks/{checkId}` | Detección de fuentes externas (feeds/data sources) con metadata SANEADA | 0015 |
+Las tres colecciones de ADR-0015 están **cerradas al cliente** en `firestore.rules`
+(`allow read, write: if false`): son evidencia, y se consumen por callables saneadas.
 
 El producto (`products/{productId}`, §4.3) suma además: identidad remota
 (`metaRetailerId`/`metaCatalogId`/`metaProductItemId`), estado de sincronización
@@ -1123,7 +1127,7 @@ Para E2E sin necesitar un número real de WA:
 |---------|-----------|-----------------|-----|
 | `dev` | Desarrollo local | `vpw-dev` | `localhost` |
 | `staging` | QA y demos | `vpw-staging` | `staging.ventaporwhatsapp.com` |
-| `production` | Producción | `vpw-prod` | `ventaporwhatsapp.com` |
+| `production` | Producción | **`vpw-prod-dd6ff`** (alias `production` en `.firebaserc`) | **`vendeyapy.com`** (desde 2026-07-13) |
 
 ### 9.2 Estructura del repositorio
 
@@ -1154,6 +1158,14 @@ ventaporwhatsapp/
 Estructura de monorepo gestionada con **pnpm workspaces**.
 
 ### 9.3 Pipeline CI/CD
+
+> ⛔ **HISTÓRICO — el pipeline de PRODUCCIÓN descrito abajo NO se usa y no debe usarse.** El deploy
+> automático por tag desplegaría todo el proyecto sin selector explícito y con `--force`, lo que
+> **crea en producción funciones que no deben existir** (`devRunMetaCatalogOutbox`) y buildea Hosting
+> sin el `.env.production.local` temporal, dejando que las variables públicas ausentes caigan al
+> `.env.local` demo de la máquina. **Producción (`vpw-prod-dd6ff`) se despliega exclusivamente a
+> mano siguiendo `docs/HANDOFF.md` §5**: rules → functions con selector explícito y sin `--force` →
+> hosting. El flujo de staging del diagrama sí es válido.
 
 ```
 PR abierto

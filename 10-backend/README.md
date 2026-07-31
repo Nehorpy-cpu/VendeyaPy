@@ -104,10 +104,14 @@ pnpm test:e2e
 ```bash
 # Staging (automático en merge a main)
 pnpm deploy:staging
-
-# Producción (manual, requiere tag v*.*.*)
-pnpm deploy:prod
 ```
+
+⛔ **Producción NO se despliega con estos scripts.** `pnpm deploy:prod` despliega **todo sin
+selector explícito** y apunta a un alias que no existe (`vpw-prod`; el proyecto real es
+`vpw-prod-dd6ff`); `pnpm deploy:functions` no lleva `--project` y cae al default `vpw-dev`. Un
+deploy sin selector **crea en producción funciones que no deben existir** (`devRunMetaCatalogOutbox`).
+El procedimiento vigente y único es **`docs/HANDOFF.md` §5**: rules → functions con selector
+explícito y sin `--force` → hosting con su `.env.production.local` temporal de 9 claves.
 
 ---
 

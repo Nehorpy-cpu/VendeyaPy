@@ -93,8 +93,11 @@ no cambió. En emulador/tests el cliente es el **Fake** (cero red); sin key en p
 **Configurar en STAGING/PROD (Secret Manager — entrada oculta, no se muestra):**
 ```bash
 firebase functions:secrets:set ANTHROPIC_API_KEY --project vpw-staging   # pide el valor por stdin oculto
-firebase functions:secrets:set ANTHROPIC_API_KEY --project vpw-prod
-firebase deploy --only functions --project vpw-prod                      # deploya con el secret bindeado
+firebase functions:secrets:set ANTHROPIC_API_KEY --project vpw-prod-dd6ff
+# ⚠️ NUNCA `--only functions` a secas en producción: crea funciones que no deben existir allí
+# (devRunMetaCatalogOutbox). Se despliega con selector explícito, `--config firebase.functions.json`
+# y sin `--force`. Procedimiento completo: ../../docs/HANDOFF.md §5.
+firebase deploy --only functions:<n1>,functions:<n2> --config firebase.functions.json --project vpw-prod-dd6ff
 ```
 `functions:secrets:set` lee el valor por stdin (oculto) y lo guarda cifrado en Secret Manager; nunca aparece en la terminal ni en archivos.
 

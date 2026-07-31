@@ -1,6 +1,6 @@
 # ADR-0015 — Propiedad por campos del catálogo y estado de sincronización honesto
 
-- **Estado:** aceptado (EN REPO — NO DESPLEGADO)
+- **Estado:** aceptado y DESPLEGADO (release `d542cda`, 2026-07-31; arfagi migrado a `external_managed` con smoke humano aprobado)
 - **Fecha:** 2026-07-30
 - **Programa:** META-CATALOG-OWNERSHIP-MODEL-1
 - **Relacionados:** ADR-0012 (contrato de escritura), ADR-0013 (outbox + preview binding), ADR-0014 (importación genérica y calidad)
@@ -10,7 +10,7 @@
 La auditoría META-CATALOG-SOURCE-OF-TRUTH-AUDIT-1 (2026-07-30) probó que el catálogo de Meta de
 arfagi lo gobierna **un feed diario del propio sitio del tenant** (fuente primaria, con borrado
 habilitado, que publica los 181 artículos cada madrugada). Nuestra única escritura real —el canary
-de Odyssey— vivió unas once horas antes de ser revertida. Los hallazgos estructurales:
+de Odyssey— vivió unas 36 horas antes de ser revertida. Los hallazgos estructurales:
 
 1. `sourceOfTruth` es un literal decorativo: su único valor legal es `'vendeyapy'` y cualquier otro
    apaga la sincronización entera. No representa autoridad, no verifica exclusividad de escritura y
