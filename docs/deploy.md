@@ -20,35 +20,43 @@
 
 ## Deploy
 
-### Opción A — GitHub Actions — ⛔ **SOLO STAGING. PROHIBIDA PARA PRODUCCIÓN.**
-`.github/workflows/deploy.yml` → **Run workflow** → elegí `staging`.
-Requiere el secret `FIREBASE_SERVICE_ACCOUNT` (JSON de service account con permisos de deploy).
+**Política, en una línea:** GitHub Actions es **staging-only**; producción es **procedimiento manual
+auditado** con selector mínimo y proyecto/config explícitos; **nunca** `--force`; **nunca**
+`--only functions` genérico; **nunca** depender del proyecto `default` de `.firebaserc`.
 
-> **No la uses con `production`.** El workflow corre `firebase deploy --only functions,…` **sin
-> selector explícito**, que es exactamente lo que crea en producción funciones que no deben existir
-> (`devRunMetaCatalogOutbox`), y buildea Hosting **sin** el `.env.production.local` de 9 claves —
-> con lo cual las variables públicas ausentes caen al `.env.local` demo de la máquina. Producción
-> (`vpw-prod-dd6ff`) se despliega **solo** siguiendo `docs/HANDOFF.md` §5.
+### Opción A — GitHub Actions — **STAGING-ONLY por construcción**
+`.github/workflows/deploy.yml` → **Run workflow**. No tiene ningún input: no hay forma de elegir
+destino, y por lo tanto producción no es alcanzable. Despliega **solo** `firestore:rules`,
+`firestore:indexes` y `storage` sobre `vpw-staging`. Requiere el secret `FIREBASE_SERVICE_ACCOUNT`.
 
-### Opción B — local (desde 10-backend/)
+Functions y Hosting quedan **fuera del workflow a propósito**: un deploy seguro de Functions exige
+el selector exacto derivado del grafo de imports del cambio más `--config firebase.functions.json`
+—cosas que CI no puede derivar— y el build de Hosting hornea las `NEXT_PUBLIC_*`, que necesitan el
+archivo de entorno correcto. Ambos se hacen a mano.
 
-> ⚠️ **En PRODUCCIÓN nunca uses `--only functions` a secas.** El proyecto exporta funciones que
-> deliberadamente NO existen en producción (`devRunMetaCatalogOutbox`): un deploy sin selector las
-> CREA. Se despliega siempre con el selector explícito `functions:<nombre>,functions:<nombre>,…`
-> calculado desde el grafo de imports del cambio. Ver el runbook detallado en
-> `docs/HANDOFF.md` §5.
->
-> ⚠️ **`--project` es obligatorio SIEMPRE.** El `default` de `.firebaserc` es `vpw-dev`: omitirlo
-> despliega al proyecto equivocado.
+Antes de autenticarse, el propio job corre `node apps/functions/scripts/deploy-guard.mjs --audit`:
+si alguien reintroduce un destino de producción, un flag repetido, un `--force` o un selector
+genérico, el workflow **falla antes de tocar Firebase**. El verificador recorre los workflows, los
+`package.json`, los `firebase*.json` (incluidos sus hooks `predeploy`) y los scripts ejecutables del
+repo. **Lo que no cubre**: la configuración del GitHub Environment (restricción de ramas y revisores
+obligatorios) vive fuera del repositorio y hay que verificarla a mano en Settings → Environments.
+
+### Opción B — local (desde 10-backend/), solo dev/staging
+
+Todos los scripts pasan por `apps/functions/scripts/firebase-deploy.mjs`, que **valida antes de
+ejecutar** (proyecto explícito y permitido, sin `--force`, `--only` presente, selector de Functions
+exacto, config correcto) y ejecuta sin shell. Si algo no cierra, sale con código 1 sin tocar la red.
 
 ```bash
 pnpm build
-# staging (entorno de prueba: el selector completo es aceptable acá).
-# `--config firebase.functions.json` es obligatorio: un deploy directo de apps/functions
-# falla con EUNSUPPORTEDPROTOCOL por la dependencia workspace:* de @vpw/shared.
-pnpm exec firebase deploy --only firestore:rules,firestore:indexes,storage,hosting --project staging
-pnpm exec firebase deploy --only functions --config firebase.functions.json --project staging
+pnpm deploy:rules        # firestore:rules + storage      → vpw-staging
+pnpm deploy:indexes      # firestore:indexes              → vpw-staging
+pnpm deploy:staging      # rules + indexes + storage + hosting → vpw-staging
+# Functions: el selector lo aporta quien despliega, y sin él el helper falla cerrado.
+pnpm deploy:functions -- --only functions:onWebhookInbox,functions:runTenantJob
 ```
+
+`pnpm deploy:prod` está **bloqueado**: imprime el motivo y sale con código 1 sin ejecutar Firebase.
 
 Para **producción** (`vpw-prod-dd6ff`) seguí `docs/HANDOFF.md` §5: rules primero, después functions
 con selector explícito y sin `--force`, y hosting al final con su `.env.production.local` temporal.
@@ -61,6 +69,11 @@ Verificá además: login del panel, que los endpoints `dev*` respondan **404** (
 webhook de Meta rechace una firma inválida (401).
 
 ## Rollback
+
+> Los comandos de esta sección para **producción** se ejecutan con `firebase` directo, a propósito:
+> el helper `firebase-deploy.mjs` bloquea el proyecto productivo por diseño, y un rollback de
+> producción es una operación manual supervisada. Siguen valiendo las mismas reglas: selector
+> explícito, `--project` explícito y **nunca** `--force`.
 
 - **Hosting (panel):** `pnpm exec firebase hosting:rollback --project <env>` (revierte a la release anterior).
 - **Reglas Firestore:** `git revert` del cambio + `pnpm exec firebase deploy --only firestore:rules --project <env>`.

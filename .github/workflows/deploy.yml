@@ -1,24 +1,46 @@
-name: Deploy
+name: Deploy staging (rules, indexes, storage)
 
-# Deploy MANUAL (workflow_dispatch) a staging o production.
-# Requiere el secret FIREBASE_SERVICE_ACCOUNT (JSON de una service account con permisos
-# de deploy) configurado en GitHub → Settings → Secrets. Los proyectos están en
-# 10-backend/.firebaserc (staging → vpw-staging, production → vpw-prod).
+# ============================================================================================
+# STAGING-ONLY POR DISEÑO. Producción NO es alcanzable desde acá, ni directa ni indirectamente.
+# ============================================================================================
+#
+# Por qué este workflow es tan chico (DEPLOY-TOOLING-FAIL-CLOSED-1):
+#
+#  · NO tiene inputs. Antes tenía un `choice` con `staging|production`, y `--project production`
+#    resuelve por `.firebaserc` al proyecto productivo REAL (`vpw-prod-dd6ff`). Un desplegable de
+#    UI no es un control de seguridad. Sin input, además, desaparece la interpolación de un valor
+#    controlado por el usuario dentro de un `run:`.
+#
+#  · NO despliega Functions. Un deploy seguro de Functions exige DOS cosas que CI no puede derivar:
+#    el selector exacto `--only functions:<n1>,functions:<n2>` calculado desde el grafo de imports
+#    del cambio, y `--config firebase.functions.json` (el artefacto autónomo que resuelve la
+#    dependencia `workspace:*`). Con el config por defecto el deploy rompe en Cloud Build, y con
+#    `--only functions` genérico publicaría TODOS los exports, incluidos los `dev*`. Las Functions
+#    se despliegan a mano: ver `docs/HANDOFF.md` §5.
+#
+#  · NO despliega Hosting. El bundle de Next.js hornea las `NEXT_PUBLIC_*` en build-time; sin el
+#    archivo de entorno correcto quedan vacías o caen a valores locales. Ese paso necesita
+#    supervisión humana, así que tampoco vive en CI.
+#
+#  · Lo que SÍ despliega —reglas de Firestore, índices y reglas de Storage— se deriva por completo
+#    del repositorio, es idempotente y no crea endpoints.
+#
+# Producción se despliega EXCLUSIVAMENTE a mano, con el procedimiento auditado de `docs/HANDOFF.md`
+# §5: rules → functions con selector mínimo → hosting, con `--project vpw-prod-dd6ff` explícito y
+# sin `--force`.
+#
+# Deuda conocida (no bloqueante): las acciones están pinneadas por tag móvil (`@v4`) en vez de por
+# SHA. Fijarlas por SHA requiere resolver cada digest y verificarlo; queda para un microprograma.
 
 on:
   workflow_dispatch:
-    inputs:
-      target:
-        description: 'Entorno de destino'
-        required: true
-        default: 'staging'
-        type: choice
-        options:
-          - staging
-          - production
 
 permissions:
   contents: read
+
+concurrency:
+  group: deploy-staging
+  cancel-in-progress: false
 
 defaults:
   run:
@@ -26,12 +48,19 @@ defaults:
 
 jobs:
   deploy:
-    name: Deploy a ${{ github.event.inputs.target }}
+    name: Deploy reglas e indices a vpw-staging
+    # Defensa en profundidad, NO un control: `workflow_dispatch` permite elegir el ref y ejecuta el
+    # YAML de ESE ref, así que una rama con este `if` borrado correria igual. Lo que de verdad
+    # impide llegar a produccion es que en este archivo no existe ningun destino productivo — y que
+    # restringir ramas y exigir revisores es configuracion del Environment de GitHub, fuera del repo.
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    environment: ${{ github.event.inputs.target }}
+    environment: staging
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
@@ -48,19 +77,29 @@ jobs:
       - name: Install
         run: pnpm install --frozen-lockfile
 
+      # El propio CI verifica que ninguna ruta de deploy del repo sea insegura. Si alguien vuelve a
+      # introducir un `--only functions` generico, un destino de produccion o un `--force`, el job
+      # falla ANTES de autenticarse contra Firebase.
+      - name: Verificar que las rutas de deploy son fail-closed
+        run: node apps/functions/scripts/deploy-guard.mjs --audit
+
       - name: Build
         run: pnpm build
 
-      - name: Authenticate + Deploy
+      - name: Deploy reglas, indices y storage a staging
         env:
           FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
           GOOGLE_APPLICATION_CREDENTIALS: ${{ runner.temp }}/firebase-sa.json
         run: |
-          if [ -z "$FIREBASE_SERVICE_ACCOUNT" ]; then
+          set -euo pipefail
+          if [ -z "${FIREBASE_SERVICE_ACCOUNT:-}" ]; then
             echo "::error::Falta el secret FIREBASE_SERVICE_ACCOUNT"; exit 1
           fi
+          cleanup() { rm -f "$GOOGLE_APPLICATION_CREDENTIALS"; }
+          trap cleanup EXIT
+          umask 077
           printf '%s' "$FIREBASE_SERVICE_ACCOUNT" > "$GOOGLE_APPLICATION_CREDENTIALS"
           pnpm exec firebase deploy \
-            --only functions,firestore:rules,firestore:indexes,storage,hosting \
-            --project ${{ github.event.inputs.target }} \
+            --only firestore:rules,firestore:indexes,storage \
+            --project vpw-staging \
             --non-interactive

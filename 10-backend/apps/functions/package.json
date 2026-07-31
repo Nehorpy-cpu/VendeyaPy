@@ -14,7 +14,7 @@
     "serve": "pnpm build && firebase emulators:start --only functions",
     "shell": "pnpm build && firebase functions:shell",
     "start": "pnpm shell",
-    "deploy": "firebase deploy --only functions",
+    "deploy": "node scripts/deploy-prod-bloqueado.mjs --workspace",
     "logs": "firebase functions:log",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src --ext .ts",

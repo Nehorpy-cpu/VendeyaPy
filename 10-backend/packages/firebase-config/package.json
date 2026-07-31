@@ -5,8 +5,8 @@
   "description": "Reglas e índices de Firestore — fuente única",
   "scripts": {
     "test:rules": "vitest run --passWithNoTests",
-    "deploy:rules": "cd ../.. && firebase deploy --only firestore:rules,storage",
-    "deploy:indexes": "cd ../.. && firebase deploy --only firestore:indexes",
+    "deploy:rules": "cd ../.. && node apps/functions/scripts/firebase-deploy.mjs --only firestore:rules,storage --project vpw-staging",
+    "deploy:indexes": "cd ../.. && node apps/functions/scripts/firebase-deploy.mjs --only firestore:indexes --project vpw-staging",
     "typecheck": "echo 'no typecheck needed'",
     "lint": "echo 'no lint needed'",
     "build": "echo 'no build needed'",

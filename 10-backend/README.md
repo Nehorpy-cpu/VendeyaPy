@@ -102,16 +102,25 @@ pnpm test:e2e
 ## Deploy
 
 ```bash
-# Staging (automático en merge a main)
-pnpm deploy:staging
+# Staging (manual, desde 10-backend/)
+pnpm deploy:rules        # firestore:rules + storage           -> vpw-staging
+pnpm deploy:indexes      # firestore:indexes                   -> vpw-staging
+pnpm deploy:staging      # rules + indexes + storage + hosting -> vpw-staging
+
+# Functions en staging: el selector exacto lo aporta quien despliega.
+pnpm deploy:functions -- --only functions:onWebhookInbox,functions:runTenantJob
 ```
 
-⛔ **Producción NO se despliega con estos scripts.** `pnpm deploy:prod` despliega **todo sin
-selector explícito** y apunta a un alias que no existe (`vpw-prod`; el proyecto real es
-`vpw-prod-dd6ff`); `pnpm deploy:functions` no lleva `--project` y cae al default `vpw-dev`. Un
-deploy sin selector **crea en producción funciones que no deben existir** (`devRunMetaCatalogOutbox`).
-El procedimiento vigente y único es **`docs/HANDOFF.md` §5**: rules → functions con selector
-explícito y sin `--force` → hosting con su `.env.production.local` temporal de 9 claves.
+⛔ **Producción NO se despliega con scripts.** Todos los scripts de deploy pasan por
+`apps/functions/scripts/firebase-deploy.mjs`, que valida los argumentos antes de ejecutar (proyecto
+explícito y permitido, sin `--force`, `--only` presente, selector de Functions exacto y config
+correcto) y **rechaza el proyecto productivo**. `pnpm deploy:prod` y el `deploy` de `apps/functions`
+están bloqueados: salen con código 1 sin invocar Firebase.
+
+El procedimiento de producción, vigente y único, es **`docs/HANDOFF.md` §5**: rules → functions con
+selector explícito y sin `--force` → hosting con su `.env.production.local` temporal de 9 claves.
+`node apps/functions/scripts/deploy-guard.mjs --audit` verifica que ninguna ruta ejecutable de deploy
+del repo se salga de esa regla; el workflow de staging lo corre antes de autenticarse.
 
 ---
 
