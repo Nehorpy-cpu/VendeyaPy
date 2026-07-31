@@ -37,6 +37,7 @@ import {
   type OrderStatus,
 } from '@vpw/shared';
 import { db, paths } from '../lib/firebase.js';
+import { logger } from '../lib/logger.js';
 // La ingesta es la que declara QUÉ archivos admite el tenant; el gate no puede tener su propia
 // versión de esa verdad (ver `mergeReceiptGateWithIngest`).
 import { getAttachmentIngestLimits } from '../meta/attachmentLimits.js';
@@ -47,12 +48,14 @@ import {
   evaluateReceiptFile,
   mergeReceiptGateWithIngest,
   normalizeReceiptGateConfig,
+  receiptGateEnabledFromRaw,
   type ReceiptGateAttachmentFacts,
   type ReceiptGateConfig,
   type ReceiptGateDenyReason,
   type ReceiptMarkDenyReason,
   type ReceiptMarkOrderFacts,
 } from './receiptGate.js';
+import { buildReceiptCandidateNotification, receiptCandidateNotificationId } from './receiptCandidateNotification.js';
 import { UNPAID_STATUSES, isPaidStatus } from './lifecycle.js';
 
 /** Doc de configuración por tenant. Ausente ⇒ defaults (nunca un vertical hardcodeado). */
@@ -62,15 +65,29 @@ export const receiptGateConfigPath = (tenantId: string): string => `tenants/${te
  * Config EFECTIVA del gate: la del tenant, ya compuesta con los límites de INGESTA (ADR-0016 §8).
  * Las dos lecturas van juntas porque gobiernan la MISMA decisión — ver
  * `mergeReceiptGateWithIngest` en `receiptGate.ts` para el porqué de la intersección.
+ *
+ * Si la lectura falla, se devuelve la config APAGADA (ADR-0016 §10, fail-closed). Al revés que la
+ * ingesta —donde caer a defaults preserva el archivo del cliente— acá un Firestore intermitente
+ * que "abriera" el gate propondría comprobantes en un tenant que nunca lo encendió. Y sin este
+ * try/catch la excepción subía hasta la ingesta y dejaba el adjunto `unclassified`, que es un
+ * estado que la purga sí considera purgable: un error de red terminaba borrando el archivo.
  */
 export async function getReceiptGateConfig(tenantId: string): Promise<ReceiptGateConfig> {
-  // Las dos lecturas van juntas: la del gate y la de la ingesta gobiernan la MISMA decisión.
-  const [snap, ingest] = await Promise.all([
-    db().doc(receiptGateConfigPath(tenantId)).get(),
-    getAttachmentIngestLimits(tenantId),
-  ]);
-  const gate = snap.exists ? normalizeReceiptGateConfig(snap.data()) : DEFAULT_RECEIPT_GATE_CONFIG;
-  return mergeReceiptGateWithIngest(gate, ingest);
+  try {
+    // Las dos lecturas van juntas: la del gate y la de la ingesta gobiernan la MISMA decisión.
+    const [snap, ingest] = await Promise.all([
+      db().doc(receiptGateConfigPath(tenantId)).get(),
+      getAttachmentIngestLimits(tenantId),
+    ]);
+    const gate = snap.exists ? normalizeReceiptGateConfig(snap.data()) : DEFAULT_RECEIPT_GATE_CONFIG;
+    return mergeReceiptGateWithIngest(gate, ingest);
+  } catch (e) {
+    logger.warn('receiptGate: no se pudo leer la config del tenant, el nivel B queda APAGADO', {
+      tenantId,
+      error: e instanceof Error ? e.name : 'desconocido',
+    });
+    return DEFAULT_RECEIPT_GATE_CONFIG;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -131,8 +148,23 @@ export function toReceiptAttachmentFacts(attachment: Attachment): ReceiptGateAtt
 export interface ReceiptTx {
   getAttachment(attachmentId: string): Promise<Attachment | null>;
   getOrder(orderId: string): Promise<Order | null>;
+  /**
+   * Relectura FRESCA del NIVEL B dentro de la transacción (ADR-0016 §10). La config del gate se
+   * lee mucho antes —el evaluador la necesita para ventana y formatos— y entre esa lectura y el
+   * commit alguien puede apagar el flag. Una lectura vieja no puede ganarle a un apagado ya
+   * commiteado: lo que todavía no se escribió, no se escribe.
+   */
+  isReceiptGateEnabled(): Promise<boolean>;
+  /**
+   * ¿Ya existe la campana con este id determinístico? Es una LECTURA, así que va antes de
+   * cualquier escritura (Firestore lo exige) y da la idempotencia sin que un reintento aborte la
+   * transacción entera por colisión de `create`.
+   */
+  hasNotification(notificationId: string): Promise<boolean>;
   updateAttachment(attachmentId: string, patch: Record<string, unknown>): void;
   updateOrder(orderId: string, patch: Record<string, unknown>): void;
+  /** `create` (no `set`): si dos corridas empatan, la perdedora reintenta y ve el aviso ya escrito. */
+  createNotification(notificationId: string, data: Record<string, unknown>): void;
 }
 
 export interface ReceiptStoreDeps {
@@ -152,11 +184,22 @@ export const defaultReceiptStoreDeps: ReceiptStoreDeps = {
           const snap = await t.get(db().doc(paths.order(tenantId, orderId)));
           return snap.exists ? (snap.data() as Order) : null;
         },
+        async isReceiptGateEnabled() {
+          const snap = await t.get(db().doc(receiptGateConfigPath(tenantId)));
+          // Doc ausente ⇒ APAGADO, y el mismo lector estricto que usa la config previa.
+          return snap.exists ? receiptGateEnabledFromRaw(snap.data()) : false;
+        },
+        async hasNotification(notificationId) {
+          return (await t.get(db().doc(paths.notification(tenantId, notificationId)))).exists;
+        },
         updateAttachment(attachmentId, patch) {
           t.update(db().doc(buildAttachmentDocPath(tenantId, attachmentId)), patch);
         },
         updateOrder(orderId, patch) {
           t.update(db().doc(paths.order(tenantId, orderId)), patch);
+        },
+        createNotification(notificationId, data) {
+          t.create(db().doc(paths.notification(tenantId, notificationId)), data);
         },
       }),
     ),
@@ -208,6 +251,16 @@ const classificationPatch = (
  *
  * NO cambia `order.status` bajo ninguna circunstancia: ese es el corazón del ADR — la ingesta
  * jamás mueve un pedido por sí sola.
+ *
+ * DOS COSAS QUE ANTES ESTABAN AFUERA Y AHORA VIVEN ACÁ ADENTRO:
+ *
+ *  1. El FLAG del nivel B se RELEE (ADR-0016 §10). La config que trae el caller se leyó antes de
+ *     evaluar; entre esa lectura y este commit alguien puede haber apagado el gate.
+ *  2. La CAMPANA del panel (ADR-0016 §11). El mensaje al cliente promete que «un vendedor lo
+ *     revisa»: esa promesa y la señal que la hace cierta son UN SOLO HECHO. Antes el aviso era
+ *     best-effort después del commit, así que un Firestore con hipo dejaba al cliente esperando a
+ *     alguien que nunca fue notificado. Ahora, o entran los tres writes (adjunto + pedido +
+ *     campana) o no entra ninguno y el archivo queda como medio normal.
  */
 export async function linkReceiptCandidate(
   tenantId: string,
@@ -225,7 +278,9 @@ export async function linkReceiptCandidate(
     if (facts.tenantId !== tenantId) return { ok: false, reason: 'tenant_mismatch' } as const;
     if (order.customerId !== facts.customerId) return { ok: false, reason: 'order_customer_mismatch' } as const;
 
-    // Idempotencia por `(tenantId, attachmentId)` y por `(orderId, attachmentId)`.
+    // Idempotencia por `(tenantId, attachmentId)` y por `(orderId, attachmentId)`. Va ANTES del
+    // flag a propósito: informar un vínculo que ya existe no escribe nada, y apagar el nivel B no
+    // puede borrar ni ocultar lo ya guardado (ADR-0016 §10).
     const receipts = readOrderReceiptAttachments(order);
     if (
       (facts.classification === 'payment_receipt_candidate' || facts.classification === 'payment_receipt_linked') &&
@@ -234,6 +289,10 @@ export async function linkReceiptCandidate(
     ) {
       return { ok: true, orderId: order.id, alreadyLinked: true } as const;
     }
+
+    // NIVEL B, releído FRESCO: de acá para abajo todo son escrituras NUEVAS.
+    if (!(await tx.isReceiptGateEnabled())) return { ok: false, reason: 'receipt_gate_disabled' } as const;
+
     if (facts.classification !== 'unclassified') return { ok: false, reason: 'illegal_classification_transition' } as const;
 
     // Estado FRESCO: entre el gate y esta transacción el pedido pudo pagarse o cancelarse.
@@ -242,6 +301,10 @@ export async function linkReceiptCandidate(
 
     const archivo = evaluateReceiptFile(facts, config);
     if (!archivo.ok) return { ok: false, reason: archivo.reason } as const;
+
+    // Última LECTURA antes de escribir: Firestore exige que todas vayan primero.
+    const notificationId = receiptCandidateNotificationId(facts.attachmentId);
+    const yaAvisado = await tx.hasNotification(notificationId);
 
     const now = deps.now();
     tx.updateAttachment(facts.attachmentId, {
@@ -255,6 +318,14 @@ export async function linkReceiptCandidate(
       'receiptAttachments.updatedAt': now,
       updatedAt: now,
     });
+    if (!yaAvisado) {
+      // Id determinístico por adjunto ⇒ como MÁXIMO una campana por reintento del webhook.
+      const aviso = buildReceiptCandidateNotification(
+        { tenantId, customerId: facts.customerId, orderId: order.id, attachmentId: facts.attachmentId },
+        now,
+      );
+      tx.createNotification(aviso.id, aviso.data);
+    }
     return { ok: true, orderId: order.id, alreadyLinked: false } as const;
   });
 }
@@ -263,6 +334,11 @@ export async function linkReceiptCandidate(
 // 2) Marcar como comprobante (human) — llega hasta PENDING_VERIFICATION
 // ---------------------------------------------------------------------------
 
+/**
+ * Vincular un comprobante NUEVO es parte del nivel B (ADR-0016 §10): con el flag en OFF esta
+ * operación RECHAZA. El flag se relee dentro de la transacción por el mismo motivo que en el
+ * candidato — un apagado ya commiteado tiene que ganarle a cualquier lectura previa.
+ */
 export async function markAttachmentAsReceipt(
   tenantId: string,
   input: { attachmentId: string; orderId: string; actorUid: string },
@@ -273,12 +349,24 @@ export async function markAttachmentAsReceipt(
     if (!attachment) return { ok: false, reason: 'attachment_not_found' } as const;
     const order = await tx.getOrder(input.orderId);
     if (!order) return { ok: false, reason: 'order_not_found' } as const;
+    // La relectura del flag se hace acá, con el resto de las lecturas (Firestore exige que TODAS
+    // vayan antes de la primera escritura), pero se APLICA más abajo — ver el comentario del
+    // corto-circuito idempotente.
+    const gateHabilitado = await tx.isReceiptGateEnabled();
 
     const facts = toReceiptAttachmentFacts(attachment);
     const orderFacts = toReceiptOrderFacts(order);
     const decision = decideMarkAsReceipt({ tenantId, attachment: facts, order: orderFacts });
     if (!decision.ok) return { ok: false, reason: decision.reason } as const;
+    // Idempotencia ANTES del flag, igual que en `linkReceiptCandidate`: informar un marcado que YA
+    // existe no escribe nada, y apagar el nivel B no puede convertir en error algo que ya es un
+    // hecho (ADR-0016 §10). Pasa de verdad en el rollback del paso 3: se marcó con el gate
+    // encendido, se apaga el gate, y el vendedor vuelve a apretar «marcar» —doble click o reintento
+    // del panel— sobre un comprobante que ya estaba vinculado. Verlo fallar diría que se rompió
+    // algo cuando en realidad ya estaba hecho.
     if (decision.alreadyMarked) return { ok: true, alreadyMarked: true, status: order.status } as const;
+    // De acá para abajo todo son vínculos NUEVOS: eso sí lo gobierna el nivel B.
+    if (!gateHabilitado) return { ok: false, reason: 'receipt_gate_disabled' } as const;
 
     const now = deps.now();
     const receipts = readOrderReceiptAttachments(order);
@@ -312,6 +400,13 @@ export async function markAttachmentAsReceipt(
 // 3) Desmarcar (human) — preserva el adjunto como medio normal
 // ---------------------------------------------------------------------------
 
+/**
+ * DESMARCAR NO MIRA EL FLAG, y es deliberado (ADR-0016 §10): «apagar una función no puede dejar
+ * atrapada una decisión humana que alguien necesita revertir». Si el desmarcado dependiera del
+ * nivel B, un tenant con el gate apagado —el estado por DEFECTO— quedaría con sus comprobantes
+ * marcados para siempre y sin forma de corregir un error. Revocar siempre tiene que ser posible;
+ * lo que el flag gobierna es CREAR vínculos nuevos, no deshacerlos.
+ */
 export async function unmarkAttachmentReceipt(
   tenantId: string,
   input: { attachmentId: string; orderId: string; actorUid: string },

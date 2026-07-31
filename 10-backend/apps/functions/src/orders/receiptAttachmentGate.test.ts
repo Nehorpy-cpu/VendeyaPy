@@ -53,14 +53,16 @@ const entrada = (attachment = adjunto()): AttachmentGateInput => ({
   receivedByPhoneNumberId: null,
 });
 
+/** Config del tenant con el nivel B ENCENDIDO: el default del código está en OFF (ADR-0016 §10). */
+const CONFIG_ENCENDIDA = { ...DEFAULT_RECEIPT_GATE_CONFIG, enabled: true };
+
 const hacerDeps = (over: Partial<ReceiptAttachmentGateDeps> = {}): ReceiptAttachmentGateDeps => ({
   getSession: async () => sesion(),
   getOrder: async (_t, id) => pedido(id, 'PENDING_PAYMENT'),
   listCustomerOrders: async () => [pedido('ord_1', 'PENDING_PAYMENT')],
-  getConfig: async () => DEFAULT_RECEIPT_GATE_CONFIG,
+  getConfig: async () => CONFIG_ENCENDIDA,
   link: vi.fn(async (_t, i) => ({ ok: true as const, orderId: i.orderId, alreadyLinked: false })),
   markGenericMedia: vi.fn(async () => ({ reply: '', classification: 'generic_media' as const, orderCandidateId: null })),
-  notifyCandidate: vi.fn(async () => true),
   nowMs: () => AHORA,
   ...over,
 });
@@ -131,54 +133,153 @@ describe('orders/receiptAttachmentGate — costura ingesta ↔ pedidos', () => {
   });
 
   /**
-   * DISCRIMINANTE B2. La respuesta al cliente PROMETE que «un vendedor lo revisa». Si proponer un
-   * candidato no genera ninguna señal operativa, esa promesa es papel: el archivo queda esperando
-   * a que alguien abra por casualidad la conversación correcta.
+   * DISCRIMINANTE B2. La respuesta al cliente PROMETE que «un vendedor lo revisa». La señal
+   * operativa que hace cierta esa promesa la escribe AHORA la misma transacción del vínculo
+   * (ADR-0016 §11), así que acá se prueba lo que le toca a la costura: la promesa sale SOLO
+   * cuando el vínculo —campana incluida— quedó commiteado.
    */
-  it('proponer un candidato GENERA la señal operativa, con los ids del vínculo', async () => {
+  it('proponer un candidato promete revisión solo si el vínculo (con su campana) se confirmó', async () => {
     const deps = hacerDeps();
     const r = await crearReceiptAttachmentGate(deps)(entrada());
 
     expect(r.reply).toBe(MENSAJE_COMPROBANTE_PROPUESTO);
-    expect(deps.notifyCandidate).toHaveBeenCalledTimes(1);
-    expect(deps.notifyCandidate).toHaveBeenCalledWith({
-      tenantId: TENANT,
-      customerId: CLIENTE,
-      orderId: 'ord_1',
-      attachmentId: ATT,
-    });
+    expect(deps.link).toHaveBeenCalledTimes(1);
   });
 
-  it('sin candidato (medio normal) NO se avisa nada: no se molesta al vendedor por una foto', async () => {
+  it('sin candidato (medio normal) no se propone nada: no se molesta al vendedor por una foto', async () => {
     const deps = hacerDeps({ getSession: async () => sesion({ state: 'BROWSING' }) });
-    await crearReceiptAttachmentGate(deps)(entrada());
-    expect(deps.notifyCandidate).not.toHaveBeenCalled();
+    const r = await crearReceiptAttachmentGate(deps)(entrada());
+    expect(deps.link).not.toHaveBeenCalled();
+    expect(r.reply).toBe('');
   });
 
-  it('reintento del webhook: ya propuesto ⇒ ni mensaje ni aviso repetido', async () => {
+  it('reintento del webhook: ya propuesto ⇒ ni mensaje ni vínculo repetido', async () => {
     const deps = hacerDeps();
     const yaPropuesto = adjunto({
       classification: { value: 'payment_receipt_candidate', source: 'rule', confidence: 1, by: null, at: null },
       orderCandidateId: 'ord_1',
     } as Partial<Attachment>);
-    await crearReceiptAttachmentGate(deps)(entrada(yaPropuesto));
-    expect(deps.notifyCandidate).not.toHaveBeenCalled();
+    expect((await crearReceiptAttachmentGate(deps)(entrada(yaPropuesto))).reply).toBe('');
+    expect(deps.link).not.toHaveBeenCalled();
 
-    // Y si la transacción resuelve que el vínculo YA existía, tampoco se re-avisa.
+    // Y si la transacción resuelve que el vínculo YA existía, tampoco se repite el mensaje.
     const deps2 = hacerDeps({ link: vi.fn(async (_t, i) => ({ ok: true as const, orderId: i.orderId, alreadyLinked: true })) });
-    await crearReceiptAttachmentGate(deps2)(entrada());
-    expect(deps2.notifyCandidate).not.toHaveBeenCalled();
+    expect((await crearReceiptAttachmentGate(deps2)(entrada())).reply).toBe('');
   });
 
-  it('si la campana falla, el turno del cliente NO se rompe (el archivo ya está guardado)', async () => {
-    const deps = hacerDeps({ notifyCandidate: vi.fn(async () => { throw new Error('firestore caído'); }) });
+  /**
+   * DISCRIMINANTE B3 (ADR-0016 §11). Si la transacción que confirma candidato + campana no
+   * commitea, no se promete revisión: el archivo queda como medio normal y la respuesta es
+   * neutral. Antes el mensaje salía igual y el cliente esperaba a alguien que nunca fue avisado.
+   */
+  /**
+   * La transacción LANZA. Es el único caso del sistema en que no se sabe qué quedó escrito: un
+   * `runTransaction` puede fallar con el commit YA aplicado (UNAVAILABLE/DEADLINE sobre el RPC de
+   * commit). Por eso acá NO se degrada: `markGenericMedia` decidiría sobre la clasificación leída
+   * ANTES de la transacción y podría pisar con `generic_media` un candidato que sí se escribió,
+   * dejando al pedido listándolo y al adjunto negándolo.
+   *
+   * Lo que §11 exige sí se cumple igual, y es lo que este test fija: no se promete revisión. No
+   * degradar tampoco vuelve al archivo más frágil — la purga solo excluye evidencia de pago
+   * (`payment_receipt_candidate`/`payment_receipt_linked`), así que `unclassified` y `generic_media`
+   * corren exactamente la misma suerte.
+   */
+  it('si la transacción del vínculo LANZA, no se promete revisión Y no se pisa la clasificación', async () => {
+    const deps = hacerDeps({
+      link: vi.fn(async () => {
+        throw new Error('firestore caído');
+      }),
+    });
     const r = await crearReceiptAttachmentGate(deps)(entrada());
 
-    expect(r).toEqual({
-      reply: MENSAJE_COMPROBANTE_PROPUESTO,
-      classification: 'payment_receipt_candidate',
-      orderCandidateId: 'ord_1',
+    expect(r.orderCandidateId).toBeNull();
+    expect(r.reply).not.toBe(MENSAJE_COMPROBANTE_PROPUESTO);
+    expect(r.reply).not.toMatch(/revisa|vendedor/i);
+    // Nada se escribe: ni la degradación, que en este caso sería una suposición sobre un commit
+    // cuyo desenlace se desconoce.
+    expect(deps.markGenericMedia).not.toHaveBeenCalled();
+  });
+
+  /**
+   * Contraste deliberado con el test de arriba: cuando la transacción RESUELVE con `ok:false` el
+   * desenlace es CONOCIDO —no se escribió nada— y ahí degradar sí es lo correcto.
+   */
+  it('si la transacción RESUELVE que no aplica, ahí sí se degrada a medio normal', async () => {
+    const deps = hacerDeps({
+      link: vi.fn(async () => ({ ok: false, reason: 'order_already_paid' }) as const),
     });
+    const r = await crearReceiptAttachmentGate(deps)(entrada());
+
+    expect(r.classification).toBe('generic_media');
+    expect(r.orderCandidateId).toBeNull();
+    expect(r.reply).not.toMatch(/revisa|vendedor/i);
+    expect(deps.markGenericMedia).toHaveBeenCalled();
+  });
+
+  /**
+   * DISCRIMINANTE B1 (ADR-0016 §10). Con el nivel B apagado el archivo se guarda igual y queda
+   * como MEDIO NORMAL: cero candidato, cero campana, cero promesa. Y no se llega siquiera a la
+   * transacción.
+   */
+  it('nivel B en OFF ⇒ medio normal, sin candidato ni promesa de revisión', async () => {
+    const deps = hacerDeps({
+      getConfig: async () => ({ ...DEFAULT_RECEIPT_GATE_CONFIG, enabled: false }),
+      getSession: vi.fn(async () => sesion()),
+      listCustomerOrders: vi.fn(async () => [pedido('ord_1', 'PENDING_PAYMENT')]),
+    });
+    const r = await crearReceiptAttachmentGate(deps)(entrada());
+
+    expect(r.classification).toBe('generic_media');
+    expect(r.orderCandidateId).toBeNull();
+    expect(r.reply).not.toMatch(/revisa|vendedor|comprobante/i);
+    expect(deps.link).not.toHaveBeenCalled();
+    expect(deps.markGenericMedia).toHaveBeenCalled();
+    // Y no se paga el costo de leer sesión ni la colección de pedidos del cliente: con el gate
+    // apagado —el default de todo tenant— ese trabajo no lo usa nadie.
+    expect(deps.getSession).not.toHaveBeenCalled();
+    expect(deps.listCustomerOrders).not.toHaveBeenCalled();
+  });
+
+  it('el default del código está en OFF: desplegar no enciende el gate de nadie', async () => {
+    const deps = hacerDeps({ getConfig: async () => DEFAULT_RECEIPT_GATE_CONFIG });
+    const r = await crearReceiptAttachmentGate(deps)(entrada());
+
+    expect(r.classification).toBe('generic_media');
+    expect(deps.link).not.toHaveBeenCalled();
+  });
+
+  /**
+   * ADR-0016 §10: «apagar el nivel B no puede ocultar ni borrar nada que ya exista». Enrutar al
+   * gate genérico un adjunto YA propuesto lo DEGRADARÍA: el pedido seguiría listándolo como
+   * candidato mientras el archivo dice `generic_media`.
+   */
+  it('nivel B en OFF NO degrada un candidato ya existente: se deja como está', async () => {
+    const deps = hacerDeps({ getConfig: async () => ({ ...DEFAULT_RECEIPT_GATE_CONFIG, enabled: false }) });
+    const yaPropuesto = adjunto({
+      classification: { value: 'payment_receipt_candidate', source: 'rule', confidence: 1, by: null, at: null },
+      orderCandidateId: 'ord_1',
+    } as Partial<Attachment>);
+
+    const r = await crearReceiptAttachmentGate(deps)(entrada(yaPropuesto));
+
+    expect(r.classification).toBe('payment_receipt_candidate');
+    expect(r.orderCandidateId).toBe('ord_1');
+    expect(r.reply).toBe('');
+    expect(deps.markGenericMedia).not.toHaveBeenCalled();
+    expect(deps.link).not.toHaveBeenCalled();
+  });
+
+  it('nivel B en OFF NO degrada un comprobante vinculado por una persona', async () => {
+    const deps = hacerDeps({ getConfig: async () => ({ ...DEFAULT_RECEIPT_GATE_CONFIG, enabled: false }) });
+    const vinculado = adjunto({
+      classification: { value: 'payment_receipt_linked', source: 'human', confidence: 1, by: 'uid_v', at: null },
+      orderCandidateId: 'ord_1',
+    } as Partial<Attachment>);
+
+    const r = await crearReceiptAttachmentGate(deps)(entrada(vinculado));
+
+    expect(r.classification).toBe('payment_receipt_linked');
+    expect(deps.markGenericMedia).not.toHaveBeenCalled();
   });
 
   it('el gate JAMÁS devuelve una clasificación de comprobante vinculado ni menciona PAID', async () => {

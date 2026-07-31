@@ -13,38 +13,35 @@
  * mantenerlo coherente.
  */
 import { describe, it, expect } from 'vitest';
-import type { ReceiptGateDenyReason } from '../orders/receiptGate.js';
+import { RECEIPT_GATE_DENY_REASONS, type ReceiptGateDenyReason } from '../orders/receiptGate.js';
 import { respuestaPorAdjunto, type AttachmentReplyReason } from './attachmentReplies.js';
 
 /**
- * Comprobación EN TIEMPO DE COMPILACIÓN: `AttachmentReplyReason` debe ser superconjunto de
- * `ReceiptGateDenyReason`. Si el gate suma un motivo que no existe acá, esta línea no compila y
- * `pnpm -r typecheck` falla — antes incluso de correr los tests.
+ * Comprobación de tipos: `AttachmentReplyReason` debe ser superconjunto de `ReceiptGateDenyReason`.
+ *
+ * OJO CON LO QUE ESTA LÍNEA *NO* GARANTIZA, porque ya nos falló una vez: `apps/functions/
+ * tsconfig.json` excluye de la compilación todos los archivos `.test.ts` de `src`, así que
+ * `pnpm -r typecheck` NUNCA la mira, y vitest transpila con esbuild sin verificar tipos. Es decir:
+ * la línea sigue siendo documentación útil y una red en el editor,
+ * pero no es una verificación que corra en ningún lado. Cuando el contrato dependía SOLO de esto
+ * —más una lista de motivos repetida a mano acá abajo—, `receipt_gate_disabled` entró al gate sin
+ * mensaje al cliente y ni el typecheck ni los 2000+ tests dijeron una palabra.
+ *
+ * Lo que de verdad sostiene el contrato es el recorrido de `RECEIPT_GATE_DENY_REASONS`, que es un
+ * arreglo REAL en tiempo de ejecución del que se deriva el tipo. Un motivo nuevo aparece solo acá
+ * abajo y, si nadie le escribió respuesta, el test falla de verdad.
  */
 type _TodoMotivoDelGateTieneRespuesta = ReceiptGateDenyReason extends AttachmentReplyReason ? true : never;
 const _prueba: _TodoMotivoDelGateTieneRespuesta = true;
 
-/** Lista exhaustiva y explícita: si el gate agrega uno, el test de abajo lo detecta. */
-const MOTIVOS_DEL_GATE: ReceiptGateDenyReason[] = [
-  'tenant_mismatch',
-  'customer_mismatch',
-  'classification_not_open',
-  'no_explicit_payment_context',
-  'no_admissible_order',
-  'ambiguous_orders',
-  'order_customer_mismatch',
-  'order_not_admissible',
-  'order_already_paid',
-  'outside_time_window',
-  'attachment_not_stored',
-  'attachment_purged',
-  'mime_not_allowed',
-  'size_not_allowed',
-];
+/** LA fuente: el mismo arreglo del que sale el tipo. Nada que mantener a mano, nada que olvidar. */
+const MOTIVOS_DEL_GATE: readonly ReceiptGateDenyReason[] = RECEIPT_GATE_DENY_REASONS;
 
 describe('contrato gate ↔ respuesta al cliente', () => {
-  it('la comprobación de tipos se mantiene (si esto no compila, el typecheck ya falló)', () => {
+  it('la lista recorrida es la del gate, no una copia (si divergen, el contrato no verifica nada)', () => {
     expect(_prueba).toBe(true);
+    expect(MOTIVOS_DEL_GATE.length).toBeGreaterThan(0);
+    expect(new Set(MOTIVOS_DEL_GATE).size).toBe(MOTIVOS_DEL_GATE.length);
   });
 
   it('TODO motivo de rechazo del gate produce una respuesta no vacía', () => {
@@ -70,6 +67,19 @@ describe('contrato gate ↔ respuesta al cliente', () => {
     'order_customer_mismatch',
     'no_explicit_payment_context',
   ];
+
+  it('el nivel B apagado NO invita a *pagar*: con el gate off no existe vinculación posible', () => {
+    // Es la ventana real del rollout (nivel A encendido, nivel B todavía no). El genérico dice
+    // «escribí *pagar* y te paso los datos para vincularlo a tu pedido»; ahí sería mentira, porque
+    // ni el gate automático ni `attachmentMarkAsReceipt` pueden vincular nada.
+    for (const clase of ['image', 'document', 'unknown'] as const) {
+      const texto = respuestaPorAdjunto('receipt_gate_disabled', clase);
+      expect(texto).not.toBe(respuestaPorAdjunto(undefined, clase));
+      expect(texto.toLowerCase()).not.toContain('pagar');
+      // Tampoco promete una persona: sin nivel B no hay campana que respalde esa promesa (§11).
+      expect(texto.toLowerCase()).not.toMatch(/asesor|vendedor|revisa/);
+    }
+  });
 
   it('cada motivo tiene texto propio, o está en la lista de genéricos deliberados', () => {
     // El valor de este test no es prohibir el genérico: es obligar a DECIDIR. Un motivo nuevo o

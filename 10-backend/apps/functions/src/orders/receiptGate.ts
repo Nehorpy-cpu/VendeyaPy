@@ -31,6 +31,7 @@ import {
   ATTACHMENT_ALLOWED_MIME_TYPES,
   checkClassificationTransition,
   isAttachmentStored,
+  parseReceiptGateEnabled,
   type AttachmentClassification,
   type AttachmentIngestState,
   type OrderStatus,
@@ -58,6 +59,12 @@ export const RECEIPT_GATE_MAX_ALLOWED_BYTES = 25 * 1024 * 1024;
 export const RECEIPT_GATE_CLOCK_SKEW_MS = 60 * 1000;
 
 export interface ReceiptGateConfig {
+  /**
+   * NIVEL B del rollout (ADR-0016 §10): ¿este tenant propone comprobantes? Es lo único que
+   * habilita clasificar `payment_receipt_candidate`, emitir su señal operativa y crear vínculos
+   * manuales nuevos. Desplegar la fundación NO lo enciende.
+   */
+  enabled: boolean;
   /** Cuánto tiempo después de nacer el pedido un archivo todavía puede proponerse. */
   windowMs: number;
   maxBytes: number;
@@ -66,10 +73,34 @@ export interface ReceiptGateConfig {
 }
 
 export const DEFAULT_RECEIPT_GATE_CONFIG: ReceiptGateConfig = {
+  // FAIL-CLOSED: el default del código es el estado APAGADO. Un tenant sin doc de config —o con
+  // el doc a medio escribir— nunca propone comprobantes.
+  enabled: false,
   windowMs: RECEIPT_GATE_DEFAULT_WINDOW_MS,
   maxBytes: RECEIPT_GATE_DEFAULT_MAX_BYTES,
   allowedMimeTypes: ATTACHMENT_ALLOWED_MIME_TYPES,
 };
+
+/**
+ * Lee el interruptor del NIVEL B desde el doc CRUDO de `tenants/{t}/config/receiptGate`.
+ *
+ * SOLO el booleano exacto `true` enciende. Ausente, `false`, la cadena `"true"`, el número `1` y
+ * cualquier otra forma significan OFF — la coerción laxa (`Boolean(x)`, `x == true`, `!!x`) es
+ * justamente cómo un flag de seguridad termina encendido sin que nadie lo haya decidido: alcanza
+ * con que alguien escriba el campo desde un formulario web, donde todo llega como string.
+ *
+ * Pura ⇒ testeable sin Firestore, y la usan los DOS caminos (la lectura previa del gate y la
+ * relectura dentro de la transacción) para que no existan dos interpretaciones del mismo campo.
+ *
+ * DELEGA en `parseReceiptGateEnabled` de `@vpw/shared` en vez de reimplementar el criterio. El
+ * módulo compartido existe precisamente porque el nivel A lo lee `meta/` y el nivel B lo lee
+ * `orders/`, y su docblock advierte que con dos lecturas «tarde o temprano una sería más laxa — y
+ * la laxa sería la que enciende». Este archivo era esa segunda lectura: idéntica hoy, libre de
+ * divergir mañana. El nombre local se conserva porque ya lo importan `receiptStore.ts` y sus tests.
+ */
+export function receiptGateEnabledFromRaw(raw: unknown): boolean {
+  return parseReceiptGateEnabled(raw);
+}
 
 const clamp = (value: number, min: number, max: number): number => Math.min(Math.max(value, min), max);
 
@@ -99,6 +130,8 @@ export function normalizeReceiptGateConfig(raw: unknown): ReceiptGateConfig {
     : ATTACHMENT_ALLOWED_MIME_TYPES;
 
   return {
+    // El único campo que NO cae a un default permisivo: ausente ⇒ apagado (ADR-0016 §10).
+    enabled: receiptGateEnabledFromRaw(data),
     windowMs,
     maxBytes,
     // Una lista que quedó vacía (config con formatos inventados) volvería inútil el gate sin
@@ -140,6 +173,11 @@ export function mergeReceiptGateWithIngest(
   ingest: ReceiptGateIngestLimits,
 ): ReceiptGateConfig {
   return {
+    // El interruptor del nivel B NO participa de la intersección: los dos niveles del rollout son
+    // INDEPENDIENTES por contrato (ADR-0016 §10). Que la ingesta esté encendida no enciende el
+    // gate, y que sus formatos se solapen tampoco. La única relación es física: sin ingesta no hay
+    // archivo guardado y el gate nunca llega a correr.
+    enabled: gate.enabled,
     windowMs: gate.windowMs,
     maxBytes: Math.min(gate.maxBytes, ingest.maxBytes),
     // Intersección VACÍA = las dos configs se contradicen. NO se cae al default: eso habilitaría
@@ -223,22 +261,38 @@ export interface ReceiptGateInput {
   config: ReceiptGateConfig;
 }
 
-/** Código cerrado ⇒ seguro de loguear (no lleva teléfono, ni ids del proveedor, ni rutas). */
-export type ReceiptGateDenyReason =
-  | 'tenant_mismatch'
-  | 'customer_mismatch'
-  | 'classification_not_open'
-  | 'no_explicit_payment_context'
-  | 'no_admissible_order'
-  | 'ambiguous_orders'
-  | 'order_customer_mismatch'
-  | 'order_not_admissible'
-  | 'order_already_paid'
-  | 'outside_time_window'
-  | 'attachment_not_stored'
-  | 'attachment_purged'
-  | 'mime_not_allowed'
-  | 'size_not_allowed';
+/**
+ * Código cerrado ⇒ seguro de loguear (no lleva teléfono, ni ids del proveedor, ni rutas).
+ *
+ * Es un ARREGLO en tiempo de ejecución y el tipo se deriva de él, no al revés. El motivo es
+ * concreto: cada uno de estos motivos debe tener una respuesta escrita para el cliente
+ * (`meta/attachmentReplies.ts`), y ese contrato se verifica en `attachmentReplies.contrato.test.ts`
+ * recorriendo ESTA lista. Cuando el contrato dependía de una unión de tipos, el test tenía que
+ * repetir los motivos a mano y la verificación de tipos que lo respaldaba nunca llegaba a
+ * ejecutarse —`tsconfig.json` excluye los `*.test.ts` y vitest transpila sin chequear—, así que
+ * `receipt_gate_disabled` se agregó sin mensaje y nada avisó. Con la lista acá, agregar un motivo
+ * y olvidarse de la respuesta rompe el test de verdad.
+ */
+export const RECEIPT_GATE_DENY_REASONS = [
+  /** Nivel B del rollout apagado para este tenant (ADR-0016 §10). */
+  'receipt_gate_disabled',
+  'tenant_mismatch',
+  'customer_mismatch',
+  'classification_not_open',
+  'no_explicit_payment_context',
+  'no_admissible_order',
+  'ambiguous_orders',
+  'order_customer_mismatch',
+  'order_not_admissible',
+  'order_already_paid',
+  'outside_time_window',
+  'attachment_not_stored',
+  'attachment_purged',
+  'mime_not_allowed',
+  'size_not_allowed',
+] as const;
+
+export type ReceiptGateDenyReason = (typeof RECEIPT_GATE_DENY_REASONS)[number];
 
 export type ReceiptGateDecision =
   | {
@@ -292,6 +346,12 @@ export interface ReceiptContextInput {
  */
 export function evaluateReceiptContext(input: ReceiptContextInput): ReceiptContextDecision {
   const { tenantId, customerId, nowMs, session, candidateOrders, config } = input;
+
+  // 0) NIVEL B del rollout, antes que cualquier otra cosa: con el gate apagado no hay nada que
+  //    evaluar y el archivo queda como medio normal (ADR-0016 §10). Se compara contra `true`
+  //    explícito porque `config.enabled` ya viene normalizado, pero una config armada a mano en un
+  //    test o en un caller futuro no puede colarse por coerción.
+  if (config.enabled !== true) return { ok: false, reason: 'receipt_gate_disabled' };
 
   if (typeof tenantId !== 'string' || tenantId.length === 0) return { ok: false, reason: 'tenant_mismatch' };
   if (typeof customerId !== 'string' || customerId.length === 0) return { ok: false, reason: 'customer_mismatch' };
@@ -435,6 +495,11 @@ export function evaluateReceiptGate(input: ReceiptGateInput): ReceiptGateDecisio
 
 /** Motivos de rechazo de la acción humana. Cerrados y seguros de loguear. */
 export type ReceiptMarkDenyReason =
+  /**
+   * Nivel B apagado (ADR-0016 §10). Aplica SOLO a marcar: desmarcar sigue disponible con el flag
+   * en OFF, porque apagar una función no puede dejar atrapada una decisión humana ya tomada.
+   */
+  | 'receipt_gate_disabled'
   | 'tenant_mismatch'
   | 'attachment_not_stored'
   | 'attachment_purged'

@@ -4,6 +4,10 @@
  * Permiten a los E2E detener la ejecución en un punto exacto, cambiar el flag y reanudar,
  * demostrando que la validación EN-TRANSACCIÓN posterior respeta el kill-switch.
  *
+ * El mecanismo nació con el kill-switch de cobertura pero es GENÉRICO (pausar, mutar estado,
+ * reanudar): ADR-0016 §12 lo reusa para la carrera takeover→envío en vez de duplicar 50 líneas
+ * de hook. Un punto nuevo es un miembro más de la unión de abajo, nada más.
+ *
  * Contrato:
  *  - En producción es un no-op inmediato (guardia por FUNCTIONS_EMULATOR, sin lecturas).
  *  - JAMÁS se invoca dentro de una transacción (una pausa dentro de una tx la haría expirar):
@@ -21,6 +25,13 @@ export type CoverageHoldPoint =
   | 'ubicacion_pre_tx'
   | 'pre_handoff'
   | 'reply_pre_send'
+  /**
+   * ADR-0016 §12: la respuesta YA está construida y el cliente de WhatsApp YA está resuelto; lo
+   * único que falta es el chequeo autoritativo de silencio y el POST. Pausar acá es lo que
+   * permite activar `humanTakeover` en el medio y probar que el bot no le pisa el chat al
+   * vendedor. Se dispara en TODA respuesta automática, sea de cobertura o no.
+   */
+  | 'bot_reply_pre_send'
   | 'resume_pre_liberar'
   | 'resume_pre_orden'
   | 'resume_pre_awaiting'

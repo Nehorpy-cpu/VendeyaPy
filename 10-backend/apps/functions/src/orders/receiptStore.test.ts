@@ -27,6 +27,8 @@ interface Mundo {
   attachments: Record<string, Attachment>;
   orders: Record<string, Order>;
   patches: Array<{ kind: 'attachment' | 'order'; id: string; patch: Record<string, unknown> }>;
+  /** Campanas del panel, escritas por la MISMA transacción del vínculo (ADR-0016 §11). */
+  notifications: Record<string, Record<string, unknown>>;
 }
 
 const attachmentDoc = (over: Partial<Attachment> = {}): Attachment =>
@@ -90,6 +92,19 @@ async function ejecutar<T>(mundo: Mundo, fn: (tx: ReceiptTx) => Promise<T>): Pro
     async getOrder(id) {
       return mundo.orders[id] ?? null;
     },
+    // Este archivo prueba las REGLAS del vínculo, así que el nivel B está encendido. El apagado
+    // (y su relectura dentro de la transacción) vive en `receiptGateRollout.test.ts`.
+    async isReceiptGateEnabled() {
+      return true;
+    },
+    async hasNotification(id) {
+      return mundo.notifications[id] !== undefined;
+    },
+    createNotification(id, data) {
+      escrituras.push(() => {
+        mundo.notifications[id] = data;
+      });
+    },
     updateAttachment(id, patch) {
       mundo.patches.push({ kind: 'attachment', id, patch });
       escrituras.push(() => aplicar(mundo.attachments[id] as unknown as Record<string, unknown>, patch));
@@ -109,6 +124,7 @@ const mundo = (attachment: Attachment, order: Order): Mundo => ({
   attachments: { [attachment.attachmentId]: attachment },
   orders: { [order.id]: order },
   patches: [],
+  notifications: {},
 });
 
 const sinPAID = (m: Mundo) => {

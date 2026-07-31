@@ -55,11 +55,22 @@ vi.mock('../lib/firebase.js', () => ({
 
 const handleMessage = vi.fn(async () => ({ reply: 'respuesta del bot', state: 'IDLE', handledByHuman: false, coverageActivationId: null }));
 /** A1: el estado REAL del silencio (sesión + config del agente), que el motor y el camino de
- *  adjuntos comparten. Por default el bot atiende. */
-const botSilenciadoEnChat = vi.fn(async () => false);
+ *  adjuntos comparten. Por default el bot atiende. Vive en una variable —y no en el valor
+ *  resuelto del spy— para que las DOS puertas de la costura puedan reflejar el mismo estado sin
+ *  ensuciarse el registro de llamadas entre ellas. */
+let chatSilenciado = false;
+const botSilenciadoEnChat = vi.fn(async () => chatSilenciado);
+const evaluarSilencioPreEnvio = vi.fn(async () => (chatSilenciado ? 'silenciado' : 'libre'));
 vi.mock('../conversation/engine.js', () => ({
   handleMessage: (...a: unknown[]) => handleMessage(...(a as [])),
+}));
+/** ADR-0016 §12: la regla de silencio vive en su propia costura (`conversation/silencio.js`), que
+ *  es la MISMA para el motor y para el camino de adjuntos. Las dos puertas —la consulta suelta y
+ *  el guard autoritativo pre-envío— responden lo mismo, porque son la misma regla. */
+vi.mock('../conversation/silencio.js', () => ({
   botSilenciadoEnChat: (...a: unknown[]) => botSilenciadoEnChat(...(a as [])),
+  evaluarSilencioPreEnvio: (...a: unknown[]) => evaluarSilencioPreEnvio(...(a as [])),
+  EXIGE_SILENCIO_LIBRE: { modo: 'requiere_silencio_libre' },
 }));
 vi.mock('../conversation/coverage.js', () => ({
   procesarUbicacionEntrante: vi.fn(async () => ({ reply: '', inerte: true, coverageActivationId: null })),
@@ -92,9 +103,13 @@ const ingestInboundAttachment = vi.fn(async () => ({
   attachment: { attachmentId: 'att_aaaaaaaaaaaaaaaaaaaaaaaa', class: 'image', ingestState: 'stored', classification: { value: 'unclassified' } } as never,
 }));
 const recordUnsupportedInbound = vi.fn(async () => ({ messageId: 'pmid_x', reply: 'Recibí tu audio 🎧 pero todavía no puedo escucharlo. ¿Me lo escribís?' }));
+/** ADR-0016 §10: camino del nivel A APAGADO. Acá NO debe correr (este archivo prueba el ruteo con
+ *  la fundación encendida); el interruptor tiene su propio archivo, `process.rollout.test.ts`. */
+const recordAttachmentIngestDisabled = vi.fn(async () => ({ messageId: 'pmid_off', reply: 'no debería usarse' }));
 vi.mock('./attachmentIngest.js', () => ({
   ingestInboundAttachment: (...a: unknown[]) => ingestInboundAttachment(...(a as [])),
   recordUnsupportedInbound: (...a: unknown[]) => recordUnsupportedInbound(...(a as [])),
+  recordAttachmentIngestDisabled: (...a: unknown[]) => recordAttachmentIngestDisabled(...(a as [])),
 }));
 
 import { Timestamp } from 'firebase-admin/firestore';
@@ -130,9 +145,16 @@ beforeEach(() => {
   handleMessage.mockClear();
   ingestInboundAttachment.mockClear();
   recordUnsupportedInbound.mockClear();
-  botSilenciadoEnChat.mockReset();
-  botSilenciadoEnChat.mockResolvedValue(false);
+  recordAttachmentIngestDisabled.mockClear();
+  chatSilenciado = false;
+  botSilenciadoEnChat.mockClear();
+  evaluarSilencioPreEnvio.mockClear();
   setAttachmentGate(null);
+  // ADR-0016 §10: la fundación de medios ya NO se enciende sola. Este archivo prueba el RUTEO con
+  // la ingesta encendida, así que el tenant tiene el nivel A prendido explícitamente (el booleano
+  // exacto, que es lo único que enciende). Que sin esta línea todo el archivo se caiga es
+  // justamente la prueba de que el interruptor gobierna el camino.
+  docs.set(`tenants/${TENANT}/config/attachments`, { ingest: { enabled: true } });
 });
 
 describe('processWebhookEvent — ruteo de adjuntos (ADR-0016)', () => {
@@ -360,7 +382,7 @@ describe('processWebhookEvent — ruteo de adjuntos (ADR-0016)', () => {
     });
 
     it('vendedor con el chat tomado: NO se envía el acuse NI queda burbuja del bot', async () => {
-      botSilenciadoEnChat.mockResolvedValue(true);
+      chatSilenciado = true;
       evento(sinCaption);
       await processWebhookEvent(EVENTO);
 
@@ -373,14 +395,14 @@ describe('processWebhookEvent — ruteo de adjuntos (ADR-0016)', () => {
     });
 
     it('bot apagado desde el panel: mismo silencio (es la MISMA regla, no una copia)', async () => {
-      botSilenciadoEnChat.mockResolvedValue(true);
+      chatSilenciado = true;
       evento(sinCaption);
       await processWebhookEvent(EVENTO);
       expect(enviados).toHaveLength(0);
     });
 
     it('con el bot atendiendo, el acuse SÍ sale (el arreglo no enmudece el camino feliz)', async () => {
-      botSilenciadoEnChat.mockResolvedValue(false);
+      chatSilenciado = false;
       evento(sinCaption);
       await processWebhookEvent(EVENTO);
       expect(enviados).toHaveLength(1);
@@ -388,7 +410,7 @@ describe('processWebhookEvent — ruteo de adjuntos (ADR-0016)', () => {
     });
 
     it('un AUDIO en atención humana tampoco recibe la respuesta automática', async () => {
-      botSilenciadoEnChat.mockResolvedValue(true);
+      chatSilenciado = true;
       evento({ from: TEL, text: '', messageId: 'wamid.AUD2', unsupported: { kind: 'audio' } });
       await processWebhookEvent(EVENTO);
       expect(enviados).toHaveLength(0);

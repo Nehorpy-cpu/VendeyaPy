@@ -13,16 +13,22 @@
 import { Timestamp } from 'firebase-admin/firestore';
 import type { WebhookInboxEvent, MetaExternalIndexEntry, MessageChannel } from '@vpw/shared';
 import { db, paths } from '../lib/firebase.js';
-import { handleMessage, botSilenciadoEnChat } from '../conversation/engine.js';
+import { handleMessage } from '../conversation/engine.js';
+import { botSilenciadoEnChat, evaluarSilencioPreEnvio, EXIGE_SILENCIO_LIBRE, type OutboundDiferido } from '../conversation/silencio.js';
 import { appendMessage } from '../conversation/messages.js';
 import { procesarUbicacionEntrante, coberturaVigente } from '../conversation/coverage.js';
 import { coverageHold } from '../conversation/coverageTestHooks.js';
 import { attachmentFromInboxPayload, unsupportedFromInboxPayload } from './parseWebhook.js';
-import { ingestInboundAttachment, recordUnsupportedInbound } from './attachmentIngest.js';
+import { ingestInboundAttachment, recordUnsupportedInbound, recordAttachmentIngestDisabled } from './attachmentIngest.js';
 import { getAttachmentGate } from './attachmentGate.js';
-import { getAttachmentIngestLimits } from './attachmentLimits.js';
+import { getAttachmentIngestPolicy } from './attachmentLimits.js';
 import { respuestaPorAdjunto, type AttachmentReplyClass, type AttachmentReplyReason } from './attachmentReplies.js';
-import { getWhatsAppClient } from '../messaging/whatsappClient.js';
+import {
+  getWhatsAppClient,
+  type WhatsAppClient,
+  type SendResult,
+  type LocationRequestResult,
+} from '../messaging/whatsappClient.js';
 import { checkTenantInboundGate, incrementMessageUsage } from '../tenants/lifecycle.js';
 import { resolveEntitlements } from '../entitlements/entitlements.js';
 import { isFeatureEnabled } from '../entitlements/decide.js';
@@ -65,6 +71,144 @@ function puedeTomarseElEvento(ev: WebhookInboxEvent, nowMs: number): boolean {
   return nowMs - desdeMs >= WEBHOOK_STUCK_MS;
 }
 
+/**
+ * SHIPPING-CHAT-3B: el resultado del transporte es TIPADO y acá NO se descarta — decide qué queda
+ * en el historial:
+ *  - `accepted` / `mock` ⇒ se registra, con el wamid real o la marca de mock.
+ *  - `rejected` (4xx CONFIRMADO de Graph) ⇒ el cliente nunca lo vio: NO se registra. Es el mismo
+ *    criterio del mensaje manual del vendedor: el historial no miente sobre lo que salió.
+ *  - `unknown` (5xx / timeout / 2xx sin wamid) ⇒ el mensaje PUDO salir: SÍ se registra. Que el
+ *    vendedor no vea algo que el cliente quizá leyó es peor que una burbuja de más.
+ */
+function desenlaceDelEnvio(r: SendResult | LocationRequestResult): {
+  registrar: boolean;
+  waMessageId: string | null;
+  viaMock: boolean;
+  outcome: string;
+} {
+  if (r.ok) {
+    return {
+      registrar: true,
+      waMessageId: r.id ?? null,
+      viaMock: r.viaMock === true,
+      // El interactivo (location_request) no declara `outcome`: se deriva de su propia marca de
+      // mock en vez de asumir 'accepted', que en los logs se leería como "salió a Meta".
+      outcome: 'outcome' in r ? r.outcome : r.viaMock === true ? 'mock' : 'accepted',
+    };
+  }
+  const outcome = 'outcome' in r ? r.outcome : r.reason;
+  return { registrar: outcome !== 'rejected', waMessageId: null, viaMock: false, outcome };
+}
+
+interface EntregaAutomaticaArgs {
+  tenantId: string;
+  customerId: string;
+  /** Destino del canal (teléfono tal como vino en el webhook). */
+  to: string;
+  texto: string;
+  channel: MessageChannel;
+  receivedVia: string | null;
+  /** Ya resuelto por el caller: resolver credenciales acá reabriría la ventana del guard. */
+  client: WhatsAppClient;
+  /** COVERAGE-1B: intentar primero el botón nativo, con fallback textual UNA sola vez. */
+  locationRequest?: boolean;
+  /** Qué burbuja escribir si la respuesta efectivamente sale. null = no registrar. */
+  outbound: OutboundDiferido | null;
+  /**
+   * KILL-SWITCH-1: gate propio del caller que también tiene que ser fresco al borde. Se pasa como
+   * función —y no como booleano ya evaluado— justamente para que se evalúe ACÁ ADENTRO: si el
+   * caller lo resolviera antes de llamar, las lecturas del guard de silencio quedarían en el medio
+   * y la ventana del interruptor de emergencia se ensancharía. `false` ⇒ no se envía ni se
+   * persiste, igual que el silencio.
+   */
+  gateFinal?: () => Promise<boolean>;
+}
+
+/**
+ * ADR-0016 §12 — EL BORDE DE ENVÍO de toda respuesta automática. Cuatro reglas, en este orden:
+ *
+ *  1. El chequeo de silencio es AUTORITATIVO (relee sesión + config, no confía en lo que se leyó
+ *     al empezar el turno) e INMEDIATAMENTE anterior al POST: el caller ya resolvió credenciales,
+ *     así que entre el guard y el envío no queda ninguna E/S que reabra la ventana.
+ *  2. KILL-SWITCH-1 conserva su lugar de ÚLTIMO gate. `gateFinal` se evalúa acá adentro, después
+ *     del silencio y pegado al POST. Al principio este borde se metió ENTRE `coberturaVigente()`
+ *     y el `sendText`, y sus dos lecturas ensancharon una ventana que era de cero E/S por diseño:
+ *     un interruptor de emergencia de un flujo con plata pasaba a tener decenas de ms de retraso.
+ *     Ningún test lo detectó —el hold del E2E dispara antes— así que queda dicho acá: los dos
+ *     gates van seguidos, sin nada en el medio, y el de cobertura es el último.
+ *  3. Una respuesta SUPRIMIDA no se persiste. Nada se escribe antes de enviar: un outbound en el
+ *     historial que nunca salió le miente al vendedor sobre lo que el cliente vio.
+ *  4. El registro se hace DESPUÉS, con el desenlace REAL del transporte (ver `desenlaceDelEnvio`).
+ *
+ * VENTANA FÍSICA QUE NINGÚN CÓDIGO PUEDE CERRAR: si el vendedor toma el chat después de que el
+ * POST salió hacia Meta, el mensaje ya viajó. Se documenta en vez de fingir que no existe; lo
+ * único que se garantiza es que a partir de ese instante no sale ninguna respuesta automática más.
+ */
+async function entregarRespuestaAutomatica(args: EntregaAutomaticaArgs): Promise<void> {
+  const { tenantId, customerId, texto, channel, client } = args;
+  // Hook SOLO-EMULADOR (no-op en producción, sin lecturas): pausa con la respuesta ya construida
+  // y el cliente ya resuelto. Es la única forma de reproducir la carrera real —el vendedor toma
+  // el chat justo en este punto— sin depender del timing.
+  await coverageHold(tenantId, 'bot_reply_pre_send');
+  if ((await evaluarSilencioPreEnvio(tenantId, customerId, args.outbound?.expectativa)) === 'silenciado') {
+    logger.info('Respuesta automática SUPRIMIDA en el borde de envío (atención humana o bot apagado)', { tenantId });
+    return; // ni se envía ni se persiste
+  }
+  // ÚLTIMA operación antes del POST (ver regla 2). No hay E/S entre esto y `sendText`.
+  if (args.gateFinal && !(await args.gateFinal())) {
+    logger.info('Respuesta automática NO enviada: el gate final del caller la frenó', { tenantId });
+    return; // ni se envía ni se persiste
+  }
+
+  let res: SendResult | LocationRequestResult;
+  try {
+    if (args.locationRequest && channel === 'whatsapp') {
+      const lr = await client.sendLocationRequest(args.to, texto, { tenantId, channel });
+      if (lr.ok) {
+        res = lr;
+      } else {
+        logger.info('Cobertura: location request falló, fallback textual', { tenantId, reason: lr.reason });
+        res = await client.sendText(args.to, texto, { tenantId, channel });
+      }
+    } else {
+      res = await client.sendText(args.to, texto, { tenantId, channel });
+    }
+  } catch (e) {
+    // Excepción cruda del transporte: el POST PUDO haber salido ⇒ mismo criterio que 'unknown'.
+    logger.error('Fallo crudo entregando la respuesta automática (pudo haber salido)', e, { tenantId });
+    res = { ok: false, outcome: 'unknown' };
+  }
+
+  const desenlace = desenlaceDelEnvio(res);
+  if (!desenlace.registrar) {
+    logger.warn('WhatsApp RECHAZÓ la respuesta automática: no se registra en el chat', { tenantId, outcome: desenlace.outcome });
+    return;
+  }
+  if (!res.ok) {
+    logger.warn('Respuesta automática con envío DESCONOCIDO: se registra porque pudo haber salido', { tenantId, outcome: desenlace.outcome });
+  }
+  const out = args.outbound;
+  if (!out) return;
+  try {
+    await appendMessage(tenantId, customerId, {
+      direction: 'out',
+      author: 'bot',
+      text: texto,
+      // `undefined` significa "no tocar" en el resumen del cliente: el acuse de un adjunto nunca
+      // escribió `state` ni `humanTakeover` y no puede empezar a hacerlo por un default de tipos.
+      ...(out.state === undefined ? {} : { state: out.state }),
+      ...(out.humanTakeover === undefined ? {} : { humanTakeover: out.humanTakeover }),
+      ...(out.countUnread === undefined ? {} : { countUnread: out.countUnread }),
+      channel,
+      receivedVia: args.receivedVia,
+      waMessageId: desenlace.waMessageId,
+      viaMock: desenlace.viaMock,
+    });
+  } catch (e) {
+    logger.error('La respuesta salió pero no se pudo registrar en el chat', e, { tenantId });
+  }
+}
+
 export async function processWebhookEvent(eventId: string): Promise<void> {
   const ref = db().doc(paths.metaWebhookEvent(eventId));
   const snap = await ref.get();
@@ -98,6 +242,11 @@ export async function processWebhookEvent(eventId: string): Promise<void> {
       await ref.update({ processingStatus: 'ignored', errorMessage: !tenantId ? 'empresa no resuelta' : 'payload sin from/contenido', processedAt: Timestamp.now(), ...(esUbicacion ? { 'payload.location': null } : {}) });
       return;
     }
+
+    // Identidad del cliente dentro del tenant (solo dígitos). Se deriva UNA vez: los dos caminos
+    // que responden —ubicación nativa y bot/adjuntos— tienen que hablar del mismo `customerId`
+    // que lee el guard de silencio, o el chequeo miraría otra conversación.
+    const customerId = payload.from.replace(/[^0-9]/g, '');
 
     // Gate de empresa (Fase 4): suspendida o sobre el límite de mensajes → no procesar.
     const gate = await checkTenantInboundGate(tenantId);
@@ -135,6 +284,8 @@ export async function processWebhookEvent(eventId: string): Promise<void> {
         messageId: providerMessageId,
         receivedByPhoneNumberId: receivedBy,
         channel: platform,
+        // ADR-0016 §12: la burbuja de SALIDA la escribe el borde de envío, no el handler.
+        deferOutbound: true,
       });
       // OFF-INERTE (H1): con cobertura apagada la ubicación nativa es INERTE — comportamiento
       // heredado pre-Coverage: se IGNORA en silencio, SIN incrementMessageUsage ni reply. El inbox
@@ -147,16 +298,28 @@ export async function processWebhookEvent(eventId: string): Promise<void> {
       await incrementMessageUsage(tenantId).catch(() => { /* métrica de uso, no crítica */ });
       if (resultado.reply.trim()) {
         try {
-          // KILL-SWITCH-1: el cliente (resolución de credenciales) se construye ANTES del
-          // re-chequeo para que coberturaVigente sea la ÚLTIMA operación antes de sendText —
-          // sin E/S en el medio que reabra la ventana (mismo patrón que enviarPorOutbox).
+          // KILL-SWITCH-1: el cliente (resolución de credenciales) se construye ANTES de los
+          // re-chequeos para que ninguna E/S quede entre el último guard y el POST (mismo patrón
+          // que enviarPorOutbox). El re-chequeo de cobertura viaja como `gateFinal` para que lo
+          // evalúe el borde: resolverlo acá lo dejaría por DETRÁS de las lecturas del guard de
+          // silencio, que es exactamente la ventana que KILL-SWITCH-1 no puede tener.
           const client = await getWhatsAppClient(tenantId, undefined, receivedBy);
           await coverageHold(tenantId, 'reply_pre_send');
-          if (await coberturaVigente(tenantId, resultado.coverageActivationId ?? null)) {
-            await client.sendText(payload.from, resultado.reply, { tenantId, channel: platform });
-          } else {
-            logger.info('Cobertura: respuesta de ubicación NO enviada (kill-switch antes del envío)', { tenantId });
-          }
+          await entregarRespuestaAutomatica({
+            tenantId,
+            customerId,
+            to: payload.from,
+            texto: resultado.reply,
+            channel: platform,
+            receivedVia: receivedBy,
+            client,
+            outbound: resultado.outbound ?? null,
+            gateFinal: async () => {
+              const vigente = await coberturaVigente(tenantId, resultado.coverageActivationId ?? null);
+              if (!vigente) logger.info('Cobertura: respuesta de ubicación NO enviada (kill-switch antes del envío)', { tenantId });
+              return vigente;
+            },
+          });
         } catch (e) {
           logger.error('No se pudo entregar la respuesta de cobertura', e, { tenantId });
         }
@@ -185,7 +348,6 @@ export async function processWebhookEvent(eventId: string): Promise<void> {
     // PENDING_VERIFICATION y sacaba al bot del chat. Ahora el archivo se INGESTA SIEMPRE (existe
     // antes de significar nada) y recién después se consulta el gate, que es quien sabe si hay un
     // contexto de pago declarado. Sin ese contexto, el mensaje sigue su curso normal por el motor.
-    const customerId = payload.from.replace(/[^0-9]/g, '');
     /** Respuesta ESPECÍFICA sobre el archivo: la ingesta falló o el gate decidió decir algo. */
     let adjuntoReply = '';
     /** Acuse genérico. Es la red que impide el silencio; cede ante cualquier respuesta real. */
@@ -193,57 +355,81 @@ export async function processWebhookEvent(eventId: string): Promise<void> {
     let adjuntoAlmacenado = false;
     /** Caption del archivo. DECIDE con las reglas, pero jamás se persiste ni llega al modelo. */
     let adjuntoCaption = '';
+    /** NIVEL A del rollout apagado para este tenant ⇒ el archivo NO se toca (ADR-0016 §10). */
+    let ingestaApagada = false;
     if (adjunto) {
       adjuntoCaption = adjunto.caption.trim();
-      // ADR-0016 §8: tope de bytes y formatos son configuración POR TENANT. Sin esta línea el
-      // parámetro existía pero nadie lo pasaba y todos los tenants corrían con el default.
-      const limits = await getAttachmentIngestLimits(tenantId);
-      const ingesta = await ingestInboundAttachment({
-        tenantId,
-        customerId,
-        channel: platform,
-        providerMessageId,
-        attachment: adjunto,
-        receivedByPhoneNumberId: receivedBy,
-        limits,
-      });
-      adjuntoReply = ingesta.reply;
-      adjuntoAlmacenado = ingesta.ingestState === 'stored';
-      let motivo: AttachmentReplyReason | null = ingesta.reason;
-      /** true ⇒ el gate ya le dio significado de PAGO al archivo (y ya se acusó recibo antes). */
-      let yaPropuestoComoPago = false;
-      // El gate corre SOLO sobre un archivo efectivamente almacenado y solo la primera vez (un
-      // reintento no vuelve a proponer nada). Si falla, el adjunto YA está guardado y visible:
-      // la conversación no se rompe por un problema de clasificación.
-      if (!ingesta.duplicate && ingesta.attachment && ingesta.ingestState === 'stored') {
-        try {
-          const decision = await getAttachmentGate()({
-            tenantId,
-            customerId,
-            channel: platform,
-            attachment: ingesta.attachment,
-            messageId: ingesta.messageId,
-            receivedByPhoneNumberId: receivedBy,
-          });
-          if (decision.reply.trim()) adjuntoReply = decision.reply;
-          else motivo = decision.reason ?? null;
-          yaPropuestoComoPago =
-            decision.classification === 'payment_receipt_candidate' ||
-            decision.classification === 'payment_receipt_linked';
-        } catch (e) {
-          logger.error('Gate de adjunto falló (el archivo ya quedó guardado)', e, { tenantId, attachmentId: ingesta.attachmentId });
+      // ADR-0016 §10 — NIVEL A del rollout, fail-closed y por tenant. Una sola lectura trae el
+      // interruptor y los límites, que viven en el mismo doc de config. Sin esto la fundación de
+      // medios se encendía SOLA al desplegar: el primer webhook con imagen ya bajaba bytes de
+      // Graph para todos los tenants a la vez. §8 sigue valiendo: el tope y los formatos son
+      // configuración por tenant, no ramas en el código.
+      const politica = await getAttachmentIngestPolicy(tenantId);
+      if (!politica.enabled) {
+        ingestaApagada = true;
+        // El caption se DESCARTA acá mismo, no más abajo: sin ingesta no hay documento donde
+        // persistirlo y, sobre todo, no puede abrir un turno del motor (que terminaría en el
+        // modelo). §10 es taxativo: «sin caption a la IA, sin tocar pedidos, sin handoff».
+        adjuntoCaption = '';
+        // Cero Graph, cero Storage, cero documento de adjunto — pero el inbound queda VISIBLE y
+        // el cliente recibe una respuesta honesta. No se restaura el camino legacy.
+        const apagado = await recordAttachmentIngestDisabled({
+          tenantId,
+          customerId,
+          channel: platform,
+          providerMessageId,
+          attachment: adjunto,
+          receivedByPhoneNumberId: receivedBy,
+        });
+        adjuntoReply = apagado.reply;
+      } else {
+        const ingesta = await ingestInboundAttachment({
+          tenantId,
+          customerId,
+          channel: platform,
+          providerMessageId,
+          attachment: adjunto,
+          receivedByPhoneNumberId: receivedBy,
+          limits: politica.limits,
+        });
+        adjuntoReply = ingesta.reply;
+        adjuntoAlmacenado = ingesta.ingestState === 'stored';
+        let motivo: AttachmentReplyReason | null = ingesta.reason;
+        /** true ⇒ el gate ya le dio significado de PAGO al archivo (y ya se acusó recibo antes). */
+        let yaPropuestoComoPago = false;
+        // El gate corre SOLO sobre un archivo efectivamente almacenado y solo la primera vez (un
+        // reintento no vuelve a proponer nada). Si falla, el adjunto YA está guardado y visible:
+        // la conversación no se rompe por un problema de clasificación.
+        if (!ingesta.duplicate && ingesta.attachment && ingesta.ingestState === 'stored') {
+          try {
+            const decision = await getAttachmentGate()({
+              tenantId,
+              customerId,
+              channel: platform,
+              attachment: ingesta.attachment,
+              messageId: ingesta.messageId,
+              receivedByPhoneNumberId: receivedBy,
+            });
+            if (decision.reply.trim()) adjuntoReply = decision.reply;
+            else motivo = decision.reason ?? null;
+            yaPropuestoComoPago =
+              decision.classification === 'payment_receipt_candidate' ||
+              decision.classification === 'payment_receipt_linked';
+          } catch (e) {
+            logger.error('Gate de adjunto falló (el archivo ya quedó guardado)', e, { tenantId, attachmentId: ingesta.attachmentId });
+          }
         }
-      }
-      // ADR-0016 §4: «un rechazo NUNCA bloquea la conversación: se responde al cliente y queda
-      // rastro visible en el chat». Acá se cierra el agujero del SILENCIO TOTAL: el gate degradaba
-      // a `generic_media` con reply '' y —como el caption ya no se promueve a texto— no corría
-      // ningún bloque de envío. El cliente que mandaba el PDF del banco no recibía NADA y creía
-      // que nadie lo había visto. Toda recepción de archivo produce una respuesta honesta; la
-      // única excepción es la idempotencia: un reintento del webhook —o un archivo que el gate ya
-      // había propuesto como pago y por eso no vuelve a hablar— no repite el acuse.
-      if (!adjuntoReply.trim() && !ingesta.duplicate && !yaPropuestoComoPago) {
-        const clase: AttachmentReplyClass = ingesta.attachment?.class ?? adjunto.kind;
-        adjuntoAcuse = respuestaPorAdjunto(motivo, clase);
+        // ADR-0016 §4: «un rechazo NUNCA bloquea la conversación: se responde al cliente y queda
+        // rastro visible en el chat». Acá se cierra el agujero del SILENCIO TOTAL: el gate degradaba
+        // a `generic_media` con reply '' y —como el caption ya no se promueve a texto— no corría
+        // ningún bloque de envío. El cliente que mandaba el PDF del banco no recibía NADA y creía
+        // que nadie lo había visto. Toda recepción de archivo produce una respuesta honesta; la
+        // única excepción es la idempotencia: un reintento del webhook —o un archivo que el gate ya
+        // había propuesto como pago y por eso no vuelve a hablar— no repite el acuse.
+        if (!adjuntoReply.trim() && !ingesta.duplicate && !yaPropuestoComoPago) {
+          const clase: AttachmentReplyClass = ingesta.attachment?.class ?? adjunto.kind;
+          adjuntoAcuse = respuestaPorAdjunto(motivo, clase);
+        }
       }
     } else if (noSoportado) {
       // Audio/video/sticker: no se descarga nada, pero deja mensaje visible (antes se perdían).
@@ -276,8 +462,13 @@ export async function processWebhookEvent(eventId: string): Promise<void> {
     // evento que traiga adjunto Y texto solo puede venir de la forma vieja (ORDER-1B), donde el
     // caption SÍ se promovía a `text`. Tratarlo como texto libre lo mandaría derecho al modelo:
     // por eso la marca depende de que haya adjunto, no de dónde vino el texto.
+    //
+    // NIVEL A APAGADO: el archivo NUNCA abre turno del motor, ni por su caption ni por el `text`
+    // de un evento legacy (donde el caption venía promovido). No alcanza con vaciar el caption:
+    // esto es una garantía dura del §10 —«sin caption a la IA, sin tocar pedidos, sin handoff»—
+    // y no puede depender de que la respuesta del camino apagado nunca quede vacía.
     const hayRespuestaDelArchivo = adjuntoReply.trim() !== '';
-    const textoDelTurno = adjunto && hayRespuestaDelArchivo ? '' : payload.text || adjuntoCaption;
+    const textoDelTurno = adjunto && (hayRespuestaDelArchivo || ingestaApagada) ? '' : payload.text || adjuntoCaption;
     const esTurnoDeCaption = !!adjunto && textoDelTurno !== '';
     const result = textoDelTurno
       ? await handleMessage({
@@ -290,6 +481,9 @@ export async function processWebhookEvent(eventId: string): Promise<void> {
           // ante reintentos/duplicados del webhook.
           messageId: providerMessageId,
           ...(esTurnoDeCaption ? { attachmentCaption: true } : {}),
+          // ADR-0016 §12: el motor NO persiste su burbuja de salida. La escribe el borde de
+          // envío, después del chequeo autoritativo de silencio y con el desenlace real del POST.
+          deferOutbound: true,
         })
       : null;
     await incrementMessageUsage(tenantId).catch(() => { /* métrica de uso, no crítica */ });
@@ -318,24 +512,25 @@ export async function processWebhookEvent(eventId: string): Promise<void> {
         }));
     const puedeResponderElBot = respuestaDelArchivo.trim() !== '' && !result?.reply?.trim() && !silenciado;
     if (puedeResponderElBot) {
-      // ADR-0016: "se responde al cliente y QUEDA RASTRO VISIBLE EN EL CHAT". Se persiste ANTES
-      // de enviar —igual que hace el motor con sus propias respuestas— para que el vendedor abra
-      // la conversación y vea que al cliente ya se le contestó, aunque el envío después falle.
-      // Sin esto, el camino de adjuntos sería el único del sistema que responde fuera de acta.
-      try {
-        await appendMessage(tenantId, customerId, {
-          direction: 'out',
-          author: 'bot',
-          text: respuestaDelArchivo,
-          channel: platform,
-          receivedVia: receivedBy,
-        });
-      } catch (e) {
-        logger.error('No se pudo registrar en el chat la respuesta del adjunto', e, { tenantId });
-      }
+      // ADR-0016: "se responde al cliente y QUEDA RASTRO VISIBLE EN EL CHAT" — pero §12 fija el
+      // orden: primero el guard autoritativo, después el POST y recién ahí la burbuja. El chequeo
+      // de arriba (`silenciado`) queda como ATAJO barato —evita resolver credenciales cuando ya
+      // se sabe que no hay nada que decir—; la AUTORIDAD es el guard del borde. Persistir antes,
+      // como se hacía, dejaba en el chat un acuse que el vendedor lee como "ya le contestamos"
+      // aunque el envío se hubiera suprimido o Meta lo hubiera rechazado.
       try {
         const client = await getWhatsAppClient(tenantId, undefined, receivedBy);
-        await client.sendText(payload.from, respuestaDelArchivo, { tenantId, channel: platform });
+        await entregarRespuestaAutomatica({
+          tenantId,
+          customerId,
+          to: payload.from,
+          texto: respuestaDelArchivo,
+          channel: platform,
+          receivedVia: receivedBy,
+          client,
+          // Sin `state` ni `humanTakeover`: el acuse del adjunto nunca tocó el resumen del cliente.
+          outbound: { expectativa: EXIGE_SILENCIO_LIBRE },
+        });
       } catch (e) {
         logger.error('No se pudo entregar la respuesta del adjunto', e, { tenantId });
       }
@@ -344,30 +539,39 @@ export async function processWebhookEvent(eventId: string): Promise<void> {
     // Entregar la respuesta por el MISMO número que recibió (multi-número); mock/live intactos.
     if (result && result.reply && result.reply.trim() && !result.handledByHuman) {
       try {
-        // El cliente se construye ANTES del gate de cobertura para que, cuando el reply es de
-        // cobertura, coberturaVigente sea la ÚLTIMA operación antes del envío físico — sin E/S
-        // (resolución de credenciales) en el medio que reabra la ventana (mismo patrón que el outbox).
+        // El cliente se construye ANTES de los gates para que ninguna E/S (resolución de
+        // credenciales) quede entre el último chequeo y el envío físico — mismo patrón que el outbox.
         const client = await getWhatsAppClient(tenantId, undefined, receivedBy);
         // KILL-SWITCH-1: si el reply es de cobertura (coverageActivationId presente), se re-lee el
         // flag JUSTO antes del envío — un apagado de emergencia frena la solicitud de ubicación /
         // la promesa de revisión aún no enviadas. Los replies no-cobertura (id null) no se gatean.
+        // Va como `gateFinal` para que se evalúe DENTRO del borde: si se resolviera acá, las dos
+        // lecturas del guard de silencio quedarían entre el interruptor y el POST.
         const esCobertura = result.coverageActivationId != null;
         if (esCobertura) await coverageHold(tenantId, 'reply_pre_send');
-        const vigente = !esCobertura || (await coberturaVigente(tenantId, result.coverageActivationId ?? null));
-        if (!vigente) {
-          logger.info('Cobertura: respuesta NO enviada (kill-switch antes del envío)', { tenantId });
-        } else if (result.locationRequest && platform === 'whatsapp') {
-          // COVERAGE-1B: se intenta el botón nativo (location_request_message). Si el canal no es
-          // WhatsApp o el interactivo falla, FALLBACK TEXTUAL UNA SOLA VEZ (el texto ya incluye la
-          // alternativa escrita).
-          const lr = await client.sendLocationRequest(payload.from, result.reply, { tenantId, channel: platform });
-          if (!lr.ok) {
-            logger.info('Cobertura: location request falló, fallback textual', { tenantId, reason: lr.reason });
-            await client.sendText(payload.from, result.reply, { tenantId, channel: platform });
-          }
-        } else {
-          await client.sendText(payload.from, result.reply, { tenantId, channel: platform });
-        }
+        await entregarRespuestaAutomatica({
+          tenantId,
+          customerId,
+          to: payload.from,
+          texto: result.reply,
+          channel: platform,
+          receivedVia: receivedBy,
+          client,
+          ...(result.locationRequest ? { locationRequest: true } : {}),
+          // Fallback defensivo: con `deferOutbound` el motor SIEMPRE manda descriptor cuando hay
+          // texto. Si algún camino futuro se lo olvidara, preferimos registrar de más (con la
+          // vara estricta del silencio) antes que perder del historial algo que el cliente vio.
+          outbound: result.outbound ?? { expectativa: EXIGE_SILENCIO_LIBRE },
+          ...(esCobertura
+            ? {
+                gateFinal: async () => {
+                  const vigente = await coberturaVigente(tenantId, result.coverageActivationId ?? null);
+                  if (!vigente) logger.info('Cobertura: respuesta NO enviada (kill-switch antes del envío)', { tenantId });
+                  return vigente;
+                },
+              }
+            : {}),
+        });
       } catch (e) {
         logger.error('No se pudo entregar la respuesta del bot', e, { tenantId });
       }

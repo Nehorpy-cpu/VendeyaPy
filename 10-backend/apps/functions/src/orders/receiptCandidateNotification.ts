@@ -1,28 +1,33 @@
 /**
  * orders/receiptCandidateNotification.ts — La promesa al cliente tiene que existir del otro lado
  * ===============================================================================================
- * (ADR-0016 §3) Cuando el gate propone un comprobante, al cliente se le responde «queda cargado en
- * tu pedido y un vendedor lo revisa para confirmarlo». Esa frase compromete a una PERSONA. Sin
- * ninguna señal en el panel, la sugerencia quedaba esperando a que alguien abriera la conversación
- * correcta por casualidad: el archivo existía, el vínculo existía, y nadie se enteraba.
+ * (ADR-0016 §3 y §11) Cuando el gate propone un comprobante, al cliente se le responde «queda
+ * cargado en tu pedido y un vendedor lo revisa para confirmarlo». Esa frase compromete a una
+ * PERSONA. Sin ninguna señal en el panel, la sugerencia quedaba esperando a que alguien abriera la
+ * conversación correcta por casualidad: el archivo existía, el vínculo existía, y nadie se
+ * enteraba.
  *
  * Se reusa la campana que el panel YA tiene (`tenants/{t}/notifications`), con el mismo patrón de
- * idempotencia que `conversation/handoff.ts`: id determinístico + `create()`, así un reintento del
- * webhook no puede duplicar el aviso. No se inventa una colección nueva ni un mecanismo paralelo.
+ * idempotencia que `conversation/handoff.ts`: id determinístico, así un reintento del webhook no
+ * puede duplicar el aviso. No se inventa una colección nueva ni un mecanismo paralelo.
+ *
+ * ESTE MÓDULO ES PURO A PROPÓSITO: solo arma el id y el documento. Quien lo ESCRIBE es la misma
+ * transacción que crea el vínculo candidato (`orders/receiptStore.ts`), porque la promesa y la
+ * señal son un solo hecho (ADR-0016 §11). Antes había acá un escritor best-effort que corría
+ * después del commit: si fallaba, el candidato quedaba escrito, el mensaje salía igual y el
+ * cliente esperaba a alguien que nunca fue notificado. Un aviso perdido que promete una persona es
+ * peor que no prometer nada.
  *
  * LO QUE ESTE AVISO NO HACE, por contrato:
  *  · no mueve el pedido ni confirma un pago — sigue siendo una SUGERENCIA;
  *  · no hace handoff: el bot NO queda en pausa (eso es exactamente lo que el ADR vino a matar) y
- *    por eso el texto jamás dice que el asistente dejó de responder;
- *  · no bloquea la ingesta: si la campana falla, el archivo ya está guardado y visible igual.
+ *    por eso el texto jamás dice que el asistente dejó de responder.
  *
  * HIGIENE: nunca el teléfono completo (solo los últimos 4 dígitos, como el aviso de handoff),
  * nunca el mediaId del proveedor, nunca una ruta de Storage ni una URL firmada. El `attachmentId`
  * sí: es opaco por construcción y es lo que hace idempotente al aviso.
  */
 import { Timestamp } from 'firebase-admin/firestore';
-import { db, paths } from '../lib/firebase.js';
-import { logger } from '../lib/logger.js';
 
 /**
  * Tipo del aviso. Va como string y NO se suma todavía a `HandoffNotificationType` de `@vpw/shared`
@@ -82,45 +87,4 @@ export function buildReceiptCandidateNotification(
       createdAt: now,
     },
   };
-}
-
-export interface ReceiptCandidateNotifyDeps {
-  /** `create` (no `set`): la colisión de id ES la idempotencia. */
-  create: (tenantId: string, id: string, data: Record<string, unknown>) => Promise<void>;
-  now: () => Timestamp;
-}
-
-export const defaultReceiptCandidateNotifyDeps: ReceiptCandidateNotifyDeps = {
-  create: async (tenantId, id, data) => {
-    await db().doc(`${paths.notifications(tenantId)}/${id}`).create(data);
-  },
-  now: () => Timestamp.now(),
-};
-
-/**
- * Crea el aviso. Devuelve `true` si lo creó, `false` si ya existía o si no se pudo.
- *
- * BEST-EFFORT SIEMPRE: el vínculo candidato ya está persistido y el archivo ya se ve en el chat.
- * Hacer fallar la ingesta porque la campana no se pudo escribir cambiaría un aviso perdido por un
- * archivo perdido, que es peor y es justamente el bug que este programa vino a matar.
- */
-export async function notifyReceiptCandidate(
-  input: ReceiptCandidateNotificationInput,
-  deps: ReceiptCandidateNotifyDeps = defaultReceiptCandidateNotifyDeps,
-): Promise<boolean> {
-  const { id, data } = buildReceiptCandidateNotification(input, deps.now());
-  try {
-    await deps.create(input.tenantId, id, data);
-    return true;
-  } catch (e) {
-    const code = (e as { code?: number | string }).code;
-    if (code === 6 || code === 'already-exists') return false; // ya avisado: idempotencia
-    // Sin `customerId` (es el teléfono) y sin el mensaje crudo del error.
-    logger.warn('receiptGate: no se pudo crear el aviso del comprobante sugerido', {
-      tenantId: input.tenantId,
-      attachmentId: input.attachmentId,
-      error: e instanceof Error ? e.name : 'desconocido',
-    });
-    return false;
-  }
 }

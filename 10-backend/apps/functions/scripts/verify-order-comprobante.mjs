@@ -58,8 +58,15 @@ await db.doc(`tenants/${T}/metaAssets/${PNID}`).set({ id: PNID, tenantId: T, con
 await db.doc(`metaExternalIndex/whatsapp_${PNID}`).set({ id: `whatsapp_${PNID}`, tenantId: T, connectionId: 'main', assetType: 'whatsapp_phone_number', platform: 'whatsapp', externalId: PNID, status: 'active', updatedAt: now });
 const beforeChannels = (await db.doc(`tenants/${T}/config/channels`).get()).data() ?? null;
 await db.doc(`tenants/${T}/config/channels`).set({ whatsappSendMode: 'mock' });
-// El gate corre con la config por DEFECTO del tenant (ventana 24 h, formatos del contrato).
+// ROLLOUT (ADR-0016 §10): los dos niveles nacen APAGADOS, así que desplegar no enciende nada para
+// nadie. Todo lo que este script verifica es el camino del comprobante FUNCIONANDO, o sea que hay
+// que encenderlo a propósito — igual que habrá que hacerlo en producción, tenant por tenant. El
+// comportamiento con los flags apagados se verifica aparte, en `verify-attachments.mjs` (AT-23).
+// El resto de la config del gate queda en sus DEFAULTS (ventana 24 h, formatos del contrato).
+const beforeAttachmentsCfg = (await db.doc(`tenants/${T}/config/attachments`).get()).data() ?? null;
+await db.doc(`tenants/${T}/config/attachments`).set({ ingest: { enabled: true } }, { merge: true });
 await db.doc(`tenants/${T}/config/receiptGate`).delete().catch(() => {});
+await db.doc(`tenants/${T}/config/receiptGate`).set({ enabled: true });
 
 let midSeq = 0;
 const sentMids = [];
@@ -215,6 +222,11 @@ await db.doc(`tenants/${T}/metaAssets/${PNID}`).delete();
 await db.doc(`metaExternalIndex/whatsapp_${PNID}`).delete();
 for (const d of oldAssetDocs) await db.doc(`tenants/${T}/metaAssets/${d.id}`).set(d.data);
 if (beforeChannels) await db.doc(`tenants/${T}/config/channels`).set(beforeChannels); else await db.doc(`tenants/${T}/config/channels`).delete();
+// El rollout vuelve a quedar APAGADO: es el estado por defecto y ninguna suite posterior debería
+// heredar la fundación encendida sin haberla pedido.
+if (beforeAttachmentsCfg) await db.doc(`tenants/${T}/config/attachments`).set(beforeAttachmentsCfg);
+else await db.doc(`tenants/${T}/config/attachments`).delete().catch(() => {});
+await db.doc(`tenants/${T}/config/receiptGate`).delete().catch(() => {});
 
 const ok = results.every(Boolean);
 console.log(`\nRESULTADO ORDER-1B (comprobante por imagen, contrato ADR-0016): ${ok ? 'TODO OK ✅' : 'FALLOS ❌'} (${results.filter(Boolean).length}/${results.length})`);

@@ -35,6 +35,7 @@ import { executeHandoff, notifyHandoffRequested } from './handoff.js';
 import { esConsultaCobertura } from './coverageGuard.js';
 import { coverageHold } from './coverageTestHooks.js';
 import { appendMessage } from './messages.js';
+import { EXIGE_SILENCIO_LIBRE, type ExpectativaDeSilencio, type OutboundDiferido } from './silencio.js';
 import type { InboundLocation } from '../meta/parseWebhook.js';
 
 // ---------------------------------------------------------------------------
@@ -569,13 +570,17 @@ function vendedorParaCobertura(config: CheckoutConfig): string | null {
  * KILL-SWITCH-1: el takeover se toma con un GUARD dentro de la transacción del handoff — flag
  * vigente + misma activación + request todavía pendiente del MISMO tenant/cliente. Si el flag
  * cambió después de persistir la ubicación, NO se toma el chat NI se notifica.
+ *
+ * ADR-0016 §12: cuando SÍ tomó el chat devuelve además el `handoffSourceId` con el que quedó
+ * escrita la transición (el `requestId`, no el wamid). El borde de envío lo compara contra la
+ * sesión FRESCA para no confundir "tomado por este turno" con "tomado por otro en el medio".
  */
 async function derivarARevision(
   tenantId: string,
   customerId: string,
   registro: Extract<RegistroResultado, { kind: 'ok' }>,
   wamid: string | null,
-): Promise<{ reply: string; takeover: boolean }> {
+): Promise<{ reply: string; takeover: boolean; handoffSourceId?: string | null; prometeRevision?: boolean }> {
   await coverageHold(tenantId, 'pre_handoff'); // solo-emulador: test del kill-switch
   // Vendedor del handoff: el ASIGNADO al cliente (uid real, ya persistido en el request por la
   // transacción de registro); sin asignado, el primero activo de la config (solo display).
@@ -607,7 +612,12 @@ async function derivarARevision(
     // El flujo se apagó (o el request dejó de estar pendiente) entre la persistencia y el
     // handoff: sin takeover, sin campana, sin promesa de revisión — respuesta honesta neutra.
     logger.info('Cobertura: handoff bloqueado por kill-switch tras registrar la ubicación', { tenantId, customer: `…${customerId.slice(-4)}`, requestId: registro.requestId });
-    return { reply: registro.humanTakeover ? '' : MENSAJE_UBICACION_NO_PROCESABLE, takeover: false };
+    // `prometeRevision: false` es LO IMPORTANTE de este return. Esta respuesta no es del flujo de
+    // cobertura: es la que existe PORQUE el flujo se apagó, y le dice al cliente que no podemos
+    // procesar su ubicación. Etiquetarla con el `activationId` la haría pasar por el kill-switch
+    // —que ya está apagado— y el cliente quedaría en silencio total justo cuando más falta hace
+    // explicarle algo. El interruptor de emergencia frena las promesas del flujo, no la honestidad.
+    return { reply: registro.humanTakeover ? '' : MENSAJE_UBICACION_NO_PROCESABLE, takeover: false, prometeRevision: false };
   }
   // Aviso a la campana: SIEMPRE tras persistir (salvo bloqueo), deduplicado por wamid (un webhook
   // repetido no duplica; una ubicación NUEVA con wamid nuevo sí avisa — el equipo ve la
@@ -615,18 +625,18 @@ async function derivarARevision(
   await notifyHandoffRequested(tenantId, customerId, sellerName, wamid, 'coverage_review', registro.sellerUid ?? null);
   if (hr.ok && !hr.already) {
     logger.info('Cobertura: ubicación registrada → revisión humana', { tenantId, customer: `…${customerId.slice(-4)}`, requestId: registro.requestId });
-    return { reply: MENSAJE_UBICACION_RECIBIDA, takeover: true };
+    return { reply: MENSAJE_UBICACION_RECIBIDA, takeover: true, handoffSourceId: registro.requestId };
   }
   if (hr.already && registro.handoffReason === 'coverage_review') {
     // Ya estaba en revisión de cobertura (actualización de ubicación / carrera del webhook).
-    return { reply: registro.primeraVez ? MENSAJE_UBICACION_RECIBIDA : MENSAJE_UBICACION_ACTUALIZADA, takeover: true };
+    return { reply: registro.primeraVez ? MENSAJE_UBICACION_RECIBIDA : MENSAJE_UBICACION_ACTUALIZADA, takeover: true, handoffSourceId: registro.requestId };
   }
   if (hr.already && registro.handoffReason === null) {
     // Carrera nativa+texto casi simultáneas: la razón leída en la tx quedó stale — si el
     // takeover FRESCO apunta a ESTE request, es nuestro propio flujo: confirmar igual (review).
     const fresh = (await db().doc(paths.session(tenantId, customerId)).get()).data() as Session | undefined;
     if (fresh?.context?.handoffReason === 'coverage_review' && fresh?.context?.handoffSourceId === registro.requestId) {
-      return { reply: registro.primeraVez ? MENSAJE_UBICACION_RECIBIDA : MENSAJE_UBICACION_ACTUALIZADA, takeover: true };
+      return { reply: registro.primeraVez ? MENSAJE_UBICACION_RECIBIDA : MENSAJE_UBICACION_ACTUALIZADA, takeover: true, handoffSourceId: registro.requestId };
     }
   }
   if (hr.already) {
@@ -651,6 +661,13 @@ export interface UbicacionEntranteInput {
   messageId: string | null;
   receivedByPhoneNumberId: string | null;
   channel: MessageChannel;
+  /**
+   * ADR-0016 §12: el caller se hace cargo del BORDE DE ENVÍO. Con esto en true la burbuja de
+   * SALIDA no se escribe acá: viaja como descriptor (`outbound`) y la persiste process.ts recién
+   * después del chequeo autoritativo de silencio y del POST. El placeholder de ENTRADA
+   * (`📍 Ubicación recibida`) se sigue escribiendo siempre: el inbound ocurrió, no se suprime.
+   */
+  deferOutbound?: boolean;
 }
 
 /**
@@ -660,7 +677,7 @@ export interface UbicacionEntranteInput {
  * antes de mandarla) + `inerte` (OFF-INERTE: con cobertura apagada la ubicación es INERTE —
  * ni placeholder, ni reply, ni registro, ni handoff, ni uso; el inbox conserva solo la redacción).
  */
-export async function procesarUbicacionEntrante(input: UbicacionEntranteInput): Promise<{ reply: string; coverageActivationId?: string | null; inerte?: boolean }> {
+export async function procesarUbicacionEntrante(input: UbicacionEntranteInput): Promise<{ reply: string; coverageActivationId?: string | null; inerte?: boolean; outbound?: OutboundDiferido }> {
   const { tenantId } = input;
   const customerId = input.from.replace(/[^0-9]/g, '');
   if (!customerId) return { reply: '', inerte: true };
@@ -694,10 +711,16 @@ export async function procesarUbicacionEntrante(input: UbicacionEntranteInput): 
     // G.10: la persistencia falló ANTES de cualquier escritura de historial — mensaje temporal
     // honesto, sin placeholder (nada quedó registrado).
     logger.error('Cobertura: no se pudo registrar la ubicación', e, { tenantId, customer: `…${customerId.slice(-4)}` });
-    if (!humanTakeover) {
+    if (!humanTakeover && !input.deferOutbound) {
       await appendMessage(tenantId, customerId, { direction: 'out', author: 'bot', text: MENSAJE_UBICACION_FALLO, now: Timestamp.now(), state: ses?.state ?? null, humanTakeover, countUnread: false, channel: input.channel, receivedVia: input.receivedByPhoneNumberId ?? null });
     }
-    return { reply: humanTakeover ? '' : MENSAJE_UBICACION_FALLO, coverageActivationId: null };
+    return {
+      reply: humanTakeover ? '' : MENSAJE_UBICACION_FALLO,
+      coverageActivationId: null,
+      ...(input.deferOutbound && !humanTakeover
+        ? { outbound: { state: ses?.state ?? null, humanTakeover, countUnread: false, expectativa: EXIGE_SILENCIO_LIBRE } }
+        : {}),
+    };
   }
 
   // OFF-INERTE (carrera): el flag se apagó ENTRE la lectura inicial y la transacción de registro.
@@ -718,13 +741,22 @@ export async function procesarUbicacionEntrante(input: UbicacionEntranteInput): 
     receivedVia: input.receivedByPhoneNumberId ?? null,
   });
 
+  // §12: por default toda respuesta de este camino es autónoma del bot. Solo la confirmación de
+  // la revisión que ESTE turno acaba de tomar se mide con la vara del handoff propio.
+  let expectativa: ExpectativaDeSilencio = EXIGE_SILENCIO_LIBRE;
   if (registro.kind === 'ok') {
     const r = await derivarARevision(tenantId, customerId, registro, input.messageId);
     reply = r.reply;
     enTakeover = enTakeover || r.takeover;
-    // La respuesta CONFIRMA/PROMETE revisión (con o sin takeover — el borde "sesión desaparecida"
-    // devuelve la promesa sin takeover): siempre se etiqueta para gatearla antes de Meta.
-    if (reply.trim()) coverageActivationId = cfg.activationId;
+    if (r.takeover) expectativa = { modo: 'confirma_handoff_propio', sourceId: r.handoffSourceId ?? null };
+    // Se etiqueta con el `activationId` —y por lo tanto pasa por el kill-switch antes de Meta—
+    // SOLO la respuesta que CONFIRMA o PROMETE revisión (con o sin takeover: el borde "sesión
+    // desaparecida" devuelve la promesa sin takeover). La respuesta honesta que devuelve el guard
+    // cuando el flujo ya se apagó NO se etiqueta: gatearla con el interruptor que la provocó
+    // dejaría al cliente sin ninguna respuesta a su ubicación. Antes esto no se notaba porque la
+    // burbuja se persistía aunque el envío se frenara: el panel mostraba una respuesta que el
+    // cliente nunca había recibido.
+    if (reply.trim() && r.prometeRevision !== false) coverageActivationId = cfg.activationId;
   } else if (registro.kind === 'expired') {
     reply = humanTakeover ? '' : MENSAJE_INTENTO_VENCIDO;
   } else if (registro.kind === 'approved_activo') {
@@ -734,7 +766,7 @@ export async function procesarUbicacionEntrante(input: UbicacionEntranteInput): 
     reply = humanTakeover ? '' : MENSAJE_UBICACION_SIN_PEDIDO;
   }
 
-  if (reply.trim()) {
+  if (reply.trim() && !input.deferOutbound) {
     await appendMessage(tenantId, customerId, {
       direction: 'out',
       author: 'bot',
@@ -747,7 +779,13 @@ export async function procesarUbicacionEntrante(input: UbicacionEntranteInput): 
       receivedVia: input.receivedByPhoneNumberId ?? null,
     });
   }
-  return { reply, coverageActivationId };
+  return {
+    reply,
+    coverageActivationId,
+    ...(reply.trim() && input.deferOutbound
+      ? { outbound: { state: ses?.state ?? null, humanTakeover: enTakeover, countUnread: false, expectativa } }
+      : {}),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -764,6 +802,12 @@ export interface TurnoEsperaResultado {
   locationRequest?: boolean;
   /** KILL-SWITCH-1: activación del reply — process.ts re-lee el flag antes del envío físico. */
   coverageActivationId?: string | null;
+  /**
+   * ADR-0016 §12: solo con `takeover: true`. `requestId` con el que quedó escrita la transición
+   * `coverage_review`; el borde de envío lo compara contra el `handoffSourceId` fresco de la
+   * sesión para dejar salir la confirmación PROPIA y frenar la que quedó bajo un takeover ajeno.
+   */
+  handoffSourceId?: string | null;
 }
 
 /**
@@ -827,7 +871,12 @@ export async function manejarTurnoEnEsperaUbicacion(
     if (registro.kind === 'approved_activo') return { takeover: false, reply: MENSAJE_ZONA_YA_CONFIRMADA, coverageActivationId: act };
     if (registro.kind === 'no_active') return null; // el flujo normal atiende el turno
     const r = await derivarARevision(tenantId, customerId, registro, opts.messageId ?? null);
-    return { takeover: r.takeover, reply: r.reply, coverageActivationId: act, ...(r.takeover ? {} : { coverage: registro.ptr }) };
+    return {
+      takeover: r.takeover,
+      reply: r.reply,
+      coverageActivationId: act,
+      ...(r.takeover ? { handoffSourceId: r.handoffSourceId ?? null } : { coverage: registro.ptr }),
+    };
   } catch (e) {
     logger.error('Cobertura: no se pudo registrar la dirección', e, { tenantId, customer: `…${customerId.slice(-4)}` });
     return { takeover: false, reply: MENSAJE_UBICACION_FALLO };

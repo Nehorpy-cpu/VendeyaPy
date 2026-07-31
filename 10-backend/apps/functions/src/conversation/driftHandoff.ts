@@ -33,6 +33,13 @@ export interface DerivarPorDerivaResult {
   /** true = takeover persistido (o simulado): el caller responde DESPUÉS de esto. */
   takeover: boolean;
   reply: string;
+  /**
+   * ADR-0016 §12: `sourceId` con el que se persistió la transición (`deriva-{ids}`). El borde de
+   * envío lo compara contra el `handoffSourceId` FRESCO de la sesión para distinguir "el chat
+   * está tomado por este mismo turno" de "un vendedor lo tomó en el medio". Solo viene cuando
+   * hubo takeover REAL: en simulación no se persistió ninguna transición que confirmar.
+   */
+  handoffSourceId?: string | null;
 }
 
 export interface DerivarPorDerivaDeps {
@@ -148,5 +155,5 @@ async function derivarInterno(
   }
   await deps.notify(tenantId, customerId, vendedor.name, sourceId, 'catalog_drift').catch(() => false);
   logger.info('Deriva de catálogo → handoff persistido', { tenantId, customer: cliente, ...resumenSaneado(veredicto) });
-  return { takeover: true, reply };
+  return { takeover: true, reply, handoffSourceId: sourceId };
 }

@@ -59,6 +59,13 @@ const order = (
   ...over,
 });
 
+/**
+ * Config del tenant con el NIVEL B ENCENDIDO. El default del código está en OFF (ADR-0016 §10),
+ * así que estos escenarios —que prueban las REGLAS del gate— tienen que encenderlo explícitamente.
+ * El apagado vive en `receiptGateRollout.test.ts`.
+ */
+const CONFIG_ENCENDIDA = { ...DEFAULT_RECEIPT_GATE_CONFIG, enabled: true };
+
 const input = (over: Partial<ReceiptGateInput> = {}): ReceiptGateInput => ({
   tenantId: TENANT,
   customerId: CLIENTE,
@@ -66,7 +73,7 @@ const input = (over: Partial<ReceiptGateInput> = {}): ReceiptGateInput => ({
   attachment: attachment(),
   session: { awaitingPaymentDeclared: true, pendingOrderId: 'ord_1' },
   candidateOrders: [order('ord_1', 'PENDING_PAYMENT')],
-  config: DEFAULT_RECEIPT_GATE_CONFIG,
+  config: CONFIG_ENCENDIDA,
   ...over,
 });
 
@@ -134,7 +141,7 @@ describe('receiptGate — los 9 escenarios de la etapa A', () => {
       evaluateReceiptGate(
         input({
           candidateOrders: [viejo],
-          config: normalizeReceiptGateConfig({ windowMinutes: 60 * 48 }),
+          config: normalizeReceiptGateConfig({ enabled: true, windowMinutes: 60 * 48 }),
         }),
       ).ok,
     ).toBe(true);
@@ -224,7 +231,7 @@ describe('receiptGate — contexto y ventana', () => {
       nowMs: NOW,
       session: { awaitingPaymentDeclared: true, pendingOrderId: 'ord_1' },
       candidateOrders: [order('ord_1', 'PENDING_PAYMENT')],
-      config: DEFAULT_RECEIPT_GATE_CONFIG,
+      config: CONFIG_ENCENDIDA,
       ...over,
     });
 

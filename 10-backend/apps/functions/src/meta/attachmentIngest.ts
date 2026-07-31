@@ -74,6 +74,17 @@ export const ATTACHMENT_MESSAGE_MARKER: Readonly<Record<InboundAttachment['kind'
   document: '📄 Archivo recibido',
 };
 
+/**
+ * MARCADOR del historial cuando el NIVEL A del rollout está apagado (ADR-0016 §10). Es distinto
+ * del marcador normal a propósito: aquel promete un archivo que se puede abrir desde el panel, y
+ * acá no hay archivo. Decirle al vendedor "Imagen recibida" sin que exista adjunto sería la misma
+ * mentira que este programa vino a corregir del lado del cliente.
+ */
+export const ATTACHMENT_INGEST_DISABLED_MARKER: Readonly<Record<InboundAttachment['kind'], string>> = {
+  image: '📷 Imagen recibida (no se guardó: adjuntos desactivados)',
+  document: '📄 Archivo recibido (no se guardó: adjuntos desactivados)',
+};
+
 /** Mensajes de tipos aún no soportados: uno para el HISTORIAL y otro (opcional) para el cliente. */
 const UNSUPPORTED_COPY: Readonly<
   Record<UnsupportedInboundKind, { historial: string; reply: string }>
@@ -455,6 +466,53 @@ export async function ingestInboundAttachment(
 export interface UnsupportedInboundResult {
   messageId: string;
   reply: string;
+}
+
+/**
+ * NIVEL A DEL ROLLOUT APAGADO (ADR-0016 §10). El tenant todavía no encendió
+ * `config/attachments.ingest.enabled`, así que NO se toca Graph, NO se escribe un byte en Storage
+ * y NO se crea documento de adjunto — pero el inbound tampoco puede desaparecer: queda un mensaje
+ * neutral estructurado en la conversación y el cliente recibe una respuesta honesta.
+ *
+ * Es deliberadamente hermana de `recordUnsupportedInbound` y no una variante de la ingesta: las
+ * dos describen el mismo hecho —"llegó algo que no vamos a procesar, y se dice"— y ninguna de las
+ * dos tiene efectos de negocio. Acá NO se revive el camino legacy de "toda imagen es un
+ * comprobante": no se miran pedidos, no se clasifica nada y no se hace handoff.
+ *
+ * El `docId` es el MISMO id determinístico que usaría la ingesta real: un reintento del webhook no
+ * duplica la burbuja, y si más adelante el tenant enciende el flag, la ingesta de un mensaje nuevo
+ * sigue funcionando igual (el adjunto viejo no se inventa retroactivamente — sus bytes ya no
+ * existen del lado de Meta).
+ */
+export async function recordAttachmentIngestDisabled(input: {
+  tenantId: string;
+  customerId: string;
+  channel: MessageChannel;
+  providerMessageId: string;
+  attachment: InboundAttachment;
+  receivedByPhoneNumberId?: string | null;
+  now?: Timestamp;
+}): Promise<UnsupportedInboundResult> {
+  const messageId = hashProviderMessageId(input.tenantId, input.providerMessageId);
+  await appendMessage(input.tenantId, input.customerId, {
+    direction: 'in',
+    author: 'customer',
+    // El marcador es del SISTEMA, nunca el caption del cliente: el caption entraría al prompt del
+    // modelo por el historial en el turno siguiente (ADR-0016 §9). Con el nivel A apagado el
+    // caption no se persiste en ningún lado, porque no hay documento de adjunto donde ponerlo.
+    text: ATTACHMENT_INGEST_DISABLED_MARKER[input.attachment.kind],
+    now: input.now ?? Timestamp.now(),
+    channel: input.channel,
+    receivedVia: input.receivedByPhoneNumberId ?? null,
+    docId: messageId, // idempotente: un reintento no repite la burbuja
+    // SIN `attachmentIds`: el panel decide que hay adjunto por ese campo y por nada más
+    // (ADR-0016 §1). Un puntero a un documento que no existe rompería el visor.
+  });
+  logger.info('attachment: ingesta APAGADA para el tenant, el archivo no se descarga', {
+    tenantId: input.tenantId,
+    kind: input.attachment.kind,
+  });
+  return { messageId, reply: respuestaPorAdjunto('ingest_disabled', input.attachment.kind) };
 }
 
 /**

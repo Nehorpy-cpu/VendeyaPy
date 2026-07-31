@@ -1,17 +1,18 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import { Timestamp } from 'firebase-admin/firestore';
 import {
   RECEIPT_CANDIDATE_NOTIFICATION_CATEGORY,
   buildReceiptCandidateNotification,
-  notifyReceiptCandidate,
   receiptCandidateNotificationId,
-  type ReceiptCandidateNotifyDeps,
 } from './receiptCandidateNotification.js';
 
 /**
  * DISCRIMINANTE B2 — al cliente se le promete que «un vendedor lo revisa». Este archivo prueba
  * que esa promesa produce una SEÑAL real, idempotente, que nadie confunde con un pago confirmado
  * y que no filtra el teléfono del cliente.
+ *
+ * La ESCRITURA del aviso se prueba en `receiptGateRollout.test.ts`: desde ADR-0016 §11 la hace la
+ * misma transacción que crea el candidato, así que acá solo queda la forma del documento.
  */
 const TENANT = 'tnt_demo';
 const CLIENTE = '595981000111';
@@ -19,12 +20,6 @@ const ATT = 'att_0123456789abcdef01234567';
 const NOW = Timestamp.fromMillis(1_700_000_000_000);
 
 const entrada = { tenantId: TENANT, customerId: CLIENTE, orderId: 'ord_1', attachmentId: ATT };
-
-const deps = (over: Partial<ReceiptCandidateNotifyDeps> = {}): ReceiptCandidateNotifyDeps => ({
-  create: vi.fn(async () => undefined),
-  now: () => NOW,
-  ...over,
-});
 
 describe('receiptCandidateNotification — la señal operativa del candidato', () => {
   it('el aviso usa la campana EXISTENTE y apunta a la conversación del cliente', () => {
@@ -67,23 +62,19 @@ describe('receiptCandidateNotification — la señal operativa del candidato', (
     expect(receiptCandidateNotificationId('att_../../otro')).not.toMatch(/[/]/);
   });
 
-  it('crea el aviso una sola vez: el reintento del webhook choca con el id y no duplica', async () => {
-    const yaExiste = Object.assign(new Error('already exists'), { code: 6 });
-    const d = deps({ create: vi.fn(async () => { throw yaExiste; }) });
-
-    await expect(notifyReceiptCandidate(entrada, d)).resolves.toBe(false);
-    expect(d.create).toHaveBeenCalledTimes(1);
-    expect(d.create).toHaveBeenCalledWith(TENANT, `receipt-candidate-${ATT}`, expect.objectContaining({ tenantId: TENANT }));
+  it('el documento es determinístico: mismos datos ⇒ mismo id y mismo cuerpo', () => {
+    const a = buildReceiptCandidateNotification(entrada, NOW);
+    const b = buildReceiptCandidateNotification(entrada, NOW);
+    expect(a).toEqual(b);
+    // Y el id que se guarda ADENTRO coincide con el que nombra el documento: el `create` de la
+    // transacción usa ese id, así que si se desincronizaran la campana se duplicaría.
+    expect(a.data['id']).toBe(a.id);
+    expect(a.data['tenantId']).toBe(TENANT);
   });
 
-  it('BEST-EFFORT: si la campana falla, NO se propaga el error (el archivo ya está guardado)', async () => {
-    const d = deps({ create: vi.fn(async () => { throw new Error('firestore caído'); }) });
-    await expect(notifyReceiptCandidate(entrada, d)).resolves.toBe(false);
-  });
-
-  it('camino feliz: devuelve true y escribe una sola vez', async () => {
-    const d = deps();
-    await expect(notifyReceiptCandidate(entrada, d)).resolves.toBe(true);
-    expect(d.create).toHaveBeenCalledTimes(1);
+  it('el aviso no lleva rutas de Storage, URLs firmadas ni ids del proveedor', () => {
+    const { data } = buildReceiptCandidateNotification(entrada, NOW);
+    const serializado = JSON.stringify(data);
+    expect(serializado).not.toMatch(/https?:|tenants\/|wamid\.|storage/i);
   });
 });

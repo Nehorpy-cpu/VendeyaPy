@@ -103,6 +103,8 @@ const C = {
   descargaFallida: '595984100014',// AT-14
   legacy: '595984100019',         // AT-19
   textoFalso: '595984100020',     // AT-20
+  rolloutGateOff: '595984100021', // AT-23a..f (nivel B apagado)
+  rolloutIngestOff: '595984100022',// AT-23g..k (nivel A apagado)
 };
 const CLIENTES = Object.values(C);
 
@@ -199,9 +201,18 @@ const channelsPrevio = (await db.doc(`tenants/${T}/config/channels`).get()).data
 await db.doc(`tenants/${T}/config/channels`).set({ whatsappSendMode: 'mock' });
 const agentPrevio = (await db.doc(`tenants/${T}/config/agent`).get()).data() ?? null;
 await db.doc(`tenants/${T}/config/agent`).set({ botEnabled: true, greetingMessage: 'Hola, soy el bot de la prueba' }, { merge: true });
-// El gate de comprobante corre con la config POR DEFECTO (ventana 24 h, formatos del contrato):
-// un doc heredado de otra corrida cambiaría la ventana y AT-3 sería un espejismo.
+// ROLLOUT (ADR-0016 §10). Los dos niveles nacen APAGADOS: desplegar no enciende nada para nadie.
+// Todo lo que verifica AT-1..AT-22 es la fundación FUNCIONANDO, así que hay que encenderla a
+// propósito — igual que habrá que hacerlo en producción, tenant por tenant. Que este bloque sea
+// necesario ES parte de la garantía: si se borrara, el script fallaría en AT-1, que es
+// exactamente lo que tiene que pasar cuando los flags no están.
+// Los flags van en `set` con merge para no pisar `retention` si otra corrida lo dejó escrito, y
+// el resto de la config del gate queda en sus DEFAULTS (ventana 24 h, formatos del contrato): un
+// doc heredado de otra corrida cambiaría la ventana y AT-3 sería un espejismo.
+const attachmentsCfgPrevio = (await db.doc(`tenants/${T}/config/attachments`).get()).data() ?? null;
+await db.doc(`tenants/${T}/config/attachments`).set({ ingest: { enabled: true } }, { merge: true });
 await db.doc(`tenants/${T}/config/receiptGate`).delete().catch(() => {});
+await db.doc(`tenants/${T}/config/receiptGate`).set({ enabled: true });
 
 const owner = await signIn('owner@perfumeria.com');
 const seller = await signIn('seller@perfumeria.com');
@@ -969,9 +980,98 @@ const IA_TRAS_ADJUNTOS = await usoIa();
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// AT-23 · ROLLOUT EN DOS NIVELES, FAIL-CLOSED (ADR-0016 §10)
+// Va al final a propósito: apaga los flags, así que cualquier check posterior mediría el sistema
+// apagado. Es el ÚNICO bloque que prueba el estado REAL del día del deploy —ningún tenant tiene
+// estos documentos— y por eso no puede faltar: sin él, el E2E entero solo sabe describir la
+// fundación encendida.
+// ═══════════════════════════════════════════════════════════════════════════
+{
+  const iaAntesDeApagar = await usoIa();
+
+  // ── Nivel B apagado (la ingesta sigue encendida) ──────────────────────────
+  await db.doc(`tenants/${T}/config/receiptGate`).set({ enabled: false });
+  const ordenB = await mkOrder(C.rolloutGateOff);
+  await setSesion(C.rolloutGateOff, { pendingOrderId: ordenB });
+  const rB = await mandarArchivo(C.rolloutGateOff, { mediaId: 'MEDIA-AT-23B' });
+  const docB = await esperarClasificacion(rB.attachmentId, 'generic_media');
+  storagePathsCreados.push(buildAttachmentStoragePath(T, rB.attachmentId));
+  check('AT-23a. nivel B apagado: el archivo SÍ se guarda, pero queda `generic_media`',
+    docB?.ingestState === 'stored' && docB?.classification?.value === 'generic_media' && docB?.orderCandidateId === null,
+    `ingest=${docB?.ingestState} class=${docB?.classification?.value} candidato=${docB?.orderCandidateId}`);
+  const pedidoB = await orderDoc(ordenB);
+  const avisosB = await db.collection(`tenants/${T}/notifications`).where('type', '==', 'handoff_receipt_candidate').get();
+  check('AT-23b. sin candidato no hay campana ni el pedido se toca (§10 + §11)',
+    (pedidoB?.receiptAttachments?.candidateIds ?? []).length === 0 && pedidoB?.status === 'PENDING_PAYMENT' &&
+    avisosB.docs.every((d) => d.data().customerId !== C.rolloutGateOff),
+    `candidatos=${JSON.stringify(pedidoB?.receiptAttachments?.candidateIds ?? [])} status=${pedidoB?.status} avisos=${avisosB.size}`);
+  // El genérico invita a escribir *pagar* para vincular el archivo: con el nivel B apagado esa
+  // vinculación no existe por ningún camino, así que ese texto sería una mentira y un bucle.
+  const msgsB = await mensajesDe(C.rolloutGateOff);
+  const salidaB = msgsB.filter((m) => m.direction === 'out').map((m) => (m.text ?? '').toLowerCase());
+  check('AT-23c. al cliente se le responde, sin prometer una vinculación imposible',
+    salidaB.length > 0 && salidaB.every((t) => !t.includes('*pagar*')),
+    `salidas=${salidaB.length}`);
+  const marcarOff = await call('attachmentMarkAsReceipt', seller, { attachmentId: rB.attachmentId, orderId: ordenB });
+  check('AT-23d. `attachmentMarkAsReceipt` RECHAZA con el nivel B apagado',
+    marcarOff.err === 'FAILED_PRECONDITION' && (await orderDoc(ordenB))?.status === 'PENDING_PAYMENT',
+    `err=${marcarOff.err ?? 'ninguno'} status=${(await orderDoc(ordenB))?.status}`);
+  // La asimetría del §10: apagar una función no puede dejar atrapada una decisión humana ya
+  // tomada. El adjunto canónico quedó marcado antes, con el gate encendido.
+  const desmarcarOff = await call('attachmentUnmarkReceipt', seller, { attachmentId: adjuntoCandidato, orderId: ordenCandidato });
+  check('AT-23e. pero `attachmentUnmarkReceipt` SIGUE disponible con el flag apagado',
+    desmarcarOff.err === null && (await attachmentDoc(adjuntoCandidato))?.classification?.value === 'generic_media',
+    `err=${desmarcarOff.err ?? 'ninguno'} class=${(await attachmentDoc(adjuntoCandidato))?.classification?.value}`);
+  const marcadoPrevio = await attachmentDoc(adjuntoPagado);
+  check('AT-23f. y apagar el nivel B no oculta ni borra nada de lo ya guardado',
+    marcadoPrevio?.classification?.value === 'payment_receipt_linked' && marcadoPrevio?.purgedAt === null &&
+    (await bucket.file(buildAttachmentStoragePath(T, adjuntoPagado)).exists())[0] === true,
+    `class=${marcadoPrevio?.classification?.value}`);
+
+  // ── Nivel A apagado: ni un byte ───────────────────────────────────────────
+  await db.doc(`tenants/${T}/config/attachments`).set({ ingest: { enabled: false } }, { merge: true });
+  const ordenA = await mkOrder(C.rolloutIngestOff);
+  await setSesion(C.rolloutIngestOff, { pendingOrderId: ordenA });
+  const rA = await mandarArchivo(C.rolloutIngestOff, { mediaId: 'MEDIA-AT-23A', caption: 'ya te pagué, confirmame' });
+  const docA = await attachmentDoc(rA.attachmentId);
+  const [existeA] = await bucket.file(buildAttachmentStoragePath(T, rA.attachmentId)).exists();
+  check('AT-23g. nivel A apagado: CERO documento de adjunto y CERO bytes en Storage',
+    rA.status === 200 && docA === null && existeA === false,
+    `status=${rA.status} doc=${docA === null ? 'no' : 'sí'} archivo=${existeA}`);
+  const msgsA = await mensajesDe(C.rolloutIngestOff);
+  check('AT-23h. pero el inbound NO desaparece: queda visible y el cliente recibe respuesta',
+    msgsA.some((m) => m.direction === 'in') && msgsA.some((m) => m.direction === 'out' && (m.text ?? '').trim() !== ''),
+    `entradas=${msgsA.filter((m) => m.direction === 'in').length} salidas=${msgsA.filter((m) => m.direction === 'out').length}`);
+  // §10 es taxativo: «sin caption a la IA, sin tocar pedidos, sin handoff». El caption de este
+  // envío ("ya te pagué, confirmame") es justo el que dispararía el camino legacy si reviviera.
+  const iaTrasApagar = await usoIa();
+  check('AT-23i. el caption no queda en el historial ni abre turno del motor (no llega a la IA)',
+    msgsA.every((m) => !(m.text ?? '').includes('ya te pagué')) &&
+    iaTrasApagar.tokens === iaAntesDeApagar.tokens && iaTrasApagar.costo === iaAntesDeApagar.costo,
+    `tokens ${iaAntesDeApagar.tokens}→${iaTrasApagar.tokens}`);
+  const pedidoA = await orderDoc(ordenA);
+  const sesionA = await sessionDoc(C.rolloutIngestOff);
+  check('AT-23j. y CERO mutación comercial: el pedido no se mueve, sin handoff y sin takeover',
+    pedidoA?.status === 'PENDING_PAYMENT' && sesionA?.context?.humanTakeover !== true &&
+    !(await db.doc(`tenants/${T}/handoffs/${ordenA}`).get()).exists,
+    `status=${pedidoA?.status} takeover=${sesionA?.context?.humanTakeover}`);
+  // Fail-closed de verdad: las formas que NO son el booleano exacto `true` no encienden nada.
+  for (const valor of ['true', 1]) {
+    await db.doc(`tenants/${T}/config/attachments`).set({ ingest: { enabled: valor } }, { merge: true });
+    const r = await mandarArchivo(C.rolloutIngestOff, { mediaId: `MEDIA-AT-23-${valor}` });
+    check(`AT-23k. \`enabled: ${JSON.stringify(valor)}\` NO enciende la ingesta (solo el booleano exacto)`,
+      (await attachmentDoc(r.attachmentId)) === null,
+      `doc=${(await attachmentDoc(r.attachmentId)) === null ? 'no' : 'sí'}`);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Limpieza (deja el emulador listo para las regresiones)
 // ═══════════════════════════════════════════════════════════════════════════
 await wipePrograma();
+if (attachmentsCfgPrevio) await db.doc(`tenants/${T}/config/attachments`).set(attachmentsCfgPrevio);
+else await db.doc(`tenants/${T}/config/attachments`).delete().catch(() => {});
+await db.doc(`tenants/${T}/config/receiptGate`).delete().catch(() => {});
 for (const mid of sentMids) {
   await db.doc(`metaWebhookInbox/whatsapp_${mid.replace(/[^\w.:=+-]/g, '_').slice(0, 256)}`).delete().catch(() => {});
 }

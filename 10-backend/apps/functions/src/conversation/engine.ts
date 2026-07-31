@@ -10,7 +10,7 @@
  */
 
 import { Timestamp } from 'firebase-admin/firestore';
-import type { Session, SessionState, Product, Cart, MessageChannel, PendingCartConfirmation, AgentConfig } from '@vpw/shared';
+import type { Session, SessionState, Product, Cart, MessageChannel, PendingCartConfirmation } from '@vpw/shared';
 import { db, paths } from '../lib/firebase.js';
 import { logger } from '../lib/logger.js';
 import {
@@ -36,6 +36,12 @@ import { getAgentConfig } from './agentConfig.js';
 import { runSalesAgent } from '../ai/salesAgent.js';
 import type { AiMessage } from '../ai/types.js';
 import { appendMessage, listRecentMessages } from './messages.js';
+import {
+  enSilencio,
+  EXIGE_SILENCIO_LIBRE,
+  type ExpectativaDeSilencio,
+  type OutboundDiferido,
+} from './silencio.js';
 import { queryTokens, esBusquedaSimilar } from '../catalog/match.js';
 import { detectarOcasionContexto } from '../catalog/fichaRank.js';
 import { veredictoOcasion, respuestaOcasionNoConviene, respuestaOcasionConviene } from './productOccasion.js';
@@ -81,6 +87,17 @@ export interface ConversationInput {
    *     con foto no puede quedar sin respuesta— pero jamás se envía a la IA.
    */
   attachmentCaption?: boolean;
+  /**
+   * ADR-0016 §12: el caller se hace cargo del BORDE DE ENVÍO. Con esto en true el motor NO
+   * persiste su propia burbuja de salida: devuelve el descriptor `outbound` y el caller escribe
+   * el historial recién después del chequeo autoritativo de silencio y del envío físico.
+   *
+   * Por qué es opt-in y no el comportamiento único: solo el camino real de WhatsApp (process.ts)
+   * tiene un envío que pueda contradecir al historial. El simulador del panel, el chat de prueba
+   * y los test cases NO envían nada — ahí el motor sigue siendo el que registra, exactamente
+   * como antes.
+   */
+  deferOutbound?: boolean;
 }
 
 export interface ConversationResult {
@@ -95,6 +112,12 @@ export interface ConversationResult {
    * flag JUSTO antes del envío físico y NO manda el mensaje si el flujo se apagó/rotó en el medio.
    */
   coverageActivationId?: string | null;
+  /**
+   * ADR-0016 §12: presente SOLO con `deferOutbound`. Qué burbuja habría que escribir si la
+   * respuesta efectivamente sale, y qué espera del silencio (una confirmación de handoff no se
+   * mide con la misma vara que una respuesta autónoma del bot — ver `ExpectativaDeSilencio`).
+   */
+  outbound?: OutboundDiferido;
 }
 
 /** El teléfono (solo dígitos) sirve de id de cliente. */
@@ -984,26 +1007,6 @@ export async function evaluarDerivaDelTurno(
   return leerDeriva(tenantId, [...enJuego].map(([id, name]) => ({ id, name })));
 }
 
-/**
- * ¿El bot tiene que quedarse CALLADO en esta conversación? Es la regla de HANDOFF-2 y vive en un
- * solo lugar a propósito: un vendedor tomó el chat, o el bot está apagado desde el panel.
- */
-const enSilencio = (session: Session | null, agentConfig: AgentConfig): boolean =>
-  (session?.context?.humanTakeover ?? false) || !agentConfig.botEnabled;
-
-/**
- * Misma pregunta que la de arriba, pero leyendo el estado REAL (sesión + config del agente).
- *
- * Se exporta porque el camino de ADJUNTOS puede cerrar un turno SIN pasar por el motor —un archivo
- * sin caption no abre turno— y aun así tiene algo que decirle al cliente. Sin esto, el acuse del
- * adjunto salía igual con el chat tomado por un vendedor: reimplementar la regla allá garantizaba
- * que las dos versiones se desincronizaran a la primera condición nueva.
- */
-export async function botSilenciadoEnChat(tenantId: string, customerId: string): Promise<boolean> {
-  const snap = await db().doc(paths.session(tenantId, customerId)).get();
-  return enSilencio(snap.exists ? (snap.data() as Session) : null, await getAgentConfig(tenantId));
-}
-
 export async function handleMessage(input: ConversationInput): Promise<ConversationResult> {
   const { tenantId, from, text } = input;
   const channel: MessageChannel = input.channel ?? 'whatsapp';
@@ -1021,6 +1024,36 @@ export async function handleMessage(input: ConversationInput): Promise<Conversat
   // Config del agente (editable desde el panel): on/off + saludo.
   const agentConfig = await getAgentConfig(tenantId);
   const botSilent = enSilencio(existing, agentConfig);
+
+  /**
+   * ADR-0016 §12 — UN solo lugar decide QUIÉN persiste la burbuja de salida del bot.
+   *
+   * Con el borde de envío diferido (`deferOutbound`: el camino real de WhatsApp) acá NO se
+   * escribe nada; el outbound viaja como descriptor y lo persiste el borde recién DESPUÉS del
+   * chequeo autoritativo de silencio y del POST. Así una respuesta suprimida —o rechazada por
+   * Meta— no queda en el historial mintiéndole al vendedor sobre lo que el cliente vio.
+   *
+   * Sin diferir (simulador del panel, chat de prueba, dev) nadie envía nada: el motor sigue
+   * siendo el que registra, con el comportamiento exacto de siempre.
+   */
+  const registrarSalida = async (
+    texto: string,
+    meta: { state: SessionState | null; humanTakeover: boolean; countUnread?: boolean },
+    expectativa: ExpectativaDeSilencio = EXIGE_SILENCIO_LIBRE,
+  ): Promise<OutboundDiferido | undefined> => {
+    if (input.deferOutbound) return { ...meta, expectativa };
+    await appendMessage(tenantId, customerId, {
+      direction: 'out',
+      author: 'bot',
+      text: texto,
+      state: meta.state,
+      humanTakeover: meta.humanTakeover,
+      ...(meta.countUnread === undefined ? {} : { countUnread: meta.countUnread }),
+      channel,
+      receivedVia: input.receivedByPhoneNumberId ?? null,
+    });
+    return undefined;
+  };
 
   // COVERAGE-1B: turno mientras se espera la ubicación. La clasificación es PURA y corre ANTES
   // de persistir el inbound: si el texto ES una dirección, el historial recibe SOLO el
@@ -1173,24 +1206,25 @@ export async function handleMessage(input: ConversationInput): Promise<Conversat
   if (!result && esPosiblePedidoHumano(text)) {
     const hr = await procesarPedidoHumano(tenantId, customerId, text, { messageId: input.messageId ?? null });
     if (hr.handled && hr.takeover) {
-      if (hr.reply.trim()) {
-        await appendMessage(tenantId, customerId, {
-          direction: 'out',
-          author: 'bot',
-          text: hr.reply,
-          state: existing?.state ?? 'IDLE',
-          humanTakeover: true,
-          // El vendedor tiene algo pendiente: el badge de "sin leer" de /conversations es la
-          // señal operativa del handoff (la campana avisa al owner).
-          countUnread: true,
-          channel,
-          receivedVia: input.receivedByPhoneNumberId ?? null,
-        });
-      }
+      // §12: es la confirmación del takeover que ESTE turno acaba de persistir (sourceId = wamid,
+      // el mismo que usó `procesarPedidoHumano`) ⇒ el borde la deja salir salvo takeover ajeno.
+      const outbound = hr.reply.trim()
+        ? await registrarSalida(
+            hr.reply,
+            {
+              state: existing?.state ?? 'IDLE',
+              humanTakeover: true,
+              // El vendedor tiene algo pendiente: el badge de "sin leer" de /conversations es la
+              // señal operativa del handoff (la campana avisa al owner).
+              countUnread: true,
+            },
+            { modo: 'confirma_handoff_propio', sourceId: input.messageId ?? null },
+          )
+        : undefined;
       // El estado del handoff ya quedó persistido por el servicio canónico: acá NO se pisa la
       // sesión (el tail genérico escribiría humanTakeover=false del snapshot previo).
       logger.info('Handoff por pedido del cliente', { tenantId, customer: `…${customerId.slice(-4)}`, reason: 'customer_requested' });
-      return { reply: hr.reply, state: existing?.state ?? 'IDLE' };
+      return { reply: hr.reply, state: existing?.state ?? 'IDLE', ...(outbound ? { outbound } : {}) };
     }
     if (hr.handled) {
       // Honestidad sin transición (nombre desconocido/inactivo/ambiguo/sin vendedores): sigue
@@ -1231,18 +1265,15 @@ export async function handleMessage(input: ConversationInput): Promise<Conversat
       if (ce.reply.trim()) {
         let replyCe = ce.reply;
         if (nuevoConIntencion) replyCe = saludoBreve(agentConfig.greetingMessage) + '\n\n' + sinSaludoInicial(replyCe);
-        await appendMessage(tenantId, customerId, {
-          direction: 'out',
-          author: 'bot',
-          text: replyCe,
-          state: existing?.state ?? 'IDLE',
-          humanTakeover: true,
-          countUnread: true,
-          channel,
-          receivedVia: input.receivedByPhoneNumberId ?? null,
-        });
+        // §12: confirmación del takeover `coverage_review` que este turno persistió. Su sourceId
+        // es el requestId (NO el wamid), igual que el que escribió la transición canónica.
+        const outbound = await registrarSalida(
+          replyCe,
+          { state: existing?.state ?? 'IDLE', humanTakeover: true, countUnread: true },
+          { modo: 'confirma_handoff_propio', sourceId: ce.handoffSourceId ?? null },
+        );
         // KILL-SWITCH-1: la confirmación de revisión se etiqueta — process.ts re-lee el flag antes de mandarla.
-        return { reply: replyCe, state: existing?.state ?? 'IDLE', ...(ce.coverageActivationId !== undefined ? { coverageActivationId: ce.coverageActivationId } : {}) };
+        return { reply: replyCe, state: existing?.state ?? 'IDLE', ...(ce.coverageActivationId !== undefined ? { coverageActivationId: ce.coverageActivationId } : {}), ...(outbound ? { outbound } : {}) };
       }
       return { reply: '', state: existing?.state ?? 'IDLE', handledByHuman: true };
     }
@@ -1376,20 +1407,16 @@ export async function handleMessage(input: ConversationInput): Promise<Conversat
         if (nuevoConIntencion && replyFb.trim()) {
           replyFb = saludoBreve(agentConfig.greetingMessage) + '\n\n' + sinSaludoInicial(replyFb);
         }
-        if (replyFb.trim()) {
-          await appendMessage(tenantId, customerId, {
-            direction: 'out',
-            author: 'bot',
-            text: replyFb,
-            state: existing?.state ?? 'IDLE',
-            humanTakeover: true,
-            countUnread: true,
-            channel,
-            receivedVia: input.receivedByPhoneNumberId ?? null,
-          });
-        }
+        // §12: confirmación del takeover `ai_unavailable` recién persistido (sourceId = wamid).
+        const outbound = replyFb.trim()
+          ? await registrarSalida(
+              replyFb,
+              { state: existing?.state ?? 'IDLE', humanTakeover: true, countUnread: true },
+              { modo: 'confirma_handoff_propio', sourceId: input.messageId ?? null },
+            )
+          : undefined;
         logger.info('IA no disponible → derivado a humano', { tenantId, customer: `…${customerId.slice(-4)}` });
-        return { reply: replyFb, state: existing?.state ?? 'IDLE' };
+        return { reply: replyFb, state: existing?.state ?? 'IDLE', ...(outbound ? { outbound } : {}) };
       }
       // Simulación (sin efectos) o sin vendedor/persistencia: sigue el flujo normal de sesión.
       // pendingCart se limpia: la conversación cambió de tema hacia "atención humana" (review).
@@ -1453,20 +1480,17 @@ export async function handleMessage(input: ConversationInput): Promise<Conversat
       if (nuevoConIntencion && replyD.trim()) {
         replyD = saludoBreve(agentConfig.greetingMessage) + '\n\n' + sinSaludoInicial(replyD);
       }
-      if (replyD.trim()) {
-        await appendMessage(tenantId, customerId, {
-          direction: 'out',
-          author: 'bot',
-          text: replyD,
-          state: existing?.state ?? 'IDLE',
-          humanTakeover: true,
-          countUnread: true,
-          channel,
-          receivedVia: input.receivedByPhoneNumberId ?? null,
-        });
-      }
+      // §12: confirmación del takeover `catalog_drift` recién persistido. Su sourceId es la
+      // DERIVA (`deriva-{ids}`), no el wamid: lo devuelve el servicio que ejecutó la transición.
+      const outbound = replyD.trim()
+        ? await registrarSalida(
+            replyD,
+            { state: existing?.state ?? 'IDLE', humanTakeover: true, countUnread: true },
+            { modo: 'confirma_handoff_propio', sourceId: d.handoffSourceId ?? null },
+          )
+        : undefined;
       logger.info('Deriva de catálogo → derivado a humano', { tenantId, customer: `…${customerId.slice(-4)}` });
-      return { reply: replyD, state: existing?.state ?? 'IDLE' };
+      return { reply: replyD, state: existing?.state ?? 'IDLE', ...(outbound ? { outbound } : {}) };
     }
     // Simulación (cero efectos) o sin vendedor/persistencia: sigue el flujo normal de sesión con
     // el mismo mensaje honesto — jamás se cotiza el precio en disputa por este camino.
@@ -1523,6 +1547,11 @@ export async function handleMessage(input: ConversationInput): Promise<Conversat
   // (p.ej. IA de varios segundos) no puede PISAR un takeover que se persistió mientras tanto
   // (pedido de humano / comprobante / panel). Si un humano tomó el chat en el medio, este turno
   // no escribe la sesión NI responde: la promesa de pausa al cliente se cumple siempre.
+  //
+  // ADR-0016 §12: esto NO es el guard de silencio, y por eso mira solo `humanTakeover`. Acá se
+  // protege la ESCRITURA de la sesión contra una carrera de escritura; la autoridad sobre si la
+  // respuesta SALE es el guard del borde de envío (`evaluarSilencioPreEnvio`), que corre después
+  // y sí aplica la regla completa —incluido el bot apagado desde el panel—.
   const tomadoEnElMedio = await db().runTransaction(async (tx) => {
     const fresh = await tx.get(sessionRef);
     const ctxFresh = (fresh.data()?.context ?? {}) as Session['context'];
@@ -1563,17 +1592,10 @@ export async function handleMessage(input: ConversationInput): Promise<Conversat
   }
 
   // Guardar la respuesta del bot en el historial (sale por el mismo número que recibió).
-  if (reply.trim()) {
-    await appendMessage(tenantId, customerId, {
-      direction: 'out',
-      author: 'bot',
-      text: reply,
-      state: nextState,
-      humanTakeover: false,
-      channel,
-      receivedVia: input.receivedByPhoneNumberId ?? null,
-    });
-  }
+  // §12: es una respuesta AUTÓNOMA del bot ⇒ exige silencio libre en el borde de envío.
+  const outbound = reply.trim()
+    ? await registrarSalida(reply, { state: nextState, humanTakeover: false })
+    : undefined;
 
   logger.info('Mensaje procesado', { tenantId, customerId, state: nextState });
   return {
@@ -1581,5 +1603,6 @@ export async function handleMessage(input: ConversationInput): Promise<Conversat
     state: nextState,
     ...(result.locationRequest ? { locationRequest: true } : {}),
     ...(result.coverageActivationId !== undefined ? { coverageActivationId: result.coverageActivationId } : {}),
+    ...(outbound ? { outbound } : {}),
   };
 }

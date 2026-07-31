@@ -129,6 +129,111 @@ el archivo o su caption. El caption se sanea y se persiste, pero no se envía a 
 de secuencia, no de capacidad: la base segura debe existir antes, y el costo por imagen (~1,3–1,6k
 tokens, comparable a un turno de texto completo) exige cerrar antes las alertas de cupo.
 
+### 10. Rollout en DOS niveles, ambos fail-closed y por tenant
+
+Desplegar esta fundación cambia de golpe lo que pasa cuando un cliente manda una foto. Para poder
+soltarla sin apostar todo a la vez, el encendido es **gradual y por tenant**, con dos interruptores
+independientes que se leen de la config del tenant y **fallan cerrados**.
+
+**Nivel A — `config/attachments.ingest.enabled`: ¿guardamos archivos?**
+
+Solo el booleano exacto `true` habilita descargar y guardar. **Ausente, `false`, la cadena `"true"`,
+el número `1` o cualquier otra forma significan OFF**: la coerción laxa es justamente cómo un flag
+de seguridad termina encendido sin que nadie lo decida.
+
+Con el nivel A en OFF: cero llamadas a Graph, cero escritura en Storage, cero documento de adjunto.
+Pero el inbound **no desaparece** — queda un mensaje neutral estructurado en la conversación y una
+respuesta honesta al cliente, sin caption a la IA, sin tocar pedidos, sin handoff y sin ninguna
+mutación comercial. **No se restaura el camino legacy** de "toda imagen es un comprobante": ese
+camino se eliminó porque era el defecto, y apagar el nivel A no lo revive.
+
+**Nivel B — `config/receiptGate.enabled`: ¿proponemos comprobantes?**
+
+Solo `true` habilita clasificar `payment_receipt_candidate`, emitir su señal operativa y crear
+vínculos manuales nuevos. Ausente u OFF: un adjunto que se guardó queda `generic_media`, y
+`attachmentMarkAsReceipt` **rechaza**.
+
+Apagar el nivel B **no puede ocultar ni borrar nada** que ya exista: los archivos guardados siguen
+visibles, los comprobantes ya vinculados siguen vinculados y la evidencia legacy sigue abriendo. Y
+`attachmentUnmarkReceipt` **sigue disponible con el flag en OFF**: apagar una función no puede
+dejar atrapada una decisión humana que alguien necesita revertir.
+
+La purga conserva su propio flag independiente (`purgeEnabled`, OFF por defecto): borrar bytes es
+una decisión distinta de guardar o de clasificar, y no se acopla a ninguna de las dos.
+
+**El flag se relee DENTRO de la transacción** que crea el candidato o marca el comprobante. Una
+lectura vieja no puede ganarle a un apagado ya commiteado: si alguien apaga el gate a mitad de una
+corrida, lo que todavía no se escribió no se escribe.
+
+**Secuencia de encendido que esto habilita**: (1) desplegar todo con los dos flags en OFF;
+(2) encender solo la ingesta en arfagi y probar medios genéricos; (3) encender después el receipt
+gate, también solo en arfagi; (4) credipower permanece apagado en todo momento.
+
+**El paso (1) NO es «no cambió nada», y decirlo así sería mentira.** Los flags gobiernan *guardar
+bytes* y *proponer comprobantes*; no pueden revertir la eliminación del camino legacy, que es
+precisamente el defecto que este ADR vino a cerrar. Con los dos flags en OFF, el delta esperado
+—y el criterio de aceptación real del paso (1)— es exactamente éste:
+
+- una imagen de un cliente con pedido pendiente **ya no** mueve el pedido a `PENDING_VERIFICATION`,
+  **ya no** activa `humanTakeover` y **ya no** abre handoff: produce un mensaje neutral en la
+  conversación y una respuesta honesta. Ése es el cambio deseado, no una regresión;
+- **no** se llama a Graph, **no** se escribe en Storage y **no** se crea documento de adjunto;
+- **nada** de dinero se mueve: cero cambios de estado de pedido, cero `PAID`;
+- cambian los recursos de `onWebhookInbox` (timeout y memoria) y se amplía la lectura en
+  `firestore.rules`, dos efectos que tampoco dependen de los flags.
+
+De ahí se sigue algo operativo: **con los flags en OFF el deploy no es inerte**, así que volver al
+comportamiento de hoy exige redesplegar código, no apagar un flag. El rollback se documenta en
+`docs/deploy.md` y su orden es el **inverso** del deploy.
+
+### 11. La promesa al cliente y la señal al vendedor son un solo hecho
+
+El mensaje que recibe el cliente cuando se propone un candidato compromete a una persona: «un
+vendedor lo revisa». Esa promesa y la campana que la hace cierta **se confirman juntas** — en la
+misma transacción, con id determinístico, o no se confirma ninguna.
+
+Si la señal operativa falla, **no se promete revisión**: el archivo queda visible como medio
+normal, el pedido no se toca y la respuesta es neutral. Un aviso best-effort que se pierde deja al
+cliente esperando a alguien que nunca fue notificado, y eso es peor que no prometer nada.
+
+Un reintento del mismo webhook produce **como máximo** un candidato y una campana.
+
+**Limitación conocida, dicha de frente**: la campana se emite sin `targetUid`, así que la ven el
+OWNER y el MANAGER del tenant, pero **no el rol SELLER** —que es justamente el que la frase al
+cliente nombra—. No es un descuido: en el camino de un adjunto entrante no hay ningún vendedor
+asignado a quien dirigir el aviso, y ampliar la regla de lectura a todos los sellers les abriría
+las campanas de clientes que no son suyos. Se deja así, con el respaldo de OWNER+MANAGER, hasta
+que exista asignación de conversación; entonces el aviso llevará el `targetUid` de esa asignación,
+igual que ya hacen los avisos de handoff y de cobertura.
+
+### 12. Ninguna respuesta automática del webhook sobrevive a un takeover
+
+Entre que se decide una respuesta y que se envía hay una ventana en la que un vendedor puede tomar
+el chat. El chequeo de silencio es **autoritativo e inmediatamente anterior al envío**, con la
+semántica canónica de HANDOFF-2 —no una segunda versión de la misma regla— y una respuesta
+suprimida **no se persiste**: un outbound en el historial que nunca salió le miente al vendedor
+sobre lo que el cliente vio.
+
+**Alcance exacto, porque enunciarlo como universal sería falso.** El guard cubre las respuestas
+automáticas del **webhook entrante**: el motor, el acuse de adjuntos y el camino de ubicación
+nativa. **No** cubre la entrega por outbox de la reanudación de cobertura
+(`conversation/coverageResume.ts`), que tiene su propio chequeo de takeover pero no mira
+`botEnabled`. Se deja fuera a conciencia y por dos razones: la dispara una **aprobación humana**
+—alguien del equipo ya decidió que ese mensaje salga—, y es código preexistente que este ADR no
+toca. Queda anotado como deuda explícita, no como cobertura que no existe.
+
+Y el guard **no puede ser el último gate por sí solo**: donde ya había un interruptor de
+emergencia —el kill-switch de cobertura— ese interruptor conserva el lugar final, pegado al POST.
+Meterle lecturas en el medio ensancharía la ventana que existe para cerrarse rápido.
+
+Queda una ventana física que ningún código puede cerrar: si el takeover ocurre después de que el
+POST salió hacia Meta, el mensaje ya viajó. Se documenta en vez de fingir que no existe.
+
+**Delta con el bot apagado.** Apagar el bot desde el panel silencia lo que el bot *dice*, no lo que
+el sistema *registra*: una ubicación nativa sigue registrando la solicitud de cobertura, tomando el
+chat y avisando al vendedor — lo único que desaparece es el acuse al cliente. Es preexistente, y se
+escribe acá para que nadie lea «bot apagado» como «sistema inerte».
+
 ## Consecuencias
 
 - Un archivo que hoy se perdía ahora se conserva y se ve desde el chat.

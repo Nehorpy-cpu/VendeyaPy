@@ -759,6 +759,36 @@ El cliente no lee ni escribe Storage; los bytes salen solo por un callable autor
 URL de vida corta, nunca persistida, con whitelist estricta que acepta **dos** familias de path: los
 adjuntos nuevos y los comprobantes legacy (`tenants/{t}/orders/{orderId}/comprobantes/…`).
 
+**Rollout en dos niveles (ADR-0016 §10).** El encendido es gradual y por tenant, con dos
+interruptores independientes que se leen de la config del tenant y **fallan cerrados**:
+
+| Flag | Qué habilita | OFF significa |
+|---|---|---|
+| `config/attachments.ingest.enabled` | descargar y guardar archivos | cero Graph, cero Storage, cero documento de adjunto — pero el inbound queda visible con un mensaje neutral y respuesta honesta |
+| `config/receiptGate.enabled` | proponer candidatos, su señal operativa y vínculos manuales nuevos | el adjunto guardado queda `generic_media`; `attachmentMarkAsReceipt` rechaza |
+| `config/attachments.retention.purgeEnabled` | borrar bytes vencidos | nada se borra (default) |
+
+**Solo el booleano exacto `true` enciende**: ausente, `false`, la cadena `"true"` y el número `1`
+significan OFF. El flag del gate se **relee dentro de la transacción** que crea el candidato o marca
+el comprobante, así que un apagado ya commiteado le gana a cualquier lectura previa. Apagar el nivel
+B nunca oculta ni borra lo ya guardado, y `attachmentUnmarkReceipt` sigue disponible con el flag en
+OFF para poder revertir una decisión humana. Apagar el nivel A **no** restaura el camino legacy de
+"toda imagen es un comprobante".
+
+**Promesa y señal son un solo hecho (§11).** El candidato y la campana que lo respalda se confirman
+en la misma transacción con id determinístico, o no se confirma ninguno: si la señal falla no se
+promete revisión, el archivo queda como medio normal y la respuesta es neutral.
+
+**Takeover (§12).** El chequeo de silencio es autoritativo e inmediatamente anterior al envío, con la
+semántica canónica de HANDOFF-2 —que vive en `conversation/silencio.ts`, en un solo lugar—, y una
+respuesta suprimida no se persiste. Cubre las respuestas automáticas del **webhook entrante**
+(motor, acuse de adjuntos y ubicación nativa); **no** cubre la entrega por outbox de la reanudación
+de cobertura, que la dispara una aprobación humana y tiene su propio chequeo.
+
+Donde ya existía un interruptor de emergencia —el kill-switch de cobertura— ése conserva el lugar de
+**último gate**, pegado al POST: el guard de silencio va antes, no en el medio. Meterle lecturas
+entre el interruptor y el envío ensancharía justo la ventana que ese interruptor existe para cerrar.
+
 **Regla de negocio (ADR-0016).** La ingesta jamás cambia por sí sola el estado de un pedido.
 `payment_receipt_candidate` es una sugerencia visible que **no** convierte el archivo en comprobante
 oficial ni mueve el pedido; solo una acción humana de OWNER/MANAGER/SELLER lo vincula y lo pasa a

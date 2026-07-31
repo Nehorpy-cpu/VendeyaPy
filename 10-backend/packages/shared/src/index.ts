@@ -16,6 +16,7 @@ export * from './orderTotals.js';
 export * from './privacy.js';
 export * from './sha256.js';
 export * from './attachmentIdentity.js';
+export * from './attachmentRollout.js';
 export * from './attachmentStates.js';
 export * from './attachmentMime.js';
 export * from './attachmentSanitize.js';

@@ -36,7 +36,9 @@ export type AttachmentReplyReason =
   | 'too_large'
   | 'unsupported_type'
   | 'download_failed'
+  | 'ingest_disabled'
   // --- gate de clasificación ---
+  | 'receipt_gate_disabled'
   | 'tenant_mismatch'
   | 'customer_mismatch'
   | 'classification_not_open'
@@ -97,6 +99,15 @@ export function respuestaPorAdjunto(
       return ATTACHMENT_REPLIES.unsupported_type;
     case 'download_failed':
       return ATTACHMENT_REPLIES.download_failed;
+    // ADR-0016 §10, NIVEL A APAGADO. Es el único motivo en el que el archivo ni siquiera se
+    // intentó bajar, y por eso necesita redacción propia: ninguna de las de arriba sirve.
+    // `download_failed` invitaría a reenviarlo —y el reenvío terminaría exactamente igual, o sea
+    // un bucle—; el genérico diría "lo dejo en la conversación", que sería falso porque el archivo
+    // no se guardó. Tampoco se promete que alguien lo revise: eso compromete a una persona y solo
+    // puede decirse cuando hay una señal del otro lado (§11). Lo honesto es admitir que por acá no
+    // se pueden procesar archivos y ofrecer el camino que SÍ funciona: escribirlo.
+    case 'ingest_disabled':
+      return `Recibí ${s.tu} 🙂 pero por ahora no puedo procesar archivos. ¿Me contás por escrito lo que necesitás?`;
     case 'attachment_not_stored':
       return `Recibí ${s.tu} 🙂 pero no ${s.lo} pude guardar ${s.completo}. ¿Me ${s.lo} reenviás?`;
     // El archivo existió pero sus bytes ya se borraron por retención: pedirlo de nuevo es lo único
@@ -121,6 +132,19 @@ export function respuestaPorAdjunto(
       return `Recibí ${s.tu} 🙌 Tu pedido ya figura pagado, así que no hace falta nada más. Si necesitás algo, un asesor te ayuda.`;
     case 'outside_time_window':
       return `Recibí ${s.tu} 🙌 Como tu pedido ya lleva un tiempo, prefiero que lo revise un asesor antes de darlo por pagado.`;
+
+    // ADR-0016 §10, NIVEL B APAGADO. El archivo SÍ se guardó y SÍ es visible en el panel: lo único
+    // que no existe es la maquinaria que lo propone como comprobante. Necesita texto propio porque
+    // el genérico termina en «escribí *pagar* y te paso los datos para vincularlo a tu pedido», y
+    // con el nivel B apagado esa vinculación NO puede ocurrir por ningún camino —ni automático ni
+    // manual: `attachmentMarkAsReceipt` rechaza—. El cliente escribiría *pagar*, reenviaría el
+    // archivo y volvería a leer lo mismo: un bucle. Y es la ventana exacta que atraviesa el rollout
+    // (nivel A encendido, nivel B todavía no), así que la ven clientes reales. Tampoco se promete
+    // que alguien lo revise: eso compromete a una persona y sin campana sería una promesa vacía
+    // (§11). Lo cierto y suficiente es que el archivo quedó en la conversación, que es donde el
+    // vendedor lo ve.
+    case 'receipt_gate_disabled':
+      return `Recibí ${s.tu} 🙂 ${s.lo} dejo en la conversación. Si necesitás algo más, escribime por acá.`;
 
     // --- genérico: incluye `no_explicit_payment_context` y los mismatch de tenant/cliente, que
     //     JAMÁS se le explican al cliente (son problemas nuestros, no suyos) ---

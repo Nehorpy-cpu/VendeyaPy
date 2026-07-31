@@ -91,6 +91,16 @@ export function validarEntrada(data: { attachmentId?: unknown; orderId?: unknown
  */
 export function mensajeDeMotivo(reason: ReceiptStoreDenyReason): { code: 'not-found' | 'failed-precondition'; message: string } {
   switch (reason) {
+    case 'receipt_gate_disabled':
+      // Nivel B del rollout apagado para este tenant (ADR-0016 §10). No es un error del vendedor
+      // ni algo que se arregle reintentando: hay que encenderlo. Y se aclara que desmarcar sigue
+      // disponible, porque es lo primero que va a intentar quien ve este mensaje.
+      return {
+        code: 'failed-precondition',
+        message:
+          'La marcación de comprobantes no está habilitada para tu empresa. Pedile al responsable ' +
+          'de la cuenta que la active. Desmarcar comprobantes sigue disponible.',
+      };
     case 'attachment_not_found':
     case 'tenant_mismatch':
       return { code: 'not-found', message: 'El archivo no existe en esta empresa.' };

@@ -20,7 +20,11 @@
  * Mismo criterio que `normalizeReceiptGateConfig` del lado de pedidos, sin importarlo: `meta/` no
  * depende de `orders/` (costura del gate).
  */
-import { ATTACHMENT_ALLOWED_MIME_TYPES, type AttachmentAllowedMime } from '@vpw/shared';
+import {
+  ATTACHMENT_ALLOWED_MIME_TYPES,
+  parseAttachmentIngestEnabled,
+  type AttachmentAllowedMime,
+} from '@vpw/shared';
 import { db } from '../lib/firebase.js';
 import { logger } from '../lib/logger.js';
 // El nombre del doc de config vive del lado de retención, que fue quien lo definió. Importarlo
@@ -73,21 +77,59 @@ export function parseAttachmentIngestLimits(raw: unknown): AttachmentIngestLimit
 }
 
 /**
- * Límites efectivos del tenant. Si la lectura falla, se sigue con los DEFAULTS (que son los más
- * restrictivos del código): un Firestore intermitente no puede convertirse en "no recibo más
- * archivos de nadie" — el archivo del cliente se pierde y ese es justo el bug que este programa
- * vino a matar.
+ * Política de ingesta EFECTIVA del tenant: el interruptor del NIVEL A (ADR-0016 §10) y los
+ * límites, que viven en el mismo documento y por eso se leen de una sola vez.
  */
-export async function getAttachmentIngestLimits(tenantId: string): Promise<AttachmentIngestLimits> {
+export interface AttachmentIngestPolicy {
+  /**
+   * NIVEL A del rollout. `true` SOLO si el tenant escribió el booleano exacto en
+   * `config/attachments.ingest.enabled`. Apagado ⇒ cero Graph, cero Storage, cero documento de
+   * adjunto (el inbound igual queda visible en la conversación — eso lo resuelve el webhook).
+   */
+  enabled: boolean;
+  limits: AttachmentIngestLimits;
+}
+
+/** Política cuando no hay nada válido que leer. Fail-closed: la fundación NO se enciende sola. */
+export const ATTACHMENT_INGEST_DISABLED: AttachmentIngestPolicy = {
+  enabled: false,
+  limits: DEFAULT_ATTACHMENT_LIMITS,
+};
+
+/**
+ * Lee `config/attachments` UNA vez y devuelve las dos cosas que gobierna: si la ingesta está
+ * encendida para este tenant y con qué límites corre.
+ *
+ * LOS DOS CRITERIOS DE FALLA SON DISTINTOS A PROPÓSITO, y esa asimetría es el diseño:
+ *
+ *  · El FLAG falla CERRADO. Doc ausente, campo ausente, `'true'`, `1`, o una lectura de Firestore
+ *    que se cae ⇒ apagado. Encender una fundación nueva tiene que ser un acto explícito, y un
+ *    error de infraestructura no es un acto (ADR-0016 §10). Apagado no significa perder el
+ *    archivo en silencio: el inbound queda visible y el cliente recibe una respuesta honesta.
+ *  · Los LÍMITES siguen cayendo a los DEFAULTS del código, que son los más restrictivos. Ahí el
+ *    razonamiento original sigue valiendo: con la ingesta ENCENDIDA, un Firestore intermitente no
+ *    puede convertirse en "no recibo más archivos de nadie".
+ */
+export async function getAttachmentIngestPolicy(tenantId: string): Promise<AttachmentIngestPolicy> {
   try {
     const snap = await db().doc(attachmentConfigPath(tenantId)).get();
-    if (!snap.exists) return DEFAULT_ATTACHMENT_LIMITS;
-    return parseAttachmentIngestLimits((snap.data() as { ingest?: unknown } | undefined)?.ingest);
+    if (!snap.exists) return ATTACHMENT_INGEST_DISABLED;
+    const ingest = (snap.data() as { ingest?: unknown } | undefined)?.ingest;
+    return { enabled: parseAttachmentIngestEnabled(ingest), limits: parseAttachmentIngestLimits(ingest) };
   } catch (e) {
-    logger.warn('attachment: no se pudo leer la config de ingesta del tenant, se usan defaults', {
+    logger.warn('attachment: no se pudo leer la config de ingesta del tenant, queda APAGADA', {
       tenantId,
       error: e instanceof Error ? e.name : 'desconocido',
     });
-    return DEFAULT_ATTACHMENT_LIMITS;
+    return ATTACHMENT_INGEST_DISABLED;
   }
+}
+
+/**
+ * Solo los LÍMITES (formatos y tope de bytes). Lo usa el gate de comprobantes, que necesita
+ * intersecar su config con lo que la ingesta llega a guardar (ADR-0016 §8) y no tiene nada que
+ * decidir sobre el interruptor del nivel A.
+ */
+export async function getAttachmentIngestLimits(tenantId: string): Promise<AttachmentIngestLimits> {
+  return (await getAttachmentIngestPolicy(tenantId)).limits;
 }
