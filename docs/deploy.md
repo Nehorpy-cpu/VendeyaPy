@@ -75,13 +75,24 @@ webhook de Meta rechace una firma inválida (401).
 > producción es una operación manual supervisada. Siguen valiendo las mismas reglas: selector
 > explícito, `--project` explícito y **nunca** `--force`.
 
-- **Hosting (panel):** `pnpm exec firebase hosting:rollback --project <env>` (revierte a la release anterior).
+- **Hosting (panel):** ⚠️ **`hosting:rollback` NO EXISTE** en firebase-tools (verificado en 15.23.0: no hay `lib/commands/hosting-rollback.js` y `hosting:rollback` no está registrado). El comando documentado acá durante meses fallaba con «is not a Firebase command» — y era el PASO 1 del rollback, o sea que el runbook arrancaba roto justo donde hay que cortar al llamador del backend. El comando real es `hosting:clone`, que acepta la forma `<site>@<versionId>`:
+  ```bash
+  pnpm exec firebase hosting:clone vpw-prod-dd6ff@<versionId> vpw-prod-dd6ff:live --project vpw-prod-dd6ff
+  ```
+  El `<versionId>` se obtiene listando releases (API `firebasehosting.googleapis.com/v1beta1/sites/<site>/releases`) o desde Firebase Console → Hosting → Historial de versiones → **Revertir**, que es la alternativa de un clic.
 - **Reglas Firestore:** `git revert` del cambio + `pnpm exec firebase deploy --only firestore:rules --project <env>`.
 - **Functions:** redeploy del commit anterior, **con el MISMO selector explícito que usó el deploy que se revierte** y `--project` (`git checkout <commit-bueno> -- . && pnpm build && pnpm exec firebase deploy --only functions:<n1>,functions:<n2>,… --config firebase.functions.json --project vpw-prod-dd6ff`). Las Functions no tienen rollback nativo: se redeploya la versión buena. Nunca `--only functions` a secas ni `--force`.
   - **EL ORDEN DEL ROLLBACK ES EL INVERSO DEL DEPLOY, y no es un detalle de estilo.** Cuando un cambio altera el formato de un dato que una función *escribe* y otra *lee*, la compatibilidad es asimétrica: el consumidor nuevo suele entender las dos formas, el viejo entiende solo la vieja. Por eso el deploy va **consumidor primero, productor después** — y el rollback tiene que ir **productor primero, consumidor después**. Si se revierte en el mismo orden que el deploy, queda una ventana con el productor nuevo escribiendo el formato nuevo y el consumidor ya viejo sin saber leerlo: todo lo que entre en esa ventana se descarta sin rastro.
   - Caso concreto y vigente (ADR-0016): `metaWebhook` escribe `payload.attachment`; el `onWebhookInbox` nuevo lee `attachment` **y** el legacy `image`, pero el viejo lee solo `image`. Deploy: `onWebhookInbox` → `metaWebhook`. Rollback: **`metaWebhook` → `onWebhookInbox`**. Al revés se pierden las fotos y los PDF que manden los clientes durante la ventana.
   - Y no des por hecho que un flag apagado hace inerte al deploy: los flags de rollout gobiernan lo que el código *hace de más*, no restauran comportamiento *eliminado*. Si el cambio borró un camino viejo, volver atrás exige redesplegar código.
+- **Schedulers: el rollback de código NO los frena.** Un scheduler creado por el release sigue existiendo y disparando aunque se revierta el código de las demás funciones, porque su selector no lo incluye (y borrarlo durante un incidente es irreversible). Si el problema puede involucrarlo, pausalo — es reversible y de efecto inmediato:
+  ```bash
+  gcloud scheduler jobs pause firebase-schedule-<fn>-us-central1 --location us-central1 --project vpw-prod-dd6ff
+  ```
+  También se pausa con un clic desde Cloud Console → Cloud Scheduler. Y antes de eso, verificá el flag que gobierna su efecto (para adjuntos: `tenants/{t}/config/attachments.retention.purgeEnabled` debe estar en `false`/ausente).
+- **`pnpm deploy:rules` NO sirve para producción**: desde `3939676` está hardcodeado a `--project vpw-staging`. Usarlo creyendo que despliega prod deja producción con las reglas viejas **y el comando sale con éxito** — un falso positivo perfecto. Las Rules de producción se despliegan a mano: `firebase deploy --only firestore:rules,storage --project vpw-prod-dd6ff`, y después se verifica contra la API que el ruleset vigente sea el esperado.
 - **Datos:** Firestore tiene PITR/backups según el plan; restaurar desde la consola de Firebase.
+- **Higiene del artefacto:** `apps/functions/scripts/build-deploy.mjs` copia al bundle **cualquier** `.env.<algo>` que no termine en `.local`, no solo el del proyecto destino. Si en la máquina existe `.env.vpw-staging`, sus secretos viajan al bucket de fuentes de **producción**. Mitigación de cero líneas mientras no se corrija el filtro: mover ese archivo fuera de `apps/functions/` durante el deploy productivo y verificar, listando `.deploy`, que solo quedó `.env.<projectId>`.
 
 ## Checklist de producción
 - [ ] `ENABLE_DEV_ENDPOINTS` ausente → `dev*` en 404.

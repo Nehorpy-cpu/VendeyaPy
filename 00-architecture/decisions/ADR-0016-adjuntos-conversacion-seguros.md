@@ -234,6 +234,29 @@ el sistema *registra*: una ubicación nativa sigue registrando la solicitud de c
 chat y avisando al vendedor — lo único que desaparece es el acuse al cliente. Es preexistente, y se
 escribe acá para que nadie lea «bot apagado» como «sistema inerte».
 
+### 13. Estado del rollout (ejecutado el 2026-08-01/03)
+
+`30c1687` está **desplegado en producción** y el encendido se hizo en el orden que fija §10: primero
+todo con los dos flags ausentes, después el nivel A solo en arfagi, después el nivel B solo en
+arfagi. credipower conserva los dos documentos **ausentes** y la purga sigue apagada en ambos.
+
+Los tres smokes se corrieron contra producción con tráfico real, no en emulador, y validaron lo que
+este ADR promete: con los flags apagados el inbound queda visible sin descargar un solo byte; con la
+ingesta encendida el archivo se guarda con MIME verificado y ruta opaca; **una imagen llegada con el
+chat tomado no produjo ni un solo mensaje del bot** (§12); y la cadena candidato → marca humana →
+`PENDING_VERIFICATION` → desmarcado → `PENDING_PAYMENT` funcionó **sin pasar nunca por `PAID`**, con
+las dos auditorías conservadas y el archivo intacto.
+
+**Un descubrimiento que el rollout hizo visible y que este ADR no había anticipado.** La condición
+«contexto de pago declarado» (§4) depende de que la sesión esté en `AWAITING_PAYMENT`. El botón
+«devolver al asistente» del panel escribe `state: 'IDLE'` incondicionalmente, así que **un vendedor
+que toma y libera el chat durante el checkout borra esa condición** y el gate deja de proponer para
+siempre en esa conversación. No es un defecto de esta fundación —el botón es muy anterior— pero sí
+es la diferencia entre que la automatización sirva o quede muda en el camino más habitual, porque
+con Coverage `required` casi todo pedido pasa por manos humanas. Queda anotado como deuda con
+programa propio; la liberación *automática* de cobertura no tiene el problema, y ese contraste
+acota el arreglo a un solo lugar.
+
 ## Consecuencias
 
 - Un archivo que hoy se perdía ahora se conserva y se ve desde el chat.
