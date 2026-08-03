@@ -350,9 +350,16 @@ export function auditarComandos(archivo, texto, { binImplicito = false, aliases 
           'no hereda sus garantías y crea una segunda ruta de deploy.'));
     }
     for (const e of validarArgsDeploy(inv.args, { aliases }).errores) {
-      // Una invocación DEL HELPER puede legítimamente no traer `--only`: el selector lo aporta quien
-      // despliega y el propio helper falla cerrado si falta.
-      if (inv.viaHelper && /Falta `--only`/.test(e)) continue;
+      // Una invocación DEL HELPER puede legítimamente no traer `--only` NI `--project`: los aporta
+      // quien despliega y el propio helper falla cerrado si faltan — nunca llega a invocar firebase,
+      // así que el `default` de `.firebaserc` jamás entra en juego.
+      //
+      // Que un script NO traiga `--project` es, de hecho, lo que se quiere: `deploy:rules` lo tenía
+      // hardcodeado a `vpw-staging`, y un operador que lo corriera pensando en producción se
+      // llevaba EXIT 0 con producción intacta. Un script que elige el entorno en silencio es más
+      // peligroso que uno que obliga a declararlo. Ojo: la exención vale SOLO para el helper
+      // canónico; una invocación directa de `firebase deploy` sigue exigiendo ambos.
+      if (inv.viaHelper && /Falta `--only`|Falta `--project`/.test(e)) continue;
       out.push(hallazgo(/PRODUCCIÓN/.test(e) ? 'CRITICO' : 'ALTO', archivo, e, `Comando: ${seg.slice(0, 160)}`));
     }
   }

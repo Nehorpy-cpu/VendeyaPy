@@ -4,12 +4,15 @@
     {
       "source": "apps/functions/.deploy",
       "codebase": "default",
+      "//ignore": "`.env*` no se sube. El artefacto SIGUE conteniendo `.env.<projectId>` —hace falta en el disco para que `loadUserEnvs` (functions/env.js:218) arme las variables en `prepare`— pero el `ignore` lo deja fuera del zip, que es lo único que viaja al bucket de fuentes. Sin esto, cada deploy dejaba los 10 valores productivos en texto plano en un bucket cuya superficie de lectura es mucho más ancha que Secret Manager. VERIFICAR EN EL PRIMER DEPLOY: que las env vars de la función queden idénticas (comparar `serviceConfig.environmentVariables` antes y después); la evidencia dice que no cambian, pero es la clase de cosa que se confirma, no se supone.",
       "ignore": [
         "node_modules",
         ".git",
         "firebase-debug.log",
         "firebase-debug.*.log",
-        "*.local"
+        "*.local",
+        ".env",
+        ".env.*"
       ],
       "predeploy": [
         "pnpm --filter @vpw/shared build",

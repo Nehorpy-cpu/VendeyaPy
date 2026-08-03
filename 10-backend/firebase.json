@@ -10,12 +10,15 @@
     {
       "source": "apps/functions",
       "codebase": "default",
+      "//": "`.env*` NUNCA se sube: firebase LEE las variables del disco local en prepare (loadUserEnvs, functions/env.js:218 — usa configDir/functionsSource) y el `ignore` solo gobierna QUÉ archivos van al zip. Excluirlas no cambia una sola variable desplegada; lo que evita es dejar credenciales en texto plano en el bucket de fuentes. Este config apunta a `apps/functions` DIRECTO, así que sin esta línea subía `.env.vpw-staging` Y `.env.vpw-prod-dd6ff` juntos — filtraba más que el artefacto. Y la subida ocurre ANTES de que Cloud Build falle por `workspace:*`, así que hasta un deploy fallido dejaba los secretos arriba.",
       "ignore": [
         "node_modules",
         ".git",
         "firebase-debug.log",
         "firebase-debug.*.log",
-        "*.local"
+        "*.local",
+        ".env",
+        ".env.*"
       ],
       "predeploy": ["pnpm --filter functions build"]
     }

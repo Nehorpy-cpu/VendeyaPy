@@ -14,7 +14,13 @@
  *
  * Uso (los argumentos extra los aporta quien llama, y si faltan se falla cerrado):
  *   node apps/functions/scripts/firebase-deploy.mjs --only firestore:rules --project vpw-staging
- *   pnpm deploy:functions -- --only functions:onWebhookInbox,functions:runTenantJob
+ *   pnpm deploy:rules -- --project vpw-staging
+ *   pnpm deploy:functions -- --project vpw-staging --only functions:onWebhookInbox
+ *
+ * **EL ENTORNO LO DICE EL OPERADOR, SIEMPRE.** Los scripts de npm ya NO traen `--project` adentro:
+ * `deploy:rules` venía con `--project vpw-staging` hardcodeado, así que un operador que lo corriera
+ * pensando en producción se llevaba EXIT 0 y producción intacta — la peor falla posible, la que se
+ * parece a un éxito. Ahora, sin `--project`, el guard corta antes de tocar la red.
  *
  * Este helper NO puede desplegar a producción: el guard bloquea el proyecto productivo y su alias.
  * Producción se despliega a mano con el runbook de `docs/HANDOFF.md` §5.
@@ -24,7 +30,7 @@ import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { validarArgsDeploy, PROYECTOS_PERMITIDOS } from './deploy-guard.mjs';
+import { validarArgsDeploy, PROYECTOS_PERMITIDOS, aliasDeFirebaserc } from './deploy-guard.mjs';
 
 const require = createRequire(import.meta.url);
 
@@ -38,14 +44,19 @@ const args = process.argv.slice(2).filter((a) => a !== '--');
 if (args.length === 0) {
   console.error(
     '\n[deploy] No se pasó ningún argumento.\n' +
-      '  Este helper exige `--only` y `--project` explícitos. Ejemplos:\n' +
-      '    pnpm deploy:rules\n' +
-      '    pnpm deploy:functions -- --only functions:onWebhookInbox\n',
+      '  Este helper exige `--only` y `--project` EXPLÍCITOS. Ejemplos:\n' +
+      '    pnpm deploy:rules -- --project vpw-staging\n' +
+      '    pnpm deploy:functions -- --project vpw-staging --only functions:onWebhookInbox\n' +
+      '  El entorno no lo elige el script: lo declara quien despliega.\n',
   );
   process.exit(1);
 }
 
-const { ok, errores, plan } = validarArgsDeploy(args);
+// Los ALIAS se resuelven acá también, no solo en la auditoría estática. «El alias no es el destino»
+// era una defensa que existía únicamente en `--audit`: la ruta que de verdad ejecuta validaba el
+// literal, así que un `.firebaserc` que mapeara un alias permitido a producción habría pasado.
+// firebase resuelve el alias DESPUÉS de parsear; el validador tiene que hacer lo mismo.
+const { ok, errores, plan } = validarArgsDeploy(args, { aliases: aliasDeFirebaserc(RAIZ_PNPM) });
 
 if (!ok) {
   console.error('\n[deploy] BLOQUEADO — la invocación no es segura:\n');
