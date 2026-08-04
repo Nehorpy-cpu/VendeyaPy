@@ -116,6 +116,22 @@ if (!rConn.result?.ok) {
   process.exit(1);
 }
 await db.doc(`tenants/${T}/metaConnections/main`).set({ status: 'active' }, { merge: true });
+// ADR-0017 §1: el alta deja `automationMode` AUSENTE a propósito (nacer conectado ≠ nacer
+// autorizado). Este merge de UN campo es exactamente lo que hace `migrate-whatsapp-automation-mode.mjs`
+// sobre el asset real antes del deploy; sin él el gate por número cierra el inbound como `ignored`.
+await db.doc(`tenants/${T}/metaAssets/${PNID}`).set({ automationMode: 'live' }, { merge: true });
+// ADR-0016 §10: la ingesta de adjuntos también nace APAGADA (rollout de dos niveles, fail-closed).
+// El caso 6 de acá afirma el contrato de ADR-0016 —el comprobante se PROPONE sobre el pedido sin
+// moverlo—, y ese contrato no puede ejercitarse con la ingesta apagada: sin esto el archivo entra
+// como `ingest_disabled`, jamás se clasifica y el caso mide otra cosa.
+// Son DOS niveles y hacen falta los dos: `ingest.enabled` deja entrar el archivo y `receiptGate`
+// es el que lo clasifica como candidato a comprobante. Con solo el primero el adjunto se guarda
+// pero nace sin `classification`, que es justo lo que el caso 6 mide.
+await db.doc(`tenants/${T}/config/attachments`).set({ ingest: { enabled: true } }, { merge: true });
+// `delete` + `set` sin merge, igual que en verify-attachments: un doc heredado de otra corrida
+// cambiaría la ventana del gate y el caso mediría un espejismo.
+await db.doc(`tenants/${T}/config/receiptGate`).delete().catch(() => {});
+await db.doc(`tenants/${T}/config/receiptGate`).set({ enabled: true });
 const owner = await signIn('owner@perfumeria.com');
 
 const PREFIJO = '59599420'; // los clientes de este fixture son exclusivos de este script

@@ -11,7 +11,8 @@
  */
 
 import { Timestamp } from 'firebase-admin/firestore';
-import type { WebhookInboxEvent, MetaExternalIndexEntry, MessageChannel } from '@vpw/shared';
+import type { WebhookInboxEvent, MetaExternalIndexEntry, MessageChannel, WebhookEventKind } from '@vpw/shared';
+import { permiteAutomatizacion, persisteEntrante, readWebhookEventKind } from '@vpw/shared';
 import { db, paths } from '../lib/firebase.js';
 import { handleMessage } from '../conversation/engine.js';
 import { botSilenciadoEnChat, evaluarSilencioPreEnvio, EXIGE_SILENCIO_LIBRE, type OutboundDiferido } from '../conversation/silencio.js';
@@ -19,6 +20,8 @@ import { appendMessage } from '../conversation/messages.js';
 import { procesarUbicacionEntrante, coberturaVigente } from '../conversation/coverage.js';
 import { coverageHold } from '../conversation/coverageTestHooks.js';
 import { attachmentFromInboxPayload, unsupportedFromInboxPayload } from './parseWebhook.js';
+import { resolveAutomationMode, CANAL_SIN_GATE, type CanalAutomatizacion, type OrigenAutomatizacion } from './automationMode.js';
+import { consumirEcho, registrarObservacion } from './echoConsumer.js';
 import { ingestInboundAttachment, recordUnsupportedInbound, recordAttachmentIngestDisabled } from './attachmentIngest.js';
 import { getAttachmentGate } from './attachmentGate.js';
 import { getAttachmentIngestPolicy } from './attachmentLimits.js';
@@ -45,6 +48,15 @@ const channelOf = (platform: string): MessageChannel =>
 export const WEBHOOK_STUCK_MS = 5 * 60 * 1000;
 
 /**
+ * ADR-0017 §1 — Marcador del SISTEMA para un entrante en `shadow` que no trae texto propio
+ * (un archivo, una ubicación, un audio). Nunca es el caption ni el contenido del cliente: en
+ * `shadow` no se ingesta nada, así que no hay documento de adjunto donde persistirlo, y promoverlo
+ * a texto lo metería en el prompt del modelo por el historial del turno siguiente (ADR-0016 §9).
+ * Es una burbuja para que el vendedor VEA que llegó algo, no evidencia de qué llegó.
+ */
+const MARCADOR_ENTRANTE_SOMBRA = '📨 Mensaje recibido (número en observación)';
+
+/**
  * ¿Se puede tomar este evento? `received` es el caso normal. La otra puerta es el RESCATE:
  *
  * La entrega de Eventarc es at-least-once (por eso existe el guard de `processing` de siempre),
@@ -69,6 +81,156 @@ function puedeTomarseElEvento(ev: WebhookInboxEvent, nowMs: number): boolean {
   const desde = ev.processingStartedAt ?? ev.receivedAt;
   const desdeMs = (desde as { toMillis?: () => number } | null | undefined)?.toMillis?.() ?? 0;
   return nowMs - desdeMs >= WEBHOOK_STUCK_MS;
+}
+
+/** El documento del evento en la bandeja. Se tipa desde `db()` para no atarse al SDK acá. */
+type RefDelEvento = ReturnType<ReturnType<typeof db>['doc']>;
+
+/**
+ * ADR-0017 §1 — «NO PUDE AVERIGUARLO» NO ES «NO TIENE PERMISO».
+ *
+ * `resolveAutomationMode` falla cerrado y devuelve `inactive` cuando la lectura del permiso se
+ * cae. Para el ENVÍO eso es exactamente lo correcto. Para el EVENTO no: cerrarlo como `ignored`
+ * —terminal— tiraba para siempre el mensaje de un cliente de un número `live` por un hipo de
+ * Firestore, y con log `info`, así que nadie se enteraba.
+ *
+ * Las otras razones de `inactive` (sin PNID, sin declarar, declarado inactivo) SÍ son terminales:
+ * ahí el sistema sabe la respuesta y la respuesta es que no.
+ */
+const modoIndeterminado = (canal: CanalAutomatizacion): boolean => canal.origen === 'error_lectura';
+
+/**
+ * Hasta cuándo se le pide a la plataforma que vuelva a entregar un evento que no se pudo resolver.
+ *
+ * Se cuenta desde `receivedAt` —la antigüedad del evento, mismo criterio que `WEBHOOK_STUCK_MS`— y
+ * no desde un contador de intentos, porque lo que importa es hace cuánto que el cliente escribió.
+ * Quince minutos son holgadamente más que cualquier intermitencia de Firestore (la reentrega
+ * arranca a los segundos) y bastante menos que el TTL de la bandeja: pasado eso, insistir deja de
+ * ser un reintento y pasa a ser un bucle contra un problema que no se va a resolver solo.
+ */
+export const WEBHOOK_RETRY_BUDGET_MS = 15 * 60 * 1000;
+
+/**
+ * El evento no se pudo resolver por algo TRANSITORIO y tiene que volver a entregarse.
+ *
+ * Es la ÚNICA excepción que `onWebhookInbox` deja escapar. Y tiene que escapar: el trigger es
+ * `onDocumentCreated`, así que reescribir el documento no lo vuelve a disparar, y no hay ningún
+ * barrido programado sobre la bandeja. Sin una corrida FALLIDA no existe reintento — el evento
+ * quedaba en `received` y no lo miraba nadie nunca más, que es perder el mensaje del cliente en
+ * silencio sobre el número que vende.
+ */
+export class ReintentoDeWebhook extends Error {
+  constructor(readonly origen: OrigenAutomatizacion) {
+    super(`webhook reintentable: ${origen}`);
+    this.name = 'ReintentoDeWebhook';
+  }
+}
+
+/** Discriminador con nombre propio: el `catch` de acá y el del trigger tienen que coincidir. */
+export const esReintentoDeWebhook = (e: unknown): e is ReintentoDeWebhook => e instanceof ReintentoDeWebhook;
+
+/**
+ * Devuelve el evento a la cola en vez de cerrarlo, y LANZA para que la plataforma lo reentregue.
+ * `received` + `processingStartedAt: null` lo dejan en el estado que `puedeTomarseElEvento` ya
+ * reconoce como tomable, así que la reentrega entra por la puerta de siempre.
+ *
+ * Se loguea como ERROR a propósito: es la única señal de que un mensaje de un cliente quedó sin
+ * procesar. Y NO se anula `payload.location`: el evento se va a reprocesar y sin las coordenadas
+ * el reintento no serviría de nada (la retención sigue acotada por el TTL de la bandeja).
+ *
+ * REINTENTAR NO ES INSISTIR PARA SIEMPRE. Pasado `WEBHOOK_RETRY_BUDGET_MS` el evento se cierra
+ * como `failed` —no `ignored`: nadie decidió ignorarlo, se agotó el reintento— y ahí sí el camino
+ * termina, sin lanzar.
+ *
+ * Sin `receivedAt` legible se cierra en el acto. Es el mismo `?? 0` que usa `puedeTomarseElEvento`,
+ * pero acá cae del lado seguro contrario: sin poder acotar la antigüedad, insistir sería un bucle
+ * sin fin, y un evento cerrado y visible es preferible a uno que se reentrega solo.
+ */
+async function devolverALaCola(
+  ref: RefDelEvento,
+  ev: WebhookInboxEvent,
+  tenantId: string | null,
+  canal: CanalAutomatizacion,
+): Promise<void> {
+  const recibidoMs = (ev.receivedAt as { toMillis?: () => number } | null | undefined)?.toMillis?.() ?? 0;
+  const comun = {
+    ...(tenantId ? { tenantId } : {}),
+    automationOrigin: canal.origen,
+  };
+  if (Date.now() - recibidoMs >= WEBHOOK_RETRY_BUDGET_MS) {
+    await ref.update({
+      ...comun,
+      processingStatus: 'failed',
+      processingStartedAt: null,
+      errorMessage: 'no se pudo resolver el permiso del número: reintento agotado',
+      processedAt: Timestamp.now(),
+    });
+    logger.error('Reintento AGOTADO: el evento se cierra sin haberse podido procesar', undefined, {
+      tenantId: tenantId ?? undefined,
+      origen: canal.origen,
+    });
+    return;
+  }
+  await ref.update({
+    ...comun,
+    processingStatus: 'received',
+    processingStartedAt: null,
+    errorMessage: 'no se pudo resolver el permiso del número: reintentable',
+  });
+  logger.error('No se pudo resolver el permiso del número; se pide REENTREGA del evento', undefined, {
+    tenantId: tenantId ?? undefined,
+    origen: canal.origen,
+  });
+  throw new ReintentoDeWebhook(canal.origen);
+}
+
+/**
+ * ADR-0017 §3 y §12 — RUTEO POR TIPO DE EVENTO, antes del guard de `payload.from`.
+ *
+ * Un echo NO tiene `payload.from` (el productor lo omite a propósito: el `from` de un echo es el
+ * número del NEGOCIO), así que moría en ese guard como «payload sin from/contenido» y el bot nunca
+ * se enteraba de que el vendedor había contestado desde su teléfono.
+ *
+ * Todo lo que no sea `message` ni `echo` se cierra sin tocar nada: `history` y `app_state` viven en
+ * colecciones propias y no deberían pasar por acá, y un `kind` que este despliegue no entiende cae
+ * a `unknown` — degradarlo a mensaje vivo del cliente sería lo peor que podría hacer.
+ */
+async function procesarEventoNoMensaje(
+  ref: RefDelEvento,
+  ev: WebhookInboxEvent,
+  tipo: WebhookEventKind,
+  tenantId: string | null,
+  idxData: unknown,
+): Promise<void> {
+  if (tipo !== 'echo' || ev.platform !== 'whatsapp' || !tenantId) {
+    await ref.update({
+      processingStatus: 'ignored',
+      ...(tenantId ? { tenantId } : {}),
+      errorMessage: tenantId ? `evento ${tipo} sin consumidor en la bandeja` : 'empresa no resuelta',
+      processedAt: Timestamp.now(),
+    });
+    logger.warn('Evento de la bandeja sin consumidor: ACK y nada más', { eventId: ev.id, kind: tipo });
+    return;
+  }
+
+  // El gate por PNID le aplica al echo IGUAL que a un inbound: un echo de un número `inactive` no
+  // puede tocar la conversación de nadie.
+  const canal = await resolveAutomationMode(tenantId, ev.externalId, idxData);
+  if (modoIndeterminado(canal)) {
+    await devolverALaCola(ref, ev, tenantId, canal);
+    return;
+  }
+
+  const r = await consumirEcho({ tenantId, phoneNumberId: ev.externalId, payload: ev.payload, canal });
+  await ref.update({
+    processingStatus: r.desenlace === 'procesado' ? 'processed' : 'ignored',
+    tenantId,
+    automationMode: canal.mode,
+    automationOrigin: canal.origen,
+    errorMessage: r.motivo,
+    processedAt: Timestamp.now(),
+  });
+  logger.info('Echo del vendedor consumido', { eventId: ev.id, tenantId, mode: canal.mode, desenlace: r.desenlace });
 }
 
 /**
@@ -122,6 +284,12 @@ interface EntregaAutomaticaArgs {
    * persiste, igual que el silencio.
    */
   gateFinal?: () => Promise<boolean>;
+  /**
+   * ADR-0017 §2: canal de la conversación. El guard autoritativo tiene que releer la MISMA sesión
+   * que leyó el motor; si mirara siempre `active`, un takeover tomado en un número decidiría el
+   * silencio del bot en el otro.
+   */
+  sessionKey?: string;
 }
 
 /**
@@ -150,7 +318,7 @@ async function entregarRespuestaAutomatica(args: EntregaAutomaticaArgs): Promise
   // y el cliente ya resuelto. Es la única forma de reproducir la carrera real —el vendedor toma
   // el chat justo en este punto— sin depender del timing.
   await coverageHold(tenantId, 'bot_reply_pre_send');
-  if ((await evaluarSilencioPreEnvio(tenantId, customerId, args.outbound?.expectativa)) === 'silenciado') {
+  if ((await evaluarSilencioPreEnvio(tenantId, customerId, args.outbound?.expectativa, args.sessionKey)) === 'silenciado') {
     logger.info('Respuesta automática SUPRIMIDA en el borde de envío (atención humana o bot apagado)', { tenantId });
     return; // ni se envía ni se persiste
   }
@@ -224,10 +392,28 @@ export async function processWebhookEvent(eventId: string): Promise<void> {
   try {
     // Resolver empresa por el índice global (platform_externalId).
     let tenantId = ev.tenantId;
+    /**
+     * ADR-0017: el snapshot del índice se HOISTEA. El gate por PNID de abajo desempata entre lo
+     * que dice el asset y lo que dice el índice, y esta es la única lectura del índice que el
+     * turno ya paga: guardarla evita una segunda idéntica en el camino caliente del webhook.
+     */
+    let idxData: MetaExternalIndexEntry | undefined;
     if (!tenantId) {
       const idx = await db().doc(paths.metaExternalIndexEntry(`${ev.platform}_${ev.externalId}`)).get();
-      tenantId = (idx.data() as MetaExternalIndexEntry | undefined)?.tenantId ?? null;
+      idxData = idx.data() as MetaExternalIndexEntry | undefined;
+      tenantId = idxData?.tenantId ?? null;
     }
+    /**
+     * ADR-0017 §12 — el ruteo por TIPO va ANTES del guard de `payload.from`, que es donde el echo
+     * moría. `readWebhookEventKind` es el lector canónico: ausente ⇒ `message` (los eventos ya
+     * escritos antes de Coexistence son todos mensajes vivos), desconocido ⇒ `unknown`.
+     */
+    const tipo = readWebhookEventKind(ev);
+    if (tipo !== 'message') {
+      await procesarEventoNoMensaje(ref, ev, tipo, tenantId, idxData);
+      return;
+    }
+
     const payload = ev.payload as
       | { from?: string; text?: string; adReferral?: { campaignId?: string; adId?: string }; messageId?: string; location?: { latitude?: number; longitude?: number; name?: string | null; address?: string | null; contextMessageId?: string | null } }
       | undefined;
@@ -248,6 +434,89 @@ export async function processWebhookEvent(eventId: string): Promise<void> {
     // que lee el guard de silencio, o el chequeo miraría otra conversación.
     const customerId = payload.from.replace(/[^0-9]/g, '');
 
+    const platform = channelOf(ev.platform);
+
+    // MULTI-NUMBER-1: en WhatsApp, ev.externalId ES el phone_number_id del número del negocio
+    // que recibió el mensaje → se persiste en la conversación y la respuesta sale por ese número.
+    // HOISTEADO por ADR-0017: es la identidad del CANAL, y el gate del número la necesita antes
+    // que cualquier consumidor de negocio.
+    const receivedBy = ev.platform === 'whatsapp' ? ev.externalId : null;
+
+    // `||` y NO `??`: el parser escribe cadena VACÍA cuando Meta no manda `id`. Con `??` el ''
+    // no caía al fallback, `hashProviderMessageId('')` producía un id degenerado y el evento
+    // entero terminaba en 'failed' — perdiendo el archivo, que es el bug que este programa mata.
+    const providerMessageId = payload.messageId || ev.id;
+
+    /**
+     * ═══ ADR-0017 §1 — EL GATE POR NÚMERO ═══
+     *
+     * Va ACÁ y no más abajo por una razón que el ADR fija: «por encima quedan solo la resolución
+     * del tenant y la identidad; por debajo queda todo lo que cuesta plata o muta algo — metering,
+     * ingesta de adjuntos, motor, Coverage». Un número recién dado de alta tiene `status:'active'`
+     * (la credencial sirve) pero NINGÚN permiso para automatizar, y hasta este cambio esas dos
+     * cosas eran la misma: registrar el número real del negocio lo ponía a contestarle a clientes
+     * de verdad en el acto.
+     *
+     * Instagram y Messenger quedan FUERA a propósito (`CANAL_SIN_GATE`): no tienen
+     * `phone_number_id` que autorizar y ya tienen su propio gate de plan más abajo. Meterlos en el
+     * fail-closed los apagaría a todos de golpe al desplegar.
+     */
+    const canal: CanalAutomatizacion =
+      ev.platform === 'whatsapp' ? await resolveAutomationMode(tenantId, receivedBy, idxData) : CANAL_SIN_GATE;
+
+    if (modoIndeterminado(canal)) {
+      await devolverALaCola(ref, ev, tenantId, canal);
+      return;
+    }
+
+    if (!permiteAutomatizacion(canal.mode)) {
+      /**
+       * `shadow` se persiste para poder MIRARLO —esa es toda su razón de ser— pero en una
+       * SUPERFICIE PROPIA, nunca en la conversación del cliente. `inactive` no deja ni rastro.
+       *
+       * Es el mismo razonamiento que el ADR §4 hizo para el historial importado —«escribir en
+       * `messages` mezclaría el historial importado con el del número que ya vende»— y acá pesa
+       * más, porque el mensaje llega EN VIVO: `messages` y el resumen del cliente NO están
+       * particionados por canal, así que escribir ahí le movía el `receivedVia` que usa el mensaje
+       * manual del panel para elegir por qué número sale, le metía mensajes ajenos al prompt de la
+       * IA y le publicaba la conversación en la bandeja al número que está vendiendo AHORA.
+       *
+       * EL TEXTO DE UN ARCHIVO NUNCA SE PERSISTE (ADR-0016 §9): sin ingesta no hay documento de
+       * adjunto donde ponerlo. La condición mira si HAY ADJUNTO y no de dónde vino el texto,
+       * porque en la forma legacy el caption venía promovido a `payload.text`.
+       */
+      if (persisteEntrante(canal.mode)) {
+        await registrarObservacion({
+          tenantId,
+          phoneNumberId: receivedBy,
+          sessionKey: canal.sessionKey,
+          customerId,
+          direction: 'in',
+          author: 'customer',
+          kind: 'message',
+          text: (adjunto ? '' : (payload.text ?? '').trim()) || MARCADOR_ENTRANTE_SOMBRA,
+          channel: platform,
+          providerMessageId,
+        });
+      }
+      await ref.update({
+        processingStatus: 'ignored',
+        tenantId,
+        // Desenlace OBSERVABLE: sin esto, "el bot no contestó" y "el número no tiene permiso" se
+        // ven exactamente igual desde afuera, que es el peor lugar para tener que adivinar.
+        automationMode: canal.mode,
+        automationOrigin: canal.origen,
+        errorMessage: `número sin automatización (${canal.mode})`,
+        processedAt: Timestamp.now(),
+        // PRIVACIDAD: la ubicación exacta no queda retenida en el inbox, tampoco al cortar acá.
+        ...(esUbicacion ? { 'payload.location': null } : {}),
+      });
+      logger.info('Inbound sin automatización para este número', { eventId, tenantId, mode: canal.mode, origen: canal.origen });
+      return;
+    }
+    /** ADR-0017 §2: canal de la conversación. `active` = el número que ya vende (heredado). */
+    const sessionKey = canal.sessionKey;
+
     // Gate de empresa (Fase 4): suspendida o sobre el límite de mensajes → no procesar.
     const gate = await checkTenantInboundGate(tenantId);
     if (!gate.allowed) {
@@ -255,17 +524,6 @@ export async function processWebhookEvent(eventId: string): Promise<void> {
       logger.info('Inbound bloqueado por gate de empresa', { tenantId, reason: gate.reason });
       return;
     }
-
-    const platform = channelOf(ev.platform);
-
-    // MULTI-NUMBER-1: en WhatsApp, ev.externalId ES el phone_number_id del número del negocio
-    // que recibió el mensaje → se persiste en la conversación y la respuesta sale por ese número.
-    const receivedBy = ev.platform === 'whatsapp' ? ev.externalId : null;
-
-    // `||` y NO `??`: el parser escribe cadena VACÍA cuando Meta no manda `id`. Con `??` el ''
-    // no caía al fallback, `hashProviderMessageId('')` producía un id degenerado y el evento
-    // entero terminaba en 'failed' — perdiendo el archivo, que es el bug que este programa mata.
-    const providerMessageId = payload.messageId || ev.id;
 
     // COVERAGE-1B: ubicación nativa → camino propio (JAMÁS pasa por el bot/IA). El handler
     // persiste solo el placeholder en el historial; las coordenadas van al coverageRequest.
@@ -312,6 +570,7 @@ export async function processWebhookEvent(eventId: string): Promise<void> {
             texto: resultado.reply,
             channel: platform,
             receivedVia: receivedBy,
+            sessionKey,
             client,
             outbound: resultado.outbound ?? null,
             gateFinal: async () => {
@@ -477,6 +736,9 @@ export async function processWebhookEvent(eventId: string): Promise<void> {
           text: textoDelTurno,
           channel: platform,
           receivedByPhoneNumberId: receivedBy,
+          // ADR-0017 §2: el motor abre la sesión del CANAL que recibió el mensaje. Para el número
+          // heredado esto vale `active` y el comportamiento es idéntico al de siempre.
+          sessionKey,
           // HANDOFF-2: el wamid viaja al motor para que el aviso de handoff sea idempotente
           // ante reintentos/duplicados del webhook.
           messageId: providerMessageId,
@@ -506,7 +768,7 @@ export async function processWebhookEvent(eventId: string): Promise<void> {
     const silenciado = result
       ? result.handledByHuman === true
       : respuestaDelArchivo.trim() === '' ||
-        (await botSilenciadoEnChat(tenantId, customerId).catch((e) => {
+        (await botSilenciadoEnChat(tenantId, customerId, sessionKey).catch((e) => {
           logger.error('No se pudo leer el estado de silencio del bot; no se responde el adjunto', e, { tenantId });
           return true;
         }));
@@ -527,6 +789,7 @@ export async function processWebhookEvent(eventId: string): Promise<void> {
           texto: respuestaDelArchivo,
           channel: platform,
           receivedVia: receivedBy,
+          sessionKey,
           client,
           // Sin `state` ni `humanTakeover`: el acuse del adjunto nunca tocó el resumen del cliente.
           outbound: { expectativa: EXIGE_SILENCIO_LIBRE },
@@ -556,6 +819,7 @@ export async function processWebhookEvent(eventId: string): Promise<void> {
           texto: result.reply,
           channel: platform,
           receivedVia: receivedBy,
+          sessionKey,
           client,
           ...(result.locationRequest ? { locationRequest: true } : {}),
           // Fallback defensivo: con `deferOutbound` el motor SIEMPRE manda descriptor cuando hay
@@ -598,6 +862,13 @@ export async function processWebhookEvent(eventId: string): Promise<void> {
     });
     logger.info('Webhook procesado', { eventId, tenantId, platform: ev.platform, conAdjunto: !!adjunto });
   } catch (e) {
+    /**
+     * El pedido de REENTREGA es deliberado y sale intacto: `devolverALaCola` ya dejó el evento
+     * `received` y sin marca de procesamiento. Tragarlo acá para marcarlo `failed` sería volver al
+     * callejón sin salida —evento cerrado, mensaje del cliente perdido— y encima anularía la
+     * ubicación que el reintento necesita. Va PRIMERO en el catch, antes de cualquier escritura.
+     */
+    if (esReintentoDeWebhook(e)) throw e;
     // PRIVACIDAD: si el evento traía ubicación, se anula también en 'failed' (los failed no se
     // reprocesan — sin esto las coordenadas quedarían retenidas en el inbox hasta el TTL).
     const teniaUbicacion = !!(ev.payload as { location?: unknown } | undefined)?.location;

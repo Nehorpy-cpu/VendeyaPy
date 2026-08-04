@@ -54,9 +54,12 @@ vi.mock('../lib/firebase.js', () => ({
   paths: {
     metaWebhookEvent: (id: string) => `metaWebhookInbox/${id}`,
     metaExternalIndexEntry: (id: string) => `metaExternalIndex/${id}`,
+    metaAsset: (t: string, id: string) => `tenants/${t}/metaAssets/${id}`,
     customer: (t: string, c: string) => `tenants/${t}/customers/${c}`,
     messages: (t: string, c: string) => `tenants/${t}/customers/${c}/messages`,
-    session: (t: string, c: string) => `tenants/${t}/customers/${c}/sessions/active`,
+    // ADR-0017 §2: el canal HEREDADO. El número de este archivo no declara `sessionKey`, así que
+    // la carrera se reproduce sobre `sessions/active`, exactamente donde ocurre hoy.
+    session: (t: string, c: string, k = 'active') => `tenants/${t}/customers/${c}/sessions/${k}`,
   },
 }));
 
@@ -163,6 +166,10 @@ beforeEach(() => {
     coverageActivationId: null,
     outbound: { state: 'IDLE', humanTakeover: false, expectativa: { modo: 'requiere_silencio_libre' } },
   };
+  // ADR-0017 §1: la carrera que este archivo reproduce solo existe si el número puede contestar.
+  // El permiso explícito es la misma precondición que en producción (la migración a `live` corre
+  // antes de desplegar el gate).
+  docs.set(`tenants/${TENANT}/metaAssets/PNID_1`, { externalId: 'PNID_1', status: 'active', automationMode: 'live' });
 });
 
 describe('C — carrera takeover → envío (ADR-0016 §12)', () => {

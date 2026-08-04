@@ -10,16 +10,18 @@
  *   - Emulador → SIEMPRE Mock (nunca llama a Graph), pero resuelve credenciales para
  *     poder testear aislamiento por tenant (Mock inspeccionable con el phone_number_id).
  *   - Real → CloudAPIClient SOLO si whatsappSendMode==='live' (config/channels) Y la
- *     conexión Meta del tenant resuelve creds; en cualquier otro caso, Mock con motivo.
+ *     conexión Meta del tenant resuelve creds Y el canal RESUELTO tiene permiso de automatización
+ *     (ADR-0017 §1 — ver `decideOutboundChannel`); en cualquier otro caso, Mock con motivo.
  * El token NUNCA se loguea ni se escribe en Firestore. Ver Fase 4A.
  */
 import axios from 'axios';
 import { Timestamp } from 'firebase-admin/firestore';
 import { logger } from '../lib/logger.js';
 import { db } from '../lib/firebase.js';
-import { maskPhone } from '@vpw/shared';
-import type { MessageChannel, WhatsappSendMode } from '@vpw/shared';
+import { maskPhone, permiteAutomatizacion } from '@vpw/shared';
+import type { MessageChannel, WhatsappSendMode, WhatsappAutomationMode } from '@vpw/shared';
 import { getChannelConfig } from './channelConfig.js';
+import { resolveAutomationMode } from '../meta/automationMode.js';
 import { resolveTenantWhatsappCreds, resolveTenantWhatsappCredsFor, type WhatsappCredsResult } from './resolveWhatsappCreds.js';
 
 /**
@@ -29,12 +31,19 @@ import { resolveTenantWhatsappCreds, resolveTenantWhatsappCredsFor, type Whatsap
  *  - 'mock': no salió a Meta (emulador / modo mock / no-conectado); id determinístico.
  *  - 'rejected': rechazo CONFIRMADO (HTTP 4xx de Graph); `providerCode` numérico saneado o null.
  *  - 'unknown': 5xx, timeout, reset, sin respuesta o excepción ambigua — el mensaje PUDO salir.
+ *  - 'blocked': ADR-0017 §1 — el canal NO tiene permiso para hablar. NO se llamó a Meta: es un
+ *    NO-ENVÍO confirmado, cero HTTP en vuelo. Se separa de 'mock' porque son cosas opuestas: un
+ *    mock es un envío simulado que el historial registra COMO TAL (el tenant eligió no enviar),
+ *    y un bloqueo es un mensaje que el negocio quiso mandar y el sistema impidió. Devolverlo con
+ *    `ok:true` dejaba la burbuja en el chat y le contestaba éxito al vendedor mientras el cliente
+ *    no recibía nada: un silencio que miente es peor que un error.
  * Nada de regex sobre strings ni payload crudo de Meta en el resultado o los logs.
  */
 export type SendResult =
   | { ok: true; outcome: 'accepted'; id: string; viaMock: false }
   | { ok: true; outcome: 'mock'; id: string; viaMock: true }
   | { ok: false; outcome: 'rejected'; providerCode: number | null }
+  | { ok: false; outcome: 'blocked'; reason: MotivoCanalBloqueado }
   | { ok: false; outcome: 'unknown' };
 
 /**
@@ -55,10 +64,13 @@ export interface SendContext {
 /**
  * COVERAGE-1B: resultado TIPADO del pedido de ubicación nativa (nada de strings mágicos).
  * `unsupported_channel` ⇒ el llamador manda el texto plano (fallback textual, UNA sola vez).
+ * `channel_blocked` (ADR-0017 §1) ⇒ el canal no tiene permiso: el fallback textual TAMPOCO va a
+ * salir, y por eso el motivo es propio — que el log diga "falló el botón" cuando lo que pasa es
+ * que el número está mudo manda a buscar el problema al lugar equivocado.
  */
 export type LocationRequestResult =
   | { ok: true; id?: string; viaMock?: boolean }
-  | { ok: false; reason: 'unsupported_channel' | 'send_error' };
+  | { ok: false; reason: 'unsupported_channel' | 'send_error' | 'channel_blocked' };
 
 export interface WhatsAppClient {
   /** SHIPPING-CHAT-3B: metadata no sensible del transporte (ver WhatsappTransportInfo). */
@@ -317,10 +329,105 @@ function cloudClientFor(tenantId: string, creds: Extract<WhatsappCredsResult, { 
 /** Fallback global DEPRECATED (bootstrap mono-tenant) detrás de flag explícito. */
 const globalFallbackAllowed = () => process.env.ALLOW_GLOBAL_WHATSAPP_FALLBACK === 'true';
 
+/**
+ * ADR-0017 §1 — EL PERMISO DEL CANAL, DEL LADO DEL ENVÍO
+ * ======================================================
+ * El gate de ADR-0017 nació mirando el inbound. Del lado del envío quedaba un agujero con nombre
+ * propio: `resolveCreds` cae al número PRINCIPAL del tenant cuando el PNID pedido no resuelve. Si
+ * el principal es —o pasa a ser— el número en `inactive`/`shadow`, TODO el outbound del tenant
+ * sale por el número que debe estar callado. El fallback es el punto exacto donde un error de
+ * ruteo se convierte en un mensaje a un cliente real.
+ *
+ * LA INTENCIÓN NO SE ADIVINA — SE DECLARA. La primera versión de este gate dedujo el origen del
+ * mensaje mirando la forma de la llamada: «si el llamador nombró un PNID y ese PNID resolvió, lo
+ * único que puede haber llegado hasta acá es HUMANO, porque el gate del inbound corta al bot antes
+ * de que exista una respuesta que enviar». La premisa era FALSA y el contraejemplo está en el
+ * repo: `enviarPorOutbox` (cobertura) construye el cliente con el PNID GUARDADO en el job
+ * (`receivedVia`), y quienes la disparan son el mantenimiento programado y el trigger del job —
+ * cero intervención humana. Un número en `live` deja un job pendiente, el operador lo degrada a
+ * `shadow`, el mantenimiento toma el job: canal «elegido», modo distinto de `inactive` ⇒ salían
+ * instrucciones bancarias a un cliente real por el número que tiene que estar callado.
+ *
+ * Por eso el permiso depende de un `origen` EXPLÍCITO, y el default es el estricto:
+ *
+ *  · **`automatico`** (bot, jobs, schedulers, triggers — todo lo que decide una máquina): se exige
+ *    `live` SIEMPRE, nombre o no nombre el PNID. Es el default justamente porque un llamador que
+ *    no se hizo la pregunta no puede terminar con el permiso ancho.
+ *
+ *  · **`humano`** + **canal ELEGIDO** (el vendedor escribe desde el panel por un número concreto):
+ *    alcanza con que NO esté `inactive`. Es el único caso en el que un `shadow` lleva outbound, y
+ *    tiene sentido porque en `shadow` el vendedor atiende A MANO: romperlo sería dejarlo sin poder
+ *    contestar por el panel del número que él mismo está atendiendo.
+ *
+ *  · **canal INFERIDO** (no se nombró PNID, o se nombró uno y terminó saliendo por otro): se exige
+ *    `live` aunque el origen sea humano. Un mensaje que el sistema RE-RUTEÓ a un número que nadie
+ *    nombró no puede salir por un canal sin permiso: ahí no hubo decisión sobre el destino.
+ *
+ * Fail-closed igual que el inbound: si el permiso no se puede leer, el lector devuelve `inactive` y
+ * el envío no sale. Cuesta una lectura por mensaje saliente, del mismo orden que la del gate de
+ * entrada, y es lo que compra que ningún número hable sin permiso.
+ */
+export type OrigenEnvio = 'humano' | 'automatico';
+
+/** Motivo saneado de un bloqueo: código CERRADO, seguro de loguear y de persistir. */
+export type MotivoCanalBloqueado = `automation_${WhatsappAutomationMode}`;
+
+export type OutboundChannelDecision =
+  | { allow: true }
+  | { allow: false; reason: MotivoCanalBloqueado; canal: 'elegido' | 'inferido'; origen: OrigenEnvio };
+
+/** Decisión PURA (sin E/S, sin reloj) → unit-testeable, igual que `decideWhatsappCreds`. */
+export function decideOutboundChannel(args: {
+  requestedPhoneNumberId: string | null | undefined;
+  resolvedPhoneNumberId: string;
+  mode: WhatsappAutomationMode;
+  /** Ausente ⇒ `automatico`: quien no declara origen recibe la vara estricta (fail-closed). */
+  origen?: OrigenEnvio;
+}): OutboundChannelDecision {
+  const origen = args.origen ?? 'automatico';
+  const pedido = (args.requestedPhoneNumberId ?? '').trim();
+  const elegido = pedido !== '' && pedido === args.resolvedPhoneNumberId;
+  const permitido = origen === 'humano' && elegido ? args.mode !== 'inactive' : permiteAutomatizacion(args.mode);
+  return permitido
+    ? { allow: true }
+    : { allow: false, reason: `automation_${args.mode}`, canal: elegido ? 'elegido' : 'inferido', origen };
+}
+
+/**
+ * ADR-0017 §1 — CLIENTE DE UN CANAL SIN PERMISO. Extiende el Mock a propósito y no lo reemplaza:
+ * hacia afuera tiene que seguir pareciendo lo que ES —un transporte que NO llega a Meta, con la
+ * misma `resolution` inspeccionable— para que la saga de cotización lo siga rechazando por
+ * `transportInfo.transport === 'mock'` sin conocer este tipo. Lo único que cambia es lo que
+ * devuelve al enviar: `blocked`, nunca `ok`. La burbuja en el historial y el "listo" del panel se
+ * decidían con ese booleano.
+ */
+export class BlockedChannelClient extends MockWhatsAppClient {
+  constructor(
+    resolution: MockResolution,
+    private readonly motivo: MotivoCanalBloqueado,
+  ) {
+    super(resolution);
+  }
+
+  override async sendText(): Promise<SendResult> {
+    return { ok: false, outcome: 'blocked', reason: this.motivo };
+  }
+
+  override async sendLocationRequest(): Promise<LocationRequestResult> {
+    return { ok: false, reason: 'channel_blocked' };
+  }
+}
+
 /** Dependencias inyectables (para tests sin Firestore). */
 export interface WhatsappClientDeps {
   getMode: (tenantId?: string) => Promise<WhatsappSendMode>;
   resolveCreds: (tenantId?: string, phoneNumberId?: string | null) => Promise<WhatsappCredsResult>;
+  /**
+   * Permiso de automatización del canal RESUELTO (ADR-0017 §1). Opcional para no romper a quien ya
+   * construye deps: si falta, se usa el lector real —que es el MISMO que usa el gate del inbound,
+   * porque dos lecturas del mismo flag terminan divergiendo y la laxa es la que enciende—.
+   */
+  resolveAutomation?: (tenantId: string, phoneNumberId: string) => Promise<WhatsappAutomationMode>;
 }
 
 const defaultDeps: WhatsappClientDeps = {
@@ -335,7 +442,48 @@ const defaultDeps: WhatsappClientDeps = {
     }
     return resolveTenantWhatsappCreds(t);
   },
+  resolveAutomation: async (t, pnid) => (await resolveAutomationMode(t, pnid)).mode,
 };
+
+/**
+ * Aplica el gate sobre el canal por el que el mensaje SALDRÍA de verdad (el resuelto), no sobre el
+ * que se pidió: el fallback puede haber cambiado el destino sin que el llamador se entere.
+ */
+async function permisoDeCanal(
+  tenantId: string,
+  requestedPhoneNumberId: string | null | undefined,
+  creds: Extract<WhatsappCredsResult, { ok: true }>,
+  deps: WhatsappClientDeps,
+  origen: OrigenEnvio,
+): Promise<OutboundChannelDecision> {
+  const leer = deps.resolveAutomation ?? defaultDeps.resolveAutomation!;
+  const mode = await leer(tenantId, creds.phoneNumberId);
+  const decision = decideOutboundChannel({
+    requestedPhoneNumberId,
+    resolvedPhoneNumberId: creds.phoneNumberId,
+    mode,
+    origen,
+  });
+  if (!decision.allow) {
+    logger.warn('WhatsApp: envío BLOQUEADO por el permiso del canal (ADR-0017)', {
+      tenantId,
+      phoneNumberId: maskPhone(creds.phoneNumberId),
+      canal: decision.canal,
+      origen: decision.origen,
+      reason: decision.reason,
+    });
+  }
+  return decision;
+}
+
+/**
+ * Mock de un canal SIN permiso. Deliberadamente sin `tokenPresent`: la saga de cotización acepta un
+ * mock en emulador solo cuando la resolución habría sido un envío live válido, y un canal bloqueado
+ * no lo es. Marcarlo `tokenPresent: true` haría que una cotización se aprobara sobre un número que
+ * tiene prohibido hablar.
+ */
+const mockCanalBloqueado = (mode: WhatsappSendMode, decision: Extract<OutboundChannelDecision, { allow: false }>, phoneNumberId: string) =>
+  new BlockedChannelClient({ mode, phoneNumberId, reason: decision.reason }, decision.reason);
 
 /**
  * Resuelve el cliente de WhatsApp para un tenant (Fase 4A). USA el tenantId de verdad.
@@ -347,6 +495,12 @@ export async function getWhatsAppClient(
   deps: WhatsappClientDeps = defaultDeps,
   /** MULTI-NUMBER-1: responder por ESTE número (el que recibió el mensaje). */
   phoneNumberId?: string | null,
+  /**
+   * ADR-0017 §1: QUIÉN decide este envío. Ausente ⇒ `automatico` (vara estricta): el default no
+   * puede ser el permiso ancho, porque el llamador que no se hizo la pregunta es justamente el
+   * que no debería recibirlo.
+   */
+  origen: OrigenEnvio = 'automatico',
 ): Promise<WhatsAppClient> {
   const mode = await deps.getMode(tenantId);
 
@@ -354,6 +508,12 @@ export async function getWhatsAppClient(
   // (Mock inspeccionable con el phone_number_id resuelto — clave para multi-número).
   if (isEmulator()) {
     const creds = await deps.resolveCreds(tenantId, phoneNumberId);
+    // El gate corre TAMBIÉN en emulador: un permiso que se comporta distinto según el entorno es
+    // un permiso que nadie probó de verdad.
+    if (creds.ok && tenantId) {
+      const permiso = await permisoDeCanal(tenantId, phoneNumberId, creds, deps, origen);
+      if (!permiso.allow) return mockCanalBloqueado(mode, permiso, creds.phoneNumberId);
+    }
     if (mode === 'live') {
       return creds.ok
         ? new MockWhatsAppClient({ mode, phoneNumberId: creds.phoneNumberId, tokenPresent: true })
@@ -368,7 +528,13 @@ export async function getWhatsAppClient(
   if (mode !== 'live') return new MockWhatsAppClient({ mode, reason: 'mode_mock' });
 
   const creds = await deps.resolveCreds(tenantId, phoneNumberId);
-  if (creds.ok && tenantId) return cloudClientFor(tenantId, creds);
+  if (creds.ok && tenantId) {
+    // ADR-0017 §1: el permiso se verifica ANTES de la caché de clientes. Cachear el veredicto junto
+    // con el cliente dejaría hasta un minuto de envíos por un canal que ya perdió el permiso.
+    const permiso = await permisoDeCanal(tenantId, phoneNumberId, creds, deps, origen);
+    if (!permiso.allow) return mockCanalBloqueado(mode, permiso, creds.phoneNumberId);
+    return cloudClientFor(tenantId, creds);
+  }
 
   // Fallback global (DEPRECATED): solo si está habilitado explícitamente y hay env globales.
   // SHIPPING-CHAT-3B: marcado 'global_fallback' en transportInfo — es live pero con credenciales
@@ -390,12 +556,17 @@ export async function getWhatsAppClient(
  * recibió la conversación; si ese número no resuelve, el caller aborta con channel_unavailable).
  * Con pnid null (conversación vieja mono-número) se resuelve el principal del tenant.
  */
-export async function getWhatsAppClientExact(tenantId: string, phoneNumberId: string | null): Promise<WhatsAppClient> {
+export async function getWhatsAppClientExact(
+  tenantId: string,
+  phoneNumberId: string | null,
+  /** Igual que `getWhatsAppClient`: sin declarar, la vara estricta (ADR-0017 §1). */
+  origen: OrigenEnvio = 'automatico',
+): Promise<WhatsAppClient> {
   const strictDeps: WhatsappClientDeps = {
-    getMode: defaultDeps.getMode,
+    ...defaultDeps, // hereda el gate de canal de ADR-0017; solo se endurece la resolución del número
     resolveCreds: async (t, pnid) => (t && pnid ? resolveTenantWhatsappCredsFor(t, pnid) : resolveTenantWhatsappCreds(t)),
   };
-  return getWhatsAppClient(tenantId, strictDeps, phoneNumberId);
+  return getWhatsAppClient(tenantId, strictDeps, phoneNumberId, origen);
 }
 
 /*

@@ -300,3 +300,7 @@ export { attachmentGetViewUrl } from './functions/attachments/mediaViewCallable.
 // Purga de retención: APAGADA por defecto y por tenant. Nunca borra evidencia de pago, adjuntos
 // atados a un pedido ni nada sin `retentionUntil` explícito (⇒ cero backfill).
 export { attachmentRetentionMaintenance } from './functions/attachments/mediaRetentionMaintenance.js';
+// Coexistence (ADR-0017 §4): retención REAL del archivo importado. Anula el payload de lo vencido
+// —hasta 180 días de conversaciones privadas— y recién después lo borra. Es el mecanismo del repo
+// que no depende de que alguien haya aplicado la política TTL en la consola.
+export { coexistenceRetentionMaintenance } from './functions/meta/coexistenceRetention.js';

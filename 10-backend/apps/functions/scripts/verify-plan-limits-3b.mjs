@@ -50,6 +50,10 @@ const eventIds = [];
 
 // ---- Setup: conectar perfumeria (índices wa-595/ig-200/fb-300) + índice IG de boutique + reset usage ----
 await post('devMetaConnect', { tenantId: T, byUid: 'uid-3b' });
+// ADR-0017 §1: el asset demo nace SIN `automationMode` (conectar no autoriza). Este merge de UN
+// campo es lo que hace `migrate-whatsapp-automation-mode.mjs` sobre el asset real antes del deploy;
+// sin él, el inbound de WhatsApp del check 3 se cierra `ignored` y no llega al motor.
+await db.doc(`tenants/${T}/metaAssets/wa-595`).set({ automationMode: 'live' }, { merge: true });
 const now = Timestamp.now();
 await db.doc('metaExternalIndex/instagram_ig-boutique').set({ id: 'instagram_ig-boutique', tenantId: OTHER, connectionId: 'main', assetType: 'instagram_account', platform: 'instagram', externalId: 'ig-boutique', status: 'active', updatedAt: now });
 // messagesThisMonth=0 en ambos → el gate de empresa (cuota) no interfiere; el único bloqueo será el de multiChannel.

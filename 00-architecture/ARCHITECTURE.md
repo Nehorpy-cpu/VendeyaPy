@@ -454,7 +454,26 @@ El `customerId` se deriva del número de WhatsApp del cliente (hash del número)
 
 ### 4.5 Esquema: `tenants/{tenantId}/customers/{customerId}/sessions/{sessionId}`
 
-Una sesión activa representa la conversación en curso. Solo existe una sesión activa por cliente.
+Una sesión representa la conversación en curso **con un número receptor**.
+
+**Una sesión por canal, no por cliente (ADR-0017).** Durante mucho tiempo hubo exactamente una sesión por
+cliente, en el documento `active`. Con más de un número de WhatsApp por tenant eso deja de alcanzar: el mismo
+cliente puede estar comprando por un número y consultando por otro, y una sola sesión mezclaría el carrito, el
+pedido pendiente, el estado del motor y —lo más peligroso— el `humanTakeover`, que decide si el bot habla.
+
+El `sessionId` pasa a derivarse del número que RECIBIÓ el mensaje. `active` se conserva como la clave del canal
+heredado: las conversaciones que ya existen no se migran ni se tocan.
+
+Qué queda de cada lado:
+
+| compartido, vive en el `Customer` | por canal, vive en la sesión |
+|---|---|
+| identidad y `wa_id` | `state` del motor |
+| pedidos, pagos, adjuntos, financieros | `humanTakeover` y quién atiende |
+| historial de compras | `pendingCartConfirmation`, `pendingOrderId`, puntero de Coverage |
+
+El cliente sigue siendo **uno solo** por `(tenantId, wa_id)`: es la misma persona y sus pedidos son suyos, no
+del número por el que escribió.
 
 ```typescript
 {
@@ -1518,4 +1537,49 @@ Los bloques son unidades de trabajo secuenciales. Cada bloque debe estar complet
 
 ---
 
-*Última actualización: 2026-05-26 — Versión inicial.*
+---
+
+## 12. WhatsApp multi-número y Coexistence (ADR-0017)
+
+**Conexión válida ≠ permiso para automatizar.** Son dos ejes ortogonales, y confundirlos es lo que hacía
+peligroso dar de alta un número: hasta ADR-0017, `status: 'active'` significaba a la vez «la credencial sirve»
+y «el bot puede contestar», así que registrar un número lo ponía a responder clientes reales en el acto.
+
+| campo | qué significa |
+|---|---|
+| `status` | la conexión es válida. **No autoriza nada.** |
+| `automationMode` | `inactive` \| `shadow` \| `live` — qué se le permite hacer al sistema con ese número |
+
+| modo | efecto sobre un inbound |
+|---|---|
+| `inactive` | ACK seguro: sin motor, IA, reglas, carrito, pedido, Coverage, metering ni outbound |
+| `shadow` | se persiste para inspección; cero respuesta automática y cero efecto comercial |
+| `live` | automatización normal, salvo takeover de esa conversación en ese número |
+
+**Fail-closed**, con el mismo criterio que el rollout de adjuntos (§4.12): un PNID nuevo, sin el campo o con un
+valor que no sea exactamente uno de los tres es `inactive`. Ante inconsistencia entre asset, índice y conexión
+gana **el estado más restrictivo**. El gate se evalúa **antes que cualquier consumidor de negocio** — por
+encima quedan solo la resolución del tenant y la identidad del cliente.
+
+**Orden obligatorio al desplegar**: la migración del PNID vigente a `live` corre **antes** que el gate. Al
+revés, el número que vende leería el campo ausente, resolvería `inactive` y quedaría mudo. El código anterior
+ignora el campo, así que en ese orden no hay ventana de interrupción.
+
+**Webhooks de Coexistence.** El parser enruta por `change.field`, no por la forma del payload:
+
+| campo | destino | regla |
+|---|---|---|
+| `messages` | `metaWebhookInbox` | comportamiento actual, detrás del gate por PNID |
+| `statuses` | ídem | sin cambios |
+| `smb_message_echoes` | `metaWebhookInbox` (marcado) | outbound **humano**; activa el silencio; jamás se reenvía |
+| `history` | colección propia, cerrada al cliente | inerte: `historical:true`, `automationEligible:false`, `unread:false` |
+| `smb_app_state_sync` | colección propia | contactos; **no** crea `Customer`s |
+| desconocido | auditoría saneada | ACK 200, cero automatización |
+
+Dos detalles que gobiernan el diseño y no son evidentes. Primero: en un echo, **`from` es el número del
+NEGOCIO** y `to` el del cliente — normalizarlo con la forma de un inbound haría que el sistema abriera una
+conversación consigo mismo y el bot se respondiera a sí mismo. Segundo: `onWebhookInbox` dispara sobre **todo**
+documento de `metaWebhookInbox` — esa colección *es* el disparador del motor —, por eso el historial y los
+contactos no pasan por ahí, y por eso la defensa es doble: un gate por tipo de evento *y* un destino separado.
+
+*Última actualización: 2026-08-03 — §4.5 (sesión por canal) y §12 (multi-número y Coexistence, ADR-0017).*

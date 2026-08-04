@@ -19,6 +19,10 @@ import type { WhatsappCredsResult } from './resolveWhatsappCreds.js';
 const makeDeps = (mode: 'mock' | 'live', creds: WhatsappCredsResult): WhatsappClientDeps => ({
   getMode: async () => mode,
   resolveCreds: async () => creds,
+  // ADR-0017 §1: estos casos describen el número que YA VENDE, que la migración deja en `live`
+  // antes de desplegar el gate. El gate del ENVÍO tiene su propia batería en
+  // `whatsappClient.outbound.test.ts`; acá se prueba la selección de transporte, no el permiso.
+  resolveAutomation: async () => 'live',
 });
 const OK: WhatsappCredsResult = { ok: true, phoneNumberId: 'wa-595', accessToken: 'tok-abc', tokenExpiresAtMs: null };
 
@@ -210,6 +214,7 @@ describe('SHIPPING-CHAT-3B — cache por tenant + número (bug multi-número pre
   const depsPorPnid: WhatsappClientDeps = {
     getMode: async () => 'live',
     resolveCreds: async (_t, pnid) => ({ ok: true, phoneNumberId: pnid ?? 'main', accessToken: 'tok', tokenExpiresAtMs: null }),
+    resolveAutomation: async () => 'live', // números ya habilitados: acá se prueba la CACHÉ
   };
 
   it('dos números del MISMO tenant producen clientes SEPARADOS (jamás mezclar credenciales)', async () => {

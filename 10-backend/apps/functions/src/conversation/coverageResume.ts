@@ -428,7 +428,12 @@ export async function enviarPorOutbox(input: {
     // El cliente (resolución de credenciales: lecturas de Firestore/Secret Manager) se construye
     // ANTES del re-chequeo para que la validación del flag sea la ÚLTIMA operación antes de
     // client.sendText — sin E/S en el medio que ensanche la ventana (review).
-    const client = await getWhatsAppClient(tenantId, undefined, input.receivedVia);
+    // ADR-0017 §1 — origen AUTOMÁTICO explícito. Este envío lo dispara el mantenimiento programado
+    // o el trigger del job, con el PNID que quedó GUARDADO en el job: no hay humano mirando. Si ese
+    // número se degradó a `shadow` entre que se encoló el job y que se procesa, el permiso tiene
+    // que exigir `live` aunque el PNID venga nombrado — si no, salen instrucciones bancarias a un
+    // cliente real por un número que tiene que estar callado.
+    const client = await getWhatsAppClient(tenantId, undefined, input.receivedVia, 'automatico');
 
     // KILL-SWITCH-1: re-chequeo INMEDIATO antes de llamar a Meta. Nada salió todavía: si el flag
     // se apagó tras el claim, el mensaje vuelve a `prepared` (reclamable si se reactiva la misma
@@ -463,10 +468,14 @@ export async function enviarPorOutbox(input: {
       return 'sent';
     }
     // Falla devuelta por el cliente (SHIPPING-CHAT-3B: SendResult DISCRIMINADO, sin regex).
-    // Con instrucciones bancarias en juego, SOLO 'rejected' (rechazo CONFIRMADO de Meta,
-    // HTTP 4xx tipado) reintenta como `failed`; cualquier ambigüedad ('unknown': 5xx,
-    // timeout, reset, 2xx sin wamid) queda `unknown` y JAMÁS se reenvía sola.
-    const confirmada = r.outcome === 'rejected';
+    // Con instrucciones bancarias en juego, solo un NO-ENVÍO CONFIRMADO reintenta como `failed`;
+    // cualquier ambigüedad ('unknown': 5xx, timeout, reset, 2xx sin wamid) queda `unknown` y
+    // JAMÁS se reenvía sola. Confirmados hay dos: 'rejected' (4xx tipado de Meta) y 'blocked'
+    // (ADR-0017 §1: el canal no tiene permiso — cero HTTP en vuelo, así que es el caso MENOS
+    // ambiguo de todos). `blocked` como `unknown` sería peor que un bug de estado: dejaría el job
+    // en `send_unknown`, que se lee como "pudo haber salido" y nunca se recupera solo, cuando lo
+    // que hay que hacer es habilitar el número y dejar que el mantenimiento lo re-drivee.
+    const confirmada = r.outcome === 'rejected' || r.outcome === 'blocked';
     await ref.update({ status: confirmada ? 'failed' : 'unknown', leaseUntil: null, updatedAt: Timestamp.now() });
     return confirmada ? 'failed' : 'unknown';
   } catch (e) {

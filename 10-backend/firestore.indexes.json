@@ -273,5 +273,58 @@
       ]
     }
   ],
-  "fieldOverrides": []
+  "//fieldOverrides": [
+    "RETENCIÓN DEL ARCHIVO DE COEXISTENCE (ADR-0017 §4 y §1). `expiresAt` sin política TTL declarada es",
+    "una fecha decorativa: el documento queda para siempre. Acá viven las TRES colecciones nuevas —",
+    "el historial importado son hasta 180 días de conversaciones privadas de los clientes del tenant, y",
+    "la superficie de observación de `shadow` guarda el teléfono del cliente y el texto de los mensajes —,",
+    "y se declaran en la IaC y no en la consola para que la retención sea revisable y reproducible.",
+    "",
+    "Este archivo NO es la única declaración: el barrido de `coexistenceRetention.ts` tiene que listar",
+    "exactamente las mismas colecciones, y `coexistenceRetention.costura.test.ts` lo verifica en CI.",
+    "La observación nació con `expiresAt` y sin override acá — la costura se chequea justamente porque",
+    "ya se abrió una vez.",
+    "",
+    "Los tres modos de índice de un solo campo van EXPLÍCITOS a propósito: `patchField` reescribe",
+    "`indexConfig` con lo que diga este archivo, así que declararlos vacíos apagaría el índice por",
+    "defecto de `expiresAt` y la consulta de la purga (`coexistenceRetention.ts`) dejaría de resolver.",
+    "",
+    "PASO OPERATIVO BLOQUEANTE: esto se aplica con `firebase deploy --only firestore:indexes` (NUNCA",
+    "con --force: `--force` borra los field overrides del proyecto que no estén en este archivo, y el",
+    "TTL de `metaWebhookInbox` sigue siendo política de CONSOLA, no está acá). Desplegar Functions no",
+    "activa ninguna política TTL. Verificar en consola que las dos políticas quedaron ACTIVE antes de",
+    "habilitar la ingesta de historial."
+  ],
+  "fieldOverrides": [
+    {
+      "collectionGroup": "metaWebhookHistory",
+      "fieldPath": "expiresAt",
+      "ttl": true,
+      "indexes": [
+        { "order": "ASCENDING", "queryScope": "COLLECTION" },
+        { "order": "DESCENDING", "queryScope": "COLLECTION" },
+        { "arrayConfig": "CONTAINS", "queryScope": "COLLECTION" }
+      ]
+    },
+    {
+      "collectionGroup": "metaWebhookAppState",
+      "fieldPath": "expiresAt",
+      "ttl": true,
+      "indexes": [
+        { "order": "ASCENDING", "queryScope": "COLLECTION" },
+        { "order": "DESCENDING", "queryScope": "COLLECTION" },
+        { "arrayConfig": "CONTAINS", "queryScope": "COLLECTION" }
+      ]
+    },
+    {
+      "collectionGroup": "metaWebhookShadow",
+      "fieldPath": "expiresAt",
+      "ttl": true,
+      "indexes": [
+        { "order": "ASCENDING", "queryScope": "COLLECTION" },
+        { "order": "DESCENDING", "queryScope": "COLLECTION" },
+        { "arrayConfig": "CONTAINS", "queryScope": "COLLECTION" }
+      ]
+    }
+  ]
 }

@@ -5,7 +5,8 @@
  * Subcolecciones: tenants/{t}/metaConnections/{id} · tenants/{t}/metaAssets/{id}.
  */
 
-import type { MetaConnectionStatus, MetaConnectionSource, MetaAssetType, WebhookStatus, WhatsappActivationStatus } from '../enums.js';
+import { WEBHOOK_EVENT_KIND } from '../enums.js';
+import type { MetaConnectionStatus, MetaConnectionSource, MetaAssetType, WebhookStatus, WebhookEventKind, WhatsappActivationStatus } from '../enums.js';
 import type { Timestamp } from './common.types.js';
 import type { CampaignAttribution } from './attribution.types.js';
 
@@ -67,6 +68,45 @@ export interface WebhookInboxEvent {
   processingStartedAt?: Timestamp | null;
   processedAt: Timestamp | null;
   expiresAt: Timestamp | null;
+  /**
+   * Coexistence (ADR-0017 §12): qué TIPO de evento es, ya resuelto por `change.field`.
+   *
+   * OPCIONAL a propósito. Cuando esto se despliega hay eventos ya escritos en la bandeja que no
+   * tienen el campo, y perderlos sería exactamente la clase de defecto que este programa arregla.
+   * El lector canónico es `readWebhookEventKind()`: ausente ⇒ `'message'` (que es lo que esos
+   * eventos SON), valor desconocido ⇒ `'unknown'`.
+   */
+  kind?: WebhookEventKind;
+  /**
+   * true SOLO en los chunks de `history`. Un registro histórico no es una bandeja de entrada: no
+   * alimenta el prompt de la IA, no dispara campanas y no se mezcla con los mensajes vivos.
+   */
+  historical?: boolean;
+  /**
+   * false en todo lo que no sea un `messages` vivo. NO es un permiso: el gate por PNID
+   * (`automationMode`) manda igual. Es una marca legible que hace evidente, mirando el documento,
+   * que ese evento jamás debió disparar negocio.
+   */
+  automationEligible?: boolean;
+  /** false en historial: no cuenta para contadores de no-leídos ni notificaciones. */
+  unread?: boolean;
+}
+
+/**
+ * Lector canónico de `kind`. Existe como función —y no como un `ev.kind ?? 'message'` repetido en
+ * cada borde— por la misma razón que `isRolloutFlagEnabled` en `attachmentRollout.ts`: dos lecturas
+ * del mismo campo terminan divergiendo, y la laxa es la que deja pasar cosas.
+ *
+ * Las dos ramas NO son la misma decisión:
+ *  - AUSENTE ⇒ `'message'`. Es retrocompatibilidad, no laxitud: los eventos escritos antes de este
+ *    cambio son todos mensajes vivos, y tratarlos de otra forma los rompería.
+ *  - PRESENTE PERO DESCONOCIDO ⇒ `'unknown'`. Un valor que este despliegue no entiende (una versión
+ *    futura, un dato corrupto) cae al tipo MÁS RESTRICTIVO. Nunca se degrada a `'message'`.
+ */
+export function readWebhookEventKind(ev: { kind?: unknown } | null | undefined): WebhookEventKind {
+  const raw = ev?.kind;
+  if (raw === undefined || raw === null) return 'message';
+  return (WEBHOOK_EVENT_KIND as readonly string[]).includes(raw as string) ? (raw as WebhookEventKind) : 'unknown';
 }
 
 /**

@@ -35,6 +35,10 @@ await sleep(31_000);
 await post('devMetaConnect', { tenantId: T, byUid: 'uid-owner' });
 const idx = await db.doc('metaExternalIndex/whatsapp_wa-595').get();
 check('0. Índice externo poblado (whatsapp_wa-595 → empresa)', idx.data()?.tenantId === T);
+// ADR-0017 §1: el asset demo nace SIN `automationMode` (conectar no autoriza). Este merge de UN
+// campo es lo que hace `migrate-whatsapp-automation-mode.mjs` sobre el asset real antes del deploy;
+// sin él, el inbound de WhatsApp del check 5 se cierra `ignored` sin llegar al motor.
+await db.doc(`tenants/${T}/metaAssets/wa-595`).set({ automationMode: 'live' }, { merge: true });
 
 // 1. Handshake del webhook (GET verify)
 const okVerify = await fetch(`${BASE}/metaWebhook?hub.mode=subscribe&hub.verify_token=aiafg-verify-demo&hub.challenge=12345`);

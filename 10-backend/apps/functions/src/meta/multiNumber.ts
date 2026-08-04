@@ -18,6 +18,7 @@
  */
 import { Timestamp } from 'firebase-admin/firestore';
 import type { MetaAsset, MetaConnection } from '@vpw/shared';
+import { whatsappSessionKey, AUTOMATION_MODE_FAIL_CLOSED } from '@vpw/shared';
 import { db, paths } from '../lib/firebase.js';
 import { getSecretStore } from '../lib/secretStore.js';
 import { metaNumberTokenSecretName } from './secretName.js';
@@ -114,6 +115,15 @@ export async function runAddWhatsappNumber(
   batch.set(db().doc(paths.metaAsset(tenantId, pnid)), {
     id: pnid, tenantId, connectionId, assetType: 'whatsapp_phone_number', externalId: pnid,
     name: input.displayPhoneNumber, status: 'active', selected: false, createdAt: now, updatedAt: now,
+    // ADR-0017 §1: el alta NO escribe `automationMode`. El campo AUSENTE ya significa `inactive`
+    // por fail-closed, así que el número nace sin permiso para contestarle a nadie y pasar a
+    // `shadow` —y después a `live`— es una decisión humana aparte. Escribir acá cualquier valor
+    // reviviría el defecto que este ADR mata: `status:'active'` autorizando automatización.
+    //
+    // ADR-0017 §2: sí estrena su PROPIO canal de conversación. Si naciera sobre `active`, el
+    // primer mensaje que reciba se mezclaría con la conversación abierta del número que ya vende:
+    // mismo carrito, mismo `humanTakeover`, mismo pedido pendiente.
+    sessionKey: whatsappSessionKey(pnid),
   });
   batch.set(db().doc(paths.metaExternalIndexEntry(whatsappIndexId(pnid))), {
     id: whatsappIndexId(pnid), tenantId, connectionId, assetType: 'whatsapp_phone_number',
@@ -166,7 +176,12 @@ export async function deactivateWhatsappNumber(tenantId: string, phoneNumberId: 
 
   const now = Timestamp.now();
   const batch = db().batch();
-  batch.set(assetRef, { status: 'inactive', selected: false, updatedAt: now }, { merge: true });
+  // ADR-0017 §1: apagar un número es REVOCARLE el permiso, y eso se escribe.
+  // Si solo quedara implícito en `status`, una reconexión posterior (que PRESERVA el
+  // `automationMode` para no dejar mudo al número que vende) lo devolvería a `live` sin que
+  // ningún humano lo decidiera. La `sessionKey` NO se toca: el merge la conserva y perderla
+  // fusionaría su conversación con la del canal heredado.
+  batch.set(assetRef, { status: 'inactive', selected: false, automationMode: AUTOMATION_MODE_FAIL_CLOSED, updatedAt: now }, { merge: true });
   batch.delete(db().doc(paths.metaExternalIndexEntry(whatsappIndexId(phoneNumberId))));
   batch.set(connRef, { status: 'disconnected', updatedAt: now }, { merge: true });
   await batch.commit();

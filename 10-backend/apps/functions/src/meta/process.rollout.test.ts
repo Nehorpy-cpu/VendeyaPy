@@ -75,6 +75,7 @@ vi.mock('../lib/firebase.js', () => ({
   paths: {
     metaWebhookEvent: (id: string) => `metaWebhookInbox/${id}`,
     metaExternalIndexEntry: (id: string) => `metaExternalIndex/${id}`,
+    metaAsset: (t: string, id: string) => `tenants/${t}/metaAssets/${id}`,
     customer: (t: string, c: string) => `tenants/${t}/customers/${c}`,
     messages: (t: string, c: string) => `tenants/${t}/customers/${c}/messages`,
   },
@@ -190,6 +191,10 @@ beforeEach(() => {
   evaluarSilencioPreEnvio.mockClear();
   gate.mockClear();
   setAttachmentGate(gate);
+  // ADR-0017 §1: este archivo prueba el interruptor de ADJUNTOS, no el permiso del número. Para
+  // que el sujeto bajo prueba sea el que dice el título, el número tiene permiso explícito —la
+  // misma precondición que en producción, donde la migración a `live` corre antes que el gate—.
+  docs.set(`tenants/${TENANT}/metaAssets/PNID_1`, { externalId: 'PNID_1', status: 'active', automationMode: 'live' });
 });
 
 /**

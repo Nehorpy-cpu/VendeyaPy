@@ -85,6 +85,34 @@ service cloud.firestore {
       allow write: if false;
     }
 
+    // ---------- Coexistence (ADR-0017 §12 y §1): archivo y observación, CERRADOS a todo el mundo ----------
+    // Estas tres NO pueden vivir bajo la regla de metaWebhookInbox y no es un detalle de estilo:
+    //   1. `metaWebhookInbox` la lee isPlatformAdmin(). El historial trae hasta 180 días de
+    //      conversaciones privadas de los clientes del tenant: dejarlo ahí convertiría esa regla en
+    //      acceso de plataforma al historial completo de sus clientes. Por eso ni siquiera el admin.
+    //   2. `onWebhookInbox` dispara sobre TODO documento de metaWebhookInbox — esa colección ES el
+    //      disparador del motor. Un destino separado es la mitad de la defensa que un `if` no da.
+    // Solo Admin SDK escribe. La retención NO la da esta regla ni el campo `expiresAt`: la política
+    // TTL (48 h el historial, 7 d los contactos, 30 d la observación — el TTL de su evento de
+    // origen) se declara en `firestore.indexes.json` y el barrido que ANULA el contenido antes de
+    // borrar vive en `functions/meta/coexistenceRetention.ts`.
+
+    match /metaWebhookHistory/{docId} {
+      allow read, write: if false;
+    }
+
+    match /metaWebhookAppState/{docId} {
+      allow read, write: if false;
+    }
+
+    // Superficie de OBSERVACIÓN del modo `shadow` (ADR-0017 §1): «es read, write: if false». El
+    // default-deny ya la cubría, pero declararla es la diferencia entre un cierre que se lee acá y
+    // uno que depende de recordar que existe un default. Guarda el wa_id del cliente y el texto de
+    // los mensajes: es la colección MENOS publicable del sistema, ni siquiera para el admin.
+    match /metaWebhookShadow/{docId} {
+      allow read, write: if false;
+    }
+
     // ---------- Idempotencia de webhooks de pago (Fase 3): solo Cloud Functions ----------
     // Marca cada evento de Stripe procesado una sola vez. Lectura: solo Super Admin (debug).
     match /stripeWebhookEvents/{eventId} {

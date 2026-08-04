@@ -82,6 +82,10 @@ const rConn = await call('adminSetManualWhatsappConnection', admin, {
 });
 if (!rConn.result?.ok) { console.error('setup: no se pudo cargar la conexión', rConn); process.exit(1); }
 await db.doc(`tenants/${T}/metaConnections/main`).set({ status: 'active' }, { merge: true }); // fixture Graph no valida tokens fake
+// ADR-0017 §1: el alta deja `automationMode` AUSENTE a propósito (nacer conectado ≠ nacer
+// autorizado). Este merge de UN campo es exactamente lo que hace `migrate-whatsapp-automation-mode.mjs`
+// sobre el asset real antes del deploy; sin él el gate por número cierra el inbound como `ignored`.
+await db.doc(`tenants/${T}/metaAssets/${PNID_H}`).set({ automationMode: 'live' }, { merge: true });
 
 // ===== 1. Cliente compra y manda comprobante → handoff =====
 await postText(CUST, 'hola');

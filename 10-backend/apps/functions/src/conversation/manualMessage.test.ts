@@ -195,6 +195,30 @@ describe('conversation/manualMessage sendManualMessage', () => {
     expect(warns).not.toContain(PNID);
   });
 
+  it('9c. CANAL BLOQUEADO (ADR-0017 §1) → falla accionable, NADA se persiste y jamás se dice "enviado"', async () => {
+    // El defecto que cierra: con el gate cerrado el cliente devolvía `{ok:true}`. El mensaje no
+    // salía, pero el panel le contestaba éxito al vendedor y la burbuja quedaba en el historial —
+    // el vendedor creía haber contestado y el cliente no había recibido nada.
+    const sendText = vi.fn(async () => ({ ok: false as const, outcome: 'blocked' as const, reason: 'automation_shadow' as const }));
+    const { deps, append } = makeDeps({ getClient: async () => ({ sendText }) as never });
+    try {
+      await sendManualMessage({ tenantId: 'arfagi', customerId: '595994893000', text: 'hola' }, SELLER, deps);
+      expect.unreachable('debió fallar');
+    } catch (e) {
+      expect(e).toBeInstanceOf(HttpsError);
+      const err = e as HttpsError;
+      expect(err.code).toBe('failed-precondition');
+      // El mensaje afirma que NO salió (es lo contrario de "no pudimos confirmar") y dice qué hacer.
+      expect(err.message).toMatch(/NO se envió/);
+      expect((err.details as { kind?: string })?.kind).toBe('whatsapp_channel_blocked');
+    }
+    expect(append).not.toHaveBeenCalled();
+    const warns = JSON.stringify(vi.mocked(logger.warn).mock.calls);
+    expect(warns).toContain('automation_shadow');
+    expect(warns).not.toContain('595994893000');
+    expect(warns).not.toContain(PNID);
+  });
+
   it('10. conversación vieja sin receivedVia → resuelve el número principal (pnid null)', async () => {
     const { deps, getClient } = makeDeps({ getCustomer: async () => customer({ conversation: { humanTakeover: true } }) });
     await sendManualMessage({ tenantId: 'arfagi', customerId: 'c', text: 'hola' }, SELLER, deps);

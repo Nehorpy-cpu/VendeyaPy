@@ -8,7 +8,8 @@
  */
 
 import { Timestamp, type Transaction } from 'firebase-admin/firestore';
-import type { Session, HandoffNotificationType } from '@vpw/shared';
+import type { Session, SessionState, HandoffNotificationType } from '@vpw/shared';
+import { LEGACY_SESSION_KEY } from '@vpw/shared';
 import { db, paths } from '../lib/firebase.js';
 import { logger } from '../lib/logger.js';
 import { appendMessage, markConversationRead } from './messages.js';
@@ -38,6 +39,16 @@ export interface ExecuteHandoffOptions {
   pendingOrderId?: string | null;
   /** customer_requested puede llegar en el PRIMER mensaje (sesión aún no creada). */
   createSessionIfMissing?: boolean;
+  /**
+   * ADR-0017 §2: canal de la conversación (deriva del número que RECIBIÓ el mensaje). Omitirlo
+   * apunta al canal HEREDADO (`active`), que es donde viven todas las conversaciones de hoy: los
+   * llamadores que todavía no la pasan siguen comportándose exactamente igual.
+   *
+   * Con más de un número, el takeover TIENE que ser el de esa conversación en ESE número. Si el
+   * echo de un número escribiera siempre en `active`, el vendedor contestando desde el número
+   * nuevo dejaría mudo al bot en el número que ya vende.
+   */
+  sessionKey?: string;
   /**
    * Panel (seller_manual): tomar un chat YA tomado lo REASIGNA al nuevo vendedor (comportamiento
    * histórico de takeoverChat). Los handoffs automáticos NO reasignan (idempotencia estricta).
@@ -72,7 +83,7 @@ export async function executeHandoff(
   customerId: string,
   opts: ExecuteHandoffOptions,
 ): Promise<ExecuteHandoffResult> {
-  const ref = db().doc(paths.session(tenantId, customerId));
+  const ref = db().doc(paths.session(tenantId, customerId, opts.sessionKey));
   const now = Timestamp.now();
   const result = await db().runTransaction(async (tx) => {
     const snap = await tx.get(ref);
@@ -126,7 +137,9 @@ export async function executeHandoff(
       tx.update(ref, cambios);
     } else {
       const session: Session = {
-        id: 'active',
+        // El id del documento y el campo tienen que decir lo mismo: con más de un canal, un `id`
+        // hardcodeado en `active` haría que una sesión de otro número mintiera sobre cuál es.
+        id: opts.sessionKey ?? LEGACY_SESSION_KEY,
         tenantId,
         customerId,
         state: 'IDLE',
@@ -296,6 +309,19 @@ export async function takeoverChat(
   return { ok: true, message: 'Tomaste la conversación. El bot queda en pausa para este cliente.' };
 }
 
+/**
+ * ADR-0017 §3: estados que SOBREVIVEN a la liberación del chat.
+ *
+ * Liberar reinicia una navegación abandonada (ese es el comportamiento buscado), pero un checkout
+ * en curso no es navegación: el cliente ya eligió pagar y, en `AWAITING_PAYMENT`, ya recibió los
+ * datos bancarios y tiene un pedido pendiente. Degradarlo a `IDLE` hace que su comprobante rebote
+ * en el gate (`receiptGate`) y que el bot vuelva a ofrecerle pagar algo que ya pidió.
+ *
+ * Con Coexistence esto deja de ser un caso raro: cada respuesta del vendedor desde su teléfono
+ * toma y libera la conversación, así que el defecto se dispararía todos los días.
+ */
+const ESTADOS_QUE_SOBREVIVEN_A_LIBERAR: ReadonlySet<string> = new Set(['SELECTING_PAYMENT', 'AWAITING_PAYMENT']);
+
 /** El vendedor libera el chat: el bot vuelve a responder al próximo mensaje. */
 export async function releaseToBot(tenantId: string, customerId: string): Promise<HandoffResult> {
   const ref = db().doc(paths.session(tenantId, customerId));
@@ -303,6 +329,9 @@ export async function releaseToBot(tenantId: string, customerId: string): Promis
   if (!snap.exists) {
     return { ok: false, message: 'No hay sesión para ese cliente.' };
   }
+  const estadoPrevio = (snap.data() as Session | undefined)?.state;
+  const estadoFinal: SessionState =
+    estadoPrevio && ESTADOS_QUE_SOBREVIVEN_A_LIBERAR.has(estadoPrevio) ? estadoPrevio : 'IDLE';
   await ref.update({
     'context.humanTakeover': false,
     'context.pendingCartConfirmation': null, // F3: el bot retoma con contexto de oferta limpio
@@ -311,7 +340,8 @@ export async function releaseToBot(tenantId: string, customerId: string): Promis
     'context.handoffSellerName': null,
     'context.handoffAt': null,
     'context.handoffSourceId': null,
-    state: 'IDLE', // próximo mensaje del cliente: el bot retoma con un saludo de "vuelta"
+    // Sin checkout en curso: el próximo mensaje del cliente arranca de cero (saludo de "vuelta").
+    state: estadoFinal,
     updatedAt: Timestamp.now(),
   });
   // HUMAN-HANDOFF-1: al devolver el chat también se libera la asignación — "quién atiende"
@@ -325,7 +355,9 @@ export async function releaseToBot(tenantId: string, customerId: string): Promis
     author: 'system',
     text: '🤖 El chat volvió al asistente.',
     humanTakeover: false,
-    state: 'IDLE',
+    // El historial tiene que decir el estado REAL: si acá quedara 'IDLE' con la sesión en
+    // AWAITING_PAYMENT, el panel y la auditoría mostrarían dos verdades distintas.
+    state: estadoFinal,
   });
   logger.info('Chat liberado al bot', { tenantId, customerId });
   return {

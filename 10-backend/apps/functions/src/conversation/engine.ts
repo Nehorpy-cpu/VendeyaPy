@@ -68,6 +68,21 @@ export interface ConversationInput {
   channel?: MessageChannel;
   /** MULTI-NUMBER-1: phone_number_id del número del negocio que RECIBIÓ el mensaje. */
   receivedByPhoneNumberId?: string | null;
+  /**
+   * ADR-0017 §2 — CANAL de la conversación. La sesión (estado del motor, carrito, takeover,
+   * pedido pendiente) es por número receptor, no por cliente: el mismo cliente puede estar
+   * comprando por un número y consultando por otro.
+   *
+   * Omitirlo apunta al canal HEREDADO (`sessions/active`), que es donde viven todas las
+   * conversaciones de hoy: el simulador del panel, el chat de prueba y los test cases siguen
+   * exactamente igual.
+   *
+   * PENDIENTE DECLARADO (ADR-0017, consecuencias): `handoff.ts`, `coverage.ts` y el resto de los
+   * ~25 llamadores todavía asumen el canal heredado. Migrarlos es CONDICIÓN para pasar un número
+   * no-heredado a `live`; mientras ese número esté en `inactive` o `shadow`, el gate del webhook
+   * impide que esos caminos se ejerciten.
+   */
+  sessionKey?: string;
   /** HANDOFF-2: wamid del mensaje entrante (idempotencia de avisos de handoff). */
   messageId?: string | null;
   /**
@@ -1016,7 +1031,7 @@ export async function handleMessage(input: ConversationInput): Promise<Conversat
   }
 
   const now = Timestamp.now();
-  const sessionRef = db().doc(paths.session(tenantId, customerId));
+  const sessionRef = db().doc(paths.session(tenantId, customerId, input.sessionKey));
   const snap = await sessionRef.get();
   const existing = snap.exists ? (snap.data() as Session) : null;
 

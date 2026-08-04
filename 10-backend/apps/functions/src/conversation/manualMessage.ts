@@ -125,7 +125,10 @@ export const defaultManualMessageDeps: ManualMessageDeps = {
     }
     return { humanTakeover, coveragePointer: ptr, activation, shippingQuote, resumeDone };
   },
-  getClient: (t, pnid) => getWhatsAppClient(t, undefined, pnid),
+  // ADR-0017 §1: el ÚNICO origen humano del sistema. Se declara acá y no se deduce del PNID: es
+  // lo que le permite al vendedor seguir contestando por el panel de un número en `shadow` (donde
+  // atiende a mano) sin que ese mismo permiso se lo lleve puesto un job automático.
+  getClient: (t, pnid) => getWhatsAppClient(t, undefined, pnid, 'humano'),
   append: appendMessage,
 };
 
@@ -184,6 +187,22 @@ export async function sendManualMessage(
   const to = customer.whatsappPhone || input.customerId;
   const res = await client.sendText(to, text, { tenantId: input.tenantId, channel: 'whatsapp' });
   if (!res.ok) {
+    // ADR-0017 §1: el canal NO tiene permiso para hablar. NADA salió (cero HTTP hacia Meta), así
+    // que no se persiste burbuja ni se le contesta éxito al vendedor: antes esto devolvía ok y el
+    // panel mostraba el mensaje como enviado mientras el cliente no recibía nada. El texto del
+    // error dice qué hacer —es un permiso, no una falla de red— y no nombra el número.
+    if (res.outcome === 'blocked') {
+      logger.warn('Mensaje manual: el canal no tiene permiso para enviar (ADR-0017)', {
+        tenantId: input.tenantId,
+        customerId: maskPhone(input.customerId),
+        reason: res.reason,
+      });
+      throw new HttpsError(
+        'failed-precondition',
+        'Ese número todavía no tiene habilitado el envío de mensajes. El mensaje NO se envió: pedí que se active el número antes de volver a intentar.',
+        { kind: 'whatsapp_channel_blocked' },
+      );
+    }
     // SHIPPING-CHAT-3B-HARDEN: rejected ≠ unknown. Un RECHAZO CONFIRMADO (4xx de Meta) admite
     // reintento; un resultado DESCONOCIDO (timeout/5xx/2xx sin wamid) NO — el mensaje PUDO haber
     // salido y un reintento ciego lo duplicaría al cliente. En ninguno se persiste el mensaje

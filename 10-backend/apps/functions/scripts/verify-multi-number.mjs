@@ -78,6 +78,23 @@ check('1b. adicional agregado: asset (no default) + índice con connectionId pro
 await db.doc(`tenants/${T}/metaConnections/main`).set({ status: 'active' }, { merge: true });
 await db.doc(`tenants/${T}/metaConnections/wa_${PNID_B}`).set({ status: 'active' }, { merge: true });
 
+/**
+ * ADR-0017 §1 y §2 — el permiso de automatización y el canal de conversación de cada número.
+ *
+ * Ni WM-1 ni el alta de adicionales escriben `automationMode`: el campo AUSENTE ya significa
+ * `inactive` por fail-closed, así que un número nace conectado pero SIN permiso para contestarle a
+ * nadie. Este merge de UN campo es exactamente lo que hace `migrate-whatsapp-automation-mode.mjs`
+ * sobre el asset real antes del deploy — sin él, los dos inbounds de abajo se cierran `ignored`.
+ *
+ * `sessionKey` NO se toca, y esa asimetría es la regla del §2:
+ *  · A es el número HEREDADO (`connectionId: 'main'`, `selected`): su asset no la declara y el
+ *    resolvedor lo manda al canal `active`, que es donde ya viven las conversaciones.
+ *  · B entró como ADICIONAL y el alta ya le escribió la suya (`wa_{pnid}`): si compartiera el
+ *    canal de A, los dos números compartirían carrito, checkout y takeover.
+ */
+await db.doc(`tenants/${T}/metaAssets/${PNID_A}`).set({ automationMode: 'live' }, { merge: true });
+await db.doc(`tenants/${T}/metaAssets/${PNID_B}`).set({ automationMode: 'live' }, { merge: true });
+
 // === 2. Tercer número → límite del plan ===
 const r3 = await call('adminAddWhatsappNumber', admin, baseInput(PNID_C, '+595 991 000 003'));
 check('2. tercer número sobre el límite → FAILED_PRECONDITION', r3.err === 'FAILED_PRECONDITION', `err=${r3.err} msg=${r3.msg.slice(0, 60)}`);
@@ -156,7 +173,9 @@ if (beforeChannels) await db.doc(`tenants/${T}/config/channels`).set(beforeChann
 await db.doc(`secrets/meta-token-${T}`).delete().catch(() => {});
 for (const c of [CUST_A, CUST_B]) {
   for (const d of (await db.collection(`tenants/${T}/customers/${c}/messages`).get()).docs) await d.ref.delete();
-  await db.doc(`tenants/${T}/customers/${c}/sessions/active`).delete().catch(() => {});
+  // ADR-0017 §2: B conversa en SU canal (`wa_{pnid}`), no en `active`. Borrar solo `active`
+  // dejaría la sesión del adicional viva y la corrida siguiente arrancaría con su estado.
+  for (const d of (await db.collection(`tenants/${T}/customers/${c}/sessions`).get()).docs) await d.ref.delete();
   await db.doc(`tenants/${T}/customers/${c}`).delete().catch(() => {});
 }
 await db.doc(`tenants/${T}/_debug/lastWhatsappSend`).delete().catch(() => {});

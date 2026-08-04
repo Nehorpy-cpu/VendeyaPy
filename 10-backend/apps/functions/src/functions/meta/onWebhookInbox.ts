@@ -6,7 +6,7 @@
  */
 
 import { onDocumentCreated } from 'firebase-functions/v2/firestore';
-import { processWebhookEvent } from '../../meta/process.js';
+import { processWebhookEvent, esReintentoDeWebhook } from '../../meta/process.js';
 import { ANTHROPIC_API_KEY } from '../../ai/aiSecret.js';
 import { logger } from '../../lib/logger.js';
 
@@ -18,6 +18,21 @@ import { logger } from '../../lib/logger.js';
  */
 export const ONWEBHOOKINBOX_TIMEOUT_SECONDS = 180;
 export const ONWEBHOOKINBOX_MEMORY = '512MiB' as const;
+
+/**
+ * ADR-0017 §1 — REENTREGA DEL EVENTO. La otra mitad del reintento de `process.ts`.
+ *
+ * Este trigger es `onDocumentCreated`: reescribir un documento que ya existe no lo vuelve a
+ * disparar, y no hay ningún barrido programado sobre `metaWebhookInbox`. O sea que devolver el
+ * evento a la cola solo sirve si la CORRIDA FALLA y la plataforma lo reentrega — y sin `retry`
+ * declarado, una corrida fallida se descarta y el mensaje del cliente se pierde en silencio.
+ *
+ * Habilitarlo NO le cambia el camino a nadie más: la única excepción que se deja escapar es la
+ * TIPADA (`esReintentoDeWebhook`), que `process.ts` lanza a propósito y con presupuesto acotado.
+ * Todo otro error se sigue tragando exactamente como antes, así que ningún camino que hoy termina
+ * en `failed` pasa a reintentarse.
+ */
+export const ONWEBHOOKINBOX_RETRY = true;
 
 /**
  * TIMEOUT y MEMORIA explícitos (ADR-0016). Los defaults de gen2 —60 s y 256 MiB— no alcanzan para
@@ -50,11 +65,18 @@ export const onWebhookInbox = onDocumentCreated(
     secrets: [ANTHROPIC_API_KEY],
     timeoutSeconds: ONWEBHOOKINBOX_TIMEOUT_SECONDS,
     memory: ONWEBHOOKINBOX_MEMORY,
+    retry: ONWEBHOOKINBOX_RETRY,
   },
   async (event) => {
     try {
       await processWebhookEvent(event.params.eventId);
     } catch (e) {
+      // El pedido de reentrega SALE: la corrida tiene que fallar o no hay reintento (ver
+      // ONWEBHOOKINBOX_RETRY). El evento ya quedó `received` y tomable; acá no se toca nada más.
+      if (esReintentoDeWebhook(e)) {
+        logger.warn('onWebhookInbox: el evento vuelve a la cola; se pide reentrega', { eventId: event.params.eventId });
+        throw e;
+      }
       logger.error('Error en onWebhookInbox', e, { eventId: event.params.eventId });
     }
   },

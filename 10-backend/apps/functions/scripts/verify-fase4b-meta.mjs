@@ -91,6 +91,11 @@ const idx1 = (await db.doc(`metaExternalIndex/whatsapp_${PNID_1}`).get()).data()
 check('5. metaAsset whatsapp_phone_number seleccionado + metaExternalIndex → tenant',
   asset1?.assetType === 'whatsapp_phone_number' && asset1?.selected === true && idx1?.tenantId === T, `asset=${asset1?.selected} idx=${idx1?.tenantId}`);
 
+// ADR-0017 §1: `connectMeta` escribe el asset SIN `automationMode` (conectar no autoriza). Este
+// merge de UN campo es lo que hace `migrate-whatsapp-automation-mode.mjs` sobre el asset real antes
+// del deploy; sin él, el inbound del check 6 se cierra `ignored` y nunca se resuelven credenciales.
+await db.doc(`tenants/${T}/metaAssets/${PNID_1}`).set({ automationMode: 'live' }, { merge: true });
+
 // 6. 4A resuelve credenciales luego de conectar (sin Graph): conectar → enviar
 await db.doc(`tenants/${T}/config/channels`).set({ whatsappSendMode: 'live' });
 await db.doc(`tenants/${T}/_debug/lastWhatsappSend`).delete().catch(() => {});

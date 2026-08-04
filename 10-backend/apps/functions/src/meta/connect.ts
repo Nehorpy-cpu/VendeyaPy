@@ -10,6 +10,7 @@
 import { Timestamp } from 'firebase-admin/firestore';
 import type { MetaConnection } from '@vpw/shared';
 import { db, paths } from '../lib/firebase.js';
+import { ASSET_STATUS_DESCONECTADO } from './discovery.js';
 import { getSecretStore } from '../lib/secretStore.js';
 import { logger } from '../lib/logger.js';
 import { recordAudit } from '../audit/audit.js';
@@ -67,7 +68,28 @@ export async function connectMetaDemo(tenantId: string, byUid?: string | null): 
   await recordAudit({ tenantId, action: 'meta.connected', actorUid: byUid ?? null, targetType: 'meta', summary: 'Conexión Meta creada (demo)' });
 }
 
-/** Desconecta: estado not_connected + borra los activos + borra el secreto del token. */
+/**
+ * Desconecta: estado not_connected + saca del ruteo + borra el secreto del token.
+ *
+ * ADR-0017 — LOS NÚMEROS DE WHATSAPP NO SE BORRAN. Este callable es una operación NORMAL del panel
+ * (un click de TENANT_OWNER en Integraciones) y hasta este cambio borraba todos los `metaAssets`
+ * del tenant. Desde que el permiso de automatización vive en el asset, eso significaba que al
+ * reconectar `writeDiscoveredAssets` no encontraba NADA que preservar: el número que está
+ * atendiendo clientes se reescribía sin `automationMode` ⇒ `inactive` por fail-closed ⇒ mudo, con
+ * cada inbound cerrándose sin respuesta hasta que alguien lo volviera a habilitar a mano.
+ *
+ * Ahora el asset del número se MARCA (merge, sin tocar `automationMode` ni `sessionKey`) con un
+ * estado propio, distinto del que deja apagar un número a mano — ver `ASSET_STATUS_DESCONECTADO`,
+ * que es donde vive el porqué de la distinción.
+ *
+ * LO QUE APAGA AL NÚMERO SIGUE SIENDO LO MISMO QUE ANTES, y por eso desconectar no se afloja:
+ * sin entrada en `metaExternalIndex` el inbound no resuelve empresa y no se procesa; sin token y
+ * con la conexión en `not_connected` no salen credenciales para enviar. El permiso queda guardado,
+ * pero no habilita nada por sí solo.
+ *
+ * El resto de los activos (WABA, página, catálogo, pixel…) se sigue borrando: no llevan permiso ni
+ * estado de conversación, así que conservarlos solo dejaría basura.
+ */
 export async function disconnectMeta(tenantId: string): Promise<void> {
   const connRef = db().doc(paths.metaConnection(tenantId, 'main'));
   const prevTokenRef = (await connRef.get()).data()?.tokenSecretRef as string | undefined;
@@ -82,8 +104,20 @@ export async function disconnectMeta(tenantId: string): Promise<void> {
   }
   const assets = await db().collection(paths.metaAssets(tenantId)).get();
   const idx = await db().collection(paths.metaExternalIndex()).where('tenantId', '==', tenantId).get();
+  const now = Timestamp.now();
   const batch = db().batch();
-  assets.docs.forEach((d) => batch.delete(d.ref));
+  assets.docs.forEach((d) => {
+    const data = d.data() as { assetType?: unknown };
+    if (data.assetType === 'whatsapp_phone_number') {
+      // MERGE a propósito: `automationMode` y `sessionKey` no se nombran, así que no se tocan.
+      // Escribirlos —aunque fuera con su valor actual— convertiría esto en una decisión sobre el
+      // permiso del número, y desconectar no es eso.
+      batch.set(d.ref, { status: ASSET_STATUS_DESCONECTADO, updatedAt: now }, { merge: true });
+      return;
+    }
+    batch.delete(d.ref);
+  });
+  // El índice SÍ se borra: es el ruteo, y es lo que deja al número efectivamente callado.
   idx.docs.forEach((d) => batch.delete(d.ref));
   await batch.commit();
   logger.info('Conexión Meta desconectada', { tenantId });

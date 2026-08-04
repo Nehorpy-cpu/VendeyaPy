@@ -112,6 +112,10 @@ const rConn = await call('adminSetManualWhatsappConnection', superadmin, {
 });
 if (!rConn.result?.ok) { console.error('setup: conexión manual falló', rConn); process.exit(1); }
 await db.doc(`tenants/${T}/metaConnections/main`).set({ status: 'active' }, { merge: true });
+// ADR-0017 §1: el alta deja `automationMode` AUSENTE a propósito (nacer conectado ≠ nacer
+// autorizado). Este merge de UN campo es exactamente lo que hace `migrate-whatsapp-automation-mode.mjs`
+// sobre el asset real antes del deploy; sin él el gate por número cierra el inbound como `ignored`.
+await db.doc(`tenants/${T}/metaAssets/${PNID}`).set({ automationMode: 'live' }, { merge: true });
 
 const ensureUser = async (email, role) => {
   let user;

@@ -37,6 +37,13 @@ export interface AppendMessageInput {
   /** HUMAN-HANDOFF-1: true = el outbound quedó retenido por modo mock (no salió a Meta). */
   viaMock?: boolean;
   /**
+   * ADR-0017 §3: de DÓNDE salió un outbound humano. `whatsapp_business_app` = lo mandó el vendedor
+   * desde su teléfono y nos enteramos por un echo — nunca salió de acá. Es lo que le permite al
+   * panel distinguirlo de un mensaje manual del propio panel, que sí pasó por Cloud API.
+   * Opcional y aditivo: los mensajes que ya existen no lo tienen y siguen siendo válidos.
+   */
+  origin?: string | null;
+  /**
    * ADR-0016: id DETERMINÍSTICO del documento. Con él, el mensaje se escribe con `create()` y un
    * reintento del webhook NO duplica la burbuja en el chat. Sin él (default) se usa un id
    * aleatorio y el comportamiento es el de siempre.
@@ -93,6 +100,7 @@ export async function appendMessage(
   if (input.senderName) extra['senderName'] = input.senderName;
   if (input.waMessageId) extra['waMessageId'] = input.waMessageId;
   if (input.viaMock) extra['viaMock'] = true;
+  if (input.origin) extra['origin'] = input.origin;
   const doc = Object.keys(extra).length ? { ...msg, ...extra } : msg;
 
   if (input.docId) {

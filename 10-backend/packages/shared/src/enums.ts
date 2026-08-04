@@ -234,6 +234,19 @@ export type WhatsappSendMode = (typeof WHATSAPP_SEND_MODE)[number];
 export const WEBHOOK_STATUS = ['received', 'processing', 'processed', 'failed', 'ignored'] as const;
 export type WebhookStatus = (typeof WEBHOOK_STATUS)[number];
 
+// Tipo de evento de webhook YA ROUTEADO por `change.field` (Coexistence, ADR-0017 §12).
+// Hasta este programa, `change.field` no se leía nunca y todo evento que no fuera `messages` se
+// descartaba sin dejar rastro. Los valores NO son intercambiables:
+//   · 'message'   — un inbound del cliente. Es el único que puede terminar automatizado.
+//   · 'echo'      — lo que el VENDEDOR mandó desde la app de WhatsApp Business (outbound humano).
+//   · 'history'   — hasta 180 días de conversaciones importadas. Archivo, no bandeja de entrada.
+//   · 'app_state' — la agenda del vendedor. Contactos, NO clientes.
+//   · 'unknown'   — un `field` que este despliegue no conoce. Es el valor MÁS RESTRICTIVO y por eso
+//                   también es a donde cae un `kind` persistido con un valor que no está en esta
+//                   lista: ante un dato que no se entiende, no se automatiza.
+export const WEBHOOK_EVENT_KIND = ['message', 'echo', 'history', 'app_state', 'unknown'] as const;
+export type WebhookEventKind = (typeof WEBHOOK_EVENT_KIND)[number];
+
 // Tracking propio sin Meta (P11): tipo de fuente de una venta atribuida a una promo propia.
 export const TRACKING_TYPE = ['coupon', 'qr', 'link'] as const;
 export type TrackingType = (typeof TRACKING_TYPE)[number];

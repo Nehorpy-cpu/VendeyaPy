@@ -98,7 +98,10 @@ const testStart = Timestamp.now();
 const now = Timestamp.now();
 const oldAssets = await db.collection(`tenants/${T}/metaAssets`).where('assetType', '==', 'whatsapp_phone_number').get();
 for (const d of oldAssets.docs) await d.ref.delete();
-await db.doc(`tenants/${T}/metaAssets/${PNID}`).set({ id: PNID, tenantId: T, connectionId: 'main', assetType: 'whatsapp_phone_number', externalId: PNID, name: 'wa-ai', status: 'active', selected: true, createdAt: now, updatedAt: now });
+// ADR-0017 §1: el asset DECLARA el permiso de automatización — es el mismo estado que le deja al
+// número real `migrate-whatsapp-automation-mode.mjs` antes del deploy. Sin el campo, el gate por
+// número resuelve `inactive` (fail-closed) y el inbound se cierra `ignored` sin llegar al motor.
+await db.doc(`tenants/${T}/metaAssets/${PNID}`).set({ id: PNID, tenantId: T, connectionId: 'main', assetType: 'whatsapp_phone_number', externalId: PNID, name: 'wa-ai', status: 'active', selected: true, automationMode: 'live', createdAt: now, updatedAt: now });
 await db.doc(`metaExternalIndex/whatsapp_${PNID}`).set({ id: `whatsapp_${PNID}`, tenantId: T, connectionId: 'main', assetType: 'whatsapp_phone_number', platform: 'whatsapp', externalId: PNID, status: 'active', updatedAt: now });
 await db.doc(`tenants/${T}/config/channels`).set({ whatsappSendMode: 'mock' });
 await db.doc(`tenants/${T}/config/agent`).set({ botEnabled: true, greetingMessage: 'Hola, soy el bot AI' }, { merge: true });

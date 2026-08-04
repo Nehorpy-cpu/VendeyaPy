@@ -48,6 +48,7 @@ vi.mock('../lib/firebase.js', () => ({
   paths: {
     metaWebhookEvent: (id: string) => `metaWebhookInbox/${id}`,
     metaExternalIndexEntry: (id: string) => `metaExternalIndex/${id}`,
+    metaAsset: (t: string, id: string) => `tenants/${t}/metaAssets/${id}`,
     customer: (t: string, c: string) => `tenants/${t}/customers/${c}`,
     messages: (t: string, c: string) => `tenants/${t}/customers/${c}/messages`,
   },
@@ -155,6 +156,10 @@ beforeEach(() => {
   // exacto, que es lo único que enciende). Que sin esta línea todo el archivo se caiga es
   // justamente la prueba de que el interruptor gobierna el camino.
   docs.set(`tenants/${TENANT}/config/attachments`, { ingest: { enabled: true } });
+  // ADR-0017 §1: el número tiene permiso EXPLÍCITO para automatizar. Es la misma precondición que
+  // en producción —la migración del PNID vigente a `live` corre ANTES de desplegar el gate—, y
+  // que sin esta línea todo el archivo se caiga es justamente la prueba de que el gate gobierna.
+  docs.set(`tenants/${TENANT}/metaAssets/PNID_1`, { externalId: 'PNID_1', status: 'active', automationMode: 'live' });
 });
 
 describe('processWebhookEvent — ruteo de adjuntos (ADR-0016)', () => {
@@ -387,7 +392,9 @@ describe('processWebhookEvent — ruteo de adjuntos (ADR-0016)', () => {
       await processWebhookEvent(EVENTO);
 
       expect(handleMessage).not.toHaveBeenCalled(); // sin caption el motor no abre turno
-      expect(botSilenciadoEnChat).toHaveBeenCalledWith(TENANT, TEL);
+      // ADR-0017 §2: el guard consulta el CANAL que recibió el archivo. Este número no declara
+      // `sessionKey`, así que es el canal heredado — el mismo documento de siempre.
+      expect(botSilenciadoEnChat).toHaveBeenCalledWith(TENANT, TEL, 'active');
       expect(enviados).toHaveLength(0);
       // Y tampoco se finge en el historial que el bot contestó.
       expect(docs.get(`tenants/${TENANT}/customers/${TEL}/messages/auto`)).toBeUndefined();

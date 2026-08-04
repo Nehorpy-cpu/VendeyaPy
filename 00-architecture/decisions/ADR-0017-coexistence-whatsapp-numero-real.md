@@ -1,0 +1,184 @@
+# ADR-0017 — Coexistence: incorporar el número real sin apagar lo que ya vende
+
+- **Estado**: aceptado (fundación en implementación; el onboarding del número real es un acto humano posterior)
+- **Fecha**: 2026-08-03
+- **Contexto previo**: ADR-0003 (WhatsApp Cloud API), ADR-0009 (integración Meta), ADR-0010 (go-live), ADR-0016 (adjuntos)
+- **Programa**: `EMERGENCY-WHATSAPP-COEXISTENCE-SAFE-CUTOVER-1`, precedido por la auditoría read-only `…-CUTOVER-AUDIT-1`
+
+## El problema
+
+La perfumería atiende a sus clientes desde un número real, en la app WhatsApp Business, con conversaciones y
+ventas en curso. Ese número tiene que entrar a VendeYaPy **sin apagar nada**: ni la app del vendedor, ni el
+número que hoy ya está conectado, ni los pedidos, pagos, catálogo, Coverage o adjuntos.
+
+La auditoría previa devolvió **BLOQUEADO** y encontró la razón de fondo: el sistema fue construido para **un**
+número por tenant. No es que le falten features de Coexistence — es que **no tiene el concepto de "este número
+todavía no manda"**. Todo lo que existe hoy es binario y por tenant: un número está conectado o no lo está, y
+si lo está, el bot contesta.
+
+## Las cuatro decisiones
+
+### 1. La salud de la conexión y el permiso para automatizar son cosas distintas
+
+Hoy `status: 'active'` significa dos cosas a la vez: «la credencial sirve» y «el bot puede contestar». Esa
+confusión es la que hace peligroso dar de alta un número: `multiNumber.ts` lo escribe `active` y desde ese
+instante `process.ts` lo rutea al motor.
+
+Se separan en dos ejes ortogonales:
+
+- **`status`** — sigue significando lo de siempre: la conexión es válida. **No autoriza nada.**
+- **`automationMode: 'inactive' | 'shadow' | 'live'`** — qué se le permite hacer al sistema con ese número.
+
+| modo | qué pasa con un inbound |
+|---|---|
+| `inactive` | ACK seguro y nada más: sin motor, IA, reglas, carrito, pedido, Coverage, metering ni outbound |
+| `shadow` | se registra en una **superficie de observación propia** (`metaWebhookShadow`, cerrada y con TTL) para poder mirarlo, y nada más: cero respuesta automática, cero efecto comercial y **cero escritura en la conversación del cliente** |
+| `live` | automatización normal, siempre que no haya takeover de esa conversación en ese número |
+
+**`shadow` NO escribe en `messages`**, y es el mismo razonamiento del §4 sobre el historial —«escribir en
+`messages` mezclaría el historial importado con el del número que ya vende»— aplicado a un mensaje que
+llega EN VIVO. `messages` y el resumen del cliente son **por cliente, no por canal** (§2), así que escribir
+ahí tenía tres efectos sobre el número que está vendiendo AHORA, los tres confirmados:
+
+1. dejaba `conversation.receivedVia` con el PNID en observación, y el mensaje MANUAL del panel lee ese campo
+   para elegir por qué número sale: el vendedor escribía creyendo que contestaba por el número de siempre y
+   salía por el que debe estar callado, a un cliente vivo;
+2. `listRecentMessages` arma el prompt del modelo sin filtrar por canal, así que lo del número en observación
+   entraba al contexto de la IA del número que sí vende;
+3. publicaba la conversación en la bandeja del panel, y tomarla ahí silencia al bot en el número que vende.
+
+La observación va a una colección propia por las mismas dos razones del historial: `metaWebhookInbox` **es**
+el disparador del motor (`onWebhookInbox` dispara sobre todo documento) y además la lee `isPlatformAdmin()`.
+Es `read, write: if false` y su TTL es el mismo del evento que la origina — es una vista legible de algo que
+la bandeja ya retiene, no un archivo nuevo.
+
+**Cuándo se promueve a la conversación**: nunca desde `shadow`. El material que el vendedor necesita ver de
+verdad entra el día que el número pasa a `live`, que es una decisión humana (ver más abajo).
+
+**Fail-closed, con el mismo criterio que ADR-0016 §10**: un PNID nuevo, o sin el campo, o con un valor que no
+sea exactamente uno de los tres, es `inactive`. Ante inconsistencia entre asset, índice y conexión gana **el
+estado más restrictivo**. Un lector puro y compartido decide — no se reimplementa en cada borde, porque dos
+lecturas del mismo flag terminan divergiendo y la laxa es la que enciende.
+
+**Pero «no pude averiguarlo» no es «no tiene permiso».** Si la lectura del permiso misma falla, el ENVÍO
+falla cerrado igual (no se automatiza nada en ese turno) pero el **evento no es terminal**: vuelve a la cola
+(`processingStatus: 'received'`, que es lo que el guard de la bandeja ya reconoce como tomable) y se loguea
+como **error**. Cerrarlo como `ignored` tiraba para siempre el mensaje de un cliente de un número `live` por
+un hipo de Firestore, en silencio. Las otras razones de `inactive` —sin PNID, sin declarar, declarado
+inactivo— sí son terminales: ahí el sistema sabe la respuesta.
+
+**El gate se aplica antes que cualquier consumidor de negocio.** En `meta/process.ts`, entre derivar el
+`customerId` y el gate de empresa: por encima quedan solo la resolución del tenant y la identidad; por debajo
+queda todo lo que cuesta plata o muta algo — metering, ingesta de adjuntos, motor, Coverage.
+
+### 2. El cliente es uno; la conversación es por canal
+
+Fragmentar el `Customer` por número sería un error: es la misma persona, con los mismos pedidos y el mismo
+historial de compras. El `Customer` sigue siendo único por `(tenantId, wa_id)`.
+
+Lo que **sí** se separa por número receptor, porque son estado de una conversación y no del cliente:
+
+| compartido (por cliente) | por canal (`sessionKey` derivada del PNID) |
+|---|---|
+| identidad, pedidos, pagos, adjuntos, financieros | sesión conversacional y estado del motor |
+| historial de compras | `humanTakeover` y quién atiende |
+| | `pendingCartConfirmation`, `pendingOrderId`, puntero de Coverage |
+| | destino del outbound (`receivedVia`) |
+
+Sin esto, un cliente que le escribe a los dos números comparte carrito y takeover entre ambos: el bot podría
+tomar el pedido empezado en un número y contestarlo por el otro.
+
+**Compatibilidad**: las conversaciones que ya existen viven en `sessions/active`. Esa clave se conserva como
+la del canal legacy; no se migra nada.
+
+### 3. Un echo es lo que el vendedor dijo, no lo que el cliente pidió
+
+`smb_message_echoes` es el evento que hace posible Coexistence: avisa que el vendedor contestó desde su
+teléfono. Sin consumirlo, el sistema no se entera y el bot le habla encima al vendedor delante del cliente.
+
+Dos hechos de la [referencia oficial](https://developers.facebook.com/documentation/business-messaging/whatsapp/webhooks/reference/smb_message_echoes)
+(consultada 2026-08-03) gobiernan el diseño:
+
+- el array es `value.message_echoes`, **no** `value.messages`;
+- cada item trae **`from` Y `to`**, y **`from` es el número del NEGOCIO**; `to` es el del cliente.
+
+De ahí la regla dura: **el `from` de un echo no se transporta jamás en la forma normalizada de un inbound.**
+Si se hiciera, `customerId` sería el wa_id de la propia perfumería, el sistema abriría una conversación
+consigo mismo y el bot se respondería a sí mismo, sobre el número real y consumiendo cuota. El cliente se
+resuelve por `to`; el canal, por `metadata.phone_number_id`.
+
+Un echo se persiste como **outbound humano** con origen `whatsapp_business_app`, es idempotente por su wamid,
+**nunca se reenvía** por Cloud API, y **activa o extiende el control humano** de esa conversación en ese
+número — reusando la semántica canónica de silencio de HANDOFF-2, sin inventar una segunda.
+
+El **gate por PNID le aplica igual que a un inbound**, con un matiz por modo:
+
+- `inactive` — el echo no toca nada. Un número sin permiso no puede mover la conversación de nadie.
+- `shadow` — el echo **se observa** (ver el trabajo del vendedor es exactamente el punto del modo) pero **no
+  toca la conversación ni el control humano**: en `shadow` el gate ya deja al bot mudo para ese número, así
+  que un takeover no agregaría ni un gramo de silencio y sí escribiría estado de alcance ajeno —el resumen
+  del cliente no está particionado por canal—.
+- `live` — el camino completo: silencio primero (`executeHandoff` sobre la sesión de ESE canal, creándola si
+  no existe: sin sesión el handoff sería un no-op y el bot seguiría hablando encima), burbuja después.
+
+Y un echo **jamás** dispara metering, motor, IA, adjuntos, Coverage ni outbound.
+
+Y una consecuencia que hay que arreglar antes: hoy `releaseToBot` escribe `state: 'IDLE'` incondicionalmente y
+**destruye el `AWAITING_PAYMENT` del checkout** (defecto ya documentado). Con echoes, tomar y liberar deja de
+ser excepcional y pasa a ser el ritmo normal del vendedor. La liberación tiene que preservar el estado.
+
+### 4. El historial es un archivo, no una bandeja de entrada
+
+`history` trae hasta 180 días de conversaciones. Se persiste **en una superficie propia**, nunca mezclado con
+los mensajes vivos, y marcado `historical: true`, `automationEligible: false`, `unread: false`.
+
+Tres razones por las que no puede ir a `messages`:
+
+1. `listRecentMessages` alimenta el prompt de la IA: el historial entraría al contexto del modelo.
+2. Los contadores de no-leídos y las campanas se dispararían por conversaciones de hace meses.
+3. **Escribir en `messages` mezclaría el historial importado con el del número que ya vende.**
+
+Y una razón de aislamiento que decide el destino: `metaWebhookInbox` es legible por `isPlatformAdmin()`.
+Mandar ahí 180 días de chats privados del tenant convertiría esa regla en acceso de plataforma al historial
+completo de sus clientes. El historial va a una colección **cerrada al cliente** (`read: if false`), con TTL
+corto, y su payload se anula al cerrar el evento — el mismo patrón que ya se usa con la ubicación exacta.
+
+Además, `onWebhookInbox` dispara sobre **todo** documento de `metaWebhookInbox`: esa colección **es** el
+disparador del motor. Por eso `history` y `smb_app_state_sync` ni siquiera pasan por ahí. La defensa es doble
+a propósito — un gate por tipo de evento *y* un destino separado —, porque un `if` se puede borrar en un
+refactor y una colección distinta no.
+
+**La decisión de compartir o no el historial es humana**, en el onboarding. Meta da **24 horas** para
+sincronizarlo; pasado ese plazo hay que desconectar el número y rehacer todo el flujo. Por eso: **si el
+ingestor no está probado el día del cutover, se elige "no compartir historial"**. Es la única opción que no
+apuesta la ventana de 24 h sobre un número con clientes vivos.
+
+`smb_app_state_sync` trae la agenda del vendedor — incluidas personas que nunca le escribieron. **No crea
+`Customer`s**: sería fabricar clientes sin relación comercial y llenar el panel de conversaciones falsas.
+
+## Lo que este ADR NO decide, y por qué
+
+- **El onboarding es un acto humano.** El owner completa el flujo y el QR/OTP desde su teléfono. Nadie más lo
+  ve ni lo pide.
+- **`live` no se alcanza por deploy.** El número nace `inactive`, pasa a `shadow` por decisión explícita, y a
+  `live` solo tras un smoke humano y una aprobación aparte.
+
+## Consecuencias
+
+- Aparece un eje de estado nuevo que hay que mantener coherente en tres lugares (asset, índice, conexión), con
+  la regla del más restrictivo como desempate.
+- La sesión deja de ser una sola por cliente. Hay ~25 lugares que hoy asumen `sessions/active`; **migrarlos es
+  condición para pasar a `live`**, no para desplegar la fundación: mientras el número esté en `inactive` o
+  `shadow`, el gate impide que esos caminos se ejerciten.
+- `writeDiscoveredAssets` borra los assets y el índice del tenant. Con este ADR eso deja de ser solo «se
+  pierde el ruteo local»: el número que vende perdería su `automationMode` y quedaría mudo. **Preservar esos
+  campos es requisito de despliegue.**
+- El orden importa: **la migración del PNID actual a `live` corre ANTES de desplegar el gate.** Al revés, el
+  número que vende leería el campo ausente, resolvería `inactive` y se quedaría callado hasta que alguien
+  corriera la migración. El código desplegado hoy ignora el campo, así que hacerlo en ese orden no tiene
+  ventana de interrupción.
+- El vendedor pierde en su app las **listas de difusión** (quedan de solo lectura), los **mensajes temporales**,
+  **"ver una vez"** y la **ubicación en vivo**. **Conserva** catálogo, pedidos, Status, perfil, etiquetas,
+  grupos y llamadas: siguen funcionando en la app, solo que no son visibles vía Cloud API. Los dispositivos
+  vinculados se desvinculan durante el onboarding y se vuelven a vincular después.
+- Throughput fijo de 20 mensajes/segundo mientras el número esté en coexistencia.

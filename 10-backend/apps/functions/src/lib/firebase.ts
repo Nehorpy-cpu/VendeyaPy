@@ -58,8 +58,20 @@ export const paths = {
   customers: (tenantId: string) => `tenants/${tenantId}/customers`,
   customer: (tenantId: string, customerId: string) =>
     `tenants/${tenantId}/customers/${customerId}`,
-  session: (tenantId: string, customerId: string) =>
-    `tenants/${tenantId}/customers/${customerId}/sessions/active`,
+  /**
+   * ADR-0017 §2 — la conversación es POR CANAL, no por cliente. El `sessionKey` deriva del número
+   * que RECIBIÓ el mensaje; sin él, el mismo cliente escribiéndole a dos números compartiría
+   * carrito, `humanTakeover` y pedido pendiente entre ambos.
+   *
+   * El default `active` es la garantía de retrocompatibilidad, no comodidad: todas las
+   * conversaciones que existen hoy viven en ese documento y NO se migran. Los ~25 llamadores que
+   * todavía no pasan la clave siguen hablando del canal heredado, que es el del número que ya
+   * vende. Migrarlos es condición para pasar un número nuevo a `live` —mientras esté en
+   * `inactive` o `shadow` el gate del webhook impide que esos caminos se ejerciten—, no para
+   * desplegar la fundación.
+   */
+  session: (tenantId: string, customerId: string, sessionKey: string = 'active') =>
+    `tenants/${tenantId}/customers/${customerId}/sessions/${sessionKey}`,
   messages: (tenantId: string, customerId: string) =>
     `tenants/${tenantId}/customers/${customerId}/messages`,
   message: (tenantId: string, customerId: string, messageId: string) =>

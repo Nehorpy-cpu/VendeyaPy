@@ -42,8 +42,18 @@ export const enSilencio = (session: Session | null, agentConfig: AgentConfig): b
  * adjunto salía igual con el chat tomado por un vendedor: reimplementar la regla allá garantizaba
  * que las dos versiones se desincronizaran a la primera condición nueva.
  */
-export async function botSilenciadoEnChat(tenantId: string, customerId: string): Promise<boolean> {
-  const snap = await db().doc(paths.session(tenantId, customerId)).get();
+export async function botSilenciadoEnChat(
+  tenantId: string,
+  customerId: string,
+  /**
+   * ADR-0017 §2: canal de la conversación (deriva del número que recibió el mensaje). Omitirlo
+   * apunta al canal heredado — el del número que ya vende— que es donde viven las conversaciones
+   * de hoy. El guard TIENE que mirar la misma sesión que el motor: si mirara `active` para todos
+   * los números, un takeover en uno callaría al bot en el otro (y al revés, que es peor).
+   */
+  sessionKey?: string,
+): Promise<boolean> {
+  const snap = await db().doc(paths.session(tenantId, customerId, sessionKey)).get();
   return enSilencio(snap.exists ? (snap.data() as Session) : null, await getAgentConfig(tenantId));
 }
 
@@ -101,12 +111,14 @@ export async function evaluarSilencioPreEnvio(
   tenantId: string,
   customerId: string,
   expectativa: ExpectativaDeSilencio = EXIGE_SILENCIO_LIBRE,
+  /** ADR-0017 §2: canal de la conversación. Omitirlo = canal heredado (ver arriba). */
+  sessionKey?: string,
 ): Promise<VeredictoPreEnvio> {
   let session: Session | null;
   let agentConfig: AgentConfig;
   try {
     const [snap, cfg] = await Promise.all([
-      db().doc(paths.session(tenantId, customerId)).get(),
+      db().doc(paths.session(tenantId, customerId, sessionKey)).get(),
       getAgentConfig(tenantId),
     ]);
     session = snap.exists ? (snap.data() as Session) : null;
