@@ -32,12 +32,36 @@ export interface ExchangeResult {
   expiresInSec: number | null;
 }
 
+/**
+ * Los dos `sync_type` de `POST /<PHONE_NUMBER_ID>/smb_app_data` (ADR-0017 §5). El orden del arreglo
+ * ES el orden en que se piden: primero la agenda, después el historial. Congelado porque es
+ * vocabulario de Meta y un valor inventado no produce un error claro, produce un no-op.
+ */
+export const SMB_APP_DATA_SYNC_TYPES = Object.freeze(['smb_app_state_sync', 'history'] as const);
+export type SmbAppDataSyncType = (typeof SMB_APP_DATA_SYNC_TYPES)[number];
+
+export interface SmbAppDataResult {
+  ok: boolean;
+  /** Mensaje SANEADO del error de Graph, para diagnosticar sin arrastrar el payload entero. */
+  error?: string;
+}
+
 export interface MetaGraphClient {
   exchangeCode(code: string): Promise<ExchangeResult>;
   debugToken(accessToken: string): Promise<DebugTokenResult>;
   listWabaPhoneNumbers(wabaId: string, accessToken: string): Promise<MetaPhoneNumber[]>;
   getPhoneNumber(phoneNumberId: string, accessToken: string): Promise<MetaPhoneNumber | null>;
   subscribeApp(wabaId: string, accessToken: string): Promise<void>;
+  /**
+   * ADR-0017 §5 — PIDE los datos de la app del vendedor. Sin esta llamada NO llega un solo webhook
+   * de `history` ni de `smb_app_state_sync`: el §4 daba por sentado que llegaban por estar
+   * suscritos, y el contrato oficial verificado el 2026-08-04 dice que no.
+   *
+   * Se puede hacer UNA SOLA VEZ. Repetirlo exige que el cliente offboardee el número y vuelva a
+   * completar el Embedded Signup entero — sobre un número con clientes vivos. Por eso el llamador
+   * es un coordinador durable (`historyCoordinator.ts`) y no un botón.
+   */
+  requestSmbAppData(phoneNumberId: string, syncType: SmbAppDataSyncType, accessToken: string): Promise<SmbAppDataResult>;
 }
 
 // ---------------- Parsers PUROS (testeables sin red) ----------------
@@ -134,6 +158,25 @@ export class HttpMetaGraphClient implements MetaGraphClient {
       timeout: 10_000,
     });
   }
+
+  async requestSmbAppData(phoneNumberId: string, syncType: SmbAppDataSyncType, accessToken: string): Promise<SmbAppDataResult> {
+    try {
+      const res = await axios.post(
+        `${GRAPH}/${phoneNumberId}/smb_app_data`,
+        { messaging_product: 'whatsapp', sync_type: syncType },
+        { headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' }, timeout: 15_000 },
+      );
+      // Meta devuelve `{ success: true }`. Un 2xx sin ese campo se toma como éxito igual: el
+      // disparo no se puede repetir, así que interpretar un 2xx como falla llevaría a un reintento
+      // que Meta ya no acepta y a un estado que dice `failed` sobre algo que sí ocurrió.
+      return { ok: res.data?.success !== false };
+    } catch (e) {
+      // NUNCA el payload completo: la respuesta de error de Graph puede repetir el request.
+      const err = e as { response?: { data?: { error?: { message?: unknown; code?: unknown } } } };
+      const code = err?.response?.data?.error?.code;
+      return { ok: false, error: typeof code === 'number' || typeof code === 'string' ? `graph_error_${code}` : 'graph_error' };
+    }
+  }
 }
 
 // ---------------- Fake por fixtures (emulador / e2e) ----------------
@@ -147,6 +190,8 @@ interface GraphFixture {
   wabaIds?: string[];
   tokenExpiresAtMs?: number | null;
   phoneNumbers?: MetaPhoneNumber[];
+  /** Coexistence: permite ejercitar el camino de fallo del disparo sin tocar Graph. */
+  smbAppDataError?: string;
 }
 
 export class FixtureMetaGraphClient implements MetaGraphClient {
@@ -172,6 +217,11 @@ export class FixtureMetaGraphClient implements MetaGraphClient {
   }
   async subscribeApp(_wabaId: string, _accessToken: string): Promise<void> {
     /* no-op en fixture */
+  }
+  async requestSmbAppData(_phoneNumberId: string, _syncType: SmbAppDataSyncType, _accessToken: string): Promise<SmbAppDataResult> {
+    // El fixture NUNCA llama a graph.facebook.com: el disparo es irrepetible y no se ensaya contra
+    // Meta. Sin fixture de error, se comporta como un disparo aceptado.
+    return this.fx.smbAppDataError ? { ok: false, error: this.fx.smbAppDataError } : { ok: true };
   }
 }
 

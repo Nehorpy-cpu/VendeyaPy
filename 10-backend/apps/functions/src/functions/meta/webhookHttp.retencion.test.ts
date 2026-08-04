@@ -191,7 +191,7 @@ describe('tenantId en el archivo de Coexistence', () => {
     expect(fake.lecturas).toHaveLength(0);
   });
 
-  it('varios chunks del MISMO número pagan UNA sola lectura del índice', async () => {
+  it('varios chunks del MISMO número pagan UNA sola resolución (índice + coordinador)', async () => {
     fake.docs.set(`metaExternalIndex/whatsapp_${PNID}`, { tenantId: TENANT });
     await post({
       object: 'whatsapp_business_account',
@@ -201,7 +201,11 @@ describe('tenantId en el archivo de Coexistence', () => {
       ] }],
     });
     expect(fake.escrituras).toHaveLength(2);
-    expect(fake.lecturas).toHaveLength(1);
+    // DOS lecturas por PNID DISTINTO, no por chunk: el índice (qué empresa) y el coordinador
+    // durable (qué GENERACIÓN de sincronización). La generación entra en la clave de idempotencia
+    // porque una segunda sincronización trae los mismos `phase`/`chunk_order` y sin ella el resync
+    // entero se descartaría como duplicado. La ruta caliente (`messages`) sigue pagando cero.
+    expect(fake.lecturas).toHaveLength(2);
     for (const e of fake.escrituras) expect(e.data['tenantId']).toBe(TENANT);
   });
 });

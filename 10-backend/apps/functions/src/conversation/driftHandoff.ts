@@ -18,6 +18,7 @@ import type { VeredictoDeriva } from '../catalog/driftGuard.js';
 import { resumenSaneado } from '../catalog/driftGuard.js';
 import { normalizeText } from '../catalog/match.js';
 import { getCheckoutConfig } from '../orders/checkoutConfig.js';
+import { LEGACY_SESSION_KEY } from '@vpw/shared';
 import { executeHandoff, notifyHandoffRequested } from './handoff.js';
 import { db, paths } from '../lib/firebase.js';
 import { logger } from '../lib/logger.js';
@@ -27,6 +28,11 @@ export interface DerivarPorDerivaInput {
   messageId?: string | null;
   /** Simulador del panel / test cases: mismo texto, CERO efectos operativos. */
   simulation?: boolean;
+  /**
+   * ADR-0017 §2: canal de la conversación. Omitirlo = canal heredado (simulador / dev): la
+   * derivación tiene que pausar el bot EN el número por el que el cliente escribió.
+   */
+  sessionKey?: string;
 }
 
 export interface DerivarPorDerivaResult {
@@ -143,6 +149,7 @@ async function derivarInterno(
     reason: 'catalog_drift',
     sellerName: vendedor.name,
     sourceId,
+    sessionKey: input.sessionKey ?? LEGACY_SESSION_KEY,
     createSessionIfMissing: true,
   });
   if (!r.ok) {

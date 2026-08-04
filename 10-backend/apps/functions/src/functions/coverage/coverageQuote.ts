@@ -58,6 +58,7 @@ import {
   MENSAJE_FLUJO_DESHABILITADO,
   MENSAJE_QUOTE_CONFIG_INVALIDA,
 } from './coverageCallables.js';
+import { canalDeCoberturaPersistido } from '../../conversation/coverageResume.js';
 
 const REGION = 'us-central1';
 const QUOTE_LEASE_MS = 60_000;
@@ -66,6 +67,7 @@ const NOTE_MAX = 300;
 const reqRef = (t: string, id: string) => db().doc(`tenants/${t}/coverageRequests/${id}`);
 const outboxRef = (t: string, id: string) => db().doc(`tenants/${t}/coverageMessageOutbox/${id}`);
 const jobRef = (t: string, id: string) => db().doc(`tenants/${t}/coverageResumeJobs/${id}`);
+
 const configRef = (t: string) => db().doc(`tenants/${t}/config/checkout`);
 
 export { outboxIdDeQuote }; // definido en coverageCallables (la decisión también lee el outbox); los tests importan de acá
@@ -209,7 +211,7 @@ async function txPrepararIntento(tenantId: string, actor: QuoteActor, input: Quo
     if (actor.role === 'SELLER' && req.sellerUid !== actor.uid) {
       return { kind: 'error', err: qerr('permission-denied', 'Esta revisión está asignada a otra persona del equipo.', 'not_assigned') };
     }
-    const sesSnap = await tx.get(db().doc(paths.session(tenantId, req.customerId)));
+    const sesSnap = await tx.get(db().doc(paths.session(tenantId, req.customerId, canalDeCoberturaPersistido(null, req))));
     const ses = sesSnap.data() as Session | undefined;
 
     // Idempotencia de ÉXITO: la MISMA cotización ya se aplicó (re-invocación tras commit de TX-C).
@@ -314,7 +316,7 @@ async function txPrepararIntento(tenantId: string, actor: QuoteActor, input: Quo
       // sent/sending/unknown ya retornaron arriba.
       if (obPendRef && obPend?.status === 'prepared') tx.update(obPendRef, { status: 'failed', leaseUntil: null, updatedAt: now });
       tx.update(reqSnap.ref, { status: 'coverage_expired', shippingQuotePending: null, updatedAt: now, coordinatesPurgeAt: purgeAtFrom(now, req) });
-      tx.set(db().doc(paths.session(tenantId, req.customerId)), { context: { coverage: null }, updatedAt: now }, { merge: true });
+      tx.set(db().doc(paths.session(tenantId, req.customerId, canalDeCoberturaPersistido(null, req))), { context: { coverage: null }, updatedAt: now }, { merge: true });
       return { kind: 'error', err: qerr('failed-precondition', 'La solicitud venció: el cliente tiene que retomar la compra.', 'expired') };
     }
 
@@ -627,7 +629,7 @@ async function txAplicarAprobacion(tenantId: string, requestId: string, attemptI
       if ((req.activationId ?? null) !== act.activationId) return { err: qerr('failed-precondition', MENSAJE_FLUJO_DESHABILITADO, 'flow_off') };
       const obSnap = await tx.get(outboxRef(tenantId, obId));
       const ob = obSnap.exists ? (obSnap.data() as CoverageOutboxMessage) : null;
-      const sesSnap = await tx.get(db().doc(paths.session(tenantId, req.customerId)));
+      const sesSnap = await tx.get(db().doc(paths.session(tenantId, req.customerId, canalDeCoberturaPersistido(null, req))));
       const ses = sesSnap.data() as Session | undefined;
       const pending = req.shippingQuotePending ?? null;
 
@@ -673,7 +675,7 @@ async function txAplicarAprobacion(tenantId: string, requestId: string, attemptI
         await campana('la solicitud venció antes de aplicar el costo');
         tx.update(obSnap.ref, { status: 'sent_not_applied', leaseUntil: null, updatedAt: now });
         tx.update(reqSnap.ref, { status: 'coverage_expired', shippingQuotePending: null, updatedAt: now, coordinatesPurgeAt: purgeAtFrom(now, req) });
-        tx.set(db().doc(paths.session(tenantId, req.customerId)), { context: { coverage: null }, updatedAt: now }, { merge: true });
+        tx.set(db().doc(paths.session(tenantId, req.customerId, canalDeCoberturaPersistido(null, req))), { context: { coverage: null }, updatedAt: now }, { merge: true });
         return { err: qerr('failed-precondition', 'La solicitud venció: el costo enviado no se aplicó. El cliente tiene que retomar la compra.', 'expired') };
       }
       const locOk = (req.locationFingerprint ?? '') === pending.locationFingerprint;
@@ -738,6 +740,8 @@ async function txAplicarAprobacion(tenantId: string, requestId: string, attemptI
         coordinatesPurgeAt: purgeAtFrom(now, req),
         updatedAt: now,
       });
+      // ADR-0017 §2: el job de la saga de cotización hereda el canal del request, igual que el de
+      // la decisión manual — el consumidor es el mismo y lee el carrito de esa conversación.
       const job: CoverageResumeJob = {
         id: requestId,
         tenantId,
@@ -747,6 +751,7 @@ async function txAplicarAprobacion(tenantId: string, requestId: string, attemptI
         status: 'pending',
         channel: req.channel,
         receivedVia: req.receivedVia ?? null,
+        sessionKey: canalDeCoberturaPersistido(null, req),
         activationId: act.activationId,
         shippingGs: pending.chargeGs,
         cartSnapshot: snapshotCongelado,
@@ -764,7 +769,7 @@ async function txAplicarAprobacion(tenantId: string, requestId: string, attemptI
       // HARDEN-2 (review): terminal FELIZ del outbox EN el mismo commit — sin esto, los quotes
       // aplicados quedaban 'sent' para siempre y saturaban los slots del sweep (inanición).
       tx.update(obSnap.ref, { status: 'sent_applied', leaseUntil: null, updatedAt: now });
-      tx.set(db().doc(paths.session(tenantId, req.customerId)), { context: { coverage: ptr }, updatedAt: now }, { merge: true });
+      tx.set(db().doc(paths.session(tenantId, req.customerId, canalDeCoberturaPersistido(null, req))), { context: { coverage: ptr }, updatedAt: now }, { merge: true });
       return { shippingGs: pending.chargeGs, totalGs: totalAprobado, customerId: req.customerId };
     });
   } catch (e) {

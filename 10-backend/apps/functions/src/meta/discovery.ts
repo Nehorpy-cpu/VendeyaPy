@@ -10,6 +10,7 @@ import { Timestamp } from 'firebase-admin/firestore';
 import type { MetaAssetType } from '@vpw/shared';
 import { declaredAutomationMode, isSessionKey, whatsappSessionKey } from '@vpw/shared';
 import { db, paths } from '../lib/firebase.js';
+import { assertPnidLibre } from './pnidOwnership.js';
 import type { MetaPhoneNumber } from './graphClient.js';
 
 // Mapeo asset → plataforma para el índice global (igual que connect.ts demo).
@@ -122,10 +123,18 @@ function canalDeAlta(a: DiscoveredAsset, previo: Record<string, unknown> | undef
   return { sessionKey: whatsappSessionKey(a.externalId) };
 }
 
-/** Reemplaza los activos del tenant + el índice global (Admin SDK). Idempotente en reconexión. */
+/**
+ * Reemplaza los activos del tenant + el índice global (Admin SDK). Idempotente en reconexión.
+ *
+ * ADR-0017 — POR QUÉ ES UNA TRANSACCIÓN Y NO UN BATCH. Este es el único camino de alta del
+ * Embedded Signup REAL, y reclamaba `metaExternalIndex/whatsapp_{pnid}` sin mirar si otro tenant ya
+ * lo tenía. Un batch no puede leer, así que el guard tendría que quedar afuera —que es exactamente
+ * el defecto TOCTOU que tenían los otros dos caminos de alta—. Con transacción, verificar la
+ * propiedad y reclamarla son el mismo acto: si el PNID es ajeno, el rechazo deja CERO escrituras y
+ * no un alta a medio hacer.
+ */
 export async function writeDiscoveredAssets(tenantId: string, connectionId: string, assets: DiscoveredAsset[]): Promise<void> {
   const now = Timestamp.now();
-  const batch = db().batch();
   /**
    * ADR-0017 — La limpieza es de ESTA conexión, no del tenant entero.
    *
@@ -136,40 +145,45 @@ export async function writeDiscoveredAssets(tenantId: string, connectionId: stri
    * funcionando igual.
    */
   const esDeEstaConexion = (d: Record<string, unknown>): boolean => (d['connectionId'] ?? connectionId) === connectionId;
+  const pnids = assets.filter((a) => a.assetType === 'whatsapp_phone_number').map((a) => a.externalId);
 
-  // Borra los activos previos de esta conexión y sus entradas de índice (reconexión limpia).
-  const oldAssets = await db().collection(paths.metaAssets(tenantId)).get();
-  const previoAsset = new Map<string, Record<string, unknown>>();
-  oldAssets.docs.forEach((d) => {
-    const data = d.data() as Record<string, unknown>;
-    previoAsset.set(d.id, data);
-    if (esDeEstaConexion(data)) batch.delete(d.ref);
-  });
-  const oldIdx = await db().collection(paths.metaExternalIndex()).where('tenantId', '==', tenantId).get();
-  const previoIdx = new Map<string, Record<string, unknown>>();
-  oldIdx.docs.forEach((d) => {
-    const data = d.data() as Record<string, unknown>;
-    previoIdx.set(d.id, data);
-    if (esDeEstaConexion(data)) batch.delete(d.ref);
-  });
+  await db().runTransaction(async (tx) => {
+    // TODAS las lecturas primero: Firestore rechaza una lectura posterior a la primera escritura.
+    const oldAssets = await tx.get(db().collection(paths.metaAssets(tenantId)));
+    const oldIdx = await tx.get(db().collection(paths.metaExternalIndex()).where('tenantId', '==', tenantId));
+    for (const pnid of pnids) await assertPnidLibre(tx, tenantId, pnid);
 
-  for (const a of assets) {
-    const previo = previoAsset.get(a.externalId);
-    batch.set(db().doc(paths.metaAsset(tenantId, a.externalId)), {
-      id: a.externalId, tenantId, connectionId, assetType: a.assetType, externalId: a.externalId, name: a.name, status: 'active', selected: a.selected, createdAt: now, updatedAt: now,
-      ...canalDeAlta(a, previo),
-      ...camposPreservados(previo),
+    // Borra los activos previos de esta conexión y sus entradas de índice (reconexión limpia).
+    const previoAsset = new Map<string, Record<string, unknown>>();
+    oldAssets.docs.forEach((d) => {
+      const data = d.data() as Record<string, unknown>;
+      previoAsset.set(d.id, data);
+      if (esDeEstaConexion(data)) tx.delete(d.ref);
     });
-    const platform = PLATFORM_BY_ASSET[a.assetType];
-    if (platform) {
-      const id = `${platform}_${a.externalId}`;
-      batch.set(db().doc(paths.metaExternalIndexEntry(id)), {
-        id, tenantId, connectionId, assetType: a.assetType, platform, externalId: a.externalId, status: 'active', updatedAt: now,
-        ...camposPreservados(previoIdx.get(id)),
+    const previoIdx = new Map<string, Record<string, unknown>>();
+    oldIdx.docs.forEach((d) => {
+      const data = d.data() as Record<string, unknown>;
+      previoIdx.set(d.id, data);
+      if (esDeEstaConexion(data)) tx.delete(d.ref);
+    });
+
+    for (const a of assets) {
+      const previo = previoAsset.get(a.externalId);
+      tx.set(db().doc(paths.metaAsset(tenantId, a.externalId)), {
+        id: a.externalId, tenantId, connectionId, assetType: a.assetType, externalId: a.externalId, name: a.name, status: 'active', selected: a.selected, createdAt: now, updatedAt: now,
+        ...canalDeAlta(a, previo),
+        ...camposPreservados(previo),
       });
+      const platform = PLATFORM_BY_ASSET[a.assetType];
+      if (platform) {
+        const id = `${platform}_${a.externalId}`;
+        tx.set(db().doc(paths.metaExternalIndexEntry(id)), {
+          id, tenantId, connectionId, assetType: a.assetType, platform, externalId: a.externalId, status: 'active', updatedAt: now,
+          ...camposPreservados(previoIdx.get(id)),
+        });
+      }
     }
-  }
-  await batch.commit();
+  });
 }
 
 /** Marca un phone_number como seleccionado (y deselecciona los demás) para el envío. */

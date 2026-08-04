@@ -13,7 +13,13 @@
  */
 import { onCall, HttpsError, type CallableRequest } from 'firebase-functions/v2/https';
 import { resolveMetaConnectAuth } from '../../meta/authz.js';
-import { createMetaConnectNonce, consumeMetaConnectNonce } from '../../meta/nonce.js';
+import {
+  createMetaConnectNonce,
+  consumeMetaConnectNonce,
+  claimMetaConnectCode,
+  parseMetaConnectMode,
+  type MetaConnectMode,
+} from '../../meta/nonce.js';
 import { runMetaConnect, type ConnectFailReason } from '../../meta/connectFlow.js';
 import { verifyWhatsappChannel } from '../../meta/preflight.js';
 import { selectTenantPhoneNumber } from '../../meta/discovery.js';
@@ -42,20 +48,75 @@ const CONNECT_FAIL_MESSAGE: Record<ConnectFailReason, string> = {
   scopes_insuficientes: 'Faltan permisos de WhatsApp. Aceptá todos los permisos al conectar.',
   no_waba: 'No se encontró una cuenta de WhatsApp Business en tu Meta Business.',
   no_phone_number: 'No se encontró un número de WhatsApp en tu cuenta.',
+  phone_number_mismatch: 'El número que elegiste no pertenece a esa cuenta de WhatsApp Business. Reiniciá el proceso y elegí un número de la lista.',
+  phone_number_collision: 'Ese número de WhatsApp ya está conectado en otra empresa. Desconectalo de la otra cuenta antes de conectarlo acá.',
+  persistencia_incompleta: 'No se pudo guardar la conexión. Tu conexión anterior quedó intacta: reintentá el proceso.',
   over_number_limit: 'Tu plan no alcanza para todos los números de WhatsApp de esta cuenta. Actualizá tu plan o conectá una cuenta con menos números.',
 };
 
-export const startMetaConnect = onCall<{ tenantId?: string }>({ region: 'us-central1' }, async (req) => {
+/**
+ * Lee el modo pedido por el panel. AUSENTE ⇒ `standard`, que es exactamente lo que mandan los
+ * clientes anteriores a Coexistence: el flujo estándar no puede regresionar por este cambio.
+ *
+ * Un valor PRESENTE pero irreconocible se RECHAZA en vez de degradarse a estándar. Degradarlo
+ * silenciosamente convertiría un typo en el panel en un onboarding del flujo equivocado sobre el
+ * número con el que la empresa vende.
+ */
+function modoPedido(raw: unknown): MetaConnectMode {
+  const modo = parseMetaConnectMode(raw);
+  if (modo === null) throw new HttpsError('invalid-argument', 'Tipo de conexión de Meta desconocido.');
+  return modo;
+}
+
+/**
+ * ADR-0017 — ESTA SUPERFICIE SOLO CIERRA ONBOARDINGS ESTÁNDAR. Devuelve el motivo del rechazo, o
+ * `null` si el modo es aceptable acá.
+ *
+ * Estos dos callables corren `runMetaConnect`, y ese camino hace dos cosas que sobre el número real
+ * de un negocio en coexistencia son destructivas:
+ *
+ *  1. guarda el token en el secreto del TENANT (`metaTokenSecretName(tenantId)`, determinístico),
+ *     o sea PISA la credencial con la que hoy se le contesta a los clientes;
+ *  2. `writeDiscoveredAssets(tenantId, 'main', …)`, cuya limpieza borra todo asset y toda entrada
+ *     de índice de la conexión `main` — el asset del número que vende y su ruteo del inbound.
+ *
+ * Coexistence tiene su propio camino (`coexistenceStart`/`coexistenceConnect` →
+ * `runCoexistenceConnect`), que deja el número nuevo en su conexión `wa_{pnid}` y a `main` intacto.
+ * Aceptar `mode: 'coexistence'` acá no agregaba ninguna capacidad y dejaba alcanzable el desenlace
+ * que el ADR existe para impedir. Es DEFENSA EN PROFUNDIDAD: el panel ya usa los callables
+ * correctos, y esto hace que volver a cablearlo mal no llegue a escribir.
+ *
+ * El rechazo va ANTES de consumir el nonce y de reclamar el `code`: un pedido rechazado no puede
+ * gastar el consentimiento del dueño, que en Coexistence no se puede volver a pedir gratis.
+ *
+ * El flujo estándar NO cambia: `standard` —y el `mode` ausente de los clientes anteriores— pasan.
+ */
+export function rechazoPorModoEnFlujoEstandar(mode: MetaConnectMode): string | null {
+  return mode === 'coexistence'
+    ? 'El número que ya usás en WhatsApp Business se conecta desde su propia opción del panel, no por acá.'
+    : null;
+}
+
+function assertModoEstandar(mode: MetaConnectMode): void {
+  const motivo = rechazoPorModoEnFlujoEstandar(mode);
+  if (motivo) throw new HttpsError('invalid-argument', motivo);
+}
+
+export const startMetaConnect = onCall<{ tenantId?: string; mode?: string }>({ region: 'us-central1' }, async (req) => {
   const { tenantId, uid } = authorize(req, req.data?.tenantId);
-  const nonce = await createMetaConnectNonce(tenantId, uid);
-  logger.info('Meta connect: nonce emitido', { tenantId });
-  return { ok: true, nonce };
+  const mode = modoPedido(req.data?.mode);
+  assertModoEstandar(mode);
+  const nonce = await createMetaConnectNonce(tenantId, uid, mode);
+  logger.info('Meta connect: nonce emitido', { tenantId, mode });
+  return { ok: true, nonce, mode };
 });
 
 export const connectMeta = onCall<{
   tenantId?: string;
   nonce?: string;
   code?: string;
+  /** `standard` | `coexistence` (ADR-0017 §5). Ausente = estándar. */
+  mode?: string;
   wabaId?: string;
   phoneNumberId?: string;
   businessId?: string;
@@ -65,13 +126,36 @@ export const connectMeta = onCall<{
   const { tenantId, uid } = authorize(req, req.data?.tenantId);
   const d = req.data ?? {};
   if (!d.code) throw new HttpsError('invalid-argument', 'Falta el code de Meta.');
+  const mode = modoPedido(d.mode);
+  // Antes de tocar nada: este callable reescribe la conexión `main`. Coexistence va por su camino.
+  assertModoEstandar(mode);
 
   // Entitlements (Fase 5A): el plan debe permitir números de WhatsApp.
   await assertWhatsappNumbersEntitled(tenantId, { actorUid: uid });
 
-  const nonceOk = await consumeMetaConnectNonce(d.nonce ?? '', { tenantId, uid });
+  // El nonce está atado al MODO con el que se emitió (ADR-0017 §5): un nonce pedido por el botón
+  // estándar no cierra un onboarding de Coexistence ni al revés. Son dos consentimientos distintos
+  // del dueño sobre dos cosas distintas, y uno de ellos corre sobre el número que ya vende.
+  const nonceOk = await consumeMetaConnectNonce(d.nonce ?? '', { tenantId, uid, mode });
   if (!nonceOk) throw new HttpsError('failed-precondition', 'Sesión de conexión inválida o expirada. Reiniciá el proceso.');
 
+  // El nonce solo garantiza que ESTA sesión de conexión se use una vez; nada impedía pedir otro
+  // nonce y reenviar el MISMO `code`. Sin este reclamo, dos llamadas con el mismo code corrían el
+  // flujo entero dos veces sobre la conexión que está vendiendo. El reclamo es transaccional, así
+  // que también sirve de single-flight entre invocaciones concurrentes.
+  const codeOk = await claimMetaConnectCode(d.code, { tenantId, uid, mode });
+  if (!codeOk) {
+    logger.warn('Meta connect: code ya utilizado (replay o doble envío)', { tenantId, mode });
+    throw new HttpsError('failed-precondition', 'Esa autorización de Meta ya fue utilizada. Reiniciá el proceso desde el botón de conectar.');
+  }
+
+  // DE ACÁ PARA ABAJO SE ESCRIBE SOBRE LA CONEXIÓN `main`: `runMetaConnect` guarda el token en el
+  // secreto del tenant y reescribe los assets de esa conexión. Por eso `mode` ya quedó acotado a
+  // `standard` arriba — el razonamiento anterior («el flujo es el mismo para los dos modos») miraba
+  // solo el tramo de Graph y pasaba por alto que la PERSISTENCIA no es la misma: en Coexistence el
+  // número entra en su propia conexión `wa_{pnid}` (ver `coexistenceConnect`), justamente para no
+  // pisar el token ni borrar el asset del número que ya vende.
+  // El número recién conectado nace sin `automationMode`, o sea INACTIVO (ADR-0017 §1).
   const graph = await getMetaGraphClient();
   const result = await runMetaConnect(
     tenantId,
@@ -80,10 +164,10 @@ export const connectMeta = onCall<{
     graph,
   );
   if (!result.ok) {
-    logger.warn('Meta connect: falló', { tenantId, reason: result.reason, status: result.status });
+    logger.warn('Meta connect: falló', { tenantId, mode, reason: result.reason, status: result.status });
     throw new HttpsError('failed-precondition', CONNECT_FAIL_MESSAGE[result.reason]);
   }
-  return { ok: true, status: result.status, phoneNumberId: result.selectedPhoneNumberId, phoneNumber: result.phoneNumber, assets: result.assetsCount };
+  return { ok: true, mode, status: result.status, phoneNumberId: result.selectedPhoneNumberId, phoneNumber: result.phoneNumber, assets: result.assetsCount };
 });
 
 export const verifyMetaChannel = onCall<{ tenantId?: string }>({ region: 'us-central1', secrets: [META_APP_SECRET] }, async (req) => {

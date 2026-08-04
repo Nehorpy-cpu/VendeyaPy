@@ -389,6 +389,20 @@ service cloud.firestore {
         allow write: if false;
       }
 
+      // Coexistence (ADR-0017 §5): el COORDINADOR DURABLE del historial, por número.
+      // CERRADO en las dos direcciones, y las dos razones son distintas:
+      //   · escritura: el disparo de `smb_app_data` se puede usar UNA sola vez en la vida de ese
+      //     número, y este documento es lo único que lo impide. Un cliente que pudiera escribirlo
+      //     podría devolverlo a `pending_request` y quemar el onboarding del número real.
+      //   · lectura: no la necesita nadie desde el cliente — el panel la obtiene por el callable
+      //     `coexistenceSyncStatus`, que devuelve una vista saneada. Cerrarla acá es la diferencia
+      //     entre un cierre que se lee en el archivo y uno que depende del default-deny.
+      // El documento NO guarda PII (contadores, estados y marcas de tiempo); el contenido del
+      // historial vive en `metaWebhookHistory`, que es `read, write: if false` y tiene TTL.
+      match /coexistenceHistorySyncs/{phoneNumberId} {
+        allow read, write: if false;
+      }
+
       // Meta Ads (D3): campañas/adsets/ads + snapshots diarios. Datos sensibles (gasto):
       // los lee el manager+, los escribe SOLO la sync (Admin SDK).
       match /metaCampaigns/{id} { allow read: if isTenantManager(tenantId) || isPlatformAdmin(); allow write: if false; }

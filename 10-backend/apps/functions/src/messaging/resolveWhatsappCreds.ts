@@ -24,11 +24,29 @@ export type WhatsappCredsReason =
   | 'not_connected'
   | 'token_expired'
   | 'no_phone_asset'
-  | 'token_unavailable';
+  | 'token_unavailable'
+  /**
+   * ADR-0017 — Se pidió un número CONCRETO y ese número no resuelve. Es un motivo propio y no un
+   * `not_connected` cualquiera: dice que no hay canal para el destino PEDIDO, y por eso el llamador
+   * no puede sustituirlo por otro. Sin esta distinción, el caller no tenía cómo saber si podía
+   * caer al principal (que es justamente el número que está vendiendo).
+   */
+  | 'channel_unavailable';
 
 export type WhatsappCredsResult =
   | { ok: true; phoneNumberId: string; accessToken: string; tokenExpiresAtMs: number | null }
-  | { ok: false; reason: WhatsappCredsReason };
+  | {
+      ok: false;
+      reason: WhatsappCredsReason;
+      /**
+       * POR QUÉ el canal pedido no está disponible. `channel_unavailable` dice QUÉ hacer (no
+       * sustituir el número) pero no dice NADA de la causa: colapsar `not_connected`,
+       * `token_expired` y `no_phone_asset` en un único motivo dejaba «no salió» sin diagnóstico —
+       * y el desenlace de los tres es el mismo, así que nadie podía distinguir «reconectá» de
+       * «renová el token» de «este número no existe». Es informativo: nadie decide con este campo.
+       */
+      cause?: WhatsappCredsReason;
+    };
 
 export interface DecideInput {
   tenantId?: string;

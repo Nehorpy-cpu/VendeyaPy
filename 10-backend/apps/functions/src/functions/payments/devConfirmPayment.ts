@@ -13,6 +13,7 @@
 import { onRequest } from 'firebase-functions/v2/https';
 import { guardDevEndpoint } from '../../middleware/devGuard.js';
 import { confirmPayment } from '../../orders/confirmPayment.js';
+import { LEGACY_SESSION_KEY } from '@vpw/shared';
 import { db, paths } from '../../lib/firebase.js';
 import { logger } from '../../lib/logger.js';
 
@@ -32,7 +33,7 @@ export const devConfirmPayment = onRequest(
     // Si no dieron orderId, buscar la orden pendiente del cliente por su teléfono.
     if (!orderId && body.from) {
       const customerId = body.from.replace(/[^0-9]/g, '');
-      const sessionSnap = await db().doc(paths.session(tenantId, customerId)).get();
+      const sessionSnap = await db().doc(paths.session(tenantId, customerId, LEGACY_SESSION_KEY)).get();
       orderId = sessionSnap.data()?.context?.pendingOrderId ?? undefined;
     }
     if (!orderId) {

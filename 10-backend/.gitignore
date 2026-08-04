@@ -46,6 +46,19 @@ serviceAccount*.json
 # Emulator data (excepto fixtures controlados)
 tests/fixtures/emulator-data/
 
+# Exports y backups de datos de tenants — NUNCA se versionan.
+# `export-tenant.mjs` escribía su JSON en el cwd (o sea, típicamente adentro del repo) con datos de
+# clientes reales y sin ninguna regla que lo cubriera: un `git add -A` distraído lo commiteaba.
+# Hoy la herramienta EXIGE una ruta absoluta fuera del repo; esta regla es la segunda red, para los
+# archivos que ya hayan quedado dados vuelta y para cualquier variante futura.
+*export*.json
+# Volcados de la familia backup-*.mjs (el destino ya está obligado a vivir fuera del repo).
+firestore.ndjson
+auth.ndjson
+storage.ndjson
+manifest-*.json
+restore-*-reporte.json
+
 # IDE
 .vscode/
 .idea/

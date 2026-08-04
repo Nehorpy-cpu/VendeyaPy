@@ -10,7 +10,8 @@
  *   5. cross-tenant: inbound del número de A no dispara el bot de B (índice resuelve por tenant).
  *   6. límite de mensajes: con usage sobre el límite, el inbound se bloquea, sin envío ni incremento.
  *   7. mock → nunca intenta envío real.
- *   8/9. gates de credenciales: conexión no activa / token vencido → Mock con motivo.
+ *   8/9. gates de credenciales: conexión no activa / token vencido → NO-ENVÍO explícito (bloqueo),
+ *        con el motivo diagnóstico intacto, sin sustituir el número y sin burbuja en el chat.
  *
  * Requiere el emulador (auth+firestore+functions) con TENANT_SECRETS_ENCRYPTION_KEY igual a la de este
  * script (cifra el token y el emulador lo descifra) y los usuarios sembrados (seed-users).
@@ -184,15 +185,43 @@ const dbg7 = await sendAndGetDebug(A, PNID_A, '595900000007');
 check('7. sendMode=mock → no envía real (transporte Mock: mode+reason mock y viaMock)',
   dbg7?.reason === 'mode_mock' && dbg7?.mode === 'mock' && dbg7?.viaMock === true, JSON.stringify(dbg7));
 
-// 8. conexión no activa en live → Mock con reason not_connected.
+/**
+ * 8/9 — EL CANAL PEDIDO NO RESUELVE. El contrato CAMBIÓ con ADR-0017 y estos dos checks afirman el
+ * nuevo, que es más estricto, no menos.
+ *
+ * Antes, un inbound al número B con la conexión caída producía un Mock con `ok:true`: el sistema
+ * anotaba la burbuja en el chat y le decía «enviado» a un mensaje que el cliente nunca recibió —y,
+ * peor, lo hacía después de haber caído al número PRINCIPAL, así que la respuesta podía salir por
+ * el número que está vendiendo hacia alguien que le escribió al otro. Hoy no hay sustituto y el
+ * resultado es un NO-ENVÍO explícito (`blocked`): sin burbuja y sin «listo» mentiroso.
+ *
+ * Lo que NO puede perderse con ese cambio —y se había perdido— es «se sabe por qué»: el bloqueo
+ * tiene que dejar traza y conservar el motivo DIAGNÓSTICO (`not_connected` vs `token_expired`),
+ * porque el desenlace de los dos es idéntico y sin el motivo nadie sabe si hay que reconectar o
+ * renovar el token. Por eso cada caso afirma las cinco cosas a la vez: hubo intento registrado ·
+ * quedó bloqueado (no simulado) · el motivo saneado es el del canal · el diagnóstico sobrevive ·
+ * NO se resolvió ningún número sustituto · el chat no quedó con una burbuja que miente.
+ */
+const noEnvioBloqueado = (dbg, causa) =>
+  !!dbg && dbg.blocked === true && dbg.viaMock === false &&
+  dbg.blockedReason === 'channel_unavailable' && dbg.reason === causa &&
+  (dbg.phoneNumberId ?? null) === null;
+const outsDe = async (tenant, from) =>
+  (await db.collection(`tenants/${tenant}/customers/${from}/messages`).where('direction', '==', 'out').get()).size;
+
+// 8. conexión no activa en live → NO-ENVÍO bloqueado, motivo not_connected, sin burbuja.
 await setupTenant(B, PNID_B, { mode: 'live', status: 'not_connected' });
 const dbg8 = await sendAndGetDebug(B, PNID_B, '595900000008');
-check('8. conexión no activa → Mock (reason not_connected)', dbg8?.reason === 'not_connected', JSON.stringify(dbg8));
+const outs8 = await outsDe(B, '595900000008');
+check('8. conexión no activa → NO-ENVÍO bloqueado (channel_unavailable/not_connected), sin número sustituto ni burbuja',
+  noEnvioBloqueado(dbg8, 'not_connected') && outs8 === 0, `${JSON.stringify(dbg8)} outs=${outs8}`);
 
-// 9. token vencido en live → Mock con reason token_expired.
+// 9. token vencido en live → NO-ENVÍO bloqueado, motivo token_expired, sin burbuja.
 await setupTenant(A, PNID_A, { mode: 'live', tokenExpiresAtMs: Date.now() - 1000 });
 const dbg9 = await sendAndGetDebug(A, PNID_A, '595900000009');
-check('9. token vencido → Mock (reason token_expired)', dbg9?.reason === 'token_expired', JSON.stringify(dbg9));
+const outs9 = await outsDe(A, '595900000009');
+check('9. token vencido → NO-ENVÍO bloqueado (channel_unavailable/token_expired), sin número sustituto ni burbuja',
+  noEnvioBloqueado(dbg9, 'token_expired') && outs9 === 0, `${JSON.stringify(dbg9)} outs=${outs9}`);
 
 // --- Limpieza: deja a perfumeria/boutique sin override (verify-d2 reconecta la demo) ---
 for (const [tenant, from] of testCustomers) {

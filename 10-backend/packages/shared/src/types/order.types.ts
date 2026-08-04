@@ -96,6 +96,17 @@ export interface Order {
   delivery: OrderDelivery;
   invoice: OrderInvoice;
   channel: Channel;
+  /**
+   * ADR-0017 §2 — CANAL de la conversación que armó este pedido (`active` = número heredado).
+   *
+   * Se PERSISTE en vez de recalcularse porque quien cierra el checkout no tiene el turno a mano:
+   * el webhook de la pasarela, el callable del panel y el endpoint de prueba solo conocen el
+   * `orderId`. Sin este campo, `confirmPayment` vaciaba el carrito de `sessions/active` — con dos
+   * números, el de la conversación equivocada.
+   *
+   * OPCIONAL y retrocompatible: un pedido sin el campo es del canal heredado.
+   */
+  sessionKey?: string;
   /** Vendedor asignado (null hasta el handoff/asignación). */
   sellerId: string | null;
   /** Origen del pedido para tracking (ej: 'whatsapp-bot', campaña). Prep Track C. */

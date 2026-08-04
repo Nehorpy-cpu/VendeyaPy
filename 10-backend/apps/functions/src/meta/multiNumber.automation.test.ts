@@ -38,6 +38,20 @@ vi.mock('../lib/firebase.js', () => ({
       delete: (ref: { path: string }) => ops.push({ tipo: 'delete', path: ref.path }),
       commit: async () => { for (const op of ops) aplicar(op); ops.length = 0; },
     }),
+    // El alta pasó de batch a transacción: el guard de propiedad del PNID tiene que leer el índice
+    // en el MISMO acto en que lo reclama (antes había una ventana entre chequear y escribir).
+    runTransaction: async (fn: (tx: unknown) => Promise<unknown>) => {
+      const tx = {
+        get: async (ref: { path: string }) => ({ exists: docs.has(ref.path), data: () => docs.get(ref.path) }),
+        set: (ref: { path: string }, data: Record<string, unknown>, o?: { merge?: boolean }) =>
+          ops.push({ tipo: 'set', path: ref.path, data, merge: o?.merge === true }),
+        delete: (ref: { path: string }) => ops.push({ tipo: 'delete', path: ref.path }),
+      };
+      const r = await fn(tx);
+      for (const op of ops) aplicar(op);
+      ops.length = 0;
+      return r;
+    },
   }),
   paths: {
     metaAsset: (t: string, id: string) => `tenants/${t}/metaAssets/${id}`,

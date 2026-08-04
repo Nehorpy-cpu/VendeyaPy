@@ -10,7 +10,7 @@
  */
 
 import { Timestamp } from 'firebase-admin/firestore';
-import { newPaymentId } from '@vpw/shared';
+import { newPaymentId, parseSessionKey, LEGACY_SESSION_KEY } from '@vpw/shared';
 import type { Order } from '@vpw/shared';
 import { db, paths } from '../lib/firebase.js';
 import { logger } from '../lib/logger.js';
@@ -50,9 +50,22 @@ export async function confirmPayment(
     updatedAt: now,
   });
 
-  // Vaciar carrito y cerrar el checkout en la sesión del cliente.
+  /**
+   * ADR-0017 §2 — se cierra el checkout del CANAL que armó el pedido, no el de `active`.
+   *
+   * El canal viaja en el pedido (`sessionKey`) desde que se lo crea: los tres llamadores de esta
+   * función —webhook de Stripe, callable del panel, endpoint de prueba— solo conocen el `orderId`
+   * y no tienen forma de saber por qué número se conversó. Sin el campo, este `update` vaciaba el
+   * carrito y ponía `CHECKOUT_DONE` en la conversación equivocada: el cliente que estaba comprando
+   * por el otro número veía desaparecer su carrito, y el que sí pagó quedaba con el pedido
+   * pendiente colgado.
+   *
+   * FALLBACK LEGACY EXPLÍCITO: un pedido sin el campo (todos los que existen hoy) es del canal
+   * heredado.
+   */
+  const sessionKey = parseSessionKey(order.sessionKey, LEGACY_SESSION_KEY);
   await db()
-    .doc(paths.session(tenantId, order.customerId))
+    .doc(paths.session(tenantId, order.customerId, sessionKey))
     .update({
       cart: { items: [], subtotal: 0 },
       state: 'CHECKOUT_DONE',

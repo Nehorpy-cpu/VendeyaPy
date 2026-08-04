@@ -22,7 +22,12 @@ import { maskPhone, permiteAutomatizacion } from '@vpw/shared';
 import type { MessageChannel, WhatsappSendMode, WhatsappAutomationMode } from '@vpw/shared';
 import { getChannelConfig } from './channelConfig.js';
 import { resolveAutomationMode } from '../meta/automationMode.js';
-import { resolveTenantWhatsappCreds, resolveTenantWhatsappCredsFor, type WhatsappCredsResult } from './resolveWhatsappCreds.js';
+import {
+  resolveTenantWhatsappCreds,
+  resolveTenantWhatsappCredsFor,
+  type WhatsappCredsResult,
+  type WhatsappCredsReason,
+} from './resolveWhatsappCreds.js';
 
 /**
  * SHIPPING-CHAT-3B — Resultado DISCRIMINADO del envío (imposible de construir inconsistente).
@@ -155,6 +160,23 @@ export interface MockResolution {
 export class MockWhatsAppClient implements WhatsAppClient {
   constructor(public readonly resolution?: MockResolution) {}
 
+  /**
+   * Traza de aislamiento SOLO en emulador (tests). Nunca en producción, nunca el token.
+   *
+   * Está acá —y `protected`— porque el invariante que hace verificable a todo este módulo es
+   * «no salió a Meta **y se sabe por qué**», y vale para CUALQUIER transporte que no llegue a
+   * Graph, no solo para el envío simulado. Un no-envío sin traza es indistinguible de un flujo
+   * que nunca intentó enviar: son dos defectos opuestos y el test no podría separarlos.
+   */
+  protected async escribirTraza(ctx: SendContext | undefined, datos: Record<string, unknown>): Promise<void> {
+    if (!isEmulator() || !ctx?.tenantId) return;
+    try {
+      await db().doc(`tenants/${ctx.tenantId}/_debug/lastWhatsappSend`).set({ ...datos, at: Timestamp.now() });
+    } catch {
+      /* la traza de debug nunca debe romper el envío */
+    }
+  }
+
   get transportInfo(): WhatsappTransportInfo {
     return {
       transport: 'mock',
@@ -185,23 +207,16 @@ export class MockWhatsAppClient implements WhatsAppClient {
       mode: this.resolution?.mode,
       reason: this.resolution?.reason,
     });
-    // Traza de aislamiento SOLO en emulador (tests). Nunca en producción, nunca el token.
-    if (isEmulator() && ctx?.tenantId) {
-      try {
-        await db().doc(`tenants/${ctx.tenantId}/_debug/lastWhatsappSend`).set({
-          to,
-          channel: ctx.channel ?? null,
-          phoneNumberId: this.resolution?.phoneNumberId ?? null,
-          mode: this.resolution?.mode ?? null,
-          tokenPresent: !!this.resolution?.tokenPresent,
-          reason: this.resolution?.reason ?? null,
-          viaMock: true,
-          at: Timestamp.now(),
-        });
-      } catch {
-        /* la traza de debug nunca debe romper el envío */
-      }
-    }
+    await this.escribirTraza(ctx, {
+      to,
+      channel: ctx?.channel ?? null,
+      phoneNumberId: this.resolution?.phoneNumberId ?? null,
+      mode: this.resolution?.mode ?? null,
+      tokenPresent: !!this.resolution?.tokenPresent,
+      reason: this.resolution?.reason ?? null,
+      viaMock: true,
+      blocked: false,
+    });
     // COVERAGE-1D: id determinístico por (to, texto) — el outbox de mensajería lo persiste como
     // providerMessageId y una re-ejecución con el mismo contenido produce el mismo id (testeable).
     return { ok: true, outcome: 'mock', viaMock: true, id: `mock-${simpleHash(`${to}|${text}`)}` };
@@ -226,21 +241,15 @@ export class MockWhatsAppClient implements WhatsAppClient {
       mode: this.resolution?.mode,
       reason: this.resolution?.reason,
     });
-    if (isEmulator() && ctx?.tenantId) {
-      try {
-        await db().doc(`tenants/${ctx.tenantId}/_debug/lastWhatsappSend`).set({
-          to,
-          kind: 'location_request',
-          channel: ctx.channel ?? null,
-          phoneNumberId: this.resolution?.phoneNumberId ?? null,
-          mode: this.resolution?.mode ?? null,
-          viaMock: true,
-          at: Timestamp.now(),
-        });
-      } catch {
-        /* la traza de debug nunca debe romper el envío */
-      }
-    }
+    await this.escribirTraza(ctx, {
+      to,
+      kind: 'location_request',
+      channel: ctx?.channel ?? null,
+      phoneNumberId: this.resolution?.phoneNumberId ?? null,
+      mode: this.resolution?.mode ?? null,
+      viaMock: true,
+      blocked: false,
+    });
     return { ok: true, viaMock: true };
   }
 }
@@ -369,8 +378,16 @@ const globalFallbackAllowed = () => process.env.ALLOW_GLOBAL_WHATSAPP_FALLBACK =
  */
 export type OrigenEnvio = 'humano' | 'automatico';
 
-/** Motivo saneado de un bloqueo: código CERRADO, seguro de loguear y de persistir. */
-export type MotivoCanalBloqueado = `automation_${WhatsappAutomationMode}`;
+/**
+ * Motivo saneado de un bloqueo: código CERRADO, seguro de loguear y de persistir.
+ *
+ * `channel_unavailable` es el segundo motivo por el que un mensaje NO sale sin haber tocado Meta:
+ * se pidió un número concreto y ese número no resuelve credenciales. Comparte desenlace con el
+ * bloqueo por permiso —cero HTTP, `ok:false`— así que comparte tipo: los consumidores que ya
+ * distinguen `outcome === 'blocked'` (mensaje manual, reanudación de cobertura) hacen exactamente
+ * lo correcto sin cambiar nada, que es no persistir burbuja y no reintentar a ciegas.
+ */
+export type MotivoCanalBloqueado = `automation_${WhatsappAutomationMode}` | 'channel_unavailable';
 
 export type OutboundChannelDecision =
   | { allow: true }
@@ -409,11 +426,50 @@ export class BlockedChannelClient extends MockWhatsAppClient {
     super(resolution);
   }
 
-  override async sendText(): Promise<SendResult> {
+  /**
+   * UN BLOQUEO TAMBIÉN DEJA RASTRO. La primera versión de esta clase devolvía `blocked` y no
+   * escribía nada, así que un no-envío por permiso o por canal inexistente quedaba EXACTAMENTE
+   * igual que un flujo que ni siquiera intentó enviar: cero traza, cero log en el punto del envío.
+   * Son dos defectos opuestos —«habló el número equivocado» y «no contestó nadie»— y sin este
+   * registro no hay forma de distinguirlos, ni en un test ni frente a un cliente que reclama.
+   *
+   * `blocked: true` y `viaMock: false` son deliberados: un mock es un envío SIMULADO que el tenant
+   * eligió, un bloqueo es un mensaje que el negocio quiso mandar y el sistema impidió. Que la traza
+   * los mezclara volvería a contar la misma mentira que `ok:true` contaba en el resultado.
+   */
+  private async trazaDeBloqueo(to: string, ctx?: SendContext, kind?: string): Promise<void> {
+    logger.warn('WhatsApp: mensaje NO enviado — canal bloqueado (ADR-0017)', {
+      tenantId: ctx?.tenantId,
+      channel: ctx?.channel,
+      to: maskPhone(to),
+      ...(kind ? { kind } : {}),
+      mode: this.resolution?.mode,
+      reason: this.resolution?.reason,
+      blockedReason: this.motivo,
+    });
+    await this.escribirTraza(ctx, {
+      to,
+      ...(kind ? { kind } : {}),
+      channel: ctx?.channel ?? null,
+      phoneNumberId: this.resolution?.phoneNumberId ?? null,
+      mode: this.resolution?.mode ?? null,
+      tokenPresent: !!this.resolution?.tokenPresent,
+      // El motivo DIAGNÓSTICO (por qué el canal no sirve); `blockedReason` es el motivo SANEADO
+      // del bloqueo. Los dos, porque responden preguntas distintas.
+      reason: this.resolution?.reason ?? null,
+      blockedReason: this.motivo,
+      viaMock: false,
+      blocked: true,
+    });
+  }
+
+  override async sendText(to: string, _text: string, ctx?: SendContext): Promise<SendResult> {
+    await this.trazaDeBloqueo(to, ctx);
     return { ok: false, outcome: 'blocked', reason: this.motivo };
   }
 
-  override async sendLocationRequest(): Promise<LocationRequestResult> {
+  override async sendLocationRequest(to: string, _bodyText: string, ctx?: SendContext): Promise<LocationRequestResult> {
+    await this.trazaDeBloqueo(to, ctx, 'location_request');
     return { ok: false, reason: 'channel_blocked' };
   }
 }
@@ -432,13 +488,31 @@ export interface WhatsappClientDeps {
 
 const defaultDeps: WhatsappClientDeps = {
   getMode: async (t) => (t ? (await getChannelConfig(t)).whatsappSendMode : 'mock'),
-  // MULTI-NUMBER-1: con pnid se resuelve ESE número (responder por donde entró); si ese
-  // número ya no está activo (desactivado con mensajes en vuelo), fallback al principal.
+  /**
+   * ADR-0017 — CUANDO SE PIDE UN NÚMERO, NO HAY SUSTITUTO.
+   *
+   * Esto caía al número PRINCIPAL del tenant cuando el PNID pedido no resolvía. Nació como una
+   * comodidad de MULTI-NUMBER-1 («el número se desactivó con mensajes en vuelo») y con Coexistence
+   * es el peor desenlace posible: un número adicional que todavía no está `active` —el estado
+   * NORMAL de un número recién incorporado, y el que va a tener el número real el día del
+   * onboarding— hacía que la respuesta saliera por el número que está vendiendo, a un cliente que
+   * le escribió al OTRO número. El cliente ve una respuesta desde un teléfono que no conoce y el
+   * vendedor no se entera de nada.
+   *
+   * Sin PNID pedido (conversación vieja mono-número) se sigue resolviendo el principal: ahí no hay
+   * destino que traicionar.
+   */
   resolveCreds: async (t, pnid) => {
     if (t && pnid) {
       const specific = await resolveTenantWhatsappCredsFor(t, pnid);
       if (specific.ok) return specific;
-      logger.warn('WhatsApp: número receptor no resoluble; fallback al principal', { tenantId: t, phoneNumberId: maskPhone(pnid), reason: specific.reason });
+      logger.warn('WhatsApp: el número receptor pedido no resuelve; NO se sustituye por el principal', {
+        tenantId: t,
+        phoneNumberId: maskPhone(pnid),
+        reason: specific.reason,
+      });
+      // `cause` conserva el diagnóstico que el motivo colapsa: qué hacer y por qué son dos cosas.
+      return { ok: false, reason: 'channel_unavailable', cause: specific.reason };
     }
     return resolveTenantWhatsappCreds(t);
   },
@@ -486,6 +560,22 @@ const mockCanalBloqueado = (mode: WhatsappSendMode, decision: Extract<OutboundCh
   new BlockedChannelClient({ mode, phoneNumberId, reason: decision.reason }, decision.reason);
 
 /**
+ * El número PEDIDO no resuelve: no hay canal para ese destino y no existe sustituto legítimo.
+ * Deliberadamente SIN `phoneNumberId`: no hay número resuelto, y poner el principal ahí sería
+ * volver a insinuar en los logs y en la saga el mismo sustituto que este bloqueo existe para
+ * impedir. La `causa` sí viaja: es lo único que después explica si hay que reconectar, renovar el
+ * token o dar de alta el número.
+ */
+const mockCanalNoDisponible = (mode: WhatsappSendMode, causa?: WhatsappCredsReason) =>
+  new BlockedChannelClient({ mode, reason: causa ?? 'channel_unavailable' }, 'channel_unavailable');
+
+/** ¿La resolución falló porque el número PEDIDO no está disponible (vs. cualquier otro motivo)? */
+const canalPedidoNoDisponible = (creds: WhatsappCredsResult): boolean => !creds.ok && creds.reason === 'channel_unavailable';
+
+/** Diagnóstico conservado por `resolveCreds` cuando colapsa el motivo (null si no lo hay). */
+const causaDelCanal = (creds: WhatsappCredsResult): WhatsappCredsReason | undefined => (creds.ok ? undefined : creds.cause);
+
+/**
  * Resuelve el cliente de WhatsApp para un tenant (Fase 4A). USA el tenantId de verdad.
  * Si falta tenantId / no conectado / sin asset / token ausente o vencido / sendMode !=
  * 'live' → Mock con motivo claro. En emulador SIEMPRE Mock (nunca toca Graph).
@@ -508,6 +598,18 @@ export async function getWhatsAppClient(
   // (Mock inspeccionable con el phone_number_id resuelto — clave para multi-número).
   if (isEmulator()) {
     const creds = await deps.resolveCreds(tenantId, phoneNumberId);
+    /**
+     * SOLO EN `live`, igual que en producción. Abajo, el camino real corta en `mode !== 'live'`
+     * ANTES de resolver credenciales: un tenant en modo `mock` —demo, staging, onboarding sin Meta—
+     * jamás ve un bloqueo por canal, porque no hay nada que entregar y por lo tanto no hay número
+     * equivocado por el que entregarlo. Sin esta condición el emulador era MÁS estricto que
+     * producción justo en el caso más común de las pruebas: una conexión sin token dejaba al bot
+     * mudo y sin burbuja, un desenlace que en producción no ocurre nunca.
+     *
+     * Es el mismo criterio que defiende al gate de permiso de abajo, aplicado en las dos
+     * direcciones: el emulador tiene que comportarse como producción, ni más laxo ni más estricto.
+     */
+    if (mode === 'live' && canalPedidoNoDisponible(creds)) return mockCanalNoDisponible(mode, causaDelCanal(creds));
     // El gate corre TAMBIÉN en emulador: un permiso que se comporta distinto según el entorno es
     // un permiso que nadie probó de verdad.
     if (creds.ok && tenantId) {
@@ -528,6 +630,9 @@ export async function getWhatsAppClient(
   if (mode !== 'live') return new MockWhatsAppClient({ mode, reason: 'mode_mock' });
 
   const creds = await deps.resolveCreds(tenantId, phoneNumberId);
+  // Antes del fallback global: si el destino PEDIDO no está disponible, mandar por credenciales
+  // ajenas al tenant es la misma sustitución silenciosa, solo que peor (otro negocio).
+  if (canalPedidoNoDisponible(creds)) return mockCanalNoDisponible(mode, causaDelCanal(creds));
   if (creds.ok && tenantId) {
     // ADR-0017 §1: el permiso se verifica ANTES de la caché de clientes. Cachear el veredicto junto
     // con el cliente dejaría hasta un minuto de envíos por un canal que ya perdió el permiso.
@@ -564,7 +669,13 @@ export async function getWhatsAppClientExact(
 ): Promise<WhatsAppClient> {
   const strictDeps: WhatsappClientDeps = {
     ...defaultDeps, // hereda el gate de canal de ADR-0017; solo se endurece la resolución del número
-    resolveCreds: async (t, pnid) => (t && pnid ? resolveTenantWhatsappCredsFor(t, pnid) : resolveTenantWhatsappCreds(t)),
+    resolveCreds: async (t, pnid) => {
+      if (!t || !pnid) return resolveTenantWhatsappCreds(t);
+      const specific = await resolveTenantWhatsappCredsFor(t, pnid);
+      // Mismo motivo que el camino por defecto: sin canal para el destino PEDIDO, tampoco puede
+      // caer al fallback global (credenciales de OTRO negocio). Y mismo diagnóstico conservado.
+      return specific.ok ? specific : { ok: false, reason: 'channel_unavailable', cause: specific.reason };
+    },
   };
   return getWhatsAppClient(tenantId, strictDeps, phoneNumberId, origen);
 }

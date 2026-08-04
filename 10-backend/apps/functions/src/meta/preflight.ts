@@ -38,16 +38,30 @@ export interface PreflightResult {
   phoneNumber?: string;
 }
 
-async function updateConnectionStatus(tenantId: string, status: MetaConnectionStatus, errorMessage: string): Promise<void> {
-  await db().doc(paths.metaConnection(tenantId, 'main')).set(
+async function updateConnectionStatus(tenantId: string, connectionId: string, status: MetaConnectionStatus, errorMessage: string): Promise<void> {
+  await db().doc(paths.metaConnection(tenantId, connectionId)).set(
     { status, lastVerifiedAt: Timestamp.now(), errorMessage, updatedAt: Timestamp.now() },
     { merge: true },
   );
 }
 
+/**
+ * QUÉ canal verificar (ADR-0017). Ausente ⇒ el principal (`main` + el asset `selected`), que es
+ * exactamente lo que hacía antes: quien ya llamaba a esto no cambia de comportamiento.
+ *
+ * Estaba cableado a `main` de punta a punta, así que no se podía reusar para un número ADICIONAL
+ * —vive en `wa_{pnid}` y su asset es `selected: false`—: o no encontraba el número, o escribía el
+ * veredicto de OTRO canal sobre la conexión que está vendiendo.
+ */
+export interface PreflightTarget {
+  connectionId?: string;
+  phoneNumberId?: string;
+}
+
 /** Valida el canal WhatsApp del tenant y actualiza su estado. No envía ni registra nada. */
-export async function verifyWhatsappChannel(tenantId: string, graph: MetaGraphClient): Promise<PreflightResult> {
-  const conn = (await db().doc(paths.metaConnection(tenantId, 'main')).get()).data() as MetaConnection | undefined;
+export async function verifyWhatsappChannel(tenantId: string, graph: MetaGraphClient, target: PreflightTarget = {}): Promise<PreflightResult> {
+  const connectionId = target.connectionId ?? 'main';
+  const conn = (await db().doc(paths.metaConnection(tenantId, connectionId)).get()).data() as MetaConnection | undefined;
   if (!conn || !conn.tokenSecretRef) {
     return { ready: false, reason: 'not_connected', status: conn?.status ?? 'not_connected' };
   }
@@ -60,17 +74,20 @@ export async function verifyWhatsappChannel(tenantId: string, graph: MetaGraphCl
     token = null;
   }
   if (!token) {
-    await updateConnectionStatus(tenantId, 'expired', 'token no disponible');
+    await updateConnectionStatus(tenantId, connectionId, 'expired', 'token no disponible');
     return { ready: false, reason: 'token_unavailable', status: 'expired' };
   }
 
-  const assetSnap = await db()
-    .collection(paths.metaAssets(tenantId))
-    .where('assetType', '==', 'whatsapp_phone_number')
-    .where('selected', '==', true)
-    .limit(1)
-    .get();
-  const pnid = (assetSnap.docs[0]?.data() as MetaAsset | undefined)?.externalId;
+  let pnid = target.phoneNumberId;
+  if (!pnid) {
+    const assetSnap = await db()
+      .collection(paths.metaAssets(tenantId))
+      .where('assetType', '==', 'whatsapp_phone_number')
+      .where('selected', '==', true)
+      .limit(1)
+      .get();
+    pnid = (assetSnap.docs[0]?.data() as MetaAsset | undefined)?.externalId;
+  }
 
   const dbg = await graph.debugToken(token);
   let phoneFound = false;
@@ -84,7 +101,7 @@ export async function verifyWhatsappChannel(tenantId: string, graph: MetaGraphCl
   }
 
   const decision = decidePreflightStatus({ tokenValid: dbg.isValid, scopes: dbg.scopes, requiredScopes: META_REQUIRED_SCOPES, phoneFound });
-  await updateConnectionStatus(tenantId, decision.status, decision.reason === 'ok' ? '' : decision.reason);
-  logger.info('Preflight WhatsApp', { tenantId, status: decision.status, ready: decision.ready });
+  await updateConnectionStatus(tenantId, connectionId, decision.status, decision.reason === 'ok' ? '' : decision.reason);
+  logger.info('Preflight WhatsApp', { tenantId, connectionId, status: decision.status, ready: decision.ready });
   return { ready: decision.ready, reason: decision.reason, status: decision.status, phoneNumber };
 }

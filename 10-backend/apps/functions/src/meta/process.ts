@@ -239,6 +239,13 @@ async function procesarEventoNoMensaje(
  *  - `accepted` / `mock` ⇒ se registra, con el wamid real o la marca de mock.
  *  - `rejected` (4xx CONFIRMADO de Graph) ⇒ el cliente nunca lo vio: NO se registra. Es el mismo
  *    criterio del mensaje manual del vendedor: el historial no miente sobre lo que salió.
+ *  - `blocked` (ADR-0017 §1: canal sin permiso, o el número pedido no resuelve) ⇒ TAMPOCO se
+ *    registra, y por la misma razón exacta que `rejected`: es un no-envío CONFIRMADO, con cero
+ *    HTTP en vuelo. La única diferencia con un rechazo de Graph es quién lo negó. Se trataba como
+ *    `unknown` —la burbuja quedaba en el chat— y eso le mostraba al vendedor una respuesta que el
+ *    cliente nunca recibió, justo en el caso en el que el número está mudo a propósito y nadie
+ *    contestó de verdad. La regla ya estaba escrita en `coverageResume.ts` («confirmadas son
+ *    rejected y blocked»); acá faltaba.
  *  - `unknown` (5xx / timeout / 2xx sin wamid) ⇒ el mensaje PUDO salir: SÍ se registra. Que el
  *    vendedor no vea algo que el cliente quizá leyó es peor que una burbuja de más.
  */
@@ -259,7 +266,10 @@ function desenlaceDelEnvio(r: SendResult | LocationRequestResult): {
     };
   }
   const outcome = 'outcome' in r ? r.outcome : r.reason;
-  return { registrar: outcome !== 'rejected', waMessageId: null, viaMock: false, outcome };
+  // No-envíos CONFIRMADOS (nadie los vio): rechazo de Graph y bloqueo del canal. El interactivo
+  // declara su bloqueo con nombre propio (`channel_blocked`) y significa lo mismo.
+  const confirmado = outcome === 'rejected' || outcome === 'blocked' || outcome === 'channel_blocked';
+  return { registrar: !confirmado, waMessageId: null, viaMock: false, outcome };
 }
 
 interface EntregaAutomaticaArgs {
@@ -349,7 +359,7 @@ async function entregarRespuestaAutomatica(args: EntregaAutomaticaArgs): Promise
 
   const desenlace = desenlaceDelEnvio(res);
   if (!desenlace.registrar) {
-    logger.warn('WhatsApp RECHAZÓ la respuesta automática: no se registra en el chat', { tenantId, outcome: desenlace.outcome });
+    logger.warn('La respuesta automática NO salió (no-envío CONFIRMADO): no se registra en el chat', { tenantId, outcome: desenlace.outcome });
     return;
   }
   if (!res.ok) {
@@ -542,6 +552,8 @@ export async function processWebhookEvent(eventId: string): Promise<void> {
         messageId: providerMessageId,
         receivedByPhoneNumberId: receivedBy,
         channel: platform,
+        // ADR-0017 §2: el request de cobertura y su puntero pertenecen a ESTA conversación.
+        sessionKey,
         // ADR-0016 §12: la burbuja de SALIDA la escribe el borde de envío, no el handler.
         deferOutbound: true,
       });
@@ -668,6 +680,11 @@ export async function processWebhookEvent(eventId: string): Promise<void> {
               attachment: ingesta.attachment,
               messageId: ingesta.messageId,
               receivedByPhoneNumberId: receivedBy,
+              // ADR-0017 §2: el gate del comprobante decide con la SESIÓN (espera de pago
+              // declarada + pedido apuntado). Sin el canal las leía de `active`: un comprobante
+              // que entra por otro número se evaluaba contra una conversación ajena y terminaba
+              // degradado a medio normal, sin campana para el vendedor.
+              sessionKey,
             });
             if (decision.reply.trim()) adjuntoReply = decision.reply;
             else motivo = decision.reason ?? null;

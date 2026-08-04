@@ -15,6 +15,7 @@
  */
 
 import type { Seller } from '@vpw/shared';
+import { LEGACY_SESSION_KEY } from '@vpw/shared';
 import { normalizeText } from '../catalog/match.js';
 import { getCheckoutConfig } from '../orders/checkoutConfig.js';
 import { executeHandoff, notifyHandoffRequested } from './handoff.js';
@@ -147,6 +148,13 @@ export function resolverVendedor(
 export interface ProcesarPedidoHumanoInput {
   /** wamid del inbound (idempotencia del aviso). Sin él (dev), el aviso no deduplica. */
   messageId?: string | null;
+  /**
+   * ADR-0017 §2: canal de la conversación. Es el único dato que hace VERDAD la frase que este
+   * módulo le manda al cliente («el asistente queda en pausa»): sin él la pausa se persistía en
+   * `sessions/active` y el bot seguía contestando en el número por el que el cliente pidió ayuda.
+   * Omitirlo = canal heredado (simulador, chat de prueba, dev).
+   */
+  sessionKey?: string;
 }
 export interface ProcesarPedidoHumanoResult {
   /** false = este turno NO es un pedido de humano → sigue el ruteo normal. */
@@ -247,6 +255,7 @@ export async function procesarPedidoHumano(
     reason: 'customer_requested',
     sellerName: res.vendedor.name,
     sourceId: input.messageId ?? null,
+    sessionKey: input.sessionKey ?? LEGACY_SESSION_KEY,
     createSessionIfMissing: true,
   });
   if (!r.ok) {

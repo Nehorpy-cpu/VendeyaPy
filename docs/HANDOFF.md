@@ -205,3 +205,59 @@ UI del asistente interno de growth · botón "generar ficha con IA" (excluido a 
 3. **Programas pendientes ya identificados** (AI-FALLBACK-HONESTO-1, COVERAGE-GUARD-1 y el paquete COVERAGE con flag OFF CERRADOS/DESPLEGADOS — ver §3; el resto sigue): **COVERAGE — ACTIVO EXCLUSIVAMENTE EN ARFAGI (estado vigente 2026-07-25)**: E2E de Coverage/Shipping Chat validado en producción hasta comprobante y cancelación manual (tester interno; no hubo venta pagada); política `required` con `maxChargeGs ₲200.000`; purga a 30 días corregida (elimina coordenadas exactas y nombre del lugar; la dirección textual no la elimina este maintenance) con backfill de los 2 requests históricos; credipower apagado. **La prueba FASE 3 con número EXTERNO sigue PENDIENTE y usará la activación VIGENTE** (no requiere activationId nuevo salvo que antes se ejecute un kill-switch o exista una razón operativa real). El hallazgo del guard que la máquina de estados debe cubrir: "¿el costo de envío se calcula antes o después de pagar mi pedido?" fue clasificado como VISTA DE CARRITO por contener "mi pedido" — honesto y sin efectos, pero UX incorrecta. · **AI-QUOTA-ALERTS-1** (campana 70/85/95/100% + aviso al bloquear) · **AI-PROMPT-CACHING-1** (cache_control en system+tools + contar cache tokens) · **microprograma de cortesía determinística** (hallazgo del smoke: "Gracias" consumió un turno de IA de ~3.4k tokens — la cortesía pura debería responderse por reglas; con cupo agotado NO deriva gracias al guard `esConsultaDerivable`, es solo costo) · **higiene de logs** (el `customerId` completo — que en este modelo ES el teléfono — viaja como campo de correlación en la metadata estructurada de logs; el TEXTO de los logs está limpio; preexistente, enmascararlo en un microprograma) · **AI-USAGE-ATTRIBUTION-1** (origen/customerId en aiRequests + marcar/eximir simulador y test cases) · **AI-GATE-RESERVA-1** (estimación realista o reserva transaccional) · **META CATALOG — próximo paso: ENRIQUECER los 180 importados** (eran 30; la importación genérica del 2026-07-30 sumó 150) (cargarles costo real y stock real; hasta que no se edite su inventario siguen con `stockPendingReview:true` y no se pueden habilitar) y **revisar los grupos señalados por el centro de calidad** (conteo VIGENTE tras la importación genérica: 23 nombres genéricos, 18 duplicados probables, 33 incoherencias, 1 sin marca; las cifras 67/13/26 eran del análisis previo a importar). Recién después se decide qué productos habilitar con `metaCatalogSetSyncEnabled` y si se pasa a `mode:live`. **Hoy: la ÚNICA sincronización real de la historia (canary Odyssey, UPDATE solo de price ₲130.000→₲250.000) fue REVERTIDA por el feed diario del sitio el 2026-07-30 (Meta volvió a ₲130.000); Meta en 181 artículos (el crecimiento 133→181 fue EXTERNO); mode sigue en dry_run y las escrituras a Meta siguen BLOQUEADAS POR CONSTRUCCIÓN: desde el 2026-07-31 arfagi está en `external_managed` con cero campos escribibles, así que no existe patch posible (ADR-0015). Odyssey quedó `drifted_external` y no cierra venta automática hasta que el ORIGEN del feed publique ₲250.000 (prioridad 0)** — ver §3 · **campana para futuros usuarios con rol SELLER puro** (hoy SIN impacto: el vendedor configurado actual es TENANT_OWNER y ve todo; el staff ve la bandeja de /conversations con no-leídos, pero la campana de notificaciones requiere rules + gate de UI en un programa posterior (excepto `catalog_quality`, que desde el 2026-07-29 el MANAGER ya ve)) · **microajuste conversacional**: comparaciones contextuales ("¿ambas son dulces?") hoy caen al listado por reglas en vez de responderse, y las comparaciones de la IA deben citar la marca de CADA producto por dato. No hay pedidos pendientes de verificación. De los 15 pedidos históricos, 14 están CANCELLED y **1 quedó en estado PAID** (anterior a los releases de julio; la narrativa previa de "cero venta pagada en las pruebas" no lo mencionaba).
 4. **Criterio de "terminado" del proyecto**: una persona externa completa el ciclo entero sin intervención técnica — escribe al +595 986 440752 → el bot recomienda con ficha (honesto en "¿sirve para X?") → carrito → "pagar" crea la orden → foto del comprobante → el vendedor la VE en el panel desde `vendeyapy.com` → confirma el pago → venta registrada con ganancia. Verificación read-only en cada paso + registro público cerrado + backup semanal documentado.
 5. Después de eso: FASE 6 solo a pedido del owner.
+
+---
+
+## Coexistence de WhatsApp Business App — estado al 2026-08-04
+
+**Programa `WHATSAPP-COEXISTENCE-FOUNDATION-COMPLETE-1`, sobre `4af6607`.** Autoridad: ADR-0017
+(§5 y §6 son correcciones del contrato oficial de Meta verificado el 2026-08-04) y ARCHITECTURE §12/§12.1.
+
+### Estado honesto
+
+- Fundación **COMPLETA EN REPO**.
+- **NO desplegada.**
+- Número real **NO conectado**. **QR NO ejecutado.**
+- **Backup productivo NO ejecutado**: en este programa se construyeron y probaron las HERRAMIENTAS.
+- El cutover es el **Programa 2**: `docs/coexistence-release-runbook.md` tiene el orden exacto de los 13 pasos.
+- **La aprobación externa de Meta sigue siendo un gate abierto** (ver abajo).
+- **Restaurar Firebase NO deshace cambios externos ya hechos por Meta ni por la app móvil.** Un restore no
+  des-onboardea un número.
+
+### Lo que quedó construido
+
+| Pieza | Dónde |
+|---|---|
+| Embedded Signup en DOS flujos (`standard` \| `coexistence`) | `apps/web/src/lib/metaEmbeddedSignup.ts` |
+| Nonce atado a tenant + uid + **modo** + vencimiento + uso único | `apps/functions/src/meta/nonce.ts` |
+| Conexión `wa_{pnid}` que jamás toca `main` | `apps/functions/src/meta/coexistenceConnect.ts` |
+| Coordinador durable del historial + disparo de `smb_app_data` | `apps/functions/src/meta/historyCoordinator.ts` |
+| Ciclo de desconexión (`account_update`) | `apps/functions/src/meta/accountUpdate.ts` |
+| Backup restaurable + restore aislado + prueba de equivalencia | `apps/functions/scripts/backup-*.mjs`, `restore-*.mjs`, `backup-restore-e2e.mjs` |
+| Auditoría de release calculada desde el grafo compilado | `apps/functions/scripts/release-audit.mjs` |
+| Runbook del Programa 2 | `docs/coexistence-release-runbook.md` |
+| Backup y restauración | `docs/backup-restore.md` |
+
+### Precondiciones del E2E (importante)
+
+Emulador con **`--project demo-aiafg`** (con otro, las callables dan 404). Sembrar con `seed-users.mjs` +
+`load-catalog.mjs`. **`seed-demo.mjs` SOLO para `verify-p6-rules`**: siembra 3 órdenes `PAID` en el tenant
+`perfumeria` y el caso 23 de `verify-shipping-quote-saga` afirma sobre TODAS las órdenes del tenant.
+`backup-restore-e2e.mjs` exige `FIRESTORE_EMULATOR_HOST` y **NO** tolera `GCLOUD_PROJECT` (contradice su
+`--project` de destino y dispara el guard, correctamente). E2E **siempre serializado**.
+
+### Pendientes que NO son código
+
+1. **Elegibilidad de Paraguay para Coexistence**: Meta no publica lista maestra de países. Gate externo abierto.
+2. **`NEXT_PUBLIC_META_COEXISTENCE_CONFIG_ID`** sin valor: hace falta una configuración APARTE en Meta con
+   `featureType = whatsapp_business_app_onboarding`. Mientras esté vacío, la tarjeta se muestra pero explica
+   que la opción no está habilitada y no deja lanzar nada.
+3. **Política TTL de `metaOAuthStates`** sobre `expiresAt` (el campo ya se escribe). No se declara por código:
+   declarar el TTL de una colección preexistente podría CREAR una política que hoy no existe.
+4. **Embedded Signup corre en v2** (no se manda `extras.version`) y **v2 se depreca el 2026-10-15**. Es un
+   plazo duro, no una mejora opcional. Decisión aparte.
+5. Deploy de índices **NUNCA con `--force`**: borra los field overrides que no estén en el archivo, incluida
+   la política TTL de consola de `metaWebhookInbox`, que no está en IaC a propósito.
+6. `SESIONES_POR_CANAL_MIGRADAS` sigue en `false` en `scripts/migrate-whatsapp-automation-mode.mjs`. El
+   inventario está 100 % migrado (0 callsites runtime sin clave) y el E2E de dos PNID pasa; **cambiarlo es
+   una decisión deliberada del Programa 2**, no un efecto secundario.

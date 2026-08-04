@@ -1,9 +1,9 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import type { MetaConnectionStatus, MetaAssetType, WhatsappSendMode } from '@vpw/shared';
+import type { MetaConnectionStatus, MetaAssetType, WhatsappSendMode, WhatsappAutomationMode } from '@vpw/shared';
 import { useActiveCompany } from '@/lib/active-company';
 import { useAuth } from '@/lib/auth-context';
 import {
@@ -14,27 +14,35 @@ import {
   connectMetaDemo,
   disconnectMeta,
   isMetaConfigured,
+  isCoexistenceConfigured,
   isDemoIntegrationsAllowed,
   startMetaConnect,
   connectMeta,
+  coexistenceStart,
+  coexistenceConnect,
   verifyMetaChannel,
   selectMetaPhoneNumber,
   metaDisconnect,
   friendlyMetaError,
+  type MetaConnectResult,
+  type CoexistenceConnectResult,
 } from '@/lib/integrations';
-import { launchEmbeddedSignup, MetaSignupError } from '@/lib/metaEmbeddedSignup';
+import { launchEmbeddedSignup, preloadFacebookSdk, MetaSignupError, type MetaSignupFlow, type EmbeddedSignupResult } from '@/lib/metaEmbeddedSignup';
 import { getChannelConfig, setWhatsappSendMode, friendlyChannelError } from '@/lib/channels';
 import { getAgentConfig } from '@/lib/agent-config';
 import { resolveEntitlements, getUsage, isUnlimited } from '@/lib/entitlements';
-import { SectionHeader, EmptyState, ConfirmModal } from '@/components/ui';
+import { SectionHeader, EmptyState, ConfirmModal, StatusBadge, type BadgeTone } from '@/components/ui';
 import { WhatsappAssistedActivation } from '@/components/integrations/WhatsappAssistedActivation';
+import { CoexistenceOnboardingCard } from '@/components/integrations/CoexistenceOnboardingCard';
 
 const STATUS: Record<MetaConnectionStatus, { label: string; cls: string }> = {
   not_connected: { label: 'Sin conectar', cls: 'bg-ink-50 text-ink-600' },
   connected_limited: { label: 'Conectado (limitado)', cls: 'bg-amber-50 text-amber-700' },
   pending_review: { label: 'En revisión', cls: 'bg-ink-100 text-ink-700' },
   permission_missing: { label: 'Falta un permiso', cls: 'bg-amber-50 text-amber-700' },
-  active: { label: 'Activo', cls: 'bg-mint-50 text-mint-700' },
+  // «Conexión activa» y no «Activo» a secas: una credencial válida NO autoriza al bot a contestar
+  // (ADR-0017 §1). Decir «Activo» acá es lo que hacía creer que el número ya estaba trabajando.
+  active: { label: 'Conexión activa', cls: 'bg-mint-50 text-mint-700' },
   error: { label: 'Error', cls: 'bg-coral-50 text-coral-700' },
   expired: { label: 'Vencido', cls: 'bg-coral-50 text-coral-700' },
   revoked: { label: 'Revocado', cls: 'bg-coral-50 text-coral-700' },
@@ -61,6 +69,32 @@ const ASSET: Record<MetaAssetType, string> = {
   pixel: '🎯 Pixel',
 };
 
+/**
+ * Cómo se muestra el permiso de automatización de UN número (ADR-0017 §1). La clave es que
+ * `inactive` y «no declarado» se ven igual de callados: mostrar «Activo» un número que está en
+ * observación —o que ni siquiera fue habilitado— es mentirle al dueño sobre lo que su negocio está
+ * haciendo con sus clientes.
+ */
+const AUTOMATION_UI: Record<WhatsappAutomationMode, { label: string; tone: BadgeTone; hint: string }> = {
+  inactive: {
+    label: 'Sin automatizar',
+    tone: 'ink',
+    hint: 'El número está conectado, pero el bot todavía no responde automáticamente por él.',
+  },
+  shadow: {
+    label: 'En observación',
+    tone: 'amber',
+    hint: 'Estamos mirando lo que llega a este número: el bot todavía no responde automáticamente.',
+  },
+  live: {
+    label: 'Automatizando',
+    tone: 'mint',
+    hint: 'El bot responde a tus clientes por este número.',
+  },
+};
+/** Un número sin el campo declarado se lee como el estado MÁS restrictivo, igual que en el backend. */
+const automationUi = (mode: WhatsappAutomationMode | null) => AUTOMATION_UI[mode ?? 'inactive'];
+
 type Feedback = { kind: 'ok' | 'info' | 'error'; msg: string };
 const FEEDBACK_CLS: Record<Feedback['kind'], string> = {
   ok: 'bg-mint-50 text-mint-700 ring-mint-100',
@@ -73,6 +107,16 @@ function Dot({ ok }: { ok: boolean }) {
   return <span className={'inline-block h-2 w-2 shrink-0 rounded-full ' + (ok ? 'bg-mint-500' : 'bg-ink-200')} />;
 }
 
+/**
+ * El desenlace de la conexión real, DISCRIMINADO por flujo. Los dos caminos devuelven formas
+ * distintas y su `status` no significa lo mismo (el de Coexistence es el de la conexión propia del
+ * número, no el de `main`): sin el discriminante habría que ensanchar el tipo y el mensaje de
+ * éxito se elegiría a ciegas.
+ */
+type ConexionRealOk =
+  | { flow: 'standard'; res: MetaConnectResult }
+  | { flow: 'coexistence'; res: CoexistenceConnectResult };
+
 const btnPrimary = 'rounded-lg bg-mint-600 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-mint-700 disabled:opacity-60';
 const btnSecondary = 'rounded-lg border border-ink-200 px-4 py-2 text-sm font-medium text-ink-700 transition-colors hover:bg-ink-50 disabled:opacity-60';
 const card = 'rounded-2xl border border-ink-100 bg-white p-5 shadow-soft';
@@ -83,12 +127,29 @@ export default function IntegrationsPage() {
   const qc = useQueryClient();
 
   const configured = isMetaConfigured();
+  const coexistenceConfigured = isCoexistenceConfigured();
   // El fallback demo (endpoints dev) solo se permite en local/emulador; en prod, estados honestos.
   const demoAllowed = isDemoIntegrationsAllowed();
   // Solo owner/admin operan (conectar/verificar/seleccionar/desconectar). El backend lo reexige.
   const canOperate = claims.role === 'TENANT_OWNER' || claims.role === 'PLATFORM_ADMIN';
   const [feedback, setFeedback] = useState<Feedback | null>(null);
   const [showLiveModal, setShowLiveModal] = useState(false);
+  const [sdkListo, setSdkListo] = useState(false);
+
+  /**
+   * PRECARGA DEL SDK. El popup del Embedded Signup tiene que abrirse DENTRO del gesto del usuario:
+   * si el click primero espera a que baje el SDK (y antes, encima, al callable del nonce), el
+   * navegador bloquea la ventana y el flujo moría reportando «cancelaste la conexión». Precargando
+   * acá, el click no espera nada.
+   */
+  useEffect(() => {
+    if (!configured && !coexistenceConfigured) return;
+    let vivo = true;
+    Promise.resolve(preloadFacebookSdk(configured ? 'standard' : 'coexistence'))
+      .then(() => { if (vivo) setSdkListo(true); })
+      .catch(() => { if (vivo) setSdkListo(false); });
+    return () => { vivo = false; };
+  }, [configured, coexistenceConfigured]);
 
   const connQ = useQuery({ queryKey: ['metaConnection', tenantId], queryFn: () => getMetaConnection(tenantId!), enabled: !!tenantId });
   const assetsQ = useQuery({ queryKey: ['metaAssets', tenantId], queryFn: () => listMetaAssets(tenantId!), enabled: !!tenantId });
@@ -102,20 +163,51 @@ export default function IntegrationsPage() {
     qc.invalidateQueries({ queryKey: ['metaAssets', tenantId] });
   };
 
-  // Conexión REAL: nonce → Embedded Signup → connectMeta. Nunca tocamos el token ni logueamos el code.
+  /**
+   * Conexión REAL: el popup ya está abierto cuando esto corre (lo abrió el click). Acá solo se
+   * pide el nonce EN PARALELO y se espera el desenlace. Nunca tocamos el token ni logueamos el code.
+   *
+   * CADA FLUJO POR SU PROPIA SUPERFICIE (ADR-0017). Coexistence NO es un `mode` de `connectMeta`:
+   * ese callable corre `runMetaConnect`, que guarda el token en el secreto del TENANT —pisando el
+   * de `main`— y reescribe `metaAssets` con `connectionId: 'main'`, cuya limpieza borra el asset y
+   * la entrada de índice del número que HOY está vendiendo. Los callables `coexistence*` dejan al
+   * número real en su propia conexión `wa_{pnid}` y a `main` intacto.
+   */
   const connectRealMut = useMutation({
-    mutationFn: async () => {
-      const { nonce } = await startMetaConnect(tenantId!);
-      const { code, sessionInfo } = await launchEmbeddedSignup();
-      return connectMeta(tenantId!, { nonce, code, ...(sessionInfo ?? {}) });
+    mutationFn: async ({ flow, signup }: { flow: MetaSignupFlow; signup: Promise<EmbeddedSignupResult> }): Promise<ConexionRealOk> => {
+      if (flow === 'coexistence') {
+        const noncePromise = coexistenceStart(tenantId!);
+        // El error del nonce se maneja abajo; este catch evita un rechazo huérfano mientras el
+        // dueño sigue en la ventana de Meta.
+        noncePromise.catch(() => {});
+        const { code, sessionInfo } = await signup;
+        const { nonce } = await noncePromise;
+        return { flow, res: await coexistenceConnect(tenantId!, { nonce, code, ...(sessionInfo ?? {}) }) };
+      }
+      const noncePromise = startMetaConnect(tenantId!, flow);
+      noncePromise.catch(() => {});
+      const { code, sessionInfo } = await signup;
+      const { nonce } = await noncePromise;
+      return { flow, res: await connectMeta(tenantId!, { nonce, code, mode: flow, ...(sessionInfo ?? {}) }) };
     },
-    onSuccess: (res) => {
+    onSuccess: (r) => {
       invalidate();
-      setFeedback({ kind: 'ok', msg: res.status === 'active' ? '¡Meta conectado! Ya podés recibir mensajes de WhatsApp.' : `Conexión: ${STATUS[res.status]?.label ?? res.status}.` });
+      if (r.flow === 'coexistence') {
+        // No se promete automatización: el número nace INACTIVO y activarlo es otra decisión.
+        setFeedback({ kind: 'ok', msg: 'Conectamos tu número de WhatsApp Business. Queda inactivo: no responde automáticamente hasta que lo actives.' });
+        return;
+      }
+      const { status } = r.res;
+      setFeedback({ kind: 'ok', msg: status === 'active' ? '¡Meta conectado! Ya podés recibir mensajes de WhatsApp.' : `Conexión: ${STATUS[status]?.label ?? status}.` });
     },
     onError: (e) => {
-      // Cancelar el popup NO es un error fatal.
-      if (e instanceof MetaSignupError && e.reason === 'cancelled') { setFeedback({ kind: 'info', msg: e.message }); return; }
+      // Cancelar el popup NO es un error fatal; que el navegador lo bloquee, tampoco, pero se
+      // explica distinto: decirle «cancelaste» a alguien que no canceló lo manda a buscar un
+      // problema que no existe.
+      if (e instanceof MetaSignupError && (e.reason === 'cancelled' || e.reason === 'in_progress')) {
+        setFeedback({ kind: 'info', msg: e.message });
+        return;
+      }
       setFeedback({ kind: 'error', msg: friendlyMetaError(e) });
     },
   });
@@ -170,16 +262,42 @@ export default function IntegrationsPage() {
   const botEnabled = agentQ.data ? agentQ.data.botEnabled : null; // null mientras carga
   const selectedPhone = phoneAssets.find((a) => a.selected) ?? null;
   const metaActive = conn?.status === 'active';
+  // El permiso del número (ADR-0017) es un eje APARTE del modo de envío: el envío puede estar en
+  // vivo y el número seguir callado. La UI muestra los dos, sin mezclarlos.
+  const numeroUi = automationUi(selectedPhone?.automationMode ?? null);
+  const numeroAutomatiza = selectedPhone?.automationMode === 'live';
   // Pre-check de UI (el backend es la fuente final de verdad): live requiere conexión activa + número.
   const canGoLive = metaActive && !!selectedPhone;
   const msgItem = usageQ.data?.items.find((i) => i.metric === 'messages') ?? null;
   const fmtNum = (n: number) => n.toLocaleString('es-PY');
 
   if (companyLoading) return <div className="text-sm text-ink-400">Cargando…</div>;
+  // Guard de rol EN LA RUTA (el sidebar ya la restringe, pero una URL pegada no pasa por el sidebar).
+  // Es defensa en profundidad: la autorización real la reexigen los callables.
+  if (!canOperate) {
+    return (
+      <EmptyState
+        title="Solo el dueño o un administrador"
+        text="La conexión con Meta y WhatsApp la gestiona el dueño de la empresa o un administrador de la plataforma."
+      />
+    );
+  }
   if (!tenantId) return <EmptyState title="Seleccioná una empresa" text="Elegí una empresa en la barra superior para gestionar su conexión con Meta." />;
 
+  /**
+   * SE LLAMA DIRECTO EN EL CLICK. `launchEmbeddedSignup` abre el popup sincrónicamente y devuelve
+   * la promesa; recién después la mutación pide el nonce. Al revés —que es como estaba— el popup se
+   * abría después de dos `await` y el navegador lo bloqueaba.
+   */
+  const conectarReal = (flow: MetaSignupFlow) => {
+    setFeedback(null);
+    const signup = launchEmbeddedSignup(flow);
+    signup.catch(() => {}); // el desenlace real lo maneja la mutación
+    connectRealMut.mutate({ flow, signup });
+  };
+
   const onConnect = () => {
-    if (configured) { connectRealMut.mutate(); return; }
+    if (configured) { conectarReal('standard'); return; }
     if (demoAllowed) connectDemoMut.mutate(); // demo solo en local/emulador
   };
 
@@ -201,9 +319,10 @@ export default function IntegrationsPage() {
         </div>
       )}
 
-      {feedback && (
-        <div className={'rounded-xl px-4 py-2.5 text-sm ring-1 ring-inset ' + FEEDBACK_CLS[feedback.kind]}>{feedback.msg}</div>
-      )}
+      {/* El aviso se anuncia: sin aria-live, un lector de pantalla no se entera de que algo pasó. */}
+      <div role="status" aria-live="polite" className={feedback ? '' : 'sr-only'}>
+        {feedback && <div className={'rounded-xl px-4 py-2.5 text-sm ring-1 ring-inset ' + FEEDBACK_CLS[feedback.kind]}>{feedback.msg}</div>}
+      </div>
 
       {/* Estado de conexión */}
       <div className={card}>
@@ -215,43 +334,53 @@ export default function IntegrationsPage() {
             </div>
             {connected && <div className="mt-1 text-sm text-ink-500">{conn!.metaBusinessName} · {conn!.scopes.length} permisos</div>}
             {connected && hint && <div className="mt-1 text-xs text-ink-500">{hint}</div>}
+            {connected && (
+              <div className="mt-1 text-xs text-ink-500">
+                Que la conexión sea válida no autoriza al bot a contestar: eso lo decide el permiso de cada número.
+              </div>
+            )}
           </div>
 
           <div className="flex flex-wrap gap-2">
-            {!canOperate ? (
-              <span className="text-xs text-ink-400">Solo el dueño o un administrador pueden gestionar la conexión.</span>
-            ) : (
-              <>
-                {!connected && (configured || demoAllowed) && (
-                  <button onClick={onConnect} disabled={busy} className={btnPrimary}>
-                    {connecting ? 'Conectando…' : configured ? 'Conectar Meta Business' : 'Conectar (demo)'}
-                  </button>
-                )}
-                {needsReconnect && (
-                  <button onClick={() => connectRealMut.mutate()} disabled={busy} className={btnPrimary}>
-                    {connectRealMut.isPending ? 'Reconectando…' : 'Reconectar'}
-                  </button>
-                )}
-                {connected && configured && (
-                  <button onClick={() => verifyMut.mutate()} disabled={busy} className={btnSecondary}>
-                    {verifyMut.isPending ? 'Revisando…' : 'Revisar conexión'}
-                  </button>
-                )}
-                {connected && (configured || demoAllowed) && (
-                  <button onClick={() => disconnectMut.mutate()} disabled={busy} className={btnSecondary}>
-                    {disconnectMut.isPending ? 'Desconectando…' : 'Desconectar'}
-                  </button>
-                )}
-              </>
+            {!connected && (configured || demoAllowed) && (
+              <button onClick={onConnect} disabled={busy} className={btnPrimary}>
+                {connecting ? 'Conectando…' : configured ? 'Conectar Meta Business' : 'Conectar (demo)'}
+              </button>
+            )}
+            {needsReconnect && (
+              <button onClick={() => conectarReal('standard')} disabled={busy} className={btnPrimary}>
+                {connectRealMut.isPending ? 'Reconectando…' : 'Reconectar'}
+              </button>
+            )}
+            {connected && configured && (
+              <button onClick={() => verifyMut.mutate()} disabled={busy} className={btnSecondary}>
+                {verifyMut.isPending ? 'Revisando…' : 'Revisar conexión'}
+              </button>
+            )}
+            {connected && (configured || demoAllowed) && (
+              <button onClick={() => disconnectMut.mutate()} disabled={busy} className={btnSecondary}>
+                {disconnectMut.isPending ? 'Desconectando…' : 'Desconectar'}
+              </button>
             )}
           </div>
         </div>
+        {(configured || coexistenceConfigured) && !sdkListo && (
+          <p className="mt-3 text-xs text-ink-400">Preparando la conexión con Meta… si el botón no responde, esperá unos segundos y probá de nuevo.</p>
+        )}
         {connected && (
           <div className="mt-3 flex flex-wrap gap-1.5">
             {conn!.scopes.map((s) => <span key={s} className="rounded bg-ink-50 px-2 py-0.5 text-[10px] text-ink-500">{s}</span>)}
           </div>
         )}
       </div>
+
+      {/* Coexistence (ADR-0017): el número que el negocio YA usa con sus clientes. */}
+      <CoexistenceOnboardingCard
+        configured={coexistenceConfigured}
+        canOperate={canOperate}
+        pending={connectRealMut.isPending}
+        onConfirm={() => conectarReal('coexistence')}
+      />
 
       {/* Activación asistida de WhatsApp (WM-2): cuando el Embedded Signup no está configurado, el owner
           pide ayuda al equipo. No activa 'live' (eso sigue siendo exclusivo de channelConfigUpdate). */}
@@ -262,29 +391,29 @@ export default function IntegrationsPage() {
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-2">
             <span className="text-lg font-semibold text-ink-900">Respuestas reales por WhatsApp</span>
-            <span className={'rounded-full px-2.5 py-0.5 text-xs font-semibold ' + (isLive ? 'bg-mint-50 text-mint-700' : 'bg-ink-50 text-ink-600')}>{isLive ? 'En vivo' : 'Demo (mock)'}</span>
+            <span className={'rounded-full px-2.5 py-0.5 text-xs font-semibold ' + (isLive && numeroAutomatiza ? 'bg-mint-50 text-mint-700' : isLive ? 'bg-amber-50 text-amber-700' : 'bg-ink-50 text-ink-600')}>
+              {isLive ? (numeroAutomatiza ? 'En vivo' : 'En vivo, con el número en pausa') : 'Demo (mock)'}
+            </span>
           </div>
-          {canOperate && (
-            <div className="flex gap-2">
-              {!isLive ? (
-                <button
-                  onClick={() => setShowLiveModal(true)}
-                  disabled={busy || !canGoLive}
-                  title={!canGoLive ? 'Conectá Meta y elegí un número de WhatsApp primero.' : undefined}
-                  className={btnPrimary}
-                >
-                  Activar respuestas reales
-                </button>
-              ) : (
-                <button onClick={() => setModeMut.mutate('mock')} disabled={busy} className={btnSecondary}>
-                  {setModeMut.isPending && setModeMut.variables === 'mock' ? 'Volviendo…' : 'Volver a demo'}
-                </button>
-              )}
-            </div>
-          )}
+          <div className="flex gap-2">
+            {!isLive ? (
+              <button
+                onClick={() => setShowLiveModal(true)}
+                disabled={busy || !canGoLive}
+                title={!canGoLive ? 'Conectá Meta y elegí un número de WhatsApp primero.' : undefined}
+                className={btnPrimary}
+              >
+                Activar respuestas reales
+              </button>
+            ) : (
+              <button onClick={() => setModeMut.mutate('mock')} disabled={busy} className={btnSecondary}>
+                {setModeMut.isPending && setModeMut.variables === 'mock' ? 'Volviendo…' : 'Volver a demo'}
+              </button>
+            )}
+          </div>
         </div>
 
-        {canOperate && !isLive && !canGoLive && (
+        {!isLive && !canGoLive && (
           <p className="mt-2 text-xs text-amber-700">
             {!metaActive ? 'Conectá Meta y verificá la conexión' : 'Elegí un número de WhatsApp'} antes de activar respuestas reales.
           </p>
@@ -299,6 +428,13 @@ export default function IntegrationsPage() {
           <li className="flex items-center justify-between gap-3">
             <span className="flex items-center gap-2 text-ink-700"><Dot ok={!!selectedPhone} /> Número de WhatsApp</span>
             <span className="truncate text-ink-600">{selectedPhone ? selectedPhone.name : 'Sin seleccionar'}</span>
+          </li>
+          {/* El permiso del número: lo que decide de verdad si el bot habla por él. */}
+          <li className="flex items-center justify-between gap-3">
+            <span className="flex items-center gap-2 text-ink-700"><Dot ok={numeroAutomatiza} /> Automatización del número</span>
+            <span className="text-ink-600">
+              {selectedPhone ? <StatusBadge tone={numeroUi.tone}>{numeroUi.label}</StatusBadge> : '—'}
+            </span>
           </li>
           <li className="flex items-center justify-between gap-3">
             <span className="flex items-center gap-2 text-ink-700"><Dot ok={isLive} /> Modo de envío</span>
@@ -317,30 +453,36 @@ export default function IntegrationsPage() {
           </li>
         </ul>
 
-        {!canOperate && <p className="mt-3 text-xs text-ink-400">Solo el dueño o un administrador pueden cambiar el modo de envío.</p>}
+        {selectedPhone && !numeroAutomatiza && <p className="mt-3 text-xs text-amber-700">{numeroUi.hint}</p>}
       </div>
 
       {/* Selección de número de WhatsApp (si hay más de uno) */}
-      {connected && canOperate && phoneAssets.length > 1 && (
+      {connected && phoneAssets.length > 1 && (
         <div className={card}>
           <h2 className="mb-2 text-sm font-semibold text-ink-700">Número de WhatsApp activo</h2>
-          <p className="mb-3 text-xs text-ink-500">Elegí con qué número va a operar el bot.</p>
+          <p className="mb-3 text-xs text-ink-500">Elegí con qué número va a operar el bot. El permiso de automatización de cada número se decide aparte.</p>
           <div className="space-y-2">
-            {phoneAssets.map((a) => (
-              <button
-                key={a.id}
-                onClick={() => selectMut.mutate(a.id)}
-                disabled={busy || a.selected}
-                className={'flex w-full items-center justify-between rounded-lg border px-3 py-2.5 text-sm transition-colors disabled:cursor-default ' + (a.selected ? 'border-mint-500 bg-mint-50 text-mint-700' : 'border-ink-200 hover:bg-ink-50')}
-              >
-                <span className="font-medium">📱 {a.name}</span>
-                {a.selected ? (
-                  <span className="text-[10px] font-medium uppercase tracking-wide">en uso</span>
-                ) : (
-                  <span className="text-xs text-mint-700">{selectMut.isPending && selectMut.variables === a.id ? 'Seleccionando…' : 'Usar este'}</span>
-                )}
-              </button>
-            ))}
+            {phoneAssets.map((a) => {
+              const ui = automationUi(a.automationMode);
+              return (
+                <button
+                  key={a.id}
+                  onClick={() => selectMut.mutate(a.id)}
+                  disabled={busy || a.selected}
+                  className={'flex w-full flex-wrap items-center justify-between gap-2 rounded-lg border px-3 py-2.5 text-sm transition-colors disabled:cursor-default ' + (a.selected ? 'border-mint-500 bg-mint-50 text-mint-700' : 'border-ink-200 hover:bg-ink-50')}
+                >
+                  <span className="font-medium">📱 {a.name}</span>
+                  <span className="flex items-center gap-2">
+                    <StatusBadge tone={ui.tone}>{ui.label}</StatusBadge>
+                    {a.selected ? (
+                      <span className="text-[10px] font-medium uppercase tracking-wide">en uso</span>
+                    ) : (
+                      <span className="text-xs text-mint-700">{selectMut.isPending && selectMut.variables === a.id ? 'Seleccionando…' : 'Usar este'}</span>
+                    )}
+                  </span>
+                </button>
+              );
+            })}
           </div>
         </div>
       )}

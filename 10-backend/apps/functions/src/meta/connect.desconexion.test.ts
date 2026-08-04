@@ -45,6 +45,31 @@ interface Op {
 
 const ops: Op[] = [];
 
+/** Una transacción/batch real aplica EN ORDEN y respeta el merge de cada operación. */
+const aplicarOps = (): void => {
+  for (const op of ops) {
+    if (op.tipo === 'delete') docs.delete(op.path);
+    else escribir(op.path, op.data!, op.merge === true);
+  }
+  ops.length = 0;
+};
+
+const consulta = (path: string, filtro?: { campo: string; valor: unknown }): Record<string, unknown> => ({
+  __coleccion: path,
+  __filtro: filtro,
+  get: async () => ({ docs: hijosDe(path).filter((d) => !filtro || (d.data() as Record<string, unknown>)[filtro.campo] === filtro.valor) }),
+  where: (campo: string, _op: string, valor: unknown) => consulta(path, { campo, valor }),
+});
+
+const leer = async (ref: { path?: string; __coleccion?: string; __filtro?: { campo: string; valor: unknown } }) => {
+  if (ref.__coleccion) {
+    const f = ref.__filtro;
+    return { docs: hijosDe(ref.__coleccion).filter((d) => !f || (d.data() as Record<string, unknown>)[f.campo] === f.valor) };
+  }
+  const path = ref.path!;
+  return { exists: docs.has(path), data: () => docs.get(path) };
+};
+
 vi.mock('../lib/firebase.js', () => ({
   db: () => ({
     doc: (path: string) => ({
@@ -52,25 +77,26 @@ vi.mock('../lib/firebase.js', () => ({
       get: async () => ({ exists: docs.has(path), data: () => docs.get(path) }),
       set: async (d: Record<string, unknown>, o?: { merge?: boolean }) => escribir(path, d, o?.merge === true),
     }),
-    collection: (path: string) => ({
-      get: async () => ({ docs: hijosDe(path) }),
-      where: (campo: string, _op: string, valor: unknown) => ({
-        get: async () => ({ docs: hijosDe(path).filter((d) => (d.data() as Record<string, unknown>)[campo] === valor) }),
-      }),
-    }),
+    collection: (path: string) => consulta(path),
     batch: () => ({
       set: (ref: { path: string }, data: Record<string, unknown>, o?: { merge?: boolean }) =>
         ops.push({ tipo: 'set', path: ref.path, data, merge: o?.merge === true }),
       delete: (ref: { path: string }) => ops.push({ tipo: 'delete', path: ref.path }),
-      commit: async () => {
-        // Un batch real aplica EN ORDEN y respeta el merge de cada operación.
-        for (const op of ops) {
-          if (op.tipo === 'delete') docs.delete(op.path);
-          else escribir(op.path, op.data!, op.merge === true);
-        }
-        ops.length = 0;
-      },
+      commit: async () => aplicarOps(),
     }),
+    // `writeDiscoveredAssets` pasó de batch a transacción para poder leer (guard de propiedad del
+    // PNID) en el mismo acto en que escribe. Lo que este archivo afirma no cambia.
+    runTransaction: async (fn: (tx: unknown) => Promise<unknown>) => {
+      const tx = {
+        get: leer,
+        set: (ref: { path: string }, data: Record<string, unknown>, o?: { merge?: boolean }) =>
+          ops.push({ tipo: 'set', path: ref.path, data, merge: o?.merge === true }),
+        delete: (ref: { path: string }) => ops.push({ tipo: 'delete', path: ref.path }),
+      };
+      const r = await fn(tx);
+      aplicarOps();
+      return r;
+    },
   }),
   paths: {
     metaConnection: (t: string, id: string) => `tenants/${t}/metaConnections/${id}`,

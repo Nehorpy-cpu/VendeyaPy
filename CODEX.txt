@@ -113,3 +113,16 @@ Codex también puede trabajar directamente en el repositorio si está disponible
 - Functions, hosting, Firestore Rules y Storage Rules se despliegan por separado según la fase.
 
 En la computadora nueva: cloná el repositorio, iniciá Codex desde la raíz, asegurate de que lea `AGENTS.md` y pegale este resumen. Los secretos deben recuperarse mediante Firebase Secret Manager o un canal seguro, nunca desde Git ni WhatsApp.
+### Coexistence — 2026-08-04
+
+Fundación de WhatsApp Business App Coexistence COMPLETA EN REPO y NO DESPLEGADA. Número real no conectado,
+QR no ejecutado, backup productivo no ejecutado (se construyeron y probaron las herramientas).
+
+`automationMode: inactive|shadow|live` separa "la credencial sirve" de "el bot puede contestar", fail-closed.
+Embedded Signup en dos flujos; el de Coexistence usa `featureType = whatsapp_business_app_onboarding` y crea
+una conexión `wa_{pnid}` que jamás toca `metaConnections/main`. El PNID se resuelve server-side desde el WABA
+porque el evento de cierre oficial no lo trae. El historial hay que PEDIRLO (`smb_app_data`) y se pide UNA
+sola vez: repetirlo exige que el cliente offboardee y rehaga el flujo.
+
+El cutover es el Programa 2: `docs/coexistence-release-runbook.md`. La migración del PNID actual a `live` va
+ANTES del deploy. Gate externo abierto: elegibilidad de Paraguay, que Meta no documenta.

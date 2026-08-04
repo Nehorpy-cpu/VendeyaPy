@@ -9,12 +9,15 @@
  */
 import { Timestamp } from 'firebase-admin/firestore';
 import type { MetaConnection, MetaConnectionStatus, MetaConnectionSource } from '@vpw/shared';
+import { maskPhone } from '@vpw/shared';
 import { db, paths } from '../lib/firebase.js';
 import { getSecretStore } from '../lib/secretStore.js';
 import { logger } from '../lib/logger.js';
+import { recordAudit } from '../audit/audit.js';
 import { metaTokenSecretName } from './secretName.js';
 import { META_REQUIRED_SCOPES } from './scopes.js';
 import { buildMetaAssets, writeDiscoveredAssets } from './discovery.js';
+import { PnidOcupadoError } from './pnidOwnership.js';
 import { verifyWhatsappChannel } from './preflight.js';
 import { resolveEntitlements } from '../entitlements/entitlements.js';
 import type { MetaGraphClient, MetaPhoneNumber } from './graphClient.js';
@@ -25,10 +28,36 @@ export function missingScopes(scopes: string[], required: readonly string[]): st
   return required.filter((s) => !scopes.includes(s));
 }
 
-/** Elige el phone_number_id: el pedido si existe entre los del WABA; si no, el primero. */
+/**
+ * Elige el phone_number_id: el PEDIDO, o el primero cuando no se pidió ninguno.
+ *
+ * Antes, si el pedido no estaba entre los del WABA, caía en silencio al primero: el usuario elegía
+ * un número y el sistema conectaba OTRO sin decírselo. Con un solo número por cuenta eso era
+ * invisible; con dos —el que vende y el que entra por Coexistence— es la diferencia entre conectar
+ * el número nuevo y reescribir el que está atendiendo clientes. Un pedido que no se puede cumplir
+ * es un error, no una sugerencia.
+ */
 export function pickSelectedPhone(phones: MetaPhoneNumber[], requestedId?: string): string | null {
-  if (requestedId && phones.some((p) => p.id === requestedId)) return requestedId;
+  const pedido = (requestedId ?? '').trim();
+  if (pedido) return phones.some((p) => p.id === pedido) ? pedido : null;
   return phones[0]?.id ?? null;
+}
+
+/**
+ * ¿El WABA que mandó el CLIENTE está respaldado por el token?
+ *
+ * `input.wabaId` viene del `sessionInfo` del Embedded Signup, o sea del navegador: es input del
+ * usuario y se usaba tal cual para listar números y suscribir la app. `dbg.wabaIds` sale de los
+ * `granular_scopes` del `debug_token` —lo que Meta dice que ese token realmente alcanza— y ya
+ * estaba a mano, usado solo como fallback.
+ *
+ * Si el token no declara ningún WABA no hay con qué contrastar: ahí se acepta el pedido (que es lo
+ * que se venía haciendo) porque rechazarlo cortaría altas legítimas cuyo debug_token no expone
+ * `granular_scopes`. Cuando el token SÍ los declara, el pedido tiene que estar entre ellos.
+ */
+export function wabaAutorizado(requestedWabaId: string, wabaIdsDelToken: string[]): boolean {
+  if (wabaIdsDelToken.length === 0) return true;
+  return wabaIdsDelToken.includes(requestedWabaId);
 }
 
 // ---------------- Orquestación (E/S) ----------------
@@ -42,18 +71,65 @@ export interface ConnectInput {
   wabaName?: string;
 }
 
-export type ConnectFailReason = 'exchange_failed' | 'token_invalid' | 'scopes_insuficientes' | 'no_waba' | 'no_phone_number' | 'over_number_limit';
+export type ConnectFailReason =
+  | 'exchange_failed'
+  | 'token_invalid'
+  | 'scopes_insuficientes'
+  | 'no_waba'
+  | 'no_phone_number'
+  | 'phone_number_mismatch'
+  | 'phone_number_collision'
+  | 'persistencia_incompleta'
+  | 'over_number_limit';
 
 export type ConnectResult =
   | { ok: true; status: 'active'; selectedPhoneNumberId: string; phoneNumber: string | null; assetsCount: number }
   | { ok: false; reason: ConnectFailReason; status: MetaConnectionStatus };
 
-async function writeFailureStatus(tenantId: string, status: MetaConnectionStatus, errorMessage: string): Promise<void> {
-  // NO escribe token: solo deja el estado de error para que el panel lo muestre.
+/**
+ * UN CONNECT FALLIDO NO PUEDE APAGAR EL NÚMERO QUE ESTÁ VENDIENDO.
+ *
+ * Esto antes escribía `status` + `tokenSecretRef: ''` sobre `metaConnections/main`. O sea: un
+ * reintento fallido del Embedded Signup —alcanza con que el `code` haya vencido, y vence en 30 s—
+ * dejaba SIN CREDENCIALES a la conexión que está atendiendo clientes: `resolveTenantWhatsappCreds`
+ * exige `status === 'active'` y un `tokenSecretRef` con contenido, así que el número quedaba mudo
+ * hasta que alguien reconectara. El intento de conectar de un usuario no puede degradar lo que ya
+ * funciona; el precedente correcto ya estaba en este mismo archivo (`over_number_limit` no
+ * persiste nada).
+ *
+ * El error igual se guarda —si no, un fallo no se puede diagnosticar—, pero en campos PROPIOS que
+ * nadie usa para decidir si el canal sirve. Tampoco se toca `lastVerifiedAt`: un fallo no es una
+ * verificación, y fingirlo haría que el panel muestre «recién validado» sobre una conexión que
+ * nadie validó.
+ */
+async function registrarFalloDeConexion(tenantId: string, motivo: string): Promise<void> {
   await db().doc(paths.metaConnection(tenantId, 'main')).set(
-    { id: 'main', tenantId, status, errorMessage, tokenSecretRef: '', lastVerifiedAt: Timestamp.now(), updatedAt: Timestamp.now() },
+    { lastConnectError: motivo, lastConnectErrorAt: Timestamp.now(), updatedAt: Timestamp.now() },
     { merge: true },
   );
+}
+
+/** `tokenSecretRef` de la conexión actual (null si no hay conexión previa). */
+async function refDelSecretoPrevio(tenantId: string): Promise<string | null> {
+  const previo = (await db().doc(paths.metaConnection(tenantId, 'main')).get()).data() as MetaConnection | undefined;
+  return previo?.tokenSecretRef || null;
+}
+
+/**
+ * Rollback del secreto tras un fallo de persistencia: borra SOLO si es uno recién creado.
+ *
+ * El naming del secreto es determinístico por tenant, así que un reconecte suele producir la MISMA
+ * referencia que ya tenía la conexión sana. Borrarla dejaría sin credencial al número que vende —
+ * exactamente el desenlace que este endurecimiento existe para impedir—. Por eso se compara contra
+ * la referencia preexistente y solo se limpia lo que este intento creó.
+ */
+async function revertirSecretoNuevo(tenantId: string, refNueva: string, refPrevia: string | null): Promise<void> {
+  if (!refNueva || refNueva === refPrevia) return;
+  try {
+    await getSecretStore().remove(refNueva);
+  } catch {
+    logger.warn('Meta connect: no se pudo limpiar el secreto del intento fallido', { tenantId });
+  }
 }
 
 /**
@@ -108,26 +184,32 @@ export async function runMetaConnect(tenantId: string, input: ConnectInput, byUi
     logger.error('Meta connect: el intercambio del code falló', e, { tenantId });
   }
   if (!token) {
-    await writeFailureStatus(tenantId, 'error', 'no se pudo intercambiar el code');
+    await registrarFalloDeConexion(tenantId, 'no se pudo intercambiar el code');
     return { ok: false, reason: 'exchange_failed', status: 'error' };
   }
 
   // 2) Validación del token + scopes + WABA + expiración (debug_token con app access token).
   const dbg = await graph.debugToken(token);
   if (!dbg.isValid) {
-    await writeFailureStatus(tenantId, 'expired', 'token inválido');
+    await registrarFalloDeConexion(tenantId, 'token inválido');
     return { ok: false, reason: 'token_invalid', status: 'expired' };
   }
   const missing = missingScopes(dbg.scopes, META_REQUIRED_SCOPES);
   if (missing.length) {
-    await writeFailureStatus(tenantId, 'permission_missing', `faltan permisos: ${missing.join(', ')}`);
+    await registrarFalloDeConexion(tenantId, `faltan permisos: ${missing.join(', ')}`);
     return { ok: false, reason: 'scopes_insuficientes', status: 'permission_missing' };
   }
 
-  // 3) WABA: del input (sessionInfo del ES) o de granular_scopes del debug_token.
+  // 3) WABA: el del input (sessionInfo del ES, o sea del navegador) contrastado contra los
+  // granular_scopes del token; si el input no trae ninguno, el del token.
   const wabaId = input.wabaId || dbg.wabaIds[0];
   if (!wabaId) {
-    await writeFailureStatus(tenantId, 'error', 'sin WhatsApp Business Account');
+    await registrarFalloDeConexion(tenantId, 'sin WhatsApp Business Account');
+    return { ok: false, reason: 'no_waba', status: 'error' };
+  }
+  if (!wabaAutorizado(wabaId, dbg.wabaIds)) {
+    logger.warn('Meta connect: el WABA pedido no está entre los que autoriza el token', { tenantId });
+    await registrarFalloDeConexion(tenantId, 'la cuenta de WhatsApp Business pedida no está autorizada por el token');
     return { ok: false, reason: 'no_waba', status: 'error' };
   }
 
@@ -135,8 +217,12 @@ export async function runMetaConnect(tenantId: string, input: ConnectInput, byUi
   const phones = await graph.listWabaPhoneNumbers(wabaId, token);
   const selectedPhoneNumberId = pickSelectedPhone(phones, input.phoneNumberId);
   if (!selectedPhoneNumberId) {
-    await writeFailureStatus(tenantId, 'error', 'sin phone_number_id');
-    return { ok: false, reason: 'no_phone_number', status: 'error' };
+    // Se distingue «la cuenta no tiene números» de «el número que pediste no está en esta cuenta»:
+    // el segundo caso antes conectaba otro número en silencio, y el usuario no tenía cómo enterarse.
+    const huboPedido = (input.phoneNumberId ?? '').trim() !== '';
+    const reason: ConnectFailReason = huboPedido ? 'phone_number_mismatch' : 'no_phone_number';
+    await registrarFalloDeConexion(tenantId, huboPedido ? 'el número pedido no pertenece a esa cuenta' : 'sin phone_number_id');
+    return { ok: false, reason, status: 'error' };
   }
 
   // 4b) PLAN-LIMITS-3A: conteo real — el plan debe permitir AL MENOS tantos números como tiene el WABA.
@@ -150,14 +236,34 @@ export async function runMetaConnect(tenantId: string, input: ConnectInput, byUi
   }
 
   // 5) Token por REFERENCIA (SecretStore, naming seguro). Nunca en claro en Firestore.
+  const refPrevia = await refDelSecretoPrevio(tenantId);
   const tokenSecretRef = await getSecretStore().set(metaTokenSecretName(tenantId), token);
 
-  // 6) Conexión activa (solo la referencia).
-  await writeActiveConnection(tenantId, { byUid, tokenSecretRef, tokenExpiresAtMs: dbg.expiresAtMs, scopes: dbg.scopes, businessId: input.businessId, businessName: input.businessName });
-
-  // 7) Discovery: escribe metaAssets + metaExternalIndex (resuelve inbound por phone_number_id).
+  /**
+   * 6 y 7) EL ORDEN IMPORTA, y es al revés de como estaba.
+   *
+   * Antes se marcaba la conexión `active` y RECIÉN DESPUÉS se escribían los assets y el índice, sin
+   * transacción de por medio: si el discovery fallaba quedaba una conexión que se declaraba activa
+   * sin ruteo detrás, y nada distinguía eso de una conexión sana. Ahora el discovery —que es
+   * atómico y donde vive el guard de propiedad del PNID— va primero, y la conexión se marca activa
+   * solo cuando ya hay a dónde rutear. Un fallo en el medio deja la conexión PREVIA tal como
+   * estaba, que es lo único aceptable mientras un número esté vendiendo.
+   */
   const assets = buildMetaAssets({ businessId: input.businessId, businessName: input.businessName, wabaId, wabaName: input.wabaName, phones, selectedPhoneNumberId });
-  await writeDiscoveredAssets(tenantId, 'main', assets);
+  try {
+    await writeDiscoveredAssets(tenantId, 'main', assets);
+    await writeActiveConnection(tenantId, { byUid, tokenSecretRef, tokenExpiresAtMs: dbg.expiresAtMs, scopes: dbg.scopes, businessId: input.businessId, businessName: input.businessName });
+  } catch (e) {
+    await revertirSecretoNuevo(tenantId, tokenSecretRef, refPrevia);
+    if (e instanceof PnidOcupadoError) {
+      logger.warn('Meta connect: el número ya está conectado en otra empresa', { tenantId, conflictTenantId: e.conflictTenantId });
+      await registrarFalloDeConexion(tenantId, 'el número de WhatsApp ya está conectado en otra empresa');
+      return { ok: false, reason: 'phone_number_collision', status: 'error' };
+    }
+    logger.error('Meta connect: no se pudo persistir la conexión', e, { tenantId });
+    await registrarFalloDeConexion(tenantId, 'no se pudo guardar la conexión');
+    return { ok: false, reason: 'persistencia_incompleta', status: 'error' };
+  }
 
   // 8) Suscribir la app a la WABA para recibir webhooks (best-effort).
   try {
@@ -175,5 +281,16 @@ export async function runMetaConnect(tenantId: string, input: ConnectInput, byUi
 
   const phone = phones.find((p) => p.id === selectedPhoneNumberId);
   logger.info('Meta conectado (real)', { tenantId, status: 'active', assets: assets.length });
+  // El Embedded Signup era el ÚNICO camino de alta sin auditoría: el alta manual, el número
+  // adicional y hasta la conexión demo dejaban rastro, y el camino REAL —por donde va a entrar el
+  // número que atiende clientes— no. Metadata saneada: el PNID va enmascarado y el token no aparece.
+  await recordAudit({
+    tenantId,
+    action: 'meta.connected',
+    actorUid: byUid,
+    targetType: 'meta',
+    summary: 'Conexión Meta creada (Embedded Signup)',
+    metadata: { source: 'embedded_signup', phoneNumberId: maskPhone(selectedPhoneNumberId), assets: assets.length },
+  });
   return { ok: true, status: 'active', selectedPhoneNumberId, phoneNumber: phone?.displayPhoneNumber ?? null, assetsCount: assets.length };
 }

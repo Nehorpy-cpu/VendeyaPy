@@ -37,6 +37,15 @@ export interface AttachmentGateInput {
   /** Id del mensaje del historial al que pertenece el adjunto. */
   messageId: string;
   receivedByPhoneNumberId: string | null;
+  /**
+   * ADR-0017 §2: CANAL de la conversación que recibió el archivo. El gate del comprobante decide
+   * con dos hechos de la SESIÓN (si el checkout declaró que espera un pago y a qué pedido apunta),
+   * y sin esto los leía de `active`: un comprobante que entra por otro número se evaluaba contra
+   * una conversación que no es la suya y terminaba degradado a medio normal.
+   *
+   * Opcional y retrocompatible: omitirlo = canal heredado.
+   */
+  sessionKey?: string;
 }
 
 export interface AttachmentGateOutcome {

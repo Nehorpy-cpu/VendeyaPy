@@ -55,6 +55,10 @@ function makeDeps(over: Partial<ManualMessageDeps> = {}) {
   const deps: ManualMessageDeps = {
     getCustomer: async () => customer(),
     getGateContext: async () => gateCtx(), // sesión con handoff activo (default de los tests)
+    // ADR-0017 §2: el canal se le pregunta a la autoridad. Acá se fija el HEREDADO para que estos
+    // tests sigan midiendo lo suyo (el gate y el envío), no la resolución del canal —que tiene su
+    // propio archivo, `manualMessage.canal.test.ts`—.
+    resolverCanal: async () => 'active',
     getClient: getClient as unknown as ManualMessageDeps['getClient'],
     append: append as unknown as ManualMessageDeps['append'],
     ...over,

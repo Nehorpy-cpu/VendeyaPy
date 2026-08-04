@@ -23,6 +23,7 @@
  */
 
 import type { AgentConfig, Session, SessionState } from '@vpw/shared';
+import { LEGACY_SESSION_KEY } from '@vpw/shared';
 import { db, paths } from '../lib/firebase.js';
 import { logger } from '../lib/logger.js';
 import { getAgentConfig } from './agentConfig.js';
@@ -51,7 +52,7 @@ export async function botSilenciadoEnChat(
    * de hoy. El guard TIENE que mirar la misma sesión que el motor: si mirara `active` para todos
    * los números, un takeover en uno callaría al bot en el otro (y al revés, que es peor).
    */
-  sessionKey?: string,
+  sessionKey: string = LEGACY_SESSION_KEY,
 ): Promise<boolean> {
   const snap = await db().doc(paths.session(tenantId, customerId, sessionKey)).get();
   return enSilencio(snap.exists ? (snap.data() as Session) : null, await getAgentConfig(tenantId));
@@ -112,7 +113,7 @@ export async function evaluarSilencioPreEnvio(
   customerId: string,
   expectativa: ExpectativaDeSilencio = EXIGE_SILENCIO_LIBRE,
   /** ADR-0017 §2: canal de la conversación. Omitirlo = canal heredado (ver arriba). */
-  sessionKey?: string,
+  sessionKey: string = LEGACY_SESSION_KEY,
 ): Promise<VeredictoPreEnvio> {
   let session: Session | null;
   let agentConfig: AgentConfig;

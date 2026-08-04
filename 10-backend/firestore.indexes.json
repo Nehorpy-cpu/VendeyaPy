@@ -293,7 +293,17 @@
     "con --force: `--force` borra los field overrides del proyecto que no estén en este archivo, y el",
     "TTL de `metaWebhookInbox` sigue siendo política de CONSOLA, no está acá). Desplegar Functions no",
     "activa ninguna política TTL. Verificar en consola que las dos políticas quedaron ACTIVE antes de",
-    "habilitar la ingesta de historial."
+    "habilitar la ingesta de historial.",
+    "",
+    "POR QUÉ EL COORDINADOR DEL HISTORIAL NO ESTÁ ACÁ (ADR-0017 §5). `tenants/{t}/coexistenceHistorySyncs/{pnid}`",
+    "no lleva `expiresAt` NI política TTL, y es deliberado: es la evidencia de que el único disparo",
+    "de `smb_app_data` ya se usó. Si venciera, el sistema olvidaría que no se puede volver a pedir y",
+    "un segundo disparo pasaría el guard. No guarda PII —contadores, estados y marcas de tiempo—, así",
+    "que retenerlo no es un riesgo de privacidad; olvidarlo sí es un riesgo operativo.",
+    "",
+    "Tampoco necesita índices compuestos: se lee siempre por id (empresa + phone_number_id), nunca",
+    "por consulta. Los adjuntos del historial (`eventType: history_media`) van a `metaWebhookHistory`,",
+    "que ya está declarada arriba: entran a la MISMA política de retención sin declaración nueva."
   ],
   "fieldOverrides": [
     {

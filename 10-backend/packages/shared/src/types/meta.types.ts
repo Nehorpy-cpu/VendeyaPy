@@ -41,6 +41,16 @@ export interface MetaAsset {
   selected: boolean;
   createdAt: Timestamp;
   updatedAt: Timestamp;
+  /**
+   * Coexistence (ADR-0017 §6). Último `account_update` que Meta mandó sobre este número
+   * (`ACCOUNT_OFFBOARDED`, `PARTNER_REMOVED`, `ACCOUNT_RECONNECTED`). Es EVIDENCIA, no permiso: el
+   * permiso vive en `automationMode` y quien lo lee es `resolveAutomationMode`.
+   *
+   * ADITIVOS Y OPCIONALES a propósito: conviven con los assets escritos antes de que existieran, y
+   * el lector del permiso ya trata la ausencia como fail-closed.
+   */
+  coexistenceLastAccountEvent?: string;
+  coexistenceLastAccountEventAt?: Timestamp | null;
 }
 
 /**

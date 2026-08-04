@@ -110,6 +110,13 @@ export interface CreatePendingOrderOpts {
    * `totals.shipping` vía computeOrderTotals — jamás se suma al subtotal ni a la ganancia.
    */
   shippingGs?: number;
+  /**
+   * ADR-0017 §2: CANAL de la conversación que armó el pedido. Se persiste en el `Order` porque
+   * quien cierra el checkout después —el webhook de la pasarela, el callable del panel— no tiene
+   * el turno a mano y no puede volver a derivarlo sin lecturas extra que además vuelven a
+   * divergir. Ausente ⇒ canal heredado (los pedidos que existen hoy).
+   */
+  sessionKey?: string;
 }
 
 export async function createPendingOrder(
@@ -253,6 +260,9 @@ export async function createPendingOrder(
     delivery: { deliveryId: null, address: opts.deliveryAddress ?? emptyAddress() },
     invoice: { invoiceId: null, number: null },
     channel: 'WHATSAPP',
+    // Solo se escribe si el llamador lo declara: un pedido SIN el campo es del canal heredado, y
+    // agregarlo con `undefined` haría fallar la escritura en Firestore.
+    ...(opts.sessionKey ? { sessionKey: opts.sessionKey } : {}),
     sellerId: null, // se asigna en el handoff
     source: 'whatsapp-bot', // tracking (prep Track C)
     ...(attribution ? { attribution } : {}),

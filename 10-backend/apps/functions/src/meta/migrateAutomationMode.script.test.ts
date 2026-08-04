@@ -24,6 +24,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
  * Se prueba la función exportada, igual que `deployEnv.test.ts` con `build-deploy.mjs`: el CLI es
  * una cáscara y la decisión es lo que hay que poder auditar.
  */
+import { masRestrictivo } from '@vpw/shared';
 import { migrarModoAutomatizacion, enmascararPnid } from '../../scripts/migrate-whatsapp-automation-mode.mjs';
 
 const TENANT = 'tnt_alpha';
@@ -322,6 +323,104 @@ describe('migrarModoAutomatizacion — `live` solo sobre un canal que el código
     const r = await migrarModoAutomatizacion(db, { tenantId: TENANT, phoneNumberId: PNID, mode: 'live', apply: true });
 
     expect(r.outcome).toBe('written');
+  });
+});
+
+/**
+ * DEFECTO ALTO — LA RECUPERACIÓN DEJABA EL NÚMERO MUDO Y REPORTABA ÉXITO.
+ * =======================================================================
+ * `accountUpdate` (ADR-0017 §6) degrada a `inactive` en el ASSET **y en el ÍNDICE**. La migración
+ * escribía solo el asset, con el argumento de que «la ausencia en el índice no vota». Cierto — pero
+ * después de un `ACCOUNT_OFFBOARDED` el índice ya no está ausente: DECLARA `inactive`, y el
+ * resolvedor aplica el MÁS RESTRICTIVO. O sea que tras una reconexión la migración documentada
+ * escribía `live` en el asset, el índice seguía diciendo `inactive`, el número quedaba mudo y el
+ * runbook reportaba éxito.
+ *
+ * La regla que fijan estos tests: la herramienta de recuperación tiene que poder deshacer TODO lo
+ * que escribió la degradación. Cuando el índice no opina, la migración sigue siendo de un solo
+ * documento (eso no cambia); cuando opina distinto, se corrige — y si no se puede, no se reporta
+ * éxito.
+ */
+describe('migrarModoAutomatizacion — el índice degradado por Meta también se recupera', () => {
+  /** El estado EXACTO que deja un `ACCOUNT_OFFBOARDED`: los dos documentos en `inactive`. */
+  const sembrarDegradadoPorMeta = () => {
+    sembrarAsset({ automationMode: 'inactive' });
+    docs.set(RUTA_IDX, {
+      data: {
+        id: `whatsapp_${PNID}`, tenantId: TENANT, connectionId: 'main', assetType: 'whatsapp_phone_number',
+        platform: 'whatsapp', externalId: PNID, status: 'active', automationMode: 'inactive',
+      },
+      updateTime: { seconds: 2000, nanos: 0 },
+    });
+  };
+
+  /** Lo que resolvería el gate del webhook: el más restrictivo entre asset e índice. */
+  const modoEfectivo = () =>
+    masRestrictivo(docs.get(RUTA)?.data['automationMode'], docs.get(RUTA_IDX)?.data['automationMode']);
+
+  it('tras un ACCOUNT_OFFBOARDED, promover deja los DOS documentos coherentes (el número habla)', async () => {
+    sembrarDegradadoPorMeta();
+    const r = await migrarModoAutomatizacion(db, { tenantId: TENANT, phoneNumberId: PNID, mode: 'live', apply: true });
+
+    expect(r.outcome).toBe('written');
+    expect(modoEscrito()).toBe('live');
+    expect(docs.get(RUTA_IDX)?.data['automationMode']).toBe('live');
+    // Lo único que importa de verdad: el gate ya no lo lee mudo.
+    expect(modoEfectivo()).toBe('live');
+  });
+
+  it('un asset YA en `live` con el índice en `inactive` no es `already`: seguiría mudo', async () => {
+    sembrarDegradadoPorMeta();
+    docs.get(RUTA)!.data['automationMode'] = 'live';
+    const r = await migrarModoAutomatizacion(db, { tenantId: TENANT, phoneNumberId: PNID, mode: 'live', apply: true });
+
+    expect(r.outcome).toBe('written');
+    expect(modoEfectivo()).toBe('live');
+    // Y no reescribe el asset, que ya estaba bien: la corrección es del documento que estorba.
+    expect(escrituras.map((e) => e.path)).toEqual([RUTA_IDX]);
+  });
+
+  it('la corrección del índice también lleva PRECONDICIÓN fresca (no pisa una escritura de Meta)', async () => {
+    sembrarDegradadoPorMeta();
+    await migrarModoAutomatizacion(db, { tenantId: TENANT, phoneNumberId: PNID, mode: 'live', apply: true });
+    const delIndice = escrituras.find((e) => e.path === RUTA_IDX);
+    expect(delIndice?.precondition).toEqual({ lastUpdateTime: { seconds: 2000, nanos: 0 } });
+    expect(Object.keys(delIndice!.data)).toEqual(['automationMode']);
+  });
+
+  it('el dry-run tampoco toca el índice: informa que haría falta corregirlo', async () => {
+    sembrarDegradadoPorMeta();
+    const r = await migrarModoAutomatizacion(db, { tenantId: TENANT, phoneNumberId: PNID, mode: 'live' });
+
+    expect(r.outcome).toBe('would_write');
+    expect(escrituras).toEqual([]);
+    expect(docs.get(RUTA_IDX)?.data['automationMode']).toBe('inactive');
+  });
+
+  it('si el índice NO opina, la migración sigue siendo de UN solo documento', async () => {
+    sembrarAsset(); // el índice sembrado no declara `automationMode`
+    const r = await migrarModoAutomatizacion(db, { tenantId: TENANT, phoneNumberId: PNID, mode: 'live', apply: true });
+
+    expect(r.outcome).toBe('written');
+    expect(escrituras.map((e) => e.path)).toEqual([RUTA]);
+    expect(docs.get(RUTA_IDX)?.data['automationMode']).toBeUndefined();
+  });
+
+  it('si el índice YA coincide con el destino, no se reescribe', async () => {
+    sembrarDegradadoPorMeta();
+    docs.get(RUTA_IDX)!.data['automationMode'] = 'shadow';
+    const r = await migrarModoAutomatizacion(db, { tenantId: TENANT, phoneNumberId: PNID, mode: 'shadow', apply: true });
+
+    expect(r.outcome).toBe('written');
+    expect(escrituras.map((e) => e.path)).toEqual([RUTA]);
+  });
+
+  it('un índice con basura (`LIVE`) se corrige: para el gate eso YA es `inactive`', async () => {
+    sembrarDegradadoPorMeta();
+    docs.get(RUTA_IDX)!.data['automationMode'] = 'LIVE';
+    await migrarModoAutomatizacion(db, { tenantId: TENANT, phoneNumberId: PNID, mode: 'live', apply: true });
+    expect(docs.get(RUTA_IDX)?.data['automationMode']).toBe('live');
+    expect(modoEfectivo()).toBe('live');
   });
 });
 

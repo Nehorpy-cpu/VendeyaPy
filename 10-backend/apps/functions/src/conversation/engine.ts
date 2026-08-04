@@ -52,6 +52,7 @@ import { leerDeriva, driftGuardCableado, derivaActivaPara, evaluarDerivaSiAplica
 import { derivarPorDerivaCritica } from './driftHandoff.js';
 import { gateCoberturaCheckout, clasificarTextoEnEspera, manejarTurnoEnEsperaUbicacion, actualizarUbicacionEnRevision } from './coverage.js';
 import type { CoverageSessionPointer } from '@vpw/shared';
+import { LEGACY_SESSION_KEY } from '@vpw/shared';
 import { createPendingOrder, assertOrdenSinDerivaCritica, ProductNoVendibleError, ProductoConDerivaCriticaError } from '../orders/createPendingOrder.js';
 import { resolveCheckoutReuse } from '../orders/checkoutReuse.js';
 import { getCheckoutConfig, formatTransferInstructions } from '../orders/checkoutConfig.js';
@@ -402,7 +403,7 @@ export async function decidirRespuesta(
     /** F3: reloj inyectable (tests); default Date.now(). */
     nowMs?: number;
     /** COVERAGE-1B: metadata del turno para el gate de cobertura (flag ON solamente). */
-    coverageTurno?: { messageId?: string | null; simulation?: boolean; channel?: MessageChannel; receivedVia?: string | null };
+    coverageTurno?: { messageId?: string | null; simulation?: boolean; channel?: MessageChannel; receivedVia?: string | null; sessionKey?: string };
   },
 ): Promise<{
   reply: string;
@@ -570,7 +571,10 @@ export async function decidirRespuesta(
     }
     let order: Awaited<ReturnType<typeof createPendingOrder>>;
     try {
-      order = await createPendingOrder(tenantId, customerId, prev.cart);
+      // ADR-0017 §2: el pedido se queda con el canal que lo armó. Quien confirme el pago después
+      // (webhook de la pasarela, callable del panel) no tiene el turno a mano: sin este dato,
+      // cerraba el checkout de `active` — con dos números, el de la conversación equivocada.
+      order = await createPendingOrder(tenantId, customerId, prev.cart, { sessionKey: prev.coverageTurno?.sessionKey });
     } catch (e) {
       // ADR-0015 §8: el precio/disponibilidad/stock público de algún producto del carrito lo
       // gobierna una fuente externa que HOY publica otra cosa ⇒ la orden no nace y los datos
@@ -1031,7 +1035,14 @@ export async function handleMessage(input: ConversationInput): Promise<Conversat
   }
 
   const now = Timestamp.now();
-  const sessionRef = db().doc(paths.session(tenantId, customerId, input.sessionKey));
+  /**
+   * ADR-0017 §2 — el canal del turno se normaliza UNA sola vez y de acá sale TODO: el documento
+   * de sesión que se lee, el que se escribe y el que reciben los guards que el motor delega. Con
+   * el default resuelto en cada callsite, alcanzaba con olvidarse uno para que ese pedazo del
+   * turno operara sobre la conversación de otro número.
+   */
+  const sessionKey = input.sessionKey ?? LEGACY_SESSION_KEY;
+  const sessionRef = db().doc(paths.session(tenantId, customerId, sessionKey));
   const snap = await sessionRef.get();
   const existing = snap.exists ? (snap.data() as Session) : null;
 
@@ -1122,7 +1133,7 @@ export async function handleMessage(input: ConversationInput): Promise<Conversat
     // mudo; el historial guardó el placeholder y la dirección vive SOLO en el request (el
     // vendedor la ve en la tarjeta del panel).
     if (enRevisionCobertura && input.simulation !== true && clasifCobertura === 'direccion') {
-      await actualizarUbicacionEnRevision(tenantId, customerId, text, input.messageId ?? null);
+      await actualizarUbicacionEnRevision(tenantId, customerId, text, input.messageId ?? null, sessionKey);
     }
     await sessionRef.set({ context: { lastMessageAt: now }, updatedAt: now }, { merge: true });
     logger.info('Mensaje en modo atención humana (bot en pausa)', { tenantId, customerId });
@@ -1219,7 +1230,7 @@ export async function handleMessage(input: ConversationInput): Promise<Conversat
   // transición REAL server-side ANTES de la IA (que en prod prometió "un segundo que lo llamo"
   // sin poder ejecutar nada). La confirmación sale recién DESPUÉS de persistir el takeover.
   if (!result && esPosiblePedidoHumano(text)) {
-    const hr = await procesarPedidoHumano(tenantId, customerId, text, { messageId: input.messageId ?? null });
+    const hr = await procesarPedidoHumano(tenantId, customerId, text, { messageId: input.messageId ?? null, sessionKey });
     if (hr.handled && hr.takeover) {
       // §12: es la confirmación del takeover que ESTE turno acaba de persistir (sourceId = wamid,
       // el mismo que usó `procesarPedidoHumano`) ⇒ el borde la deja salir salvo takeover ajeno.
@@ -1273,6 +1284,7 @@ export async function handleMessage(input: ConversationInput): Promise<Conversat
       messageId: input.messageId ?? null,
       simulation: input.simulation === true,
       channel,
+      sessionKey,
     });
     if (ce?.takeover) {
       // El takeover coverage_review ya quedó persistido: NO se pisa la sesión (mismo criterio
@@ -1415,6 +1427,7 @@ export async function handleMessage(input: ConversationInput): Promise<Conversat
       const fb = await derivarPorIaNoDisponible(tenantId, customerId, {
         messageId: input.messageId ?? null,
         simulation: input.simulation === true,
+        sessionKey,
       });
       if (fb.takeover && !input.simulation) {
         // Primer mensaje con intención (F6): misma bienvenida breve que el resto de los caminos.
@@ -1465,6 +1478,7 @@ export async function handleMessage(input: ConversationInput): Promise<Conversat
         simulation: input.simulation === true,
         channel,
         receivedVia: input.receivedByPhoneNumberId ?? null,
+        sessionKey,
       },
     });
     // F1: catálogo sin resultados → antes del canned "no encontré", intentar la IA (sus tools
@@ -1487,6 +1501,7 @@ export async function handleMessage(input: ConversationInput): Promise<Conversat
     const d = await derivarPorDerivaCritica(tenantId, customerId, result.driftBlock, {
       messageId: input.messageId ?? null,
       simulation: input.simulation === true,
+      sessionKey,
     });
     if (d.takeover && !input.simulation) {
       // El estado del handoff ya quedó persistido por el servicio canónico: NO se pisa la sesión
@@ -1522,7 +1537,11 @@ export async function handleMessage(input: ConversationInput): Promise<Conversat
   }
 
   const session: Session = {
-    id: 'active',
+    // El id del documento y el campo tienen que decir lo mismo. Un `'active'` hardcodeado adentro
+    // de `sessions/wa_…` hace que cualquier lector que confíe en el campo —el panel, una
+    // auditoría, un job que re-derive el path desde el documento— termine operando sobre la
+    // conversación del número que HOY vende. Mismo molde que `handoff.ts`.
+    id: sessionKey,
     tenantId,
     customerId,
     state: nextState,

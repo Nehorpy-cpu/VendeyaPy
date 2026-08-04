@@ -16,6 +16,7 @@
 
 import { normalizeText } from '../catalog/match.js';
 import { getCheckoutConfig } from '../orders/checkoutConfig.js';
+import { LEGACY_SESSION_KEY } from '@vpw/shared';
 import { executeHandoff, notifyHandoffRequested } from './handoff.js';
 import { db, paths } from '../lib/firebase.js';
 import { logger } from '../lib/logger.js';
@@ -28,6 +29,11 @@ export interface DerivarIaNoDisponibleInput {
    * (ni takeover real ni notificación) — la respuesta es la misma que vería el cliente.
    */
   simulation?: boolean;
+  /**
+   * ADR-0017 §2: canal de la conversación. Omitirlo = canal heredado (simulador / dev): la
+   * derivación tiene que pausar el bot EN el número por el que el cliente escribió.
+   */
+  sessionKey?: string;
 }
 export interface DerivarIaNoDisponibleResult {
   /** true = takeover persistido (o simulado): el caller responde DESPUÉS de esto. */
@@ -132,6 +138,7 @@ async function derivarInterno(
     reason: 'ai_unavailable',
     sellerName: vendedor.name,
     sourceId: input.messageId ?? null,
+    sessionKey: input.sessionKey ?? LEGACY_SESSION_KEY,
     createSessionIfMissing: true,
   });
   if (!r.ok) {

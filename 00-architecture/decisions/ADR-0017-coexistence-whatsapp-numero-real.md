@@ -16,7 +16,10 @@ número por tenant. No es que le falten features de Coexistence — es que **no 
 todavía no manda"**. Todo lo que existe hoy es binario y por tenant: un número está conectado o no lo está, y
 si lo está, el bot contesta.
 
-## Las cuatro decisiones
+## Las decisiones
+
+> §1–§4 son la decisión original. §5 y §6 se agregaron el **2026-08-04** al contrastar el diseño contra el
+> contrato oficial vigente de Meta: corrigen supuestos del §4 que el contrato desmiente.
 
 ### 1. La salud de la conexión y el permiso para automatizar son cosas distintas
 
@@ -123,6 +126,15 @@ El **gate por PNID le aplica igual que a un inbound**, con un matiz por modo:
 
 Y un echo **jamás** dispara metering, motor, IA, adjuntos, Coverage ni outbound.
 
+**Corrección del contrato oficial (2026-08-04)**: un echo activa el control humano pero **no abre ni
+extiende la ventana de servicio de Cloud API**. Meta lo dice sin ambigüedad: los mensajes mandados desde la
+app «no están sujetos a la ventana de atención al cliente y no crean, extienden ni afectan las ventanas de
+conversación ni la facturación de Cloud API». Consecuencia práctica que hay que respetar en `live`: que el
+vendedor haya contestado desde su teléfono **no habilita** al bot a mandar texto libre después. Si la ventana
+está cerrada —caso típico: el cliente escribió justo *antes* del onboarding—, la única salida por Cloud API
+es una plantilla. Tratar el echo como si abriera la ventana produciría envíos rechazados por Meta que el
+sistema leería como fallas propias.
+
 Y una consecuencia que hay que arreglar antes: hoy `releaseToBot` escribe `state: 'IDLE'` incondicionalmente y
 **destruye el `AWAITING_PAYMENT` del checkout** (defecto ya documentado). Con echoes, tomar y liberar deja de
 ser excepcional y pasa a ser el ritmo normal del vendedor. La liberación tiene que preservar el estado.
@@ -156,6 +168,54 @@ apuesta la ventana de 24 h sobre un número con clientes vivos.
 `smb_app_state_sync` trae la agenda del vendedor — incluidas personas que nunca le escribieron. **No crea
 `Customer`s**: sería fabricar clientes sin relación comercial y llenar el panel de conversaciones falsas.
 
+### 5. El historial no llega solo: hay que pedirlo, y se pide una sola vez
+
+Corrección al §4, del contrato oficial consultado el **2026-08-04**. El §4 daba por sentado que los webhooks
+de `history` y `smb_app_state_sync` llegarían por el hecho de estar suscritos. **No es así.** Hay que
+dispararlos explícitamente con `POST /<PHONE_NUMBER_ID>/smb_app_data`, primero con
+`sync_type: "smb_app_state_sync"` y después con `sync_type: "history"`.
+
+Y la cita que gobierna todo el diseño del coordinador: **«Esto se puede hacer una sola vez. Si hace falta
+repetirlo, el cliente tiene que offboardear primero y volver a completar el Embedded Signup.»**
+
+De ahí tres consecuencias que no son opcionales:
+
+- **No hay reintento.** Un disparo perdido no se recupera con un botón: se recupera desconectando el número
+  real del negocio y rehaciendo el flujo entero, sobre un número con clientes vivos. Por eso el coordinador
+  es durable y persistido (`requested | receiving | completed | declined | expired | failed`), no una
+  variable en memoria de una invocación.
+- **La ventana de 24 h corre desde el onboarding**, no desde el disparo. Un coordinador que no persista el
+  deadline no puede distinguir «sigue llegando» de «se venció».
+- **«No compartió» es un desenlace explícito, no un silencio.** Llega como `history[0].errors[0].code =
+  2593109`. Sin leer `chunk.errors` el sistema se queda esperando y quema la ventana.
+
+Dos agujeros del parser actual contra este contrato, que hay que cerrar antes de que sirva de algo:
+
+1. `waHistoryChange` lee únicamente `value.history[]`, pero el webhook que trae los **IDs de los adjuntos del
+   historial** llega con `field: "history"` y el value contiene `messages[]`. Hoy se descarta en silencio — y
+   esos IDs solo existen durante 14 días y no se pueden volver a pedir.
+2. El payload del caso «no compartió» **no trae el envelope `object`/`entry`/`changes`** que `parseWhatsApp`
+   itera, así que se perdería entero antes de llegar al router.
+
+### 6. Meta desconecta el número solo, y hay que enterarse
+
+El repo no tiene hoy ninguna referencia a `account_update`, `PARTNER_REMOVED`, `ACCOUNT_OFFBOARDED` ni
+`ACCOUNT_RECONNECTED`. Meta desconecta un número en coexistencia por inactividad del dispositivo primario
+(~14 días), del companion (~30 días), por cambio de número, re-registro, reinstalación o downgrade de la app
+— y lo avisa por `account_update`.
+
+Sin consumir ese evento, un número en `live` seguiría intentando automatizar contra una conexión muerta:
+cada inbound gastaría trabajo y cada respuesta fallaría, sin que nada explique por qué. **Un
+`ACCOUNT_OFFBOARDED` tiene que degradar ese PNID a `inactive`** — que es exactamente para lo que existe el
+eje de la decisión 1.
+
+Y la Deregister API está **prohibida** para números en coexistencia: desconectar es un acto del cliente
+desde su app, nunca nuestro.
+
+Nota operativa relacionada: el error **131060** en el webhook de mensajes no soportados es **esperado** tras
+el onboarding (primer mensaje de un usuario, o un companion no soportado). Tratarlo como falla llenaría la
+auditoría de ruido y escondería las fallas reales.
+
 ## Lo que este ADR NO decide, y por qué
 
 - **El onboarding es un acto humano.** El owner completa el flujo y el QR/OTP desde su teléfono. Nadie más lo
@@ -173,6 +233,20 @@ apuesta la ventana de 24 h sobre un número con clientes vivos.
 - `writeDiscoveredAssets` borra los assets y el índice del tenant. Con este ADR eso deja de ser solo «se
   pierde el ruteo local»: el número que vende perdería su `automationMode` y quedaría mudo. **Preservar esos
   campos es requisito de despliegue.**
+- **Coexistence tiene superficie propia de punta a punta, y la estándar la rechaza.** El onboarding
+  del número real no es un `mode` de `connectMeta`: ese callable corre `runMetaConnect`, que guarda
+  el token en el secreto del TENANT —pisando el de `main`— y reescribe los assets con
+  `connectionId: 'main'`, cuya limpieza borra el asset del número que vende y su entrada de índice.
+  El panel llama a `coexistenceStart`/`coexistenceConnect`, y `connectMeta`/`startMetaConnect`
+  rechazan `mode: 'coexistence'` antes de consumir el nonce. Aceptarlo no agregaba capacidad alguna
+  y dejaba alcanzable el desenlace (a) que este ADR existe para impedir.
+- **La recuperación tiene que deshacer todo lo que escribió la degradación.** `account_update` (§6)
+  degrada en el asset **y** en el índice; como el desempate es por el más restrictivo, una migración
+  que solo tocara el asset dejaba el número mudo tras una reconexión, reportando éxito. La migración
+  corrige el índice **cuando el índice declara** algo distinto (la ausencia sigue sin votar, así que
+  el camino normal sigue siendo de un solo documento), y la auditoría de release bloquea si el
+  índice declara algo que no es `live`. Apagar (`--mode inactive`) no lee el índice: el `inactive`
+  del asset ya gana, y el rollback no puede fallar por un documento que no manda.
 - El orden importa: **la migración del PNID actual a `live` corre ANTES de desplegar el gate.** Al revés, el
   número que vende leería el campo ausente, resolvería `inactive` y se quedaría callado hasta que alguien
   corriera la migración. El código desplegado hoy ignora el campo, así que hacerlo en ese orden no tiene

@@ -222,8 +222,24 @@ describe('resolveAutomationMode — el canal heredado es de UN solo número', ()
   });
 
   it('una `sessionKey` declarada manda por encima de la conexión', async () => {
+    docs.set(assetPath(TENANT, PNID_NUEVO), { connectionId: `wa_${PNID_NUEVO}`, sessionKey: `wa_${PNID_NUEVO}` });
+    expect((await resolveAutomationMode(TENANT, PNID_NUEVO)).sessionKey).toBe(`wa_${PNID_NUEVO}`);
+  });
+
+  /**
+   * ETAPA E — CAMBIO DELIBERADO DE SEMÁNTICA (ver `derivarSessionKey`).
+   *
+   * Antes, una `sessionKey: 'active'` escrita en el asset de una conexión ADICIONAL se aceptaba
+   * tal cual, y eso es la única forma en que un número de Coexistence puede terminar compartiendo
+   * carrito, takeover y checkout con el número que ya vende — sea porque alguien la escribió a
+   * mano, porque quedó de un documento viejo o porque el índice global la espejó.
+   *
+   * La regla nueva: una declaración que manda el número al canal HEREDADO solo vale si el asset ES
+   * el de la conexión heredada. Reclamar `active` desde otra conexión ya no se puede.
+   */
+  it('un asset de otra conexión NO puede reclamar el canal heredado declarándolo', async () => {
     docs.set(assetPath(TENANT, PNID_NUEVO), { connectionId: `wa_${PNID_NUEVO}`, sessionKey: 'active' });
-    expect((await resolveAutomationMode(TENANT, PNID_NUEVO)).sessionKey).toBe('active');
+    expect((await resolveAutomationMode(TENANT, PNID_NUEVO)).sessionKey).toBe(`wa_${PNID_NUEVO}`);
   });
 });
 

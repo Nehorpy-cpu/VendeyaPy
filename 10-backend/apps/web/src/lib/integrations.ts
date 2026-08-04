@@ -4,13 +4,17 @@
  *   - flujo REAL (callables owner/admin, Fase 4B): startMetaConnect/connectMeta/verifyMetaChannel/
  *     selectMetaPhoneNumber/metaDisconnect — el token nunca pasa por el frontend (solo el `code`).
  *   - fallback DEMO (endpoints dev): connectMetaDemo/disconnectMeta, cuando Meta no está configurado.
+ *   - COEXISTENCE (ADR-0017): coexistenceStart/coexistenceConnect — superficie APARTE, no un `mode`
+ *     del flujo estándar. Ver el bloque de más abajo: `connectMeta` reescribe `metaConnections/main`.
  * La page elige uno u otro según isMetaConfigured(). M-1 solo agrega los wrappers; no cambia la UI.
  */
 
 import { collection, doc, getDoc, getDocs } from 'firebase/firestore';
 import { httpsCallable, type FunctionsError } from 'firebase/functions';
-import type { MetaConnection, MetaAsset, MetaConversionEvent, MetaConnectionStatus } from '@vpw/shared';
+import type { MetaConnection, MetaAsset, MetaConversionEvent, MetaConnectionStatus, WhatsappAutomationMode } from '@vpw/shared';
+import { declaredAutomationMode } from '@vpw/shared';
 import { firebaseDb, firebaseFunctions } from './firebase';
+import { isEmbeddedSignupConfigured, type MetaSignupFlow } from './metaEmbeddedSignup';
 
 const API = process.env['NEXT_PUBLIC_API_BASE_URL'] ?? 'http://localhost:5001/demo-aiafg/us-central1';
 
@@ -19,9 +23,22 @@ export async function getMetaConnection(tenantId: string): Promise<MetaConnectio
   return snap.exists() ? (snap.data() as MetaConnection) : null;
 }
 
-export async function listMetaAssets(tenantId: string): Promise<MetaAsset[]> {
+/**
+ * Un asset tal como lo necesita el panel: el documento MÁS el permiso de automatización del número
+ * (ADR-0017 §1). `MetaAsset` todavía no declara `automationMode` porque es un campo ADITIVO que
+ * convive con documentos que no lo tienen, así que se lee crudo y se estrecha acá.
+ *
+ * `null` = la fuente NO opina (documento anterior al campo). Es distinto de `inactive`, y la UI
+ * los muestra igual de callados: lo que no se puede es mostrarlos como si automatizaran.
+ */
+export type MetaAssetView = MetaAsset & { automationMode: WhatsappAutomationMode | null };
+
+export async function listMetaAssets(tenantId: string): Promise<MetaAssetView[]> {
   const snap = await getDocs(collection(firebaseDb(), 'tenants', tenantId, 'metaAssets'));
-  return snap.docs.map((d) => d.data() as MetaAsset);
+  return snap.docs.map((d) => {
+    const data = d.data() as MetaAsset & { automationMode?: unknown };
+    return { ...data, automationMode: declaredAutomationMode(data.automationMode) };
+  });
 }
 
 export async function connectMetaDemo(tenantId: string, byUid: string): Promise<void> {
@@ -36,9 +53,19 @@ export async function disconnectMeta(tenantId: string): Promise<void> {
 // Wrappers de los callables autenticados (owner/admin). El access token NUNCA pasa por el
 // frontend: solo transita el `code` efímero del Embedded Signup, que se intercambia server-side.
 
-/** Hay configuración para el flujo real (App ID + config_id del Embedded Signup). Si no, se usa demo. */
+/**
+ * Hay configuración para el flujo real (App ID + config_id del Embedded Signup). Si no, se usa demo.
+ *
+ * DELEGA en `metaEmbeddedSignup`: la lectura de esas env vars estaba duplicada acá y allá, y dos
+ * lecturas del mismo flag terminan divergiendo — la laxa es la que muestra un botón que no anda.
+ */
 export function isMetaConfigured(): boolean {
-  return !!process.env['NEXT_PUBLIC_META_APP_ID'] && !!process.env['NEXT_PUBLIC_META_CONFIG_ID'];
+  return isEmbeddedSignupConfigured('standard');
+}
+
+/** Coexistence tiene su PROPIO config_id: puede estar habilitado el estándar y este no. */
+export function isCoexistenceConfigured(): boolean {
+  return isEmbeddedSignupConfigured('coexistence');
 }
 
 /**
@@ -64,6 +91,11 @@ export function isDevToolingAllowed(): boolean {
 export interface MetaConnectInput {
   nonce: string;
   code: string;
+  /**
+   * Con qué flujo se hizo el onboarding (ADR-0017 §5). El backend lo exige IGUAL al del nonce:
+   * un nonce estándar no cierra un Coexistence ni al revés. Ausente = estándar.
+   */
+  mode?: MetaSignupFlow;
   // Best-effort: si el popup del Embedded Signup entrega sessionInfo. El backend descubre
   // WABA/número cuando faltan, así que basta con { nonce, code }.
   wabaId?: string;
@@ -86,16 +118,62 @@ export interface MetaVerifyResult {
   status: MetaConnectionStatus;
 }
 
-/** Paso 1 del Embedded Signup: emite un nonce de un solo uso (atado a tenant+uid). */
-export async function startMetaConnect(tenantId: string): Promise<{ nonce: string }> {
-  const call = httpsCallable<{ tenantId: string }, { ok: boolean; nonce: string }>(firebaseFunctions(), 'startMetaConnect');
-  const res = await call({ tenantId });
+/** Paso 1 del Embedded Signup: emite un nonce de un solo uso (atado a tenant+uid+MODO). */
+export async function startMetaConnect(tenantId: string, mode: MetaSignupFlow = 'standard'): Promise<{ nonce: string }> {
+  const call = httpsCallable<{ tenantId: string; mode: MetaSignupFlow }, { ok: boolean; nonce: string }>(firebaseFunctions(), 'startMetaConnect');
+  const res = await call({ tenantId, mode });
   return { nonce: res.data.nonce };
 }
 
 /** Paso 2: consume el nonce + el `code` del popup; el backend valida, descubre assets y conecta. */
 export async function connectMeta(tenantId: string, input: MetaConnectInput): Promise<MetaConnectResult> {
   const call = httpsCallable<{ tenantId: string } & MetaConnectInput, MetaConnectResult>(firebaseFunctions(), 'connectMeta');
+  const res = await call({ tenantId, ...input });
+  return res.data;
+}
+
+// ===== Coexistence: el número que el negocio YA usa con sus clientes (ADR-0017) =====
+// SUPERFICIE PROPIA, y no un `mode` del flujo estándar. `connectMeta` corre `runMetaConnect`, que
+// guarda el token en el secreto del TENANT (pisando el de `main`) y reescribe `metaAssets` con
+// `connectionId: 'main'` — cuya limpieza borra el asset y la entrada de índice del número que HOY
+// vende. Por acá el número entra en su PROPIA conexión `wa_{pnid}`, con su token, y nace MUDO.
+
+export interface CoexistenceConnectInput {
+  nonce: string;
+  code: string;
+  /**
+   * Lo que trae el `FINISH_WHATSAPP_BUSINESS_APP_ONBOARDING`: en su página específica, SOLO
+   * `waba_id`. El PNID lo resuelve el backend con `GET /<WABA_ID>/phone_numbers` — si viene, es un
+   * desempate y no una fuente.
+   */
+  wabaId?: string;
+  phoneNumberId?: string;
+  businessId?: string;
+  businessName?: string;
+}
+
+export interface CoexistenceConnectResult {
+  ok: boolean;
+  connectionId: string;
+  phoneNumberId: string;
+  phoneNumber: string | null;
+  status: string;
+  /** true ⇒ la conexión ya existía (callback repetido) y no se escribió nada nuevo. */
+  replay: boolean;
+  /** Siempre `inactive`: conectar no autoriza a automatizar (ADR-0017 §1). */
+  automationMode: WhatsappAutomationMode;
+}
+
+/** Paso 1: nonce de un solo uso atado al MODO `coexistence` (un nonce estándar no lo cierra). */
+export async function coexistenceStart(tenantId: string): Promise<{ nonce: string }> {
+  const call = httpsCallable<{ tenantId: string }, { ok: boolean; nonce: string; mode: string }>(firebaseFunctions(), 'coexistenceStart');
+  const res = await call({ tenantId });
+  return { nonce: res.data.nonce };
+}
+
+/** Paso 2: cierra el onboarding del número real. Nunca toca `metaConnections/main`. */
+export async function coexistenceConnect(tenantId: string, input: CoexistenceConnectInput): Promise<CoexistenceConnectResult> {
+  const call = httpsCallable<{ tenantId: string } & CoexistenceConnectInput, CoexistenceConnectResult>(firebaseFunctions(), 'coexistenceConnect');
   const res = await call({ tenantId, ...input });
   return res.data;
 }

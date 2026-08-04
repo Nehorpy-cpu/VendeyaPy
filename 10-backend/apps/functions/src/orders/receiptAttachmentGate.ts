@@ -17,6 +17,7 @@
  * `attachmentMarkAsReceipt`, que exige una persona autorizada.
  */
 import type { AttachmentClassification, Order, Session } from '@vpw/shared';
+import { LEGACY_SESSION_KEY } from '@vpw/shared';
 import { db, paths } from '../lib/firebase.js';
 import { logger } from '../lib/logger.js';
 import { genericMediaGate, setAttachmentGate, type AttachmentGate } from '../meta/attachmentGate.js';
@@ -44,7 +45,8 @@ export const MENSAJE_COMPROBANTE_PROPUESTO =
   'Te avisamos por acá.';
 
 export interface ReceiptAttachmentGateDeps {
-  getSession: (tenantId: string, customerId: string) => Promise<Session | null>;
+  /** ADR-0017 §2: la sesión se lee POR CANAL — la del número que recibió el archivo. */
+  getSession: (tenantId: string, customerId: string, sessionKey: string) => Promise<Session | null>;
   getOrder: (tenantId: string, orderId: string) => Promise<Order | null>;
   listCustomerOrders: (tenantId: string, customerId: string) => Promise<Order[]>;
   getConfig: (tenantId: string) => Promise<ReceiptGateConfig>;
@@ -73,7 +75,7 @@ function esDecisionYaTomada(classification: AttachmentClassification): boolean {
 }
 
 export const defaultReceiptAttachmentGateDeps: ReceiptAttachmentGateDeps = {
-  getSession: async (t, c) => ((await db().doc(paths.session(t, c)).get()).data() as Session | undefined) ?? null,
+  getSession: async (t, c, sessionKey) => ((await db().doc(paths.session(t, c, sessionKey)).get()).data() as Session | undefined) ?? null,
   getOrder: async (t, o) => ((await db().doc(paths.order(t, o)).get()).data() as Order | undefined) ?? null,
   listCustomerOrders: async (t, c) => {
     // Solo igualdad por customerId (índice automático); el filtro de estado va en memoria — un
@@ -132,7 +134,8 @@ export function crearReceiptAttachmentGate(
       return dejarComoMedioNormal('receipt_gate_disabled');
     }
 
-    const session = await deps.getSession(tenantId, customerId);
+    // FALLBACK LEGACY EXPLÍCITO: un adjunto sin canal declarado es del número heredado.
+    const session = await deps.getSession(tenantId, customerId, input.sessionKey ?? LEGACY_SESSION_KEY);
     const pendingOrderId = session?.context?.pendingOrderId ?? null;
     // El puntero de la sesión se resuelve pero NO se cree: el gate valida su `customerId`.
     const pendingOrder = pendingOrderId ? await deps.getOrder(tenantId, pendingOrderId) : null;

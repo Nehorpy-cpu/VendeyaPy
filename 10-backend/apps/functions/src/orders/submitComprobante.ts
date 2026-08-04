@@ -24,6 +24,7 @@
 
 import { Timestamp } from 'firebase-admin/firestore';
 import type { Order } from '@vpw/shared';
+import { parseSessionKey, LEGACY_SESSION_KEY } from '@vpw/shared';
 import { db, paths } from '../lib/firebase.js';
 import { logger } from '../lib/logger.js';
 import { getCheckoutConfig, pickSeller } from './checkoutConfig.js';
@@ -91,6 +92,9 @@ export async function submitComprobante(
     sellerName: seller?.name ?? null,
     sourceId: orderId,
     pendingOrderId: orderId,
+    // ADR-0017 §2: el comprobante pausa el bot en la conversación QUE ARMÓ el pedido. El canal
+    // viaja en el `Order`; los pedidos anteriores al campo son del canal heredado.
+    sessionKey: parseSessionKey(order.sessionKey, LEGACY_SESSION_KEY),
     // Review: sin sesión (edge), el takeover se persiste igual creando la sesión mínima —
     // la confirmación "te estoy pasando con…" jamás sale sin takeover persistido.
     createSessionIfMissing: true,

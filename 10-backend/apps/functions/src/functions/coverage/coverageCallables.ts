@@ -27,6 +27,7 @@ import { db, paths } from '../../lib/firebase.js';
 import { logger } from '../../lib/logger.js';
 import { recordAudit } from '../../audit/audit.js';
 import { purgeAtFrom } from '../../conversation/coverage.js';
+import { canalDeCoberturaPersistido } from '../../conversation/coverageResume.js';
 import { sendManualMessage } from '../../conversation/manualMessage.js';
 import type { AuthLike } from '../conversation/staffAuth.js';
 
@@ -197,7 +198,7 @@ async function decidirCobertura(
       if (obQuoteSnap?.exists && obQuoteStatus === 'prepared') {
         tx.update(obQuoteSnap.ref, { status: 'failed', leaseUntil: null, updatedAt: now });
       }
-      tx.set(db().doc(paths.session(tenantId, req.customerId)), { context: { coverage: null }, updatedAt: now }, { merge: true });
+      tx.set(db().doc(paths.session(tenantId, req.customerId, canalDeCoberturaPersistido(null, req))), { context: { coverage: null }, updatedAt: now }, { merge: true });
       return { kind: 'expirado' as const };
     }
     // SHIPPING-CHAT-3C-HARDEN-1 (C + review): con un intento de cotización EN CURSO, la decisión
@@ -255,6 +256,9 @@ async function decidirCobertura(
       status: 'pending',
       channel: req.channel,
       receivedVia: req.receivedVia ?? null,
+      // ADR-0017 §2: el job HEREDA el canal del request. El worker corre después y no puede
+      // volver a derivarlo sin lecturas extra que además reabren la divergencia.
+      sessionKey: canalDeCoberturaPersistido(null, req),
       activationId: act.activationId,
       createdAt: now,
       updatedAt: now,
@@ -268,7 +272,7 @@ async function decidirCobertura(
       createdAt: req.createdAt,
       updatedAt: now,
     };
-    tx.set(db().doc(paths.session(tenantId, req.customerId)), { context: { coverage: ptr }, updatedAt: now }, { merge: true });
+    tx.set(db().doc(paths.session(tenantId, req.customerId, canalDeCoberturaPersistido(null, req))), { context: { coverage: ptr }, updatedAt: now }, { merge: true });
     return { kind: 'decidido' as const, req: { ...req, status: ptr.status, decision } as CoverageRequest };
   });
   if (resultado.kind === 'expirado') {

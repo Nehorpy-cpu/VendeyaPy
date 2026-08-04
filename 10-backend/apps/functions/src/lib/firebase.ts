@@ -63,14 +63,15 @@ export const paths = {
    * que RECIBIÓ el mensaje; sin él, el mismo cliente escribiéndole a dos números compartiría
    * carrito, `humanTakeover` y pedido pendiente entre ambos.
    *
-   * El default `active` es la garantía de retrocompatibilidad, no comodidad: todas las
-   * conversaciones que existen hoy viven en ese documento y NO se migran. Los ~25 llamadores que
-   * todavía no pasan la clave siguen hablando del canal heredado, que es el del número que ya
-   * vende. Migrarlos es condición para pasar un número nuevo a `live` —mientras esté en
-   * `inactive` o `shadow` el gate del webhook impide que esos caminos se ejerciten—, no para
-   * desplegar la fundación.
+   * EL PARÁMETRO ES OBLIGATORIO A PROPÓSITO. Mientras tuvo default (`'active'`), omitirlo era
+   * indistinguible de elegir el canal heredado: el compilador no podía enumerar qué callsites
+   * seguían pendientes de migrar y la auditoría tenía que contarlos a mano. Ahora cada llamador
+   * NOMBRA su canal, y el que legítimamente habla del número heredado lo dice escribiendo
+   * `LEGACY_SESSION_KEY` — que es una decisión visible en el diff, no una omisión.
+   *
+   * Las conversaciones que existen hoy viven en `active` y NO se migran.
    */
-  session: (tenantId: string, customerId: string, sessionKey: string = 'active') =>
+  session: (tenantId: string, customerId: string, sessionKey: string) =>
     `tenants/${tenantId}/customers/${customerId}/sessions/${sessionKey}`,
   messages: (tenantId: string, customerId: string) =>
     `tenants/${tenantId}/customers/${customerId}/messages`,

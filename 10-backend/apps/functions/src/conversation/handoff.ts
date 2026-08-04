@@ -40,15 +40,16 @@ export interface ExecuteHandoffOptions {
   /** customer_requested puede llegar en el PRIMER mensaje (sesión aún no creada). */
   createSessionIfMissing?: boolean;
   /**
-   * ADR-0017 §2: canal de la conversación (deriva del número que RECIBIÓ el mensaje). Omitirlo
-   * apunta al canal HEREDADO (`active`), que es donde viven todas las conversaciones de hoy: los
-   * llamadores que todavía no la pasan siguen comportándose exactamente igual.
+   * ADR-0017 §2: canal de la conversación (deriva del número que RECIBIÓ el mensaje).
+   * `LEGACY_SESSION_KEY` (`active`) es el del número heredado, donde viven todas las
+   * conversaciones de hoy.
    *
-   * Con más de un número, el takeover TIENE que ser el de esa conversación en ESE número. Si el
-   * echo de un número escribiera siempre en `active`, el vendedor contestando desde el número
-   * nuevo dejaría mudo al bot en el número que ya vende.
+   * OBLIGATORIO desde ETAPA E. Mientras fue opcional, cada llamador que se lo olvidaba ejecutaba
+   * su transición sobre `active`: el takeover que activaba el echo de un número nuevo dejaba mudo
+   * al bot en el número que ya vende, y NO lo dejaba mudo donde el vendedor estaba escribiendo.
+   * Un canal omitido y un canal heredado no pueden seguir siendo indistinguibles.
    */
-  sessionKey?: string;
+  sessionKey: string;
   /**
    * Panel (seller_manual): tomar un chat YA tomado lo REASIGNA al nuevo vendedor (comportamiento
    * histórico de takeoverChat). Los handoffs automáticos NO reasignan (idempotencia estricta).
@@ -139,7 +140,7 @@ export async function executeHandoff(
       const session: Session = {
         // El id del documento y el campo tienen que decir lo mismo: con más de un canal, un `id`
         // hardcodeado en `active` haría que una sesión de otro número mintiera sobre cuál es.
-        id: opts.sessionKey ?? LEGACY_SESSION_KEY,
+        id: opts.sessionKey,
         tenantId,
         customerId,
         state: 'IDLE',
@@ -287,11 +288,17 @@ export async function takeoverChat(
   customerId: string,
   by?: string,
   sellerUid?: string | null,
+  /**
+   * ADR-0017 §2: canal de ESTA conversación. El default es el heredado —donde vive todo lo que
+   * existe hoy—, así que el panel de un tenant de un solo número se comporta igual que siempre.
+   */
+  sessionKey: string = LEGACY_SESSION_KEY,
 ): Promise<HandoffResult> {
   const r = await executeHandoff(tenantId, customerId, {
     reason: 'seller_manual',
     sellerName: by ?? null,
     sellerUid: sellerUid ?? null,
+    sessionKey,
     reassignIfTaken: true, // tomar un chat ya tomado lo reasigna (comportamiento histórico)
   });
   if (!r.ok) {
@@ -323,8 +330,13 @@ export async function takeoverChat(
 const ESTADOS_QUE_SOBREVIVEN_A_LIBERAR: ReadonlySet<string> = new Set(['SELECTING_PAYMENT', 'AWAITING_PAYMENT']);
 
 /** El vendedor libera el chat: el bot vuelve a responder al próximo mensaje. */
-export async function releaseToBot(tenantId: string, customerId: string): Promise<HandoffResult> {
-  const ref = db().doc(paths.session(tenantId, customerId));
+export async function releaseToBot(
+  tenantId: string,
+  customerId: string,
+  /** ADR-0017 §2: canal de ESTA conversación. Default = canal heredado (el número que ya vende). */
+  sessionKey: string = LEGACY_SESSION_KEY,
+): Promise<HandoffResult> {
+  const ref = db().doc(paths.session(tenantId, customerId, sessionKey));
   const snap = await ref.get();
   if (!snap.exists) {
     return { ok: false, message: 'No hay sesión para ese cliente.' };

@@ -304,3 +304,13 @@ export { attachmentRetentionMaintenance } from './functions/attachments/mediaRet
 // —hasta 180 días de conversaciones privadas— y recién después lo borra. Es el mecanismo del repo
 // que no depende de que alguien haya aplicado la política TTL en la consola.
 export { coexistenceRetentionMaintenance } from './functions/meta/coexistenceRetention.js';
+// Coexistence (ADR-0017 §5 y §6): onboarding del número real por su camino PROPIO —jamás toca
+// `metaConnections/main`— y el coordinador durable del historial. El número nace `inactive`; el
+// historial se pide UNA sola vez, y sólo después de una decisión humana explícita.
+export {
+  coexistenceStart,
+  coexistenceConnect,
+  coexistenceDecideHistorySharing,
+  coexistenceRequestHistorySync,
+  coexistenceSyncStatus,
+} from './functions/meta/coexistenceCallables.js';

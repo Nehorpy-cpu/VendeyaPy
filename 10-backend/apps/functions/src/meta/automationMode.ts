@@ -21,9 +21,8 @@
  */
 import {
   declaredAutomationMode,
+  derivarSessionKey,
   masRestrictivo,
-  parseSessionKey,
-  whatsappSessionKey,
   LEGACY_SESSION_KEY,
   AUTOMATION_MODE_FAIL_CLOSED,
   type WhatsappAutomationMode,
@@ -56,12 +55,34 @@ export interface CanalAutomatizacion {
  *
  * Es una constante congelada y con nombre propio —y no un `if` suelto en el webhook— para que
  * quien la use tenga que nombrar la excepción.
+ *
+ * SOBRE SU `sessionKey` (ETAPA E, deuda DECLARADA): sigue siendo `active`, que es donde viven hoy
+ * las conversaciones de Instagram y Messenger. Darles canal propio ahora las dejaría HUÉRFANAS —
+ * carrito, takeover y pedido pendiente de charlas vivas apuntando a un documento que nadie
+ * escribió—, y eso es una migración de datos, no un cambio aditivo. No hay colisión con WhatsApp
+ * porque el `customerId` de esas plataformas no es un teléfono sino el id que asigna Meta, así que
+ * son documentos de clientes distintos. Queda pendiente para el programa que migre esas
+ * conversaciones; mientras tanto el fallback es explícito y está probado, no un default silencioso.
  */
 export const CANAL_SIN_GATE: CanalAutomatizacion = Object.freeze({
   mode: 'live' as WhatsappAutomationMode,
   sessionKey: LEGACY_SESSION_KEY,
   origen: 'sin_gate' as OrigenAutomatizacion,
 });
+
+/**
+ * La ÚNICA puerta para usar el escape, y existe para cerrar el peor camino posible: que un número
+ * de WhatsApp lo obtenga. Ese objeto dice `live` Y `active` a la vez, o sea «automatizá y hacelo
+ * sobre la conversación del número que ya vende» — exactamente lo que ADR-0017 existe para impedir.
+ * Hoy el webhook no lo hace; esto lo vuelve imposible de hacer por descuido en un refactor, en vez
+ * de dejarlo dependiendo de que nadie toque un ternario.
+ */
+export function canalSinGate(platform: string): CanalAutomatizacion {
+  if (platform === 'whatsapp') {
+    throw new Error('canalSinGate: WhatsApp SIEMPRE pasa por resolveAutomationMode (ADR-0017 §1)');
+  }
+  return CANAL_SIN_GATE;
+}
 
 /** Veredicto cuando no hay nada confiable que leer. */
 const CANAL_CERRADO = (origen: OrigenAutomatizacion): CanalAutomatizacion => ({
@@ -74,27 +95,13 @@ const CANAL_CERRADO = (origen: OrigenAutomatizacion): CanalAutomatizacion => ({
 type DeclaracionCruda = { automationMode?: unknown; sessionKey?: unknown; connectionId?: unknown } | null;
 
 /**
- * La conexión del número HEREDADO: la única que existía cuando había un número por tenant. Los
- * números adicionales viven en `wa_{pnid}` (ver `multiNumber.ts`).
+ * LA AUTORIDAD para derivar el canal, re-exportada desde acá porque este módulo es la puerta del
+ * permiso por número: quien resuelve «¿puede automatizar?» resuelve también «¿en qué conversación?»
+ * y no puede haber dos respuestas. La implementación vive en `@vpw/shared` por una razón concreta:
+ * el script de migración es un `.mjs` que corre suelto contra Firestore y no puede importar el
+ * bundle de functions — cuando cada lado tenía su copia, divergieron (ver `derivarSessionKey`).
  */
-const CONEXION_HEREDADA = 'main';
-
-/**
- * ¿Este asset es el del canal heredado? Solo importa cuando NADIE declaró `sessionKey`.
- *
- * El desempate NO puede ser `selected`: un admin lo cambia al elegir el remitente por defecto y
- * eso le mudaría el canal al número que está vendiendo, con carrito, takeover y checkout vivos
- * adentro. `connectionId` no lo toca ninguna acción de panel: un número que entró como adicional
- * tiene el suyo y no puede reclamar el canal del que vende.
- *
- * Un asset sin `connectionId` (o directamente ausente) cuenta como heredado: son los documentos
- * escritos antes de que el campo existiera, y ahí `active` es efectivamente donde viven sus
- * conversaciones.
- */
-function esConexionHeredada(asset: DeclaracionCruda): boolean {
-  const conexion = asset?.connectionId;
-  return conexion === undefined || conexion === null || conexion === CONEXION_HEREDADA;
-}
+export { derivarSessionKey } from '@vpw/shared';
 
 /**
  * Los tipos de `MetaAsset` y `MetaExternalIndexEntry` todavía no declaran estos campos —son
@@ -151,23 +158,10 @@ export async function resolveAutomationMode(
   if (delIndice !== null) opiniones.push(delIndice);
   const mode = masRestrictivo(...opiniones);
 
-  /**
-   * La clave del canal, con una asimetría deliberada:
-   *  · AUSENTE Y CONEXIÓN HEREDADA ⇒ canal heredado (`active`). Es el asset del número que ya
-   *    vende, escrito antes de ADR-0017: sus conversaciones viven ahí y no se migran.
-   *  · AUSENTE PERO DE OTRA CONEXIÓN ⇒ se DERIVA del PNID. Un número adicional no puede heredar
-   *    el canal del que vende solo por no declarar nada: al pasar a `live` compartiría carrito,
-   *    estado de checkout y takeover con él.
-   *  · PRESENTE PERO MALFORMADA ⇒ se DERIVA del PNID. Caer a `active` fusionaría la conversación
-   *    de este número con la del que ya vende: ante basura, la opción segura es la que nunca
-   *    comparte.
-   */
-  const declarada = asset?.sessionKey ?? indice?.sessionKey;
-  const propia = whatsappSessionKey(pnid);
-  const sessionKey =
-    declarada === undefined || declarada === null
-      ? esConexionHeredada(asset) ? LEGACY_SESSION_KEY : propia
-      : parseSessionKey(declarada, propia);
+  // El canal sale de la MISMA función que usa el script de migración (ver `derivarSessionKey`):
+  // dos derivaciones del mismo campo terminan divergiendo, y la laxa es la que comparte sesión
+  // con el número que ya vende.
+  const sessionKey = derivarSessionKey(pnid, asset, indice);
 
   const origen: OrigenAutomatizacion =
     opiniones.length === 0 ? 'sin_declarar' : delAsset !== null && masRestrictivo(delAsset) === mode ? 'asset' : 'indice';

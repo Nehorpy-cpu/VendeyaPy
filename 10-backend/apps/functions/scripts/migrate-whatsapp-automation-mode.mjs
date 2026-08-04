@@ -14,9 +14,16 @@
  *  · Escribe UN campo (`automationMode`) en UN documento (`tenants/{t}/metaAssets/{pnid}`). Un
  *    `set` del documento entero borraría `connectionId`, `selected` y el nombre — o sea, el ruteo
  *    del inbound y el número por el que sale la respuesta.
- *  · NO toca el índice global: para el resolvedor, la AUSENCIA del campo en el índice no vota
- *    (ver `declaredAutomationMode`), justamente para que esta migración pueda ser de un solo
- *    documento sin dejar al número mudo en el medio.
+ *  · NO toca el índice global MIENTRAS EL ÍNDICE NO OPINE: para el resolvedor, la AUSENCIA del
+ *    campo en el índice no vota (ver `declaredAutomationMode`), justamente para que esta migración
+ *    pueda ser de un solo documento sin dejar al número mudo en el medio.
+ *  · PERO SÍ lo corrige cuando el índice DECLARA otra cosa. `accountUpdate` (ADR-0017 §6) degrada
+ *    a `inactive` en el asset **y en el índice**, y el resolvedor aplica el MÁS RESTRICTIVO: tras
+ *    un `ACCOUNT_OFFBOARDED` y una reconexión, escribir `live` solo en el asset dejaba el número
+ *    MUDO y el runbook reportaba éxito. La herramienta de recuperación tiene que poder deshacer
+ *    todo lo que escribió la degradación; si no puede, no reporta éxito.
+ *  · APAGAR no lee el índice: `inactive` en el asset ya gana el desempate por ser el más
+ *    restrictivo, y el rollback de emergencia no puede fallar por un documento que no manda.
  *  · NO toca `updatedAt`: una migración no es una edición humana (mismo criterio que la migración
  *    de propiedad del catálogo).
  *  · NO crea assets. Migrar no es dar de alta un número.
@@ -53,8 +60,7 @@ import {
   LEGACY_SESSION_KEY,
   parseAutomationMode,
   declaredAutomationMode,
-  parseSessionKey,
-  whatsappSessionKey,
+  derivarSessionKey,
 } from '@vpw/shared';
 
 /** El número JAMÁS se imprime entero (misma convención que los logs del motor). */
@@ -65,9 +71,6 @@ export function enmascararPnid(phoneNumberId) {
 const esPreconditionFailed = (e) =>
   e?.code === 9 || e?.code === 'failed-precondition' || /precondition|update time/i.test(String(e?.message ?? e));
 
-/** La conexión del número heredado; los adicionales viven en `wa_{pnid}` (ver `multiNumber.ts`). */
-const CONEXION_HEREDADA = 'main';
-
 /**
  * ADR-0017 (consecuencias): «Hay ~25 lugares que hoy asumen `sessions/active`; **migrarlos es
  * condición para pasar a `live`**».
@@ -77,23 +80,42 @@ const CONEXION_HEREDADA = 'main';
  * vende— y le contestaría con el carrito y el takeover de otra charla. Es una constante del
  * código y no una bandera de línea de comandos a propósito: el ADR pide verificarlo, no confiar
  * en que el operador se acuerde. Se pone en `true` en el commit que migra esos call sites.
+ *
+ * ESTADO TRAS ETAPA E — sigue en `false`, y estas son las dos cosas que faltan (nada más):
+ *
+ *  · Los ~32 call sites de `paths.session(` en `src` YA pasan clave explícita: el parámetro dejó
+ *    de tener default, así que el compilador garantiza que no queda ninguno sin migrar. Motor,
+ *    handoff, mensaje manual, comprobante, confirmación de pago, Coverage (turno, callables,
+ *    reanudación y mantenimiento) operan sobre el canal del número que recibió el mensaje, y el
+ *    canal viaja PERSISTIDO en `Session.id`, `Order.sessionKey`, `coverageRequest.sessionKey` y
+ *    `coverageResumeJob.sessionKey`.
+ *  · FALTA (1): un E2E contra el emulador con DOS PNID del mismo tenant y el MISMO cliente. Lo
+ *    que hay hoy son tests unitarios de aislamiento (carrito, takeover, checkout, comprobante,
+ *    cobertura); los scripts `verify-*.mjs` siguen sembrando solo `sessions/active` y no ejercen
+ *    un segundo número.
+ *  · FALTA (2): Instagram y Messenger siguen compartiendo la clave `active` vía `CANAL_SIN_GATE`
+ *    (ver `automationMode.ts`). No afecta a WhatsApp —son otros `customerId`— pero es la única
+ *    pieza del §2 que queda declarada como deuda en vez de cerrada.
+ *
+ * Ninguna de las dos se resuelve cambiando esta constante: se resuelven corriendo el E2E y
+ * migrando esas conversaciones. Hasta entonces, `live` sobre un canal propio sigue bloqueado.
  */
 const SESIONES_POR_CANAL_MIGRADAS = false;
 
 /**
- * El canal de un asset, con el MISMO criterio que el resolvedor del webhook
- * (`src/meta/automationMode.ts` → `resolveAutomationMode`), que es la autoridad. Se replica acá
- * porque este script es un `.mjs` que corre suelto contra Firestore, sin el bundle de functions;
- * los dos lados están cubiertos por tests y tienen que moverse juntos.
+ * El canal de un asset. Antes esto era una RÉPLICA del criterio del resolvedor del webhook, con la
+ * excusa de que un `.mjs` no puede importar el bundle de functions — y las dos copias divergieron
+ * exactamente donde importa: el resolvedor aceptaba una `sessionKey` declarada solo en el índice y
+ * acá solo se miraba el asset, así que el mismo número quedaba ruteado a `active` por el webhook y
+ * considerado «canal propio» por esta migración (o sea, promovible a `live` compartiendo carrito y
+ * takeover con el número que ya vende).
+ *
+ * Ahora los dos lados llaman a la MISMA función pura de `@vpw/shared`, que es lo único que hace
+ * imposible que vuelvan a separarse. Se conserva el envoltorio —exportado— porque el script solo
+ * tiene el asset a mano y el test de paridad lo compara contra el resolvedor completo.
  */
-function canalDeclarado(asset, phoneNumberId) {
-  const propia = whatsappSessionKey(phoneNumberId);
-  const declarada = asset?.sessionKey;
-  if (declarada === undefined || declarada === null) {
-    const conexion = asset?.connectionId;
-    return conexion === undefined || conexion === null || conexion === CONEXION_HEREDADA ? LEGACY_SESSION_KEY : propia;
-  }
-  return parseSessionKey(declarada, propia);
+export function canalDeclarado(asset, phoneNumberId) {
+  return derivarSessionKey(phoneNumberId, asset);
 }
 
 /**
@@ -104,13 +126,12 @@ function canalDeclarado(asset, phoneNumberId) {
  * con el índice apuntando a otro tenant— se migraba igual, y el número que de verdad rutea quedaba
  * sin migrar: mudo el día que se despliega el gate.
  */
-async function motivoDeBloqueo(db, tenantId, phoneNumberId, asset, mode) {
+async function motivoDeBloqueo(db, tenantId, phoneNumberId, asset, mode, idxSnap) {
   // 1) Un asset que alguien desactivó no se promueve: fue una decisión humana.
   if (asset.status !== 'active') return 'asset_inactivo';
 
   // 2) El inbound entra por el índice global. Sin entrada, o con la entrada de otro tenant, este
   //    asset no recibe nada y bendecirlo solo da una falsa sensación de migración.
-  const idxSnap = await db.doc(`metaExternalIndex/whatsapp_${phoneNumberId}`).get();
   if (!idxSnap.exists) return 'sin_ruteo';
   if ((idxSnap.data() ?? {}).tenantId !== tenantId) return 'ruteo_de_otro_tenant';
 
@@ -166,26 +187,51 @@ export async function migrarModoAutomatizacion(db, { tenantId, phoneNumberId, mo
 
   const modoPrevio = parseAutomationMode(asset.automationMode);
 
-  // Apagar NUNCA se bloquea: fail-closed significa que cuesta encender, no que cuesta callar.
+  // Estado del ÍNDICE. Solo se lee en las promociones: apagar no lo necesita (el `inactive` del
+  // asset ya gana el desempate) y el rollback no puede depender de una lectura más.
+  let idxRef = null;
+  let idxSnap = null;
+  let modoPrevioIndice = null;
   if (mode !== AUTOMATION_MODE_FAIL_CLOSED) {
-    const bloqueo = await motivoDeBloqueo(db, tenantId, phoneNumberId, asset, mode);
-    if (bloqueo) return { ...base, outcome: bloqueo, modoPrevio };
+    idxRef = db.doc(`metaExternalIndex/whatsapp_${phoneNumberId}`);
+    idxSnap = await idxRef.get();
+    // Apagar NUNCA se bloquea: fail-closed significa que cuesta encender, no que cuesta callar.
+    const bloqueo = await motivoDeBloqueo(db, tenantId, phoneNumberId, asset, mode, idxSnap);
+    if (bloqueo) return { ...base, outcome: bloqueo, modoPrevio, modoPrevioIndice: null, indice: 'no_evaluado' };
+    modoPrevioIndice = declaredAutomationMode((idxSnap.data() ?? {}).automationMode);
   }
 
   // Idempotencia por el valor CRUDO, no por el parseado: un `'LIVE'` escrito a mano resuelve
-  // `inactive` y tiene que poder corregirse a `'inactive'` de verdad.
-  if (asset.automationMode === mode) return { ...base, outcome: 'already', modoPrevio };
-  if (!apply) return { ...base, outcome: 'would_write', modoPrevio };
+  // `inactive` y tiene que poder corregirse a `'inactive'` de verdad. Y vale para los DOS
+  // documentos: un asset ya en `live` con el índice diciendo `inactive` NO está migrado — el gate
+  // lee el más restrictivo y el número sigue mudo.
+  const assetYaEsta = asset.automationMode === mode;
+  const indiceEstorba = modoPrevioIndice !== null && modoPrevioIndice !== mode;
+  const indice = modoPrevioIndice === null ? 'no_declara' : indiceEstorba ? 'corregir' : 'coincide';
+  const reporte = { ...base, modoPrevio, modoPrevioIndice };
+
+  if (assetYaEsta && !indiceEstorba) return { ...reporte, outcome: 'already', indice };
+  if (!apply) return { ...reporte, outcome: 'would_write', indice: indiceEstorba ? 'would_write' : indice };
 
   try {
-    // updateMask de UN campo + precondición por el updateTime leído: si alguien tocó el asset
-    // entre la lectura y esto (una reconexión reescribe el documento entero), no se pisa.
-    await ref.update({ automationMode: mode }, { lastUpdateTime: snap.updateTime });
+    // updateMask de UN campo + precondición por el updateTime leído: si alguien tocó el documento
+    // entre la lectura y esto (una reconexión reescribe el asset entero; `accountUpdate` escribe
+    // el índice), no se pisa. El asset primero: es la autoridad, y un fallo a mitad de camino deja
+    // los dos documentos en desacuerdo, que el resolvedor resuelve callando.
+    if (!assetYaEsta) await ref.update({ automationMode: mode }, { lastUpdateTime: snap.updateTime });
+    if (indiceEstorba) {
+      const campo = { automationMode: mode };
+      // Un documento que existe SIEMPRE trae `updateTime`; el fallback está para no pasarle
+      // `undefined` como precondición al SDK (que lo rechaza como argumento inválido) si alguna
+      // implementación no lo expone. La escritura sigue siendo de un solo campo en los dos casos.
+      if (idxSnap.updateTime) await idxRef.update(campo, { lastUpdateTime: idxSnap.updateTime });
+      else await idxRef.update(campo);
+    }
   } catch (e) {
-    if (esPreconditionFailed(e)) return { ...base, outcome: 'precondition_failed', modoPrevio };
+    if (esPreconditionFailed(e)) return { ...reporte, outcome: 'precondition_failed', indice };
     throw e;
   }
-  return { ...base, outcome: 'written', modoPrevio };
+  return { ...reporte, outcome: 'written', indice: indiceEstorba ? 'written' : indice };
 }
 
 // ----------------------------- CLI (solo cuando se ejecuta directo) -----------------------------

@@ -29,31 +29,53 @@ interface Op {
 
 const ops: Op[] = [];
 
+/** `writeDiscoveredAssets` pasó de batch a transacción para poder LEER (guard de propiedad del
+ * PNID) en el mismo acto en que escribe; el doble acompaña ese cambio sin tocar lo que se afirma. */
+const consulta = (path: string, filtro?: { campo: string; valor: unknown }): Record<string, unknown> => ({
+  __coleccion: path,
+  __filtro: filtro,
+  get: async () => ({ docs: hijosDe(path).filter((d) => !filtro || (d.data() as Record<string, unknown>)[filtro.campo] === filtro.valor) }),
+  where: (campo: string, _op: string, valor: unknown) => consulta(path, { campo, valor }),
+});
+
+const leer = async (ref: { path?: string; __coleccion?: string; __filtro?: { campo: string; valor: unknown } }) => {
+  if (ref.__coleccion) {
+    const f = ref.__filtro;
+    return { docs: hijosDe(ref.__coleccion).filter((d) => !f || (d.data() as Record<string, unknown>)[f.campo] === f.valor) };
+  }
+  const path = ref.path!;
+  return { exists: docs.has(path), data: () => docs.get(path) };
+};
+
+const aplicarOps = (): void => {
+  // Una transacción real aplica EN ORDEN: el delete previo y el set posterior sobre el mismo path
+  // terminan en el set. Reproducirlo es lo único que hace honesto a este test.
+  for (const op of ops) {
+    if (op.tipo === 'delete') docs.delete(op.path);
+    else docs.set(op.path, op.data!);
+  }
+  ops.length = 0;
+};
+
 vi.mock('../lib/firebase.js', () => ({
   db: () => ({
     doc: (path: string) => ({ path, get: async () => ({ exists: docs.has(path), data: () => docs.get(path) }) }),
-    collection: (path: string) => {
-      const coleccion = {
-        get: async () => ({ docs: hijosDe(path) }),
-        where: (campo: string, _op: string, valor: unknown) => ({
-          get: async () => ({ docs: hijosDe(path).filter((d) => (d.data() as Record<string, unknown>)[campo] === valor) }),
-        }),
-      };
-      return coleccion;
-    },
+    collection: (path: string) => consulta(path),
     batch: () => ({
       set: (ref: { path: string }, data: Record<string, unknown>) => ops.push({ tipo: 'set', path: ref.path, data }),
       delete: (ref: { path: string }) => ops.push({ tipo: 'delete', path: ref.path }),
-      commit: async () => {
-        // Un batch real aplica EN ORDEN: el delete previo y el set posterior sobre el mismo path
-        // terminan en el set. Reproducirlo es lo único que hace honesto a este test.
-        for (const op of ops) {
-          if (op.tipo === 'delete') docs.delete(op.path);
-          else docs.set(op.path, op.data!);
-        }
-        ops.length = 0;
-      },
+      commit: async () => aplicarOps(),
     }),
+    runTransaction: async (fn: (tx: unknown) => Promise<unknown>) => {
+      const tx = {
+        get: leer,
+        set: (ref: { path: string }, data: Record<string, unknown>) => ops.push({ tipo: 'set', path: ref.path, data }),
+        delete: (ref: { path: string }) => ops.push({ tipo: 'delete', path: ref.path }),
+      };
+      const r = await fn(tx);
+      aplicarOps();
+      return r;
+    },
   }),
   paths: {
     metaAssets: (t: string) => `tenants/${t}/metaAssets`,

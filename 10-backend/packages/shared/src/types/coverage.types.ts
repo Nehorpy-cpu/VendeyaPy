@@ -112,6 +112,12 @@ export interface CoverageResumeJob {
   status: CoverageResumeStatus;
   channel: MessageChannel;
   receivedVia: string | null;
+  /**
+   * ADR-0017 §2 — CANAL de la conversación que originó la decisión (`active` = número heredado).
+   * Se COPIA del request al crear el job en vez de recalcularlo: el worker corre minutos u horas
+   * más tarde y volver a derivarlo cuesta lecturas y vuelve a divergir. Ausente ⇒ canal heredado.
+   */
+  sessionKey?: string;
   /** HARDEN-1: activación bajo la que se creó. Distinta de la vigente ⇒ el job es INERTE. */
   activationId?: string | null;
   /** 1D: idempotencia del pedido (reservado ANTES de crear la orden). */
@@ -260,6 +266,14 @@ export interface CoverageRequest {
   channel: MessageChannel;
   /** phone_number_id del negocio que recibió la conversación (responder por el MISMO número). */
   receivedVia: string | null;
+  /**
+   * ADR-0017 §2 — CANAL de la conversación (`active` = número heredado). El PNID de `receivedVia`
+   * NO alcanza para derivarlo: `whatsappSessionKey(pnid)` devuelve `wa_{pnid}` siempre, y aplicarlo
+   * al número que ya vende mudaría su conversación entera a un documento vacío. El canal se
+   * resuelve UNA vez —en el turno que crea el request, que sí sabe cuál es— y viaja acá.
+   * Ausente ⇒ canal heredado.
+   */
+  sessionKey?: string;
   /**
    * HARDEN-1: activación del flujo bajo la que se creó el request. Si no coincide con la
    * activación VIGENTE del tenant, el request es histórico/inerte: no se decide ni se reanuda.

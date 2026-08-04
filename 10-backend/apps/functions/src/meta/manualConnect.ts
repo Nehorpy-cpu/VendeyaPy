@@ -14,13 +14,12 @@
  *  - No toca el flujo Embedded Signup: solo reusa helpers compartidos (writeActiveConnection,
  *    writeDiscoveredAssets, verifyWhatsappChannel).
  */
-import type { MetaExternalIndexEntry } from '@vpw/shared';
-import { db, paths } from '../lib/firebase.js';
 import { getSecretStore } from '../lib/secretStore.js';
 import { metaTokenSecretName } from './secretName.js';
 import { logger } from '../lib/logger.js';
 import { writeActiveConnection } from './connectFlow.js';
 import { buildMetaAssets, writeDiscoveredAssets, type DiscoveredAsset } from './discovery.js';
+import { duenoActualDePnid, PnidOcupadoError, whatsappIndexId } from './pnidOwnership.js';
 import { verifyWhatsappChannel } from './preflight.js';
 import type { MetaGraphClient, MetaPhoneNumber } from './graphClient.js';
 
@@ -81,10 +80,13 @@ export function parseManualWhatsappInput(data: unknown): ParseResult {
   };
 }
 
-/** Clave del índice global para un phone_number_id de WhatsApp (igual que discovery/connect). */
-export function whatsappIndexId(phoneNumberId: string): string {
-  return `whatsapp_${phoneNumberId}`;
-}
+/**
+ * Clave del índice global para un phone_number_id de WhatsApp. La definición canónica vive en
+ * `pnidOwnership.ts` junto al guard que la usa —si el guard mirara una clave distinta de la que se
+ * escribe, autorizaría sobre un documento que no es el que importa—; se re-exporta acá porque este
+ * módulo ya era el punto de importación de otros.
+ */
+export { whatsappIndexId };
 
 // ---------------- Orquestación (E/S; deps inyectables para tests) ----------------
 
@@ -99,10 +101,7 @@ export interface ManualConnectDeps {
 }
 
 const defaultDeps: ManualConnectDeps = {
-  collisionTenant: async (phoneNumberId) => {
-    const snap = await db().doc(paths.metaExternalIndexEntry(whatsappIndexId(phoneNumberId))).get();
-    return snap.exists ? ((snap.data() as MetaExternalIndexEntry).tenantId ?? null) : null;
-  },
+  collisionTenant: duenoActualDePnid,
   storeToken: (tenantId, token) => getSecretStore().set(metaTokenSecretName(tenantId), token),
   writeConnection: writeActiveConnection,
   writeAssets: (tenantId, assets) => writeDiscoveredAssets(tenantId, 'main', assets),
@@ -162,7 +161,19 @@ export async function runManualWhatsappConnect(
     phones: [phone],
     selectedPhoneNumberId: input.phoneNumberId,
   });
-  await deps.writeAssets(tenantId, assets);
+  try {
+    await deps.writeAssets(tenantId, assets);
+  } catch (e) {
+    // El guard de propiedad ahora también corre DENTRO de la escritura, así que puede rechazar
+    // cuando el chequeo del paso 1 ya dijo «libre» (la ventana entre ambos). Para el admin es el
+    // MISMO problema —el número es de otra empresa— y tiene que leer el mismo motivo, no un error
+    // interno que no le dice nada.
+    if (e instanceof PnidOcupadoError) {
+      logger.warn('manualConnect: colisión de PNID detectada al escribir', { tenantId });
+      return { ok: false, reason: 'phone_number_collision', conflictTenantId: e.conflictTenantId };
+    }
+    throw e;
+  }
 
   // 5) Suscribir la app a la WABA (best-effort; el inbound real lo requiere en Meta).
   try {

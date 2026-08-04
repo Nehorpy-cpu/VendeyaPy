@@ -22,7 +22,7 @@ import { db, paths } from '../../lib/firebase.js';
 import { logger } from '../../lib/logger.js';
 import { coverageSettings, purgeAtFrom } from '../../conversation/coverage.js';
 import { coverageHold } from '../../conversation/coverageTestHooks.js';
-import { enviarPorOutbox, processCoverageResumeJob, MENSAJE_COBERTURA_VENCIDA } from '../../conversation/coverageResume.js';
+import { canalDeCoberturaPersistido, enviarPorOutbox, processCoverageResumeJob, MENSAJE_COBERTURA_VENCIDA } from '../../conversation/coverageResume.js';
 import { outboxIdDeQuote } from '../coverage/coverageCallables.js';
 import { getCheckoutConfig } from '../../orders/checkoutConfig.js';
 
@@ -69,7 +69,9 @@ export async function runCoverageMaintenance(): Promise<void> {
           const fresh = (await tx.get(d.ref)).data() as CoverageRequest | undefined;
           if (!fresh || (fresh.status !== 'awaiting_location' && fresh.status !== 'pending_coverage_review')) return false;
           if (fresh.expiresAt.toMillis() > now.toMillis()) return false;
-          const sesRef = db().doc(paths.session(tenantId, fresh.customerId));
+          // ADR-0017 §2: la expiración libera el takeover de la conversación del canal del
+          // request. Expirando sobre `active` se liberaba el chat del número que ya vende.
+          const sesRef = db().doc(paths.session(tenantId, fresh.customerId, canalDeCoberturaPersistido(null, fresh)));
           const ses = (await tx.get(sesRef)).data() as Session | undefined;
           const ctx = ses?.context;
           // HARDEN-2 (review): un intento de cotización PREPARED (jamás salió) se cierra terminal
@@ -163,7 +165,7 @@ export async function runCoverageMaintenance(): Promise<void> {
       for (const d of held.docs) {
         const job = d.data() as CoverageResumeJob;
         if ((job.activationId ?? null) !== cfg.activationId) continue; // HARDEN-1: activación anterior → inerte, no se re-encola
-        const ses = (await db().doc(paths.session(tenantId, job.customerId)).get()).data() as Session | undefined;
+        const ses = (await db().doc(paths.session(tenantId, job.customerId, canalDeCoberturaPersistido(job, null))).get()).data() as Session | undefined;
         if (ses?.context?.humanTakeover === true) continue; // el humano sigue: no tocar
         await db().runTransaction(async (tx) => {
           const act = coverageActivationOf(((await tx.get(cfgRef)).data() as { coverage?: unknown } | undefined)?.coverage);

@@ -21,6 +21,21 @@
  *  - https://developers.facebook.com/documentation/business-messaging/whatsapp/webhooks/reference/smb_message_echoes
  *  - https://developers.facebook.com/documentation/business-messaging/whatsapp/webhooks/reference/history
  *  - https://developers.facebook.com/documentation/business-messaging/whatsapp/webhooks/reference/smb_app_state_sync
+ *
+ * CONTRATO OFICIAL VERIFICADO EL 2026-08-04 (ADR-0017 §5 y §6 · ARCHITECTURE §12.1). Cuatro hechos
+ * que este parser no contemplaba, y que cuestan material irrecuperable:
+ *
+ *  1. Los IDs de los ADJUNTOS del historial llegan con `field: "history"` pero en `value.messages[]`,
+ *     NO en `value.history[]`. Se descartaban en silencio, y esos IDs viven 14 días y no se pueden
+ *     volver a pedir. Salen por lista PROPIA (`historyMedia`): meterlos en `messages` los mandaría a
+ *     `metaWebhookInbox`, que ES el disparador del motor.
+ *  2. «El negocio no compartió» llega como `history[0].errors[0].code = 2593109` y ese payload NO
+ *     trae el envelope `object`/`entry`/`changes`. Sin leerlo, el coordinador espera hasta quemar la
+ *     ventana de 24 h — y pasada, hay que desconectar el número real y rehacer todo el onboarding.
+ *  3. `account_update` avisa que Meta desconectó el número (inactividad ~14 d / ~30 d). Sin
+ *     consumirlo, un número en `live` automatiza contra una conexión muerta.
+ *  4. El error `131060` es ESPERADO tras el onboarding. Se expone CLASIFICADO para no llenar la
+ *     auditoría de ruido y, sobre todo, para no esconder los errores que sí son fallas.
  */
 
 import { sanitizeAttachmentCaption, sanitizeAttachmentFilename, normalizeMimeType } from '@vpw/shared';
@@ -167,6 +182,70 @@ export interface NormalizedHistoryThread {
 }
 
 /**
+ * Código con el que Meta dice «el negocio eligió NO compartir el historial». Es un DESENLACE, no
+ * un silencio: sin leerlo el coordinador espera hasta que se vence la ventana de 24 h, y pasada
+ * esa ventana la única salida es desconectar el número real y rehacer el Embedded Signup entero.
+ */
+export const HISTORY_NOT_SHARED_CODE = 2593109;
+
+/**
+ * Códigos ESPERADOS tras el onboarding de Coexistence (ADR-0017 §6). `131060` aparece en el
+ * webhook de mensajes no soportados —primer mensaje de un usuario, o un companion no soportado— y
+ * tratarlo como falla llenaría la auditoría de ruido justo cuando hay que ver las fallas reales.
+ *
+ * Congelado y con nombre propio para que la clasificación se lea en un solo lugar: si esto fuera
+ * un `if (code === 131060)` en el webhook, el día que Meta sume otro código esperado nadie sabría
+ * dónde tocar.
+ */
+export const COEXISTENCE_EXPECTED_ERROR_CODES: readonly number[] = Object.freeze([131060]);
+
+/** Un error del payload de Meta, recortado a lo que se puede loguear sin exponer nada. */
+export interface NormalizedWebhookError {
+  code: number | null;
+  /** `title` SANEADO y acotado. El `message`/`details` NO se transportan: pueden traer contenido. */
+  title: string | null;
+  /** true ⇒ es uno de los códigos que el contrato declara normales. No es una falla. */
+  expected: boolean;
+}
+
+/**
+ * ADJUNTO del historial (`field: "history"` con `value.messages[]`). SOLO se transportan los IDs y
+ * la metadata: el archivo se baja después, con el token de esa conexión, y el mediaId vive 14 días.
+ *
+ * No reusa `InboundAttachment` a propósito: aquel tipo describe algo que un cliente mandó AHORA y
+ * que el motor puede consumir. Éste es archivo — nace `automationEligible: false` y su destino es
+ * la colección cerrada, nunca `metaWebhookInbox`.
+ */
+export interface NormalizedHistoryMedia {
+  platform: 'whatsapp';
+  externalId: string;
+  /** wamid del mensaje del historial al que pertenece el adjunto. Base de la idempotencia. */
+  messageId: string;
+  /** `messages[].type` SANEADO (`image`, `document`, `video`, `audio`, `sticker`, …). */
+  kind: string;
+  /** Id del media en Graph. Existe 14 días y NO se puede volver a pedir. Nunca va a logs. */
+  mediaId: string;
+  declaredMime: string | null;
+  filename: string | null;
+  sha256: string | null;
+  timestamp: number | null;
+  automationEligible: false;
+}
+
+/**
+ * Clave de idempotencia de un adjunto del historial. Lleva la GENERACIÓN de la sincronización por
+ * la misma razón que la del chunk: una segunda sincronización (que exige offboardear y rehacer el
+ * Embedded Signup) traería los mismos wamids, y sin la generación se descartaría como duplicado.
+ *
+ * La generación 1 conserva la clave SIN sufijo: es retrocompatible con lo que ya escribió el
+ * despliegue anterior, y evita duplicar documentos por un cambio de formato de clave.
+ */
+export function historyMediaIdempotencyKey(media: Pick<NormalizedHistoryMedia, 'externalId' | 'messageId'>, generacion: number): string {
+  const sufijo = generacion > 1 ? `_g${generacion}` : '';
+  return `historymedia_${media.externalId}_${media.messageId}${sufijo}`;
+}
+
+/**
  * HISTORY — un chunk del historial (hasta 180 días). Es un ARCHIVO, no una bandeja de entrada:
  * nace `automationEligible: false` y su destino es una colección propia y cerrada al cliente.
  */
@@ -183,7 +262,45 @@ export interface NormalizedHistoryChunk {
   threads: NormalizedHistoryThread[];
   /** true si se recortó por los topes. Nunca se pierde algo en silencio. */
   truncated: boolean;
+  /**
+   * `history[].errors[]`. Se ignoraba entero, y ahí vive el ÚNICO aviso de que el negocio decidió
+   * no compartir (`2593109`). Siempre existe la lista: quien la lee nunca chequea null.
+   */
+  errors: NormalizedWebhookError[];
   automationEligible: false;
+}
+
+/** ¿Este chunk es el aviso de que el negocio NO compartió el historial? */
+export function esHistorialNoCompartido(chunk: Pick<NormalizedHistoryChunk, 'errors'>): boolean {
+  return chunk.errors.some((e) => e.code === HISTORY_NOT_SHARED_CODE);
+}
+
+/**
+ * Eventos de `account_update` que gobiernan el ciclo de desconexión (ADR-0017 §6). Vocabulario
+ * CERRADO: un evento que este despliegue no conoce se normaliza como `unknown` y no se degrada a
+ * ninguno de los conocidos — degradarlo sería ejecutar una acción por un valor que no se entiende.
+ */
+export const ACCOUNT_UPDATE_EVENTS = Object.freeze(['ACCOUNT_OFFBOARDED', 'PARTNER_REMOVED', 'ACCOUNT_RECONNECTED'] as const);
+export type AccountUpdateEvent = (typeof ACCOUNT_UPDATE_EVENTS)[number] | 'unknown';
+
+/**
+ * ACCOUNT UPDATE — Meta desconecta un número en coexistencia por su cuenta (inactividad del
+ * dispositivo primario ~14 d, del companion ~30 d, cambio de número, re-registro, reinstalación).
+ *
+ * `externalId` puede quedar VACÍO: el payload de `account_update` no siempre trae
+ * `phone_number_id`. No se adivina — quien consuma esto decide qué hacer sin PNID, y la respuesta
+ * correcta es no degradar a nadie (silenciar el número equivocado es peor que un evento perdido).
+ */
+export interface NormalizedAccountUpdate {
+  platform: 'whatsapp';
+  /** `metadata.phone_number_id` si vino; `''` si Meta no lo mandó. */
+  externalId: string;
+  /** `entry[].id` — la WABA. Evidencia para diagnosticar, jamás para decidir a quién degradar. */
+  wabaId: string;
+  event: AccountUpdateEvent;
+  /** El string CRUDO saneado, para que un evento nuevo quede registrado con su nombre real. */
+  rawEvent: string;
+  timestamp: number | null;
 }
 
 /**
@@ -230,7 +347,13 @@ export interface ParseResult {
    */
   echoes: NormalizedEcho[];
   historyChunks: NormalizedHistoryChunk[];
+  /** IDs de los adjuntos del historial (`field:"history"` con `value.messages[]`). Ver el tipo. */
+  historyMedia: NormalizedHistoryMedia[];
   appStateChanges: NormalizedAppStateChange[];
+  /** `account_update`: el ciclo de desconexión de Coexistence (ADR-0017 §6). */
+  accountUpdates: NormalizedAccountUpdate[];
+  /** Errores del canal `messages`, ya clasificados en esperados / no esperados. */
+  messageErrors: NormalizedWebhookError[];
   unknownFields: NormalizedUnknownField[];
 }
 
@@ -346,12 +469,38 @@ function igReferral(ref: Any): MetaAdReferral | null {
   return { adId: str(ref.ad_id), campaignId: null, sourceUrl: null };
 }
 
+/** Largo máximo del `title` de un error. Entra en una fila de log y no arrastra contenido. */
+const ERROR_TITLE_MAX = 128;
+
+/**
+ * Normaliza `errors[]` de cualquier nivel del payload. Se transportan SOLO `code` y `title`: el
+ * `message`, `details` y `error_data` de Meta pueden arrastrar contenido del mensaje del cliente, y
+ * esto termina en logs y en documentos de auditoría.
+ */
+function waErrors(raw: Any, out: NormalizedWebhookError[]): void {
+  if (!Array.isArray(raw)) return;
+  for (const e of raw) {
+    const code = toNum(e?.code);
+    out.push({
+      code,
+      title: label(e?.title, ERROR_TITLE_MAX),
+      expected: code !== null && COEXISTENCE_EXPECTED_ERROR_CODES.includes(code),
+    });
+  }
+}
+
 /** Cuerpo HISTÓRICO del parser: un cambio con `field === 'messages'` (mensajes vivos + statuses). */
-function waMessagesChange(value: Any, externalId: string, out: NormalizedInbound[]): number {
+function waMessagesChange(value: Any, externalId: string, out: NormalizedInbound[], errores: NormalizedWebhookError[]): number {
   let ignored = 0;
   if (Array.isArray(value?.statuses)) ignored += value.statuses.length; // recibos de entrega
+  // Errores a nivel del CAMBIO: hasta acá eran completamente invisibles. Ahí es donde llega el
+  // `131060` esperado tras el onboarding, y también cualquier falla real del canal.
+  waErrors(value?.errors, errores);
   const messages = Array.isArray(value?.messages) ? value.messages : [];
   for (const msg of messages) {
+    // Errores del MENSAJE (típicamente `type: 'unsupported'`). Mismo criterio: se exponen
+    // clasificados, no se esconden ni se tratan todos como falla.
+    waErrors(msg?.errors, errores);
     const text = waText(msg);
     const attachment = waAttachment(msg);
     const location = waLocation(msg);
@@ -485,8 +634,11 @@ export function echoIdempotencyKey(echo: Pick<NormalizedEcho, 'echoType' | 'mess
  * del cliente). Así el número del negocio no necesita transportarse tampoco acá: menos superficie
  * para que mañana alguien lo confunda con el `from` de un inbound.
  */
-function waHistoryChange(value: Any, externalId: string, out: NormalizedHistoryChunk[]): number {
+function waHistoryChange(value: Any, externalId: string, out: NormalizedHistoryChunk[], media: NormalizedHistoryMedia[]): number {
   let ignored = 0;
+  // AGUJERO DEL CONTRATO #1: los IDs de los adjuntos del historial llegan en ESTE mismo `field`
+  // pero en `value.messages[]`. Se descartaban en silencio y sólo viven 14 días.
+  ignored += waHistoryMedia(value, externalId, media);
   const chunks = Array.isArray(value?.history) ? value.history : [];
   for (const chunk of chunks) {
     const hilosCrudos = Array.isArray(chunk?.threads) ? chunk.threads : [];
@@ -529,6 +681,10 @@ function waHistoryChange(value: Any, externalId: string, out: NormalizedHistoryC
       if (threads.length < HISTORY_MAX_THREADS) threads.push({ customerWaId, messages });
       else truncated = true;
     }
+    const errors: NormalizedWebhookError[] = [];
+    // AGUJERO DEL CONTRATO #2: acá vive el `2593109` con el que Meta avisa que el negocio NO
+    // compartió. Sin leerlo, el coordinador espera hasta quemar la ventana de 24 h.
+    waErrors(chunk?.errors, errors);
     out.push({
       platform: 'whatsapp',
       externalId,
@@ -539,10 +695,73 @@ function waHistoryChange(value: Any, externalId: string, out: NormalizedHistoryC
       messageCount,
       threads,
       truncated,
+      errors,
       automationEligible: false,
     });
   }
   return ignored;
+}
+
+/** Tipos de `messages[].type` que pueden traer un media id en el historial. */
+const HISTORY_MEDIA_TYPES = ['image', 'document', 'video', 'audio', 'sticker'] as const;
+
+/**
+ * Los ADJUNTOS del historial: `field: "history"` con `value.messages[]`.
+ *
+ * Se transportan sólo los IDs y la metadata. No se reusa `waAttachment` porque aquel exige
+ * `image`/`document` (los dos tipos que el motor sabe consumir) y acá se guardan TODOS los que
+ * traigan media id: no hay interpretación de negocio, hay un archivo que sólo existe 14 días.
+ */
+function waHistoryMedia(value: Any, externalId: string, out: NormalizedHistoryMedia[]): number {
+  let ignored = 0;
+  const mensajes = Array.isArray(value?.messages) ? value.messages : [];
+  for (const msg of mensajes) {
+    const messageId = str(msg?.id);
+    const tipo = str(msg?.type) ?? '';
+    const media = (HISTORY_MEDIA_TYPES as readonly string[]).includes(tipo) ? msg?.[tipo] : null;
+    const mediaId = str(media?.id);
+    // Sin wamid no hay clave de idempotencia; sin media id no hay nada que bajar. En los dos casos
+    // el ítem no sirve para nada: se cuenta como ignorado en vez de guardar un documento inútil.
+    if (messageId === null || mediaId === null) {
+      ignored++;
+      continue;
+    }
+    out.push({
+      platform: 'whatsapp',
+      externalId,
+      messageId,
+      kind: label(tipo, HISTORY_LABEL_MAX) ?? 'unknown',
+      mediaId,
+      declaredMime: normalizeMimeType(media?.mime_type),
+      filename: sanitizeAttachmentFilename(media?.filename),
+      sha256: str(media?.sha256),
+      timestamp: toNum(msg?.timestamp),
+      automationEligible: false,
+    });
+  }
+  return ignored;
+}
+
+/**
+ * ACCOUNT UPDATE (`field: "account_update"` → `value.event`). ADR-0017 §6.
+ *
+ * El PNID sale ÚNICAMENTE de `metadata.phone_number_id`. Si Meta no lo manda queda vacío y quien
+ * consuma esto no degrada a nadie: adivinar el número a partir del `phone_number` mostrado o de la
+ * WABA podría dejar mudo al número que está vendiendo, que es el desenlace prohibido.
+ */
+function waAccountUpdateChange(value: Any, externalId: string, wabaId: string, out: NormalizedAccountUpdate[]): number {
+  const crudo = str(value?.event) ?? '';
+  const conocido = (ACCOUNT_UPDATE_EVENTS as readonly string[]).includes(crudo);
+  out.push({
+    platform: 'whatsapp',
+    externalId,
+    wabaId,
+    event: conocido ? (crudo as AccountUpdateEvent) : 'unknown',
+    rawEvent: label(crudo, HISTORY_LABEL_MAX) ?? '',
+    timestamp: toNum(value?.timestamp),
+  });
+  // Un account_update no es un mensaje: no suma a `ignored` (que cuenta mensajes descartados).
+  return 0;
 }
 
 /**
@@ -610,16 +829,19 @@ function parseWhatsApp(entries: Any[], result: ParseResult): number {
       const field = str(change?.field) ?? 'messages';
       switch (field) {
         case 'messages':
-          ignored += waMessagesChange(value, externalId, result.messages);
+          ignored += waMessagesChange(value, externalId, result.messages, result.messageErrors);
           break;
         case 'smb_message_echoes':
           ignored += waEchoesChange(value, externalId, result.echoes);
           break;
         case 'history':
-          ignored += waHistoryChange(value, externalId, result.historyChunks);
+          ignored += waHistoryChange(value, externalId, result.historyChunks, result.historyMedia);
           break;
         case 'smb_app_state_sync':
           ignored += waAppStateChange(value, externalId, result.appStateChanges);
+          break;
+        case 'account_update':
+          ignored += waAccountUpdateChange(value, externalId, str(entry?.id) ?? '', result.accountUpdates);
           break;
         default:
           result.unknownFields.push(waUnknownChange(field, value, externalId));
@@ -707,14 +929,40 @@ const emptyResult = (): ParseResult => ({
   ignored: 0,
   echoes: [],
   historyChunks: [],
+  historyMedia: [],
   appStateChanges: [],
+  accountUpdates: [],
+  messageErrors: [],
   unknownFields: [],
 });
+
+/**
+ * HISTORIAL SIN ENVELOPE — AGUJERO DEL CONTRATO #2.
+ *
+ * El payload con el que Meta avisa «el negocio no compartió» NO trae `object`/`entry`/`changes`:
+ * llega como un objeto suelto con `history[]` adentro (y, según la página de la doc, a veces
+ * envuelto en `value`). Sin este camino, `parseMetaWebhookPayload` cortaba en el guard del
+ * `entry` y perdía el evento ENTERO — el coordinador se quedaba esperando hasta que se vencía la
+ * ventana de 24 h, y ahí la única salida es desconectar el número real y rehacer el onboarding.
+ *
+ * Es DELIBERADAMENTE angosto: sólo reconoce un `history` que sea arreglo. Cualquier otro payload
+ * sin envelope sigue devolviendo vacío, como antes.
+ */
+function parseHistorialSinSobre(root: Any, result: ParseResult): void {
+  const cuerpo = Array.isArray(root?.history) ? root : Array.isArray(root?.value?.history) ? root.value : null;
+  if (!cuerpo) return;
+  const externalId = str(cuerpo?.metadata?.phone_number_id) ?? '';
+  result.ignored = waHistoryChange(cuerpo, externalId, result.historyChunks, result.historyMedia);
+}
 
 export function parseMetaWebhookPayload(payload: unknown): ParseResult {
   const root = payload as Any;
   const result = emptyResult();
-  if (!root || typeof root !== 'object' || !Array.isArray(root.entry)) return result;
+  if (!root || typeof root !== 'object') return result;
+  if (!Array.isArray(root.entry)) {
+    parseHistorialSinSobre(root, result);
+    return result;
+  }
   switch (root.object) {
     case 'whatsapp_business_account':
       result.ignored = parseWhatsApp(root.entry, result);

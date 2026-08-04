@@ -12,6 +12,7 @@
 import { onRequest } from 'firebase-functions/v2/https';
 import { guardDevEndpoint } from '../../middleware/devGuard.js';
 import { submitComprobante } from '../../orders/submitComprobante.js';
+import { LEGACY_SESSION_KEY } from '@vpw/shared';
 import { db, paths } from '../../lib/firebase.js';
 import { logger } from '../../lib/logger.js';
 
@@ -35,7 +36,7 @@ export const devSubmitComprobante = onRequest(
     let orderId = body.orderId;
     if (!orderId && body.from) {
       const customerId = body.from.replace(/[^0-9]/g, '');
-      const sessionSnap = await db().doc(paths.session(tenantId, customerId)).get();
+      const sessionSnap = await db().doc(paths.session(tenantId, customerId, LEGACY_SESSION_KEY)).get();
       orderId = sessionSnap.data()?.context?.pendingOrderId ?? undefined;
     }
     if (!orderId) {

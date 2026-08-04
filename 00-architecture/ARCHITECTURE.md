@@ -1563,7 +1563,17 @@ encima quedan solo la resolución del tenant y la identidad del cliente.
 
 **Orden obligatorio al desplegar**: la migración del PNID vigente a `live` corre **antes** que el gate. Al
 revés, el número que vende leería el campo ausente, resolvería `inactive` y quedaría mudo. El código anterior
-ignora el campo, así que en ese orden no hay ventana de interrupción.
+ignora el campo, así que en ese orden no hay ventana de interrupción. La migración escribe el **asset**, y
+también el **índice** cuando el índice *declara* otro modo — que es lo que deja un `ACCOUNT_OFFBOARDED`
+(§12.1): sin eso, reconectar un número dejaba `live` en el asset, `inactive` en el índice y el número mudo
+por el desempate. La ausencia del campo en el índice sigue sin votar, así que el camino normal es de un solo
+documento. La auditoría de release (`release-audit.mjs`) verifica los dos.
+
+**Dos superficies, no un `mode`.** El onboarding del número real usa callables propios
+(`coexistenceStart`/`coexistenceConnect`), que dejan el número en su conexión `wa_{pnid}`. La superficie
+estándar (`startMetaConnect`/`connectMeta`) **rechaza** `mode: 'coexistence'`: ese camino guarda el token en
+el secreto del tenant y reescribe los assets de la conexión `main`, cuya limpieza borra el asset y el ruteo
+del número que hoy vende.
 
 **Webhooks de Coexistence.** El parser enruta por `change.field`, no por la forma del payload:
 
@@ -1582,4 +1592,20 @@ conversación consigo mismo y el bot se respondiera a sí mismo. Segundo: `onWeb
 documento de `metaWebhookInbox` — esa colección *es* el disparador del motor —, por eso el historial y los
 contactos no pasan por ahí, y por eso la defensa es doble: un gate por tipo de evento *y* un destino separado.
 
-*Última actualización: 2026-08-03 — §4.5 (sesión por canal) y §12 (multi-número y Coexistence, ADR-0017).*
+### 12.1 Contrato oficial de Meta — verificado 2026-08-04
+
+Lo que sigue se contrastó contra la documentación oficial vigente y **corrige supuestos** del diseño
+original. Ver ADR-0017 §5 y §6.
+
+| Punto | Contrato oficial | Qué implica acá |
+|---|---|---|
+| `featureType` | `whatsapp_business_app_onboarding` | El string **vacío declara el flujo ESTÁNDAR**, no «pendiente de configurar». Coexistence necesita su propio lanzador. |
+| Evento de cierre | `FINISH_WHATSAPP_BUSINESS_APP_ONBOARDING` | Su payload documentado trae **solo `waba_id`**: el PNID se resuelve server-side por `GET /<WABA_ID>/phone_numbers`, nunca desde el `postMessage`. |
+| Historial | `POST /<PNID>/smb_app_data` con `sync_type` | **Hay que pedirlo, y se pide UNA sola vez.** Sin ese disparo no llega ni un webhook. Repetirlo exige offboarding + rehacer el flujo. |
+| «No compartió» | `history[0].errors[0].code = 2593109` | Es un desenlace explícito. Sin leerlo, el coordinador espera hasta quemar la ventana de 24 h. |
+| Ventana de servicio | Los mensajes de la app **no** crean ni extienden ventanas de Cloud API | Un echo activa el takeover pero **no habilita** texto libre por Cloud API. |
+| Desconexión | `account_update` (`ACCOUNT_OFFBOARDED`, `PARTNER_REMOVED`, …) | Meta desconecta solo por inactividad (~14/30 d). Hay que degradar ese PNID a `inactive`. La Deregister API está **prohibida** en coexistencia. |
+| Error `131060` | Esperado tras el onboarding | No es una falla; tratarlo como tal esconde las reales. |
+| Versión de Embedded Signup | `extras.version`; **v2 se depreca el 2026-10-15** | Omitir el campo deja el flujo en v2. Es un plazo duro, no una mejora opcional. |
+
+*Última actualización: 2026-08-04 — §12.1 (contrato oficial de Coexistence verificado; ADR-0017 §5 y §6).*

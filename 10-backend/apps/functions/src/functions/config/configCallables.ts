@@ -35,6 +35,10 @@ const CREDS_REASON: Record<WhatsappCredsReason, string> = {
   token_expired: 'el token de Meta venció',
   no_phone_asset: 'no hay un número de WhatsApp seleccionado',
   token_unavailable: 'el token de Meta no está disponible',
+  // ADR-0017: se pidió un número CONCRETO y ese número no resuelve. Este callable resuelve el
+  // principal (sin pedir número), así que en la práctica no llega acá; el mapa es exhaustivo a
+  // propósito para que agregar un motivo obligue a decidir qué se le muestra al usuario.
+  channel_unavailable: 'el número de WhatsApp pedido no está disponible',
 };
 
 export const checkoutConfigUpdate = onCall<{ tenantId?: string; data?: unknown }>({ region: 'us-central1' }, async (req) => {

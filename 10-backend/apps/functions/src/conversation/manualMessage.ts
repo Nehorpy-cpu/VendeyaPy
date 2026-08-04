@@ -23,6 +23,7 @@ import { db, paths } from '../lib/firebase.js';
 import { logger } from '../lib/logger.js';
 import { appendMessage, type AppendMessageInput } from './messages.js';
 import { getWhatsAppClient, type WhatsAppClient } from '../messaging/whatsappClient.js';
+import { resolverCanalDePnid } from './canal.js';
 
 /** Tope de la Cloud API para texto (Meta rechaza >4096; validamos antes de gastar el request). */
 export const MANUAL_MESSAGE_MAX_CHARS = 4096;
@@ -78,7 +79,13 @@ export interface ManualMessageDeps {
    * desfasado (submitComprobante solo actualiza la sesión) — validar contra el resumen
    * bloqueaba al vendedor justo después del comprobante (caso central de HUMAN-HANDOFF-1).
    */
-  getGateContext: (tenantId: string, customerId: string) => Promise<ManualGateContext>;
+  getGateContext: (tenantId: string, customerId: string, sessionKey: string) => Promise<ManualGateContext>;
+  /**
+   * ADR-0017 §2: el CANAL de esta conversación. Se le pregunta a la autoridad a partir del mismo
+   * `receivedVia` que ya elige por qué número SALE el mensaje, para que el gate y el envío no
+   * puedan terminar mirando conversaciones distintas.
+   */
+  resolverCanal: (tenantId: string, receivedVia: string | null) => Promise<string>;
   getClient: (tenantId: string, phoneNumberId: string | null) => Promise<WhatsAppClient>;
   append: (tenantId: string, customerId: string, input: AppendMessageInput) => Promise<Message>;
 }
@@ -95,8 +102,8 @@ export const defaultManualMessageDeps: ManualMessageDeps = {
     const snap = await db().doc(paths.customer(t, c)).get();
     return snap.exists ? (snap.data() as Customer) : null;
   },
-  getGateContext: async (t, c) => {
-    const snap = await db().doc(paths.session(t, c)).get();
+  getGateContext: async (t, c, sessionKey) => {
+    const snap = await db().doc(paths.session(t, c, sessionKey)).get();
     if (!snap.exists) return { humanTakeover: null, coveragePointer: null, activation: null, shippingQuote: null, resumeDone: null };
     const ctx = (snap.data() as { context?: { humanTakeover?: boolean; coverage?: { requestId?: string; status?: CoverageStatus } | null } }).context;
     const humanTakeover = ctx?.humanTakeover === true;
@@ -129,6 +136,7 @@ export const defaultManualMessageDeps: ManualMessageDeps = {
   // lo que le permite al vendedor seguir contestando por el panel de un número en `shadow` (donde
   // atiende a mano) sin que ese mismo permiso se lo lleve puesto un job automático.
   getClient: (t, pnid) => getWhatsAppClient(t, undefined, pnid, 'humano'),
+  resolverCanal: resolverCanalDePnid,
   append: appendMessage,
 };
 
@@ -147,8 +155,15 @@ export async function sendManualMessage(
   if (!customer) throw new HttpsError('not-found', 'Esa conversación no existe.');
 
   const conv = (customer as { conversation?: { humanTakeover?: boolean; receivedVia?: string | null } }).conversation;
+  /**
+   * ADR-0017 §2 — el gate se evalúa contra la conversación QUE EL VENDEDOR ESTÁ MIRANDO. Leyendo
+   * siempre `sessions/active`, los dos errores posibles eran igual de malos: rebotarle su propio
+   * mensaje («tocá Tomar conversación») sobre un chat que ya tomó, o dar por bueno el takeover del
+   * otro número y saltear el gate de cotización de envío escribiéndole al cliente igual.
+   */
+  const sessionKey = await deps.resolverCanal(input.tenantId, conv?.receivedVia ?? null);
   // Sesión (fuente de verdad) con fallback al resumen del customer (conversaciones sin sesión).
-  const gate = await deps.getGateContext(input.tenantId, input.customerId);
+  const gate = await deps.getGateContext(input.tenantId, input.customerId, sessionKey);
   const humanTakeover = gate.humanTakeover ?? conv?.humanTakeover === true;
   if (!humanTakeover && !OVERRIDE_ROLES.has(sender.role)) {
     throw new HttpsError(

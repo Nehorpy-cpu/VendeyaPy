@@ -43,7 +43,7 @@ import type {
   OrderCartInput,
   Session,
 } from '@vpw/shared';
-import { newId, ID_PREFIX, newOrderId, coverageActivationOf, shippingQuotePolicyOf, maskPhone } from '@vpw/shared';
+import { newId, ID_PREFIX, newOrderId, coverageActivationOf, shippingQuotePolicyOf, maskPhone, parseSessionKey, LEGACY_SESSION_KEY } from '@vpw/shared';
 import { db, paths } from '../lib/firebase.js';
 import { logger } from '../lib/logger.js';
 import { recordAudit } from '../audit/audit.js';
@@ -72,6 +72,27 @@ export const MENSAJE_CARRITO_VACIO_APROBADO =
 
 export const MENSAJE_COBERTURA_VENCIDA =
   'Tu solicitud de cobertura venció ⏳ Escribí *pagar* para retomar tu compra.';
+
+/**
+ * ADR-0017 §2 — EL CANAL DEL TRABAJO SALE DEL DOCUMENTO, NO SE RECALCULA.
+ *
+ * El worker corre minutos u horas después del turno que originó el request, y ni el job ni el
+ * scheduler tienen el evento del webhook a mano. Recalcularlo desde `receivedVia` costaría una
+ * lectura del asset por job Y volvería a abrir la puerta a que dos derivaciones divergieran; peor,
+ * derivarlo con `whatsappSessionKey(pnid)` mandaría al número que ya vende a un documento vacío.
+ * Por eso el canal se resuelve UNA vez —en el turno, que sí lo sabe— y viaja en el request; el job
+ * lo copia al crearse y acá solo se lee.
+ *
+ * FALLBACK LEGACY EXPLÍCITO: los jobs y requests que existen hoy no traen el campo y son del canal
+ * heredado. Una clave que no sirva como id de documento también cae ahí: jamás se escribe fuera de
+ * la colección de sesiones del cliente.
+ */
+export function canalDeCoberturaPersistido(
+  job: { sessionKey?: unknown } | null | undefined,
+  req: { sessionKey?: unknown } | null | undefined,
+): string {
+  return parseSessionKey(job?.sessionKey ?? req?.sessionKey, LEGACY_SESSION_KEY);
+}
 
 const jobRef = (t: string, id: string) => db().doc(`tenants/${t}/coverageResumeJobs/${id}`);
 const reqRef = (t: string, id: string) => db().doc(`tenants/${t}/coverageRequests/${id}`);
@@ -172,7 +193,7 @@ async function claimJob(tenantId: string, jobId: string): Promise<ClaimResult> {
     if (!reclamable) return { kind: 'skip' as const, motivo: `status ${job.status}` };
     if ((job.activationId ?? null) !== act.activationId) {
       // Admin SDK: TODAS las lecturas antes de cualquier escritura.
-      const sesRef = db().doc(paths.session(tenantId, job.customerId));
+      const sesRef = db().doc(paths.session(tenantId, job.customerId, canalDeCoberturaPersistido(job, null)));
       const ses = (await tx.get(sesRef)).data() as Session | undefined;
       const rSnap = await tx.get(reqRef(tenantId, job.coverageRequestId));
       tx.update(jSnap.ref, { status: 'cancelled', leaseUntil: null, updatedAt: now });
@@ -189,7 +210,11 @@ async function claimJob(tenantId: string, jobId: string): Promise<ClaimResult> {
       tx.update(jSnap.ref, { status: 'send_failed', leaseUntil: null, updatedAt: now });
       // Review: si la marca anti-doble-checkout quedó puesta, se limpia — sin esto el gate
       // respondería "estamos preparando tu pedido" PARA SIEMPRE (checkout muerto).
-      tx.set(db().doc(paths.session(tenantId, job.customerId)), { context: { coverageResumeInProgress: null }, updatedAt: now }, { merge: true });
+      // Se conserva el `set` con merge (y no `update`) porque acá ya empezaron las escrituras de la
+      // transacción y no se puede leer si la sesión existe: un `update` sobre un documento ausente
+      // ABORTARÍA el claim y el job quedaría reintentando para siempre. Lo que se corrige es el
+      // DESTINO — antes esta limpieza caía siempre en `active`.
+      tx.set(db().doc(paths.session(tenantId, job.customerId, canalDeCoberturaPersistido(job, null))), { context: { coverageResumeInProgress: null }, updatedAt: now }, { merge: true });
       return { kind: 'skip' as const, motivo: 'tope de intentos' };
     }
     const rSnap = await tx.get(reqRef(tenantId, job.coverageRequestId));
@@ -260,6 +285,19 @@ async function notificarResumeCancelado(tenantId: string, job: CoverageResumeJob
   }
 }
 
+/**
+ * Limpieza de la marca anti-doble-checkout. Es `update` y no `set(..., {merge:true})` A PROPÓSITO:
+ * el merge CREABA el documento cuando no existía, así que cada job que terminaba sobre un canal sin
+ * conversación dejaba una sesión FANTASMA —sin `id`, sin `state`, sin carrito— que después el panel
+ * lista y los guards leen como si fuera una charla real. Si la sesión no existe no hay marca que
+ * limpiar, y el `catch` la absorbe igual que antes (esta limpieza siempre fue best-effort).
+ */
+const limpiarMarcaResume = (tenantId: string, customerId: string, sessionKey: string) =>
+  db()
+    .doc(paths.session(tenantId, customerId, sessionKey))
+    .update({ 'context.coverageResumeInProgress': null, updatedAt: Timestamp.now() })
+    .catch(() => {});
+
 const setResume = (tenantId: string, requestId: string, status: CoverageResumeStatus, orderId: string | null) =>
   reqRef(tenantId, requestId).update({ resume: { status, orderId }, updatedAt: Timestamp.now() });
 
@@ -275,8 +313,10 @@ async function liberarSesionGuardado(
   requestId: string,
   jobActivationId: string | null,
   marcas: { resumeInProgress?: boolean; limpiarPuntero?: boolean },
+  /** ADR-0017 §2: canal del request — se libera el takeover de ESA conversación, no el de `active`. */
+  sessionKey: string,
 ): Promise<'liberado' | 'sin_takeover' | 'ajeno' | 'apagado'> {
-  const sesRef = db().doc(paths.session(tenantId, customerId));
+  const sesRef = db().doc(paths.session(tenantId, customerId, sessionKey));
   const now = Timestamp.now();
   const out = await db().runTransaction(async (tx) => {
     const act = coverageActivationOf(((await tx.get(db().doc(`tenants/${tenantId}/config/checkout`))).data() as { coverage?: unknown } | undefined)?.coverage);
@@ -321,14 +361,14 @@ async function liberarSesionGuardado(
  * limpia la marca anti-doble-checkout SOLO si es de este request — todo en UNA transacción.
  * Auditable por log; jamás datos bancarios ni mensajes.
  */
-async function pausarJobPorApagado(tenantId: string, jobId: string, requestId: string, customerId: string, punto: string): Promise<void> {
+async function pausarJobPorApagado(tenantId: string, jobId: string, requestId: string, customerId: string, punto: string, sessionKey: string): Promise<void> {
   try {
     const pausado = await db().runTransaction(async (tx) => {
       // Review: se RE-LEE el job en la tx — solo se pausa si sigue 'processing' (nuestro claim en
       // vuelo). Un lease vencido pudo dejar que otro worker lo llevara a un estado TERMINAL
       // (cancelled/done) o held_by_seller: jamás se resucita a 'pending'.
       const job = (await tx.get(jobRef(tenantId, jobId))).data() as CoverageResumeJob | undefined;
-      const sesRef = db().doc(paths.session(tenantId, customerId));
+      const sesRef = db().doc(paths.session(tenantId, customerId, sessionKey));
       const ses = (await tx.get(sesRef)).data() as Session | undefined;
       if (job?.status !== 'processing') return false;
       tx.update(jobRef(tenantId, jobId), { status: 'pending', leaseUntil: null, updatedAt: Timestamp.now() });
@@ -534,6 +574,7 @@ async function cancelarJobPorQuoteInconsistente(
   requestId: string,
   customerId: string,
   motivo: string,
+  sessionKey: string,
 ): Promise<void> {
   const now = Timestamp.now();
   const notifId = `covquote-${customerId}-${requestId}`;
@@ -543,7 +584,7 @@ async function cancelarJobPorQuoteInconsistente(
     const jSnap = await tx.get(jobRef(tenantId, jobId));
     const job = jSnap.exists ? (jSnap.data() as CoverageResumeJob) : null;
     const rSnap = await tx.get(reqRef(tenantId, requestId));
-    const sesRef = db().doc(paths.session(tenantId, customerId));
+    const sesRef = db().doc(paths.session(tenantId, customerId, sessionKey));
     const ses = (await tx.get(sesRef)).data() as Session | undefined;
     const notifSnap = await tx.get(notifRef);
     // Solo se cancela NUESTRO claim en vuelo ('processing'): un estado terminal de otro worker
@@ -615,15 +656,17 @@ export async function processCoverageResumeJob(tenantId: string, jobId: string):
   const { job, req } = claim;
   const customerId = job.customerId;
   const jobAct = job.activationId ?? null;
+  /** ADR-0017 §2: TODA la reanudación opera sobre la sesión del canal que originó el request. */
+  const sessionKey = canalDeCoberturaPersistido(job, req);
   // KILL-SWITCH-1: cualquier revalidación que detecte el apagado deja el job en espera segura
   // (pending + marca limpia) y corta SIN efectos: ni liberación, ni orden, ni banco, ni mensaje.
-  const pausar = (punto: string) => pausarJobPorApagado(tenantId, jobId, req.id, customerId, punto);
+  const pausar = (punto: string) => pausarJobPorApagado(tenantId, jobId, req.id, customerId, punto, sessionKey);
 
   await coverageHold(tenantId, 'resume_pre_liberar'); // solo-emulador: test del kill-switch
 
   try {
     if (job.action === 'rejected') {
-      const liberacion = await liberarSesionGuardado(tenantId, customerId, req.id, jobAct, { limpiarPuntero: true });
+      const liberacion = await liberarSesionGuardado(tenantId, customerId, req.id, jobAct, { limpiarPuntero: true }, sessionKey);
       if (liberacion === 'apagado') {
         await pausar('rejected_liberar');
         return;
@@ -663,7 +706,7 @@ export async function processCoverageResumeJob(tenantId: string, jobId: string):
     if (job.orderId) {
       const oPrev = (await db().doc(paths.order(tenantId, job.orderId)).get()).data() as { status?: string } | undefined;
       if (oPrev && oPrev.status !== 'PENDING_PAYMENT') {
-        await db().doc(paths.session(tenantId, customerId)).set({ context: { coverageResumeInProgress: null }, updatedAt: Timestamp.now() }, { merge: true }).catch(() => {});
+        await limpiarMarcaResume(tenantId, customerId, sessionKey);
         await setJob(tenantId, jobId, { status: 'done' });
         await setResume(tenantId, req.id, 'done', job.orderId);
         logger.info('Cobertura: resume cerrado sin acción (la orden ya avanzó)', { tenantId, requestId: req.id, orderId: job.orderId });
@@ -680,7 +723,7 @@ export async function processCoverageResumeJob(tenantId: string, jobId: string):
     if (conQuote) {
       cartCongelado = orderCartInputFromSnapshot(job.cartSnapshot ?? null);
       if (!cartCongelado || !Number.isSafeInteger(job.shippingGs) || (job.shippingGs as number) < 0) {
-        await cancelarJobPorQuoteInconsistente(tenantId, jobId, req.id, customerId, 'snapshot/monto del quote inválido');
+        await cancelarJobPorQuoteInconsistente(tenantId, jobId, req.id, customerId, 'snapshot/monto del quote inválido', sessionKey);
         return;
       }
     } else if (politicaQuote.status !== 'off') {
@@ -689,7 +732,7 @@ export async function processCoverageResumeJob(tenantId: string, jobId: string):
       // salvo que la orden YA exista (se completa esa, totales congelados).
       const ordenPrev = job.orderId ? (await db().doc(paths.order(tenantId, job.orderId)).get()).exists : false;
       if (!ordenPrev) {
-        await cancelarJobPorQuoteInconsistente(tenantId, jobId, req.id, customerId, 'aprobación sin cotización bajo política required');
+        await cancelarJobPorQuoteInconsistente(tenantId, jobId, req.id, customerId, 'aprobación sin cotización bajo política required', sessionKey);
         return;
       }
     }
@@ -711,7 +754,10 @@ export async function processCoverageResumeJob(tenantId: string, jobId: string):
     }
 
     // 2) Estado del takeover + carrito, con marca anti-doble-checkout ANTES de liberar.
-    const sesRef = db().doc(paths.session(tenantId, customerId));
+    // EL DEFECTO MÁS CARO DE ETAPA E: acá se lee el carrito con el que se CREA EL PEDIDO. Leyendo
+    // `active` desde un request nacido en otro número, el cliente recibía un pedido armado con el
+    // carrito de la conversación equivocada, y encima con instrucciones bancarias.
+    const sesRef = db().doc(paths.session(tenantId, customerId, sessionKey));
     const ses = (await sesRef.get()).data() as Session | undefined;
     const cart = ses?.cart ?? { items: [], subtotal: 0 };
 
@@ -724,7 +770,7 @@ export async function processCoverageResumeJob(tenantId: string, jobId: string):
 
     if (!conQuote && cart.items.length === 0 && !ordenYaCreada) {
       // Carrito vacío: liberar con candado, avisar y dejar la aprobación VIGENTE (sin orden).
-      const liberacion = await liberarSesionGuardado(tenantId, customerId, req.id, jobAct, {});
+      const liberacion = await liberarSesionGuardado(tenantId, customerId, req.id, jobAct, {}, sessionKey);
       if (liberacion === 'apagado') {
         await pausar('empty_cart_liberar');
         return;
@@ -755,7 +801,7 @@ export async function processCoverageResumeJob(tenantId: string, jobId: string):
       return;
     }
 
-    const liberacion = await liberarSesionGuardado(tenantId, customerId, req.id, jobAct, { resumeInProgress: true });
+    const liberacion = await liberarSesionGuardado(tenantId, customerId, req.id, jobAct, { resumeInProgress: true }, sessionKey);
     if (liberacion === 'apagado') {
       await pausar('approved_liberar');
       return;
@@ -878,7 +924,7 @@ export async function processCoverageResumeJob(tenantId: string, jobId: string):
           : 'Cobertura: reanudación detenida, producto no vendible en el carrito',
         { tenantId, jobId, motivo: aviso.motivo, cantidad: e.productNames.length },
       );
-      await db().doc(paths.session(tenantId, customerId)).set({ context: { coverageResumeInProgress: null }, updatedAt: Timestamp.now() }, { merge: true }).catch(() => {});
+      await limpiarMarcaResume(tenantId, customerId, sessionKey);
       await setJob(tenantId, jobId, { status: 'held_by_seller' }).catch(() => {});
       // El espejo del request debe reflejar el mismo estado terminal que el job (si no, el
       // panel muestra "reanudando" para siempre).
@@ -905,7 +951,7 @@ export async function processCoverageResumeJob(tenantId: string, jobId: string):
     // Degradación recuperable: el lease vence y un retrigger re-procesa (attempts acotados).
     // La marca anti-doble-checkout se limpia SIEMPRE (review: jamás debe quedar colgada).
     logger.error('Cobertura: error procesando la reanudación', e, { tenantId, jobId });
-    await db().doc(paths.session(tenantId, customerId)).set({ context: { coverageResumeInProgress: null }, updatedAt: Timestamp.now() }, { merge: true }).catch(() => {});
+    await limpiarMarcaResume(tenantId, customerId, sessionKey);
     await setJob(tenantId, jobId, { status: 'pending' }).catch(() => {});
   }
 }
@@ -916,9 +962,14 @@ export async function processCoverageResumeJob(tenantId: string, jobId: string):
  * HARDEN-1: con el flag apagado o el job de una activación anterior NO se re-encola (queda
  * held_by_seller, inerte y preservado) — el flag se lee DENTRO de la misma transacción.
  */
-export async function reactivarResumeTrasLiberacion(tenantId: string, customerId: string): Promise<boolean> {
+export async function reactivarResumeTrasLiberacion(
+  tenantId: string,
+  customerId: string,
+  /** ADR-0017 §2: canal que se acaba de liberar — el puntero de cobertura vive en ESA sesión. */
+  sessionKey: string = LEGACY_SESSION_KEY,
+): Promise<boolean> {
   try {
-    const ses = (await db().doc(paths.session(tenantId, customerId)).get()).data() as Session | undefined;
+    const ses = (await db().doc(paths.session(tenantId, customerId, sessionKey)).get()).data() as Session | undefined;
     const requestId = ses?.context?.coverage?.requestId;
     if (!requestId) return false;
     return await db().runTransaction(async (tx) => {

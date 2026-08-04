@@ -132,3 +132,66 @@ export function whatsappSessionKey(phoneNumberId: string): string {
 export function parseSessionKey(value: unknown, fallback: string): string {
   return isSessionKey(value) ? value : fallback;
 }
+
+/**
+ * La conexión del número HEREDADO: la única que existía cuando había un número por tenant. Los
+ * números adicionales estrenan la suya (`wa_{pnid}`, ver `multiNumber.ts`).
+ */
+export const CONEXION_HEREDADA = 'main';
+
+/** Forma CRUDA de un documento que puede declarar algo sobre el canal (asset o índice). */
+export interface DeclaracionDeCanal {
+  sessionKey?: unknown;
+  connectionId?: unknown;
+}
+
+/**
+ * ¿Este asset es el del canal heredado? Solo importa cuando NADIE declaró `sessionKey`.
+ *
+ * El desempate NO puede ser `selected`: un admin lo cambia al elegir el remitente por defecto y
+ * eso le mudaría el canal al número que está vendiendo, con carrito, takeover y checkout vivos
+ * adentro. `connectionId` no lo toca ninguna acción de panel.
+ *
+ * Un asset sin `connectionId` (o directamente ausente) cuenta como heredado: son los documentos
+ * escritos antes de que el campo existiera, y ahí `active` es efectivamente donde viven sus
+ * conversaciones.
+ */
+function esConexionHeredada(asset: DeclaracionDeCanal | null | undefined): boolean {
+  const conexion = asset?.connectionId;
+  return conexion === undefined || conexion === null || conexion === CONEXION_HEREDADA;
+}
+
+/**
+ * LA ÚNICA AUTORIDAD para derivar el canal de un número (ADR-0017 §2).
+ *
+ * Vive en `@vpw/shared` y no en el webhook por la misma razón que `parseAutomationMode`: la leen
+ * el resolvedor del inbound, el alta de números y el script de migración —que es un `.mjs` suelto
+ * y NO puede importar el bundle de functions—. Cuando esto vivía en dos lados, divergieron: el
+ * resolvedor aceptaba una `sessionKey` declarada solo en el índice y el script solo miraba el
+ * asset, así que el mismo número quedaba ruteado a `active` por el webhook y considerado «canal
+ * propio» por la migración. Las dos mitades opinando distinto sobre el mismo número es exactamente
+ * cómo un número nuevo termina compartiendo carrito y takeover con el que ya vende.
+ *
+ * Las tres reglas, en orden:
+ *  1. NADIE declara ⇒ el asset de la conexión heredada va a `active`; cualquier otro estrena la
+ *     suya. Un número adicional no puede heredar el canal del que vende por no declarar nada.
+ *  2. Declaración MALFORMADA ⇒ se deriva del PNID. Ante basura, la opción segura es la que nunca
+ *     comparte.
+ *  3. Una declaración que manda el número al canal HEREDADO solo vale si el asset ES el heredado.
+ *     El canal del número que ya vende no se reclama por un espejo del índice ni por un valor
+ *     viejo que quedó dando vueltas en el documento.
+ */
+export function derivarSessionKey(
+  phoneNumberId: string,
+  asset: DeclaracionDeCanal | null | undefined,
+  indice?: DeclaracionDeCanal | null | undefined,
+): string {
+  const propia = whatsappSessionKey(phoneNumberId);
+  const declarada = asset?.sessionKey ?? indice?.sessionKey;
+  if (declarada === undefined || declarada === null) {
+    return esConexionHeredada(asset) ? LEGACY_SESSION_KEY : propia;
+  }
+  const leida = parseSessionKey(declarada, propia);
+  if (leida === LEGACY_SESSION_KEY && !esConexionHeredada(asset)) return propia;
+  return leida;
+}

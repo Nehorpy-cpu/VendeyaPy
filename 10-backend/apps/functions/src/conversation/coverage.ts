@@ -27,7 +27,7 @@ import type {
   MessageChannel,
   Session,
 } from '@vpw/shared';
-import { newCoverageRequestId, coverageActivationOf, shippingQuotePolicyOf, maskPhone } from '@vpw/shared';
+import { newCoverageRequestId, coverageActivationOf, shippingQuotePolicyOf, maskPhone, LEGACY_SESSION_KEY } from '@vpw/shared';
 import { db, paths } from '../lib/firebase.js';
 import { logger } from '../lib/logger.js';
 import { getCheckoutConfig, pickSeller } from '../orders/checkoutConfig.js';
@@ -311,7 +311,7 @@ export async function gateCoberturaCheckout(
   tenantId: string,
   customerId: string,
   cart: Cart,
-  opts: { messageId?: string | null; simulation?: boolean; channel?: MessageChannel; receivedVia?: string | null },
+  opts: { messageId?: string | null; simulation?: boolean; channel?: MessageChannel; receivedVia?: string | null; sessionKey?: string },
 ): Promise<CoverageGateResult | null> {
   const cfg = coverageSettings(await getCheckoutConfig(tenantId));
   if (!cfg.enabled) return null; // fast-path (la autoridad es la RE-lectura en la transacción)
@@ -323,7 +323,9 @@ export async function gateCoberturaCheckout(
 
   await coverageHold(tenantId, 'gate_pre_tx'); // solo-emulador: test del kill-switch
 
-  const sessionRef = db().doc(paths.session(tenantId, customerId));
+  // ADR-0017 §2: el request y su puntero pertenecen a la conversación de ESTE canal.
+  const sessionKey = opts.sessionKey ?? LEGACY_SESSION_KEY;
+  const sessionRef = db().doc(paths.session(tenantId, customerId, sessionKey));
   const now = Timestamp.now();
   const out = await db().runTransaction(async (tx) => {
     const cfgSnapTx = await tx.get(configRefDe(tenantId));
@@ -376,6 +378,10 @@ export async function gateCoberturaCheckout(
               customerId,
               channel: opts.channel ?? req.channel ?? 'whatsapp',
               receivedVia: opts.receivedVia ?? req.receivedVia ?? null,
+              // ADR-0017 §2: el canal viaja EN el request. El worker de reanudación corre horas
+              // después y no tiene el turno: sin esto leía el carrito de `active` y creaba el
+              // pedido con el de la conversación equivocada.
+              sessionKey,
               activationId: cfgTx.activationId,
               status: 'pending_coverage_review',
               location: req.location,
@@ -438,6 +444,8 @@ export async function gateCoberturaCheckout(
       receivedVia: opts.receivedVia ?? null,
       activationId: cfgTx.activationId,
       status: 'awaiting_location',
+      // ADR-0017 §2: ver arriba — el canal se persiste con el request, no se recalcula después.
+      sessionKey,
       location: null,
       locationFingerprint: null,
       sourceMessageId: opts.messageId ?? null,
@@ -498,9 +506,11 @@ async function registrarUbicacion(
   customerId: string,
   location: CoverageLocation,
   wamid: string | null,
+  /** ADR-0017 §2: canal de la conversación (el puntero de cobertura vive en ESA sesión). */
+  sessionKey: string,
 ): Promise<RegistroResultado> {
   await coverageHold(tenantId, 'ubicacion_pre_tx'); // solo-emulador: test del kill-switch
-  const sessionRef = db().doc(paths.session(tenantId, customerId));
+  const sessionRef = db().doc(paths.session(tenantId, customerId, sessionKey));
   const now = Timestamp.now();
   return db().runTransaction(async (tx) => {
     const act = coverageSettingsDeSnapshot((await tx.get(configRefDe(tenantId))).data());
@@ -580,6 +590,8 @@ async function derivarARevision(
   customerId: string,
   registro: Extract<RegistroResultado, { kind: 'ok' }>,
   wamid: string | null,
+  /** ADR-0017 §2: canal de la conversación — el takeover TIENE que ser el de ESE número. */
+  sessionKey: string,
 ): Promise<{ reply: string; takeover: boolean; handoffSourceId?: string | null; prometeRevision?: boolean }> {
   await coverageHold(tenantId, 'pre_handoff'); // solo-emulador: test del kill-switch
   // Vendedor del handoff: el ASIGNADO al cliente (uid real, ya persistido en el request por la
@@ -590,6 +602,7 @@ async function derivarARevision(
     sellerName: sellerName ?? undefined,
     sellerUid: registro.sellerUid ?? undefined,
     sourceId: registro.requestId,
+    sessionKey,
     createSessionIfMissing: false,
     guard: async (tx) => {
       const [cfgSnap, reqSnap] = await Promise.all([
@@ -634,7 +647,7 @@ async function derivarARevision(
   if (hr.already && registro.handoffReason === null) {
     // Carrera nativa+texto casi simultáneas: la razón leída en la tx quedó stale — si el
     // takeover FRESCO apunta a ESTE request, es nuestro propio flujo: confirmar igual (review).
-    const fresh = (await db().doc(paths.session(tenantId, customerId)).get()).data() as Session | undefined;
+    const fresh = (await db().doc(paths.session(tenantId, customerId, sessionKey)).get()).data() as Session | undefined;
     if (fresh?.context?.handoffReason === 'coverage_review' && fresh?.context?.handoffSourceId === registro.requestId) {
       return { reply: registro.primeraVez ? MENSAJE_UBICACION_RECIBIDA : MENSAJE_UBICACION_ACTUALIZADA, takeover: true, handoffSourceId: registro.requestId };
     }
@@ -661,6 +674,8 @@ export interface UbicacionEntranteInput {
   messageId: string | null;
   receivedByPhoneNumberId: string | null;
   channel: MessageChannel;
+  /** ADR-0017 §2: canal de la conversación. Omitirlo = canal heredado (el número que ya vende). */
+  sessionKey?: string;
   /**
    * ADR-0016 §12: el caller se hace cargo del BORDE DE ENVÍO. Con esto en true la burbuja de
    * SALIDA no se escribe acá: viaja como descriptor (`outbound`) y la persiste process.ts recién
@@ -690,7 +705,8 @@ export async function procesarUbicacionEntrante(input: UbicacionEntranteInput): 
   const cfg = coverageSettings(await getCheckoutConfig(tenantId));
   if (!cfg.enabled) return { reply: '', inerte: true };
 
-  const ses = (await db().doc(paths.session(tenantId, customerId)).get()).data() as Session | undefined;
+  const sessionKey = input.sessionKey ?? LEGACY_SESSION_KEY;
+  const ses = (await db().doc(paths.session(tenantId, customerId, sessionKey)).get()).data() as Session | undefined;
   const humanTakeover = ses?.context?.humanTakeover === true;
 
   let reply = '';
@@ -706,7 +722,7 @@ export async function procesarUbicacionEntrante(input: UbicacionEntranteInput): 
   };
   let registro: RegistroResultado;
   try {
-    registro = await registrarUbicacion(tenantId, customerId, location, input.messageId);
+    registro = await registrarUbicacion(tenantId, customerId, location, input.messageId, sessionKey);
   } catch (e) {
     // G.10: la persistencia falló ANTES de cualquier escritura de historial — mensaje temporal
     // honesto, sin placeholder (nada quedó registrado).
@@ -745,7 +761,7 @@ export async function procesarUbicacionEntrante(input: UbicacionEntranteInput): 
   // la revisión que ESTE turno acaba de tomar se mide con la vara del handoff propio.
   let expectativa: ExpectativaDeSilencio = EXIGE_SILENCIO_LIBRE;
   if (registro.kind === 'ok') {
-    const r = await derivarARevision(tenantId, customerId, registro, input.messageId);
+    const r = await derivarARevision(tenantId, customerId, registro, input.messageId, sessionKey);
     reply = r.reply;
     enTakeover = enTakeover || r.takeover;
     if (r.takeover) expectativa = { modo: 'confirma_handoff_propio', sourceId: r.handoffSourceId ?? null };
@@ -819,7 +835,7 @@ export async function manejarTurnoEnEsperaUbicacion(
   customerId: string,
   text: string,
   clasificacion: Exclude<ClasificacionTextoEspera, 'otro'>,
-  opts: { messageId?: string | null; simulation?: boolean; channel?: MessageChannel },
+  opts: { messageId?: string | null; simulation?: boolean; channel?: MessageChannel; sessionKey?: string },
 ): Promise<TurnoEsperaResultado | null> {
   const cfg = coverageSettings(await getCheckoutConfig(tenantId));
   if (!cfg.enabled) return null;
@@ -847,7 +863,7 @@ export async function manejarTurnoEnEsperaUbicacion(
         // gana: ni se marca coverage_cancelled ni sale mensaje (el flujo normal atiende el turno).
         const actTx = coverageSettingsDeSnapshot((await tx.get(configRefDe(tenantId))).data());
         if (!actTx.enabled) return false;
-        const sesRef = db().doc(paths.session(tenantId, customerId));
+        const sesRef = db().doc(paths.session(tenantId, customerId, opts.sessionKey ?? LEGACY_SESSION_KEY));
         const ptr = ((await tx.get(sesRef)).data() as Session | undefined)?.context?.coverage ?? null;
         if (!ptr) return false;
         const reqSnap = await tx.get(db().doc(requestPath(tenantId, ptr.requestId)));
@@ -865,12 +881,12 @@ export async function manejarTurnoEnEsperaUbicacion(
     // como placeholder (el engine lo reemplaza ANTES de escribir el historial).
     const addressText = text.replace(/\s+/g, ' ').trim().slice(0, 512);
     const location: CoverageLocation = { source: 'text', addressText, name: null, coordinates: null };
-    const registro = await registrarUbicacion(tenantId, customerId, location, opts.messageId ?? null);
+    const registro = await registrarUbicacion(tenantId, customerId, location, opts.messageId ?? null, opts.sessionKey ?? LEGACY_SESSION_KEY);
     if (registro.kind === 'off') return null; // kill-switch en la transacción: el flujo normal atiende
     if (registro.kind === 'expired') return { takeover: false, reply: MENSAJE_INTENTO_VENCIDO, coverage: null };
     if (registro.kind === 'approved_activo') return { takeover: false, reply: MENSAJE_ZONA_YA_CONFIRMADA, coverageActivationId: act };
     if (registro.kind === 'no_active') return null; // el flujo normal atiende el turno
-    const r = await derivarARevision(tenantId, customerId, registro, opts.messageId ?? null);
+    const r = await derivarARevision(tenantId, customerId, registro, opts.messageId ?? null, opts.sessionKey ?? LEGACY_SESSION_KEY);
     return {
       takeover: r.takeover,
       reply: r.reply,
@@ -898,13 +914,15 @@ export async function actualizarUbicacionEnRevision(
   customerId: string,
   text: string,
   wamid: string | null,
+  /** ADR-0017 §2: canal de la conversación. Default = canal heredado. */
+  sessionKey: string = LEGACY_SESSION_KEY,
 ): Promise<boolean> {
   try {
     const cfg = coverageSettings(await getCheckoutConfig(tenantId));
     if (!cfg.enabled) return false;
     const addressText = text.replace(/\s+/g, ' ').trim().slice(0, 512);
     const location: CoverageLocation = { source: 'text', addressText, name: null, coordinates: null };
-    const registro = await registrarUbicacion(tenantId, customerId, location, wamid);
+    const registro = await registrarUbicacion(tenantId, customerId, location, wamid, sessionKey);
     if (registro.kind !== 'ok') return false;
     logger.info('Cobertura: dirección actualizada durante la revisión (bot en silencio)', { tenantId, customer: `…${customerId.slice(-4)}`, requestId: registro.requestId });
     return true;
