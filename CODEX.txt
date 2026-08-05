@@ -135,3 +135,11 @@ a byte (verify-cutover 22/22), UI humana del historial (share/skip/disparo/estad
 historial (offboard cierra honesto; solo un signup nuevo abre la siguiente), backup de Storage con
 bytes + restore aislado (backup-restore-e2e 51/51, exige los tres emuladores). Sigue: NO desplegado,
 número real NO conectado, QR NO ejecutado, backup productivo NO ejecutado. Cutover = Programa 2.
+
+### Cierre correctivo final — 2026-08-05
+11 hallazgos de Codex Security + 8 de la review adversarial posterior, cerrados con test rojo
+primero. El CRITICAL fue del propio correctivo anterior: un mapa vacío con merge REEMPLAZA en
+Firestore, y el guard monotónico borraba el resumen del cliente. Dos pasadas E2E completas desde
+emuladores limpios (14 suites cada una). Sin deploy, sin Meta, sin producción. Cuatro pruebas
+externas quedan diferidas al Programa 2 (contrato de timestamp, cardinalidad de WABA, prueba de
+offboarding, provenance de bundles) — resueltas fail-closed en código, sin validación real.

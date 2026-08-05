@@ -287,3 +287,37 @@ Los 7 gates que el reporte anterior no había cerrado, cerrados con tests rojos 
    `backup-restore-e2e.mjs` exige los TRES emuladores (sin Storage ⇒ exit 1) — 51/51.
 7. **Runbook** al día: pasos 2-3 exigen export administrado + restore aislado con Graph GET read-only
    + política de Auth explícita; paso 12 documenta el cutover; hallazgos 4 y 5 cerrados.
+
+### Cierre correctivo final del Programa 1 — 2026-08-05 (sobre `2798296`)
+
+Se cerraron los **11 hallazgos** del scan de Codex Security (5 MEDIUM, 6 LOW) más los bloqueantes de
+release-safety, y los **8 confirmados** por la review adversarial posterior (1 CRITICAL, 1 HIGH,
+5 MEDIUM, 1 LOW). Todo con test discriminante rojo primero.
+
+Lo que más importa recordar de esta ronda:
+
+- **Un mapa vacío con `merge:true` NO fusiona: REEMPLAZA.** Verificado contra
+  `@google-cloud/firestore@7.11.6`: `set({conversation:{}},{merge:true})` serializa
+  `updateMask:["conversation"]` con `mapValue:{}`. El guard monotónico del resumen dejaba `conv`
+  vacío para un mensaje viejo sin decisiones y BORRABA `receivedVia`, `channel`, `humanTakeover`,
+  `state` y `unreadForSeller`. `appendMessage` ahora omite la clave cuando no hay nada que escribir.
+- **El 503 del archivo no puede tirar el lote entero**: Meta batchea varias `entry` en un POST, y
+  `deactivateWhatsappNumber` borra el índice a propósito, así que el binding ausente no siempre es
+  transitorio. Se persiste el tráfico vivo (idempotente por wamid) y se pide reintento solo por el
+  archivo.
+- **Fence temporal del offboarding**: `cerrarGeneracionPorOffboarding` recibe el timestamp de Meta y
+  no sella una generación que nació DESPUÉS de esa desconexión.
+- **WABA explícito también en el flujo estándar** (`connectFlow.ts`): con más de un WABA autorizado
+  y sin elección, rechaza. «El primero de la lista» puede ser el de otro cliente del Tech Provider.
+- **Precondición E2E nueva**: `verify-shipping-quote-saga` espera a que la cuenta de salientes se
+  ESTABILICE antes del check 44 — `AWAITING_PAYMENT` se persiste antes de mandar el mensaje
+  bancario, así que el estado de sesión no alcanza como señal de «terminó de hablar».
+
+**Pruebas externas DIFERIDAS al Programa 2** (fail-closed resuelto en código; la evidencia real
+requiere credenciales):
+1. Contrato de `account_update` sin `timestamp` — el dedup cae a un hash canónico y queda
+   reprocesable; falta la captura saneada del payload productivo.
+2. Cardinalidad y ownership de WABAs en el token Tech Provider real.
+3. Prueba durable de offboarding: no se abre generación nueva sin claim de code nuevo.
+4. Provenance/ACL de los bundles de restore: la contención de paths se aplica SIEMPRE, sin confiar
+   en el origen.
