@@ -41,6 +41,15 @@ export const coexistenceHistorySyncPath = (tenantId: string, phoneNumberId: stri
   `tenants/${tenantId}/coexistenceHistorySyncs/${phoneNumberId}`;
 
 /**
+ * Archivo de una generación CERRADA. Vive en la misma subcolección, con el número de generación en
+ * el id: la generación anterior permanece terminal e intacta —es la auditoría de qué pasó con el
+ * historial de ese número— y NUNCA se borra ni se reescribe. El documento "vivo" sigue siendo el
+ * del PNID pelado: la UI y el webhook no tienen que saber de generaciones para encontrarlo.
+ */
+export const archivoDeGeneracionPath = (tenantId: string, phoneNumberId: string, generation: number): string =>
+  `tenants/${tenantId}/coexistenceHistorySyncs/${phoneNumberId}_gen${generation}`;
+
+/**
  * Estados del ciclo. Los seis del ADR más `pending_request`, que es el que hace posible la regla
  * «una sola vez»: sin un estado explícito para «el humano ya decidió pero todavía no se disparó»,
  * el disparo no tiene contra qué reclamar y dos invocaciones concurrentes disparan las dos.
@@ -85,6 +94,25 @@ export interface HistorySyncDoc {
    * duplicado. Arranca en 1 (que conserva la clave histórica, sin sufijo).
    */
   syncGeneration: number;
+  /**
+   * Identidad del onboarding que ABRIÓ esta generación: el claim transaccional del `code` del
+   * Embedded Signup. Es lo que hace verdadera la regla «solo un nuevo signup habilita una
+   * generación posterior»: un replay del MISMO claim devuelve lo mismo sin abrir otra, y un claim
+   * que ya quedó en `claimsUsados` (de una generación archivada) no puede resetear la vigente.
+   * `null` en generaciones anteriores a este mecanismo.
+   */
+  generationClaimId: string | null;
+  /** Claims de generaciones ya archivadas de este número: un callback viejo se reconoce acá. */
+  claimsUsados: string[];
+  /**
+   * true ⇒ la generación fue cerrada ADMINISTRATIVAMENTE (offboarding o superación por un nuevo
+   * onboarding). Ese `failed` es PEGAJOSO: material tardío no lo reabre — reabrirlo borraría el
+   * motivo por el que alguien tiene que mirar. El `failed` «por fallo de persistencia» NO lleva
+   * esta marca y sigue siendo recuperable si el chunk faltante vuelve a llegar.
+   */
+  cierreAdministrativo: boolean;
+  /** Chunks que llegaron con la generación cerrada o sin disparo usado: material de OTRO ciclo. */
+  chunksFueraDeCiclo: number;
   sharingDecision: HistorySharingDecision | null;
   decidedByUid: string | null;
   decidedAt: Timestamp | null;
@@ -363,10 +391,15 @@ export async function registrarDecisionDeHistorial(args: {
     }
     const now = Timestamp.fromMillis(args.nowMs);
     const status: HistorySyncStatus = args.decision === 'share' ? 'pending_request' : 'declined';
-    // La generación arranca en 1 y sólo la mueve un ciclo nuevo (que hoy no existe sin
-    // offboarding). Se persiste igual para que la clave de idempotencia del webhook la pueda leer.
-    const syncGeneration = (previo?.syncGeneration ?? 0) + 1;
-    const deadline = Timestamp.fromMillis(args.onboardedAtMs + HISTORY_SYNC_WINDOW_MS);
+    // DECIDIR NO FABRICA GENERACIONES. La generación la mueve exclusivamente un onboarding
+    // autorizado nuevo (`abrirNuevaGeneracion`, con el claim del code). El código anterior hacía
+    // `(previo ?? 0) + 1`: decidir sobre un coordinador nacido de un chunk huérfano lo subía a 2
+    // sin que existiera segundo onboarding, y partía la clave de idempotencia del webhook en dos.
+    const syncGeneration = previo?.syncGeneration ?? 1;
+    // La ventana de 24 h la fija el ONBOARDING, no la decisión: si la generación ya la trae (la
+    // escribió `abrirNuevaGeneracion` en el re-onboarding), decidir no puede correrla.
+    const onboardedAt = previo?.onboardedAt ?? Timestamp.fromMillis(args.onboardedAtMs);
+    const deadline = previo?.deadlineAt ?? Timestamp.fromMillis(args.onboardedAtMs + HISTORY_SYNC_WINDOW_MS);
     const doc: HistorySyncDoc = {
       id: args.phoneNumberId,
       tenantId: args.tenantId,
@@ -374,10 +407,14 @@ export async function registrarDecisionDeHistorial(args: {
       connectionId: args.connectionId,
       status,
       syncGeneration,
+      generationClaimId: previo?.generationClaimId ?? null,
+      claimsUsados: previo?.claimsUsados ?? [],
+      cierreAdministrativo: previo?.cierreAdministrativo ?? false,
+      chunksFueraDeCiclo: previo?.chunksFueraDeCiclo ?? 0,
       sharingDecision: args.decision,
       decidedByUid: args.actorUid,
       decidedAt: now,
-      onboardedAt: Timestamp.fromMillis(args.onboardedAtMs),
+      onboardedAt,
       deadlineAt: deadline,
       requestedAt: null,
       syncTypesRequested: [],
@@ -474,8 +511,35 @@ export async function registrarObservaciones(args: {
   try {
     await db().runTransaction(async (tx) => {
       const previo = (await tx.get(ref)).data() as HistorySyncDoc | undefined;
-      const acumulado = acumularObservaciones(previo ?? null, args.observaciones);
       const now = Timestamp.fromMillis(args.nowMs);
+      /**
+       * MATERIAL FUERA DE CICLO (correctivo, ALTO 10 / MEDIO 18). Dos casos en los que la
+       * generación vigente NO es receptora de chunks, y dejarlos pasar la gobernaba con material
+       * de OTRO ciclo:
+       *  · cierre ADMINISTRATIVO (offboarding / superación): el `failed` es pegajoso — reabrirlo a
+       *    `receiving`/`completed` borraría el motivo por el que alguien tiene que mirar;
+       *  · `pending_request` sin `requestedAt`: la generación nueva TODAVÍA no disparó, así que su
+       *    historial no puede estar llegando — esto es reentrega tardía de la generación anterior,
+       *    y moverle el estado quemaría el disparo único antes de usarse.
+       * El material queda contado (`chunksFueraDeCiclo`) y los chunks ya persistieron en su
+       * colección con su clave: no se pierde nada, solo no gobierna.
+       */
+      const receptorCerrado =
+        previo?.cierreAdministrativo === true ||
+        (previo?.status === 'pending_request' && !previo?.requestedAt);
+      if (previo && receptorCerrado) {
+        tx.set(
+          ref,
+          {
+            chunksFueraDeCiclo: (previo.chunksFueraDeCiclo ?? 0) + args.observaciones.length + (args.mediaObservados ?? 0),
+            lastChunkAt: now,
+            updatedAt: now,
+          },
+          { merge: true },
+        );
+        return;
+      }
+      const acumulado = acumularObservaciones(previo ?? null, args.observaciones);
       const status: HistorySyncStatus =
         acumulado.status === 'receiving' && previo && vencido({ status: acumulado.status, deadlineAt: previo.deadlineAt ?? null }, args.nowMs)
           ? 'expired'
@@ -486,7 +550,7 @@ export async function registrarObservaciones(args: {
           id: args.phoneNumberId,
           tenantId: args.tenantId,
           phoneNumberId: args.phoneNumberId,
-          ...(previo ? {} : { connectionId: '', syncGeneration: 1, sharingDecision: null, onboardedAt: null, deadlineAt: null, createdAt: now, errorMessage: 'llegó historial sin coordinador previo' }),
+          ...(previo ? {} : { connectionId: '', syncGeneration: 1, generationClaimId: null, claimsUsados: [], cierreAdministrativo: false, chunksFueraDeCiclo: 0, sharingDecision: null, onboardedAt: null, deadlineAt: null, createdAt: now, errorMessage: 'llegó historial sin coordinador previo' }),
           status,
           chunksObservados: acumulado.chunksObservados,
           observadosTruncado: acumulado.observadosTruncado,
@@ -510,4 +574,158 @@ export async function registrarObservaciones(args: {
     // esto falla, el chunk igual está (o igual falló) y Meta reintenta. Se loguea sin el PNID.
     logger.error('historyCoordinator: no se pudo registrar el progreso del historial', e, { tenantId: args.tenantId });
   }
+}
+
+// ---------------------------------------------------------------------------
+// Generaciones — el ciclo de vida que hace VERDADERA la recuperación prometida
+// ---------------------------------------------------------------------------
+
+/**
+ * Reintenta una operación con backoff corto (correctivo, MEDIOs 15/19). Existe por UNA ventana
+ * concreta: entre el claim del `code` (que es de un solo uso y no se libera) y la apertura de la
+ * generación del historial, un fallo transitorio dejaba el re-onboarding VARADO — el claim
+ * consumido, la generación sin abrir, y el retry del callable muerto en «autorización ya
+ * utilizada». Tres intentos cubren la contención y los hipos; si igual falla, se lanza el ÚLTIMO
+ * error para que el diagnóstico no se trague.
+ */
+export async function conReintentos<T>(fn: () => Promise<T>, intentos: number): Promise<T> {
+  let ultimo: unknown;
+  for (let i = 0; i < intentos; i++) {
+    try {
+      return await fn();
+    } catch (e) {
+      ultimo = e;
+      if (i < intentos - 1) await new Promise((r) => setTimeout(r, 50 * (i + 1)));
+    }
+  }
+  throw ultimo;
+}
+
+/**
+ * Cierra la generación vigente cuando Meta desconecta el número (`ACCOUNT_OFFBOARDED` /
+ * `PARTNER_REMOVED`). Honesta en los dos sentidos: una sincronización en curso queda `failed` con
+ * el motivo real —no `completed`, no borrada—, y una generación ya terminal queda EXACTAMENTE como
+ * estaba (cerrar no es decidir, y offboardear no reescribe la historia). No inventa consentimiento:
+ * `sharingDecision` no se toca.
+ */
+export async function cerrarGeneracionPorOffboarding(tenantId: string, phoneNumberId: string, nowMs: number): Promise<void> {
+  const ref = db().doc(coexistenceHistorySyncPath(tenantId, phoneNumberId));
+  await db().runTransaction(async (tx) => {
+    const previo = (await tx.get(ref)).data() as HistorySyncDoc | undefined;
+    if (!previo) return; // sin coordinador no hay nada que cerrar — y no se inventa uno
+    if (esEstadoTerminal(previo.status)) return; // la historia terminal es intocable
+    tx.set(
+      ref,
+      {
+        status: 'failed' satisfies HistorySyncStatus,
+        cierreAdministrativo: true,
+        errorMessage: 'el número fue offboardeado por Meta; esta sincronización queda cerrada. Un nuevo Embedded Signup abre un ciclo nuevo.',
+        updatedAt: Timestamp.fromMillis(nowMs),
+      },
+      { merge: true },
+    );
+  });
+}
+
+export type AperturaDeGeneracion =
+  | { ok: true; syncGeneration: number; /** true = replay del mismo claim: no se abrió nada nuevo. */ reused: boolean }
+  | { ok: false; reason: 'claim_superado'; explicacion: string };
+
+/**
+ * Abre la generación siguiente del historial tras un onboarding AUTORIZADO. La autorización no se
+ * declara: se DEMUESTRA con el `claimId` — el reclamo transaccional del `code` del Embedded Signup,
+ * que solo existe si un signup real acaba de completarse (un code no se puede reclamar dos veces).
+ *
+ *  · Mismo claim que la vigente ⇒ replay del callback: mismo resultado, cero escrituras.
+ *  · Claim presente en `claimsUsados` ⇒ callback de una generación ya archivada llegando tarde:
+ *    se rechaza y la vigente queda intacta. Un callback viejo no puede resetear una generación nueva.
+ *  · Claim nuevo ⇒ la vigente se ARCHIVA íntegra en `{pnid}_gen{N}` (si no era terminal, primero se
+ *    cierra `failed` de forma honesta: el re-onboarding demuestra que hubo un offboarding aunque el
+ *    `account_update` nunca haya llegado) y nace la generación N+1: SIN decisión heredada —el
+ *    consentimiento no se transfiere entre onboardings—, contadores a cero y ventana de 24 h nueva.
+ *
+ * Sin coordinador previo (primer onboarding) solo registra la generación 1 con su claim, para que
+ * el replay y la ventana queden anclados desde el principio.
+ */
+export async function abrirNuevaGeneracion(args: {
+  tenantId: string;
+  phoneNumberId: string;
+  connectionId: string;
+  claimId: string;
+  onboardedAtMs: number;
+  nowMs: number;
+}): Promise<AperturaDeGeneracion> {
+  const ref = db().doc(coexistenceHistorySyncPath(args.tenantId, args.phoneNumberId));
+  const now = Timestamp.fromMillis(args.nowMs);
+
+  const generacionNueva = (previo: HistorySyncDoc | undefined): HistorySyncDoc => ({
+    id: args.phoneNumberId,
+    tenantId: args.tenantId,
+    phoneNumberId: args.phoneNumberId,
+    connectionId: args.connectionId,
+    status: 'pending_request',
+    syncGeneration: (previo?.syncGeneration ?? 0) + 1,
+    generationClaimId: args.claimId,
+    claimsUsados: [
+      ...(previo?.claimsUsados ?? []),
+      ...(previo?.generationClaimId ? [previo.generationClaimId] : []),
+    ],
+    cierreAdministrativo: false,
+    chunksFueraDeCiclo: 0,
+    sharingDecision: null,
+    decidedByUid: null,
+    decidedAt: null,
+    onboardedAt: Timestamp.fromMillis(args.onboardedAtMs),
+    deadlineAt: Timestamp.fromMillis(args.onboardedAtMs + HISTORY_SYNC_WINDOW_MS),
+    requestedAt: null,
+    syncTypesRequested: [],
+    chunksObservados: [],
+    observadosTruncado: false,
+    chunksObservadosCount: 0,
+    chunksDuplicados: 0,
+    chunksFallidosPendientes: [],
+    chunksSinTenant: 0,
+    fallosSinClave: 0,
+    mediaObservados: 0,
+    maxProgress: null,
+    lastChunkAt: null,
+    declineCode: null,
+    errorMessage: '',
+    createdAt: now,
+    updatedAt: now,
+  });
+
+  return db().runTransaction(async (tx) => {
+    const previo = (await tx.get(ref)).data() as HistorySyncDoc | undefined;
+
+    if (!previo) {
+      tx.set(ref, generacionNueva(undefined));
+      return { ok: true as const, syncGeneration: 1, reused: false };
+    }
+    if (previo.generationClaimId === args.claimId) {
+      return { ok: true as const, syncGeneration: previo.syncGeneration, reused: true };
+    }
+    if ((previo.claimsUsados ?? []).includes(args.claimId)) {
+      return {
+        ok: false as const,
+        reason: 'claim_superado' as const,
+        explicacion: 'Ese onboarding pertenece a una generación ya cerrada: un callback viejo no puede reabrir ni resetear la sincronización vigente.',
+      };
+    }
+
+    const cerrada: HistorySyncDoc = esEstadoTerminal(previo.status)
+      ? previo
+      : {
+          ...previo,
+          status: 'failed',
+          cierreAdministrativo: true,
+          errorMessage: 'superada por un nuevo onboarding autorizado (el número fue re-onboardeado sin que llegara el aviso de offboarding)',
+          updatedAt: now,
+        };
+    // El archivo conserva la generación entera, con su desenlace: es auditoría, no papelera.
+    tx.set(db().doc(archivoDeGeneracionPath(args.tenantId, args.phoneNumberId, cerrada.syncGeneration)), cerrada);
+    const nueva = generacionNueva(previo);
+    tx.set(ref, nueva);
+    return { ok: true as const, syncGeneration: nueva.syncGeneration, reused: false };
+  });
 }

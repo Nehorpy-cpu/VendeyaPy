@@ -19,6 +19,7 @@
  * principal ENTRA por Coexistence, esa es una decisión aparte y documentada, no un efecto lateral.
  */
 import type { MetaAsset } from '@vpw/shared';
+import { Timestamp } from 'firebase-admin/firestore';
 import { db, paths } from '../lib/firebase.js';
 import { logger } from '../lib/logger.js';
 import { resolveTenantWhatsappCredsFor } from '../messaging/resolveWhatsappCreds.js';
@@ -26,10 +27,24 @@ import { esNumeroPrincipal } from './multiNumber.js';
 import { whatsappIndexId } from './pnidOwnership.js';
 import { SMB_APP_DATA_SYNC_TYPES, type MetaGraphClient, type SmbAppDataSyncType } from './graphClient.js';
 import {
+  coexistenceHistorySyncPath,
+  leerCoordinador,
+  puedeDisparar,
   reclamarDisparo,
   registrarResultadoDelDisparo,
+  type HistorySyncStatus,
   type MotivoDeRechazo,
 } from './historyCoordinator.js';
+
+/** Marca `expired` con merge — el mismo desenlace que dejaría el reclamo al rechazar por vencido. */
+async function marcarVencido(tenantId: string, phoneNumberId: string, nowMs: number): Promise<void> {
+  await db()
+    .doc(coexistenceHistorySyncPath(tenantId, phoneNumberId))
+    .set(
+      { status: 'expired' satisfies HistorySyncStatus, errorMessage: 'venció la ventana de 24 h sin disparar', updatedAt: Timestamp.fromMillis(nowMs) },
+      { merge: true },
+    );
+}
 
 export type DisparoFallo = MotivoDeRechazo | 'es_numero_principal' | 'sin_credenciales' | 'graph_error';
 
@@ -95,19 +110,38 @@ export async function ejecutarSincronizacionDeHistorial(
     };
   }
 
-  const reclamo = await reclamarDisparo(tenantId, phoneNumberId, nowMs);
-  if (!reclamo.ok) return { ok: false, motivo: reclamo.motivo, explicacion: reclamo.explicacion, syncTypes: [] };
+  /**
+   * El VENCIMIENTO se chequea antes que las credenciales: los dos son fallos locales, pero el
+   * vencimiento es TERMINAL y determinístico — «arreglá el token» sería el diagnóstico equivocado
+   * para una ventana que ya murió. El coordinador queda marcado `expired` igual que lo haría el
+   * reclamo, para que el panel no muestre un `pending_request` imposible.
+   */
+  const coordPrevio = await leerCoordinador(tenantId, phoneNumberId);
+  const preVeredicto = puedeDisparar(coordPrevio, nowMs);
+  if (!preVeredicto.puede && preVeredicto.motivo === 'vencido') {
+    await marcarVencido(tenantId, phoneNumberId, nowMs);
+    return { ok: false, motivo: 'vencido', explicacion: preVeredicto.explicacion, syncTypes: [] };
+  }
 
+  /**
+   * Correctivo (MEDIO 14): las credenciales se resuelven ANTES de reclamar. Son una precondición
+   * PURAMENTE LOCAL — con Meta probadamente sin enterarse de nada — y consumían el único disparo
+   * de la vida del número por un token vencido o una conexión a medio migrar. El orden
+   * reclamar-antes-de-llamar sigue intacto para lo que SÍ es ambiguo: la llamada Graph en sí,
+   * donde no hay forma de saber si Meta la recibió.
+   */
   const creds = await resolveTenantWhatsappCredsFor(tenantId, phoneNumberId);
   if (!creds.ok) {
-    await registrarResultadoDelDisparo(tenantId, phoneNumberId, { ok: false, syncTypes: [], error: creds.reason }, nowMs);
     return {
       ok: false,
       motivo: 'sin_credenciales',
-      explicacion: `No se pudo resolver la credencial de ese número (${creds.reason}). El disparo quedó consumido: recuperarlo exige offboardear el número y rehacer el Embedded Signup.`,
+      explicacion: `No se pudo resolver la credencial de ese número (${creds.reason}). El disparo NO se consumió: arreglá la conexión y volvé a intentar.`,
       syncTypes: [],
     };
   }
+
+  const reclamo = await reclamarDisparo(tenantId, phoneNumberId, nowMs);
+  if (!reclamo.ok) return { ok: false, motivo: reclamo.motivo, explicacion: reclamo.explicacion, syncTypes: [] };
 
   const pedido = await pedirSmbAppData(phoneNumberId, creds.accessToken, graph);
   await registrarResultadoDelDisparo(tenantId, phoneNumberId, pedido, nowMs);

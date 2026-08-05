@@ -1608,4 +1608,16 @@ original. Ver ADR-0017 §5 y §6.
 | Error `131060` | Esperado tras el onboarding | No es una falla; tratarlo como tal esconde las reales. |
 | Versión de Embedded Signup | `extras.version`; **v2 se depreca el 2026-10-15** | Omitir el campo deja el flujo en v2. Es un plazo duro, no una mejora opcional. |
 
-*Última actualización: 2026-08-04 — §12.1 (contrato oficial de Coexistence verificado; ADR-0017 §5 y §6).*
+**Correctivo 2026-08-04 (cierre del Programa 1):** el canal conversacional es por PLATAFORMA además de por
+PNID — Instagram (`ig`) y Messenger (`msgr`) dejaron de compartir `active` con WhatsApp legacy
+(`sessionKeyDePlataforma` en `@vpw/shared`; el panel resuelve primero por `conversation.channel`). El
+gate transicional `SESIONES_POR_CANAL_MIGRADAS` fue RETIRADO: la garantía es estructural
+(`paths.session` exige la clave) y está demostrada por `verify-coexistence-dual.mjs` con la herramienta
+real. El historial tiene GENERACIONES (ADR-0017 §5): offboarding cierra la vigente de forma honesta y solo
+un nuevo Embedded Signup (claim de code nuevo) abre la siguiente; la anterior queda archivada íntegra. El
+cambio de número por defecto se hace con `cutover-whatsapp-number.mjs` (una transacción, firma del
+dry-run, rollback byte a byte) — nunca a mano ni desde el panel. El backup de Storage COPIA los bytes y
+`restore-storage.mjs` los restaura solo en destinos aislados (producción prohibida).
+
+*Última actualización: 2026-08-04 — §12.1 + correctivo de cierre (canal por plataforma, generaciones,
+cutover transaccional, backup de Storage con bytes).*

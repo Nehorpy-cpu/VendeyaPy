@@ -125,3 +125,18 @@ describe('consumeMetaConnectNonce — el cruce de modos se rechaza de punta a pu
     expect(await consumeMetaConnectNonce(nonce, { ...CTX, mode: 'standard' })).toBe(false);
   });
 });
+
+describe('TTL por modo — el onboarding humano de Coexistence no muere en el popup (correctivo, MEDIO 13)', () => {
+  it('el nonce de coexistence nace con 30 min de ventana; el estándar conserva sus 10', async () => {
+    const antes = Date.now();
+    const nEst = await createMetaConnectNonce(CTX.tenantId, CTX.uid, 'standard');
+    const nCoex = await createMetaConnectNonce(CTX.tenantId, CTX.uid, 'coexistence');
+    const vidaEst = (docs.get(`metaOAuthStates/${nEst}`) as { expiresAtMs: number }).expiresAtMs - antes;
+    const vidaCoex = (docs.get(`metaOAuthStates/${nCoex}`) as { expiresAtMs: number }).expiresAtMs - antes;
+
+    // Escanear el QR y revincular dispositivos es un acto humano: 10 min mataban el nonce DESPUÉS
+    // de que Meta ya había onboardeado el número real.
+    expect(vidaCoex).toBeGreaterThanOrEqual(30 * 60_000 - 1000);
+    expect(vidaEst).toBeLessThanOrEqual(10 * 60_000 + 1000);
+  });
+});

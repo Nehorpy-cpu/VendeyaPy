@@ -75,32 +75,33 @@ const esPreconditionFailed = (e) =>
  * ADR-0017 (consecuencias): «Hay ~25 lugares que hoy asumen `sessions/active`; **migrarlos es
  * condición para pasar a `live`**».
  *
- * Mientras esto sea `false`, el script se niega a poner en `live` a un número que NO vive en el
- * canal heredado: el motor leería su conversación de `sessions/active` —la del número que ya
- * vende— y le contestaría con el carrito y el takeover de otra charla. Es una constante del
- * código y no una bandera de línea de comandos a propósito: el ADR pide verificarlo, no confiar
- * en que el operador se acuerde. Se pone en `true` en el commit que migra esos call sites.
+ * Ese bloqueo vivió acá como la constante `SESIONES_POR_CANAL_MIGRADAS = false`: mientras la
+ * migración de call sites estuviera abierta, promover a `live` un número de canal propio hacía
+ * que el motor leyera `sessions/active` —la conversación del número que ya vende— y contestara
+ * con el carrito y el takeover de otra charla.
  *
- * ESTADO TRAS ETAPA E — sigue en `false`, y estas son las dos cosas que faltan (nada más):
+ * EL GATE SE RETIRA (no se pone en `true`) porque la condición que vigilaba dejó de ser una
+ * promesa y pasó a ser ESTRUCTURAL y DEMOSTRADA:
  *
- *  · Los ~32 call sites de `paths.session(` en `src` YA pasan clave explícita: el parámetro dejó
- *    de tener default, así que el compilador garantiza que no queda ninguno sin migrar. Motor,
- *    handoff, mensaje manual, comprobante, confirmación de pago, Coverage (turno, callables,
- *    reanudación y mantenimiento) operan sobre el canal del número que recibió el mensaje, y el
- *    canal viaja PERSISTIDO en `Session.id`, `Order.sessionKey`, `coverageRequest.sessionKey` y
- *    `coverageResumeJob.sessionKey`.
- *  · FALTA (1): un E2E contra el emulador con DOS PNID del mismo tenant y el MISMO cliente. Lo
- *    que hay hoy son tests unitarios de aislamiento (carrito, takeover, checkout, comprobante,
- *    cobertura); los scripts `verify-*.mjs` siguen sembrando solo `sessions/active` y no ejercen
- *    un segundo número.
- *  · FALTA (2): Instagram y Messenger siguen compartiendo la clave `active` vía `CANAL_SIN_GATE`
- *    (ver `automationMode.ts`). No afecta a WhatsApp —son otros `customerId`— pero es la única
- *    pieza del §2 que queda declarada como deuda en vez de cerrada.
+ *  · `paths.session(tenantId, customerId, sessionKey)` NO tiene default: el compilador rechaza
+ *    cualquier call site que no nombre su canal. Motor, handoff, mensaje manual, comprobante,
+ *    confirmación de pago y Coverage operan sobre el canal del número que recibió el mensaje, y
+ *    el canal viaja PERSISTIDO en `Session.id`, `Order.sessionKey`, `coverageRequest.sessionKey`
+ *    y `coverageResumeJob.sessionKey`. Un booleano acá no vigilaría nada que el typecheck no
+ *    vigile mejor — y un flag en `true` que ya no bloquea nada no es una defensa: es un lugar
+ *    donde mentir.
+ *  · El aislamiento se demuestra EN EJECUCIÓN y con esta MISMA herramienta (nunca escribiendo el
+ *    campo a mano): `verify-coexistence-dual.mjs` — DOS PNID del mismo tenant, el MISMO cliente,
+ *    sesión/carrito/takeover/handoff/Coverage/pedido/comprobantes/salida manual y del bot,
+ *    todos por canal — y `verify-coexistence.mjs`, que promueve el número de Coexistence a
+ *    `shadow` y a `live` SOLO por `migrarModoAutomatizacion` (la única escritura directa que
+ *    conserva es la del PNID legacy, que modela la migración pre-deploy del Paso 5). Instagram y
+ *    Messenger ya no comparten `active`: tienen canal propio por plataforma
+ *    (`sessionKeyDePlataforma`, `@vpw/shared`).
  *
- * Ninguna de las dos se resuelve cambiando esta constante: se resuelven corriendo el E2E y
- * migrando esas conversaciones. Hasta entonces, `live` sobre un canal propio sigue bloqueado.
+ * La defensa que QUEDA —y no se retira— es `canal_compartido`: un canal, UN solo número
+ * automatizado. Esa no es transicional; es el invariante del §2.
  */
-const SESIONES_POR_CANAL_MIGRADAS = false;
 
 /**
  * El canal de un asset. Antes esto era una RÉPLICA del criterio del resolvedor del webhook, con la
@@ -152,11 +153,14 @@ async function motivoDeBloqueo(db, tenantId, phoneNumberId, asset, mode, idxSnap
   }
 
   if (mode === 'live') {
-    // 4) `live` sobre un canal propio necesita que el código sepa leerlo (ver la constante).
-    if (canal !== LEGACY_SESSION_KEY && !SESIONES_POR_CANAL_MIGRADAS) return 'sesion_por_canal_no_migrada';
-    // 5) Y que sea el número por defecto del tenant: es el que resuelven las credenciales de
-    //    salida cuando el outbound no sabe por qué número entró el mensaje.
-    if (asset.selected !== true) return 'no_es_el_numero_por_defecto';
+    // 4) `live` en el canal HEREDADO exige ser el número por defecto del tenant: es el que
+    //    resuelven las credenciales de salida cuando el outbound no sabe por qué número entró el
+    //    mensaje. A un número de canal PROPIO no se le exige — exigírselo obligaría a marcarlo
+    //    `selected`, o sea a mover el remitente por defecto del tenant al número recién
+    //    onboardeado, que es justo el número por el que NADIE decidió que salga el tráfico sin
+    //    origen. Su salida no depende de `selected`: cada respuesta resuelve credenciales por el
+    //    número que RECIBIÓ (`receivedVia`), persistido por conversación.
+    if (canal === LEGACY_SESSION_KEY && asset.selected !== true) return 'no_es_el_numero_por_defecto';
   }
   return null;
 }

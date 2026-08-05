@@ -12,6 +12,8 @@
  * de su empresa. TENANT_MANAGER/VIEWER/SELLER: denegado. Nunca se loguean code ni tokens.
  */
 import { onCall, HttpsError, type CallableRequest } from 'firebase-functions/v2/https';
+import { declaredAutomationMode, parseAutomationMode, masRestrictivo } from '@vpw/shared';
+import { db, paths } from '../../lib/firebase.js';
 import { resolveMetaConnectAuth } from '../../meta/authz.js';
 import {
   createMetaConnectNonce,
@@ -177,11 +179,75 @@ export const verifyMetaChannel = onCall<{ tenantId?: string }>({ region: 'us-cen
   return { ok: true, ...result };
 });
 
+/** Forma CRUDA de un asset de número tal como viene de Firestore (solo lo que el guard mira). */
+interface NumeroParaSeleccion {
+  externalId?: unknown;
+  automationMode?: unknown;
+}
+
+/**
+ * ADR-0017 — EL DEFAULT DEL TENANT NO PUEDE DEJAR DE AUTOMATIZAR POR UN CLICK DEL PANEL.
+ *
+ * `selected: true` es el número que resuelven las credenciales de salida cuando el outbound no
+ * sabe por qué número entró el mensaje. Elegir un PNID cuyo `automationMode` resuelve `inactive`
+ * (o `shadow`: observar no es responder) mientras OTRO número del tenant está `live` deja al bot
+ * callado aunque el panel diga «éxito» — sobre el número con el que la empresa vende.
+ *
+ * El guard es MÍNIMO a propósito y exige DOS cosas a la vez para rechazar:
+ *
+ *  1. el destino NO resuelve `live` (por declaración, por basura o por ausencia bajo fail-closed);
+ *  2. existe OTRO asset del tenant que DECLARA `live` — hay una automatización encendida que esta
+ *     selección apagaría.
+ *
+ * Sin (2) no se rechaza nada, y eso es lo que protege al mundo PRE-MIGRACIÓN: en producción HOY el
+ * asset seleccionado no tiene el campo (el Paso 5 del runbook aún no corrió), nadie declara `live`
+ * y la selección sigue funcionando exactamente igual. El cutover completo (elegir + encender +
+ * degradar, sin ventana) NO es de este callable: es de la herramienta release-only
+ * (`scripts/cutover-whatsapp-number.mjs`). La autorización del callable no cambia.
+ *
+ * PURA: devuelve el mensaje del rechazo (saneado: sin PNIDs, sin rutas, sin tokens) o `null`.
+ */
+export function rechazoDeSeleccionPorAutomatizacion(
+  destino: NumeroParaSeleccion | null | undefined,
+  numeros: ReadonlyArray<NumeroParaSeleccion>,
+): string | null {
+  // Un destino inexistente no opina: ese caso lo responde el `not-found` de siempre.
+  if (!destino) return null;
+  // Correctivo (MEDIO 16): el modo EFECTIVO del destino es el MÁS RESTRICTIVO entre asset e
+  // índice — el mismo desempate del gate del webhook. Un índice degradado (p. ej. por un
+  // `account_update` aplicado a medias) con el asset todavía en `live` dejaba elegir de default
+  // un número que el inbound iba a tratar como `inactive`.
+  const opinionIndice = declaredAutomationMode((destino as { indiceAutomationMode?: unknown }).indiceAutomationMode);
+  const modoEfectivo = masRestrictivo(parseAutomationMode(destino.automationMode), ...(opinionIndice ? [opinionIndice] : []));
+  if (modoEfectivo === 'live') return null;
+  const hayOtroLive = numeros.some(
+    (n) => n !== destino && n.externalId !== destino.externalId && declaredAutomationMode(n.automationMode) === 'live',
+  );
+  return hayOtroLive
+    ? 'Ese número todavía no tiene la automatización encendida: dejarlo como número por defecto apagaría las respuestas automáticas de la empresa. Activalo primero, o hacé el cambio con el proceso de release.'
+    : null;
+}
+
 export const selectMetaPhoneNumber = onCall<{ tenantId?: string; phoneNumberId?: string }>({ region: 'us-central1' }, async (req) => {
   const { tenantId, uid } = authorize(req, req.data?.tenantId);
   const phoneNumberId = req.data?.phoneNumberId;
   if (!phoneNumberId) throw new HttpsError('invalid-argument', 'Falta phoneNumberId.');
   await assertWhatsappNumbersEntitled(tenantId, { actorUid: uid });
+  // ADR-0017: mirar el permiso ANTES de escribir. La lectura es la misma que hace la selección.
+  const snap = await db().collection(paths.metaAssets(tenantId)).where('assetType', '==', 'whatsapp_phone_number').get();
+  const numeros = snap.docs.map((d) => d.data() as NumeroParaSeleccion);
+  const destinoBase = numeros.find((n) => n.externalId === phoneNumberId) ?? null;
+  // El índice del DESTINO también opina (una sola lectura extra, solo para el elegido): es la
+  // otra mitad del desempate por el más restrictivo que ya aplica el gate del webhook.
+  const idxDestino = destinoBase
+    ? ((await db().doc(paths.metaExternalIndexEntry(`whatsapp_${phoneNumberId}`)).get()).data() as { automationMode?: unknown } | undefined)
+    : undefined;
+  const destino = destinoBase ? { ...destinoBase, indiceAutomationMode: idxDestino?.automationMode } : null;
+  const motivo = rechazoDeSeleccionPorAutomatizacion(destino, numeros);
+  if (motivo) {
+    logger.warn('Meta select: rechazado — el destino no automatiza y hay un número live', { tenantId });
+    throw new HttpsError('failed-precondition', motivo);
+  }
   const ok = await selectTenantPhoneNumber(tenantId, phoneNumberId);
   if (!ok) throw new HttpsError('not-found', 'Ese número no pertenece a la cuenta conectada.');
   return { ok: true, phoneNumberId };

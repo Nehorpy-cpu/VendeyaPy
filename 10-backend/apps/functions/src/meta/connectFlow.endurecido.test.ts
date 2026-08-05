@@ -63,7 +63,7 @@ vi.mock('../lib/firebase.js', () => ({
 }));
 
 vi.mock('../lib/secretStore.js', () => ({
-  getSecretStore: () => ({ set: h.guardarSecreto, get: async () => null, remove: h.borrarSecreto }),
+  getSecretStore: () => ({ set: h.guardarSecreto, get: async (ref: string) => h.secretos.get(ref) ?? null, remove: h.borrarSecreto }),
 }));
 
 vi.mock('./discovery.js', () => ({
@@ -208,6 +208,26 @@ describe('C1 — un connect FALLIDO no puede degradar la conexión que está ven
     await runMetaConnect(TENANT, { code: 'code-de-prueba' }, 'uid-1', graphFake({ dbg: { isValid: false } }));
 
     expect(h.guardarSecreto).not.toHaveBeenCalled();
+  });
+});
+
+describe('C2 — un fallo DESPUÉS del set del secreto no puede destruir la credencial que vende (correctivo, CRÍTICO 2)', () => {
+  it('writeDiscoveredAssets falla → el secreto de main conserva su VALOR previo, no el del intento', async () => {
+    sembrarConexionQueVende();
+    h.escribirAssets.mockImplementation(async () => { throw new Error('firestore caído'); });
+
+    const r = await runMetaConnect(
+      TENANT,
+      { code: 'code-nuevo' },
+      'uid-1',
+      graphFake({ exchangeCode: async () => ({ accessToken: 'token-del-intento', tokenType: 'bearer', expiresInS: 3600 }) }),
+    );
+
+    expect(r.ok).toBe(false);
+    // El naming del secreto es determinístico ⇒ el set PISÓ el documento. El rollback que solo
+    // comparaba referencias (misma string siempre) dejaba el token del intento fallido en el
+    // lugar del que vende: la conexión seguía 'active' apuntando a una credencial destruida.
+    expect(h.secretos.get(REF_PREVIA)).toBe('token-que-vende');
   });
 });
 

@@ -34,6 +34,7 @@ import { resolveEntitlements, getUsage, isUnlimited } from '@/lib/entitlements';
 import { SectionHeader, EmptyState, ConfirmModal, StatusBadge, type BadgeTone } from '@/components/ui';
 import { WhatsappAssistedActivation } from '@/components/integrations/WhatsappAssistedActivation';
 import { CoexistenceOnboardingCard } from '@/components/integrations/CoexistenceOnboardingCard';
+import { CoexistenceHistoryCard } from '@/components/integrations/CoexistenceHistoryCard';
 
 const STATUS: Record<MetaConnectionStatus, { label: string; cls: string }> = {
   not_connected: { label: 'Sin conectar', cls: 'bg-ink-50 text-ink-600' },
@@ -381,6 +382,15 @@ export default function IntegrationsPage() {
         pending={connectRealMut.isPending}
         onConfirm={() => conectarReal('coexistence')}
       />
+
+      {/* El flujo humano del historial (ADR-0017 §5), UNO por número de Coexistence conectado.
+          El PNID sale de los assets del tenant que esta página ya listó — jamás de un input — y
+          el backend lo re-verifica contra la conexión `wa_{pnid}` propia. */}
+      {(assetsQ.data ?? [])
+        .filter((a) => a.assetType === 'whatsapp_phone_number' && (a.connectionId ?? '').startsWith('wa_'))
+        .map((a) => (
+          <CoexistenceHistoryCard key={a.externalId} tenantId={tenantId!} phoneNumberId={a.externalId} canOperate={canOperate} />
+        ))}
 
       {/* Activación asistida de WhatsApp (WM-2): cuando el Embedded Signup no está configurado, el owner
           pide ayuda al equipo. No activa 'live' (eso sigue siendo exclusivo de channelConfigUpdate). */}

@@ -94,6 +94,21 @@ tomar el pedido empezado en un número y contestarlo por el otro.
 **Compatibilidad**: las conversaciones que ya existen viven en `sessions/active`. Esa clave se conserva como
 la del canal legacy; no se migra nada.
 
+**Corrección del correctivo (2026-08-04): el canal es por PLATAFORMA, no solo por PNID.** Instagram y
+Messenger compartían el canal mutable `active` entre sí y con WhatsApp legacy (`CANAL_SIN_GATE` congelaba
+`sessionKey: 'active'`): un cliente escribiendo por Instagram compartía carrito y takeover con el número de
+WhatsApp que vende. Ahora cada plataforma sin PNID tiene clave propia (`ig` / `msgr`, de
+`sessionKeyDePlataforma` en `@vpw/shared`; una plataforma desconocida deriva `ch_<saneado>`, jamás `active`
+ni `wa_*`), y el panel resuelve el canal mirando **primero la plataforma** (`conversation.channel`) y recién
+después el número receptor. Dato usado y verificado: producción tiene una sola entrada de ruteo (whatsapp),
+así que no existían sesiones IG/Messenger reales que abandonar.
+
+**La condición de las Consecuencias («migrar los ~25 lugares es condición para `live`») quedó CUMPLIDA** y
+la garantía es estructural: `paths.session` exige la clave (la vigila el compilador) y el aislamiento de dos
+PNID con el mismo cliente está demostrado en ejecución por `verify-coexistence-dual.mjs`, que promueve a
+`live` con la herramienta real. El gate transicional `SESIONES_POR_CANAL_MIGRADAS` fue retirado por eso —
+no por decreto.
+
 ### 3. Un echo es lo que el vendedor dijo, no lo que el cliente pidió
 
 `smb_message_echoes` es el evento que hace posible Coexistence: avisa que el vendedor contestó desde su
@@ -135,9 +150,10 @@ está cerrada —caso típico: el cliente escribió justo *antes* del onboarding
 es una plantilla. Tratar el echo como si abriera la ventana produciría envíos rechazados por Meta que el
 sistema leería como fallas propias.
 
-Y una consecuencia que hay que arreglar antes: hoy `releaseToBot` escribe `state: 'IDLE'` incondicionalmente y
-**destruye el `AWAITING_PAYMENT` del checkout** (defecto ya documentado). Con echoes, tomar y liberar deja de
-ser excepcional y pasa a ser el ritmo normal del vendedor. La liberación tiene que preservar el estado.
+Y una consecuencia que había que arreglar antes — **CERRADA en `4af6607`**: `releaseToBot` escribía
+`state: 'IDLE'` incondicionalmente y destruía el `AWAITING_PAYMENT` del checkout. Hoy la liberación preserva
+`AWAITING_PAYMENT`/`SELECTING_PAYMENT` (`conversation/handoff.release.test.ts`): tomar y liberar puede ser el
+ritmo normal del vendedor sin romper el pago en curso.
 
 ### 4. El historial es un archivo, no una bandeja de entrada
 
@@ -178,6 +194,17 @@ dispararlos explícitamente con `POST /<PHONE_NUMBER_ID>/smb_app_data`, primero 
 Y la cita que gobierna todo el diseño del coordinador: **«Esto se puede hacer una sola vez. Si hace falta
 repetirlo, el cliente tiene que offboardear primero y volver a completar el Embedded Signup.»**
 
+**Generaciones (correctivo 2026-08-04).** La única recuperación real que este contrato admite —offboardear y
+rehacer el Embedded Signup— necesitaba existir en el código, no solo en el texto de los rechazos: la decisión
+y el disparo eran terminales PARA SIEMPRE, y una reconexión legítima quedaba bloqueada por la generación
+anterior. El ciclo ahora es explícito: un `ACCOUNT_OFFBOARDED` **cierra la generación vigente de forma
+honesta** (`failed` con el motivo; una terminal queda intacta; el consentimiento no se toca), y **solo un
+onboarding autorizado** —el claim transaccional de un `code` nuevo, que por construcción existe a lo sumo una
+vez por signup real— **abre la siguiente**: sin decisión heredada, contadores a cero, ventana de 24 h nueva.
+La generación anterior se archiva íntegra en `{pnid}_gen{N}` (auditoría: jamás se borra ni se reescribe), un
+replay del mismo claim devuelve lo mismo sin abrir nada, y un claim de una generación ya archivada no puede
+resetear la vigente. Decidir no fabrica generaciones: la generación la mueve exclusivamente el onboarding.
+
 De ahí tres consecuencias que no son opcionales:
 
 - **No hay reintento.** Un disparo perdido no se recupera con un botón: se recupera desconectando el número
@@ -189,13 +216,14 @@ De ahí tres consecuencias que no son opcionales:
 - **«No compartió» es un desenlace explícito, no un silencio.** Llega como `history[0].errors[0].code =
   2593109`. Sin leer `chunk.errors` el sistema se queda esperando y quema la ventana.
 
-Dos agujeros del parser actual contra este contrato, que hay que cerrar antes de que sirva de algo:
+Dos agujeros del parser que este contrato exponía, ambos **CERRADOS por el programa de cierre** (los cubre
+`parseWebhook.coexistenciaContrato.test.ts`):
 
-1. `waHistoryChange` lee únicamente `value.history[]`, pero el webhook que trae los **IDs de los adjuntos del
-   historial** llega con `field: "history"` y el value contiene `messages[]`. Hoy se descarta en silencio — y
-   esos IDs solo existen durante 14 días y no se pueden volver a pedir.
-2. El payload del caso «no compartió» **no trae el envelope `object`/`entry`/`changes`** que `parseWhatsApp`
-   itera, así que se perdería entero antes de llegar al router.
+1. `waHistoryChange` leía únicamente `value.history[]` y descartaba el webhook con los **IDs de los adjuntos
+   del historial** (llega con `field: "history"` pero `value.messages[]`; esos IDs solo viven 14 días). Hoy
+   se parsean como `historyMedia` y el coordinador los cuenta.
+2. El payload del caso «no compartió» **no trae el envelope `object`/`entry`/`changes`**; el parser lo acepta
+   sin envelope y el código `2593109` llega al coordinador como el desenlace `declined` que es.
 
 ### 6. Meta desconecta el número solo, y hay que enterarse
 

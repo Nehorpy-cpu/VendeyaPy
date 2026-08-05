@@ -113,6 +113,12 @@ async function main() {
   if (!process.env.FIREBASE_AUTH_EMULATOR_HOST) {
     throw new Error('[e2e] ABORTADO: falta FIREBASE_AUTH_EMULATOR_HOST. La identidad es parte de la prueba, no un extra.');
   }
+  if (!process.env.STORAGE_EMULATOR_HOST && !process.env.FIREBASE_STORAGE_EMULATOR_HOST) {
+    // El correctivo lo prohibió con nombre y apellido: «ningún SALTEADO puede terminar exit 0».
+    // Sin Storage, esta prueba certificaba un backup al que le faltaban los adjuntos de los
+    // clientes — exactamente la media verdad que el E2E existe para impedir.
+    throw new Error('[e2e] ABORTADO: falta STORAGE_EMULATOR_HOST. Los bytes de Storage son parte del backup, no un extra: sin el emulador de Storage esta prueba no certifica nada.');
+  }
   const cryptoCompilado = join(FUNCTIONS_DIR, 'lib', 'lib', 'crypto.js');
   if (!existsSync(cryptoCompilado)) {
     throw new Error('[e2e] ABORTADO: falta lib/lib/crypto.js. Corré `pnpm --filter functions build` antes: la prueba de descifrado usa el módulo REAL, no una reimplementación.');
@@ -173,16 +179,16 @@ async function main() {
   await authO.createUser({ uid: `ajeno-${TENANT}`, email: `ajeno-${TENANT}@example.test` });
   await authO.setCustomUserClaims(`ajeno-${TENANT}`, { tenantId: 'OTRO-TENANT', role: 'TENANT_OWNER' });
 
-  let storageOk = null;
-  const contenidoObjeto = Buffer.from(`objeto sintetico ${TENANT}`);
-  if (process.env.STORAGE_EMULATOR_HOST) {
-    try {
-      await getStorage(appO).bucket(BUCKET).file(`tenants/${TENANT}/products/p1/foto.bin`).save(contenidoObjeto, { contentType: 'application/octet-stream', resumable: false });
-      storageOk = true;
-    } catch (e) {
-      storageOk = false;
-      console.warn(`[e2e] no se pudo sembrar Storage: ${e instanceof Error ? e.message : String(e)}`);
-    }
+  // Storage se siembra SIEMPRE (la precondición ya exigió el emulador): varios objetos, en
+  // familias distintas, para que la copia y el restore se prueben sobre más de un caso.
+  const OBJETOS_SEMILLA = [
+    { ruta: `tenants/${TENANT}/products/p1/foto.bin`, contenido: Buffer.from(`objeto sintetico ${TENANT}`), tipo: 'application/octet-stream' },
+    { ruta: `tenants/${TENANT}/attachments/att1/comprobante.pdf`, contenido: Buffer.from(`pdf sintetico ${TENANT} — bytes que un restore de Firestore solo dejaria rotos`), tipo: 'application/pdf' },
+    { ruta: `tenants/${TENANT}/branding/logo.png`, contenido: Buffer.from(`png sintetico ${TENANT}`), tipo: 'image/png' },
+  ];
+  const bucketO = getStorage(appO).bucket(BUCKET);
+  for (const o of OBJETOS_SEMILLA) {
+    await bucketO.file(o.ruta).save(o.contenido, { contentType: o.tipo, resumable: false });
   }
 
   const fotoOriginal = await fotografiar(dbO, `tenants/${TENANT}`);
@@ -223,15 +229,48 @@ async function main() {
   check('manifiesto: registra las 14 semanas del backup gestionado y que el TTL no se repone',
     manFs.advertencias.some((a) => /14 semanas/i.test(a)) && manFs.advertencias.some((a) => /NO REPONE LAS POLÍTICAS TTL/i.test(a)));
 
-  // Storage (inventario + muestra verificada por checksum)
-  if (storageOk) {
-    const bst = correr('backup-storage.mjs', [...argsBase, '--bucket', BUCKET, '--muestra', '2', '--apply']);
-    const manSt = bst.code === 0 ? JSON.parse(readFileSync(join(dirBackup, 'manifest-storage.json'), 'utf8')) : null;
-    check('backup Storage: inventario con muestra verificada por checksum',
-      bst.code === 0 && manSt?.resumen.total >= 1 && manSt?.muestreo.fallidos === 0, manSt ? `objetos=${manSt.resumen.total} verificados=${manSt.muestreo.verificados}` : '');
-  } else {
-    console.log('⏭️  Storage: SALTEADO (STORAGE_EMULATOR_HOST no está seteado). No cuenta como aprobado.');
+  // ---------------------------------------------------------------------
+  // 2b. Storage: COPIA de bytes → mutación del origen → restore aislado → equivalencia TOTAL
+  // ---------------------------------------------------------------------
+  const bst = correr('backup-storage.mjs', [...argsBase, '--bucket', BUCKET, '--apply']);
+  const manSt = bst.code === 0 ? JSON.parse(readFileSync(join(dirBackup, 'manifest-storage.json'), 'utf8')) : null;
+  check('backup Storage: COPIA los bytes de TODOS los objetos (no un inventario)',
+    bst.code === 0 && manSt?.copiaDeBytes === true && manSt?.copia.copiados === OBJETOS_SEMILLA.length && manSt?.copia.fallidos === 0,
+    manSt ? `copiados=${manSt.copia?.copiados}/${OBJETOS_SEMILLA.length} bytes=${manSt.copia?.bytes}` : `exit=${bst.code}`);
+
+  // Mutación del ORIGEN: borrar un objeto y corromper otro. Sin esto, la equivalencia posterior
+  // no demuestra que el restore vino del BACKUP y no del origen.
+  await bucketO.file(OBJETOS_SEMILLA[1].ruta).delete();
+  await bucketO.file(OBJETOS_SEMILLA[0].ruta).save(Buffer.from('CORROMPIDO EN EL ORIGEN'), { contentType: 'text/plain', resumable: false });
+
+  const BUCKET_DESTINO = `${PROY_DESTINO}.appspot.com`;
+  const argsRestoreSt = ['--project', PROY_DESTINO, '--desde', dirBackup, '--out', dirReporte, '--bucket', BUCKET_DESTINO];
+
+  const prodStBloqueado = correr('restore-storage.mjs', ['--project', 'vpw-prod-dd6ff', '--desde', dirBackup, '--out', dirReporte, '--apply'], { esperaFallo: true });
+  check('restore Storage: contra PRODUCCIÓN aborta sin flag que lo levante', prodStBloqueado.code !== 0 && /destino_produccion/.test(prodStBloqueado.salida));
+
+  const drySt = correr('restore-storage.mjs', argsRestoreSt);
+  const huellaSt = /--confirmo ([0-9a-f]+)/.exec(drySt.salida)?.[1];
+  check('restore Storage: el dry-run verifica las copias locales e imprime la huella del destino',
+    drySt.code === 0 && Boolean(huellaSt) && /copias locales verificadas/.test(drySt.salida));
+
+  const rst = correr('restore-storage.mjs', [...argsRestoreSt, '--confirmo', huellaSt ?? 'sin-huella', '--apply']);
+  check('restore Storage: sube y VERIFICA todos los objetos (exit 0)', rst.code === 0, rst.code === 0 ? '' : rst.salida.slice(-200));
+
+  // Equivalencia TOTAL: cada objeto del backup, releído del DESTINO, byte a byte por sha256 —
+  // incluido el que el origen ya no tiene y el que el origen corrompió.
+  const bucketD = getStorage(appD).bucket(BUCKET_DESTINO);
+  let equivalentes = 0;
+  for (const o of OBJETOS_SEMILLA) {
+    const [buf] = await bucketD.file(o.ruta).download();
+    if (createHash('sha256').update(buf).digest('hex') === createHash('sha256').update(o.contenido).digest('hex')) equivalentes++;
   }
+  check('equivalencia Storage: TODOS los objetos restaurados coinciden byte a byte con la semilla', equivalentes === OBJETOS_SEMILLA.length, `${equivalentes}/${OBJETOS_SEMILLA.length}`);
+  check('equivalencia Storage: el objeto BORRADO en el origen volvió desde el backup',
+    (await bucketD.file(OBJETOS_SEMILLA[1].ruta).exists())[0] === true);
+  const [bufCorrompido] = await bucketD.file(OBJETOS_SEMILLA[0].ruta).download();
+  check('equivalencia Storage: el objeto CORROMPIDO en el origen quedó con los bytes del BACKUP, no los corrompidos',
+    bufCorrompido.equals(OBJETOS_SEMILLA[0].contenido));
 
   // ---------------------------------------------------------------------
   // 3. Mutación sintética del ORIGEN — sin esto, comparar no demuestra nada

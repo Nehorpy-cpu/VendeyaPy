@@ -106,8 +106,16 @@ export async function disconnectMeta(tenantId: string): Promise<void> {
   const idx = await db().collection(paths.metaExternalIndex()).where('tenantId', '==', tenantId).get();
   const now = Timestamp.now();
   const batch = db().batch();
+  // «Desconectar» es una operación sobre la conexión MAIN, no sobre el tenant entero. Los números
+  // de otras conexiones (`wa_{pnid}`, Coexistence/multi-número) tienen su propio ciclo de vida
+  // (`deactivateWhatsappNumber`) y NO se tocan: borrarles el ruteo acá dejaba mudo, con un solo
+  // click del panel, a un número que esta conexión ni administra — en `shadow` la observación
+  // moría en silencio, y después del cutover ese número es EL QUE VENDE. Mismo criterio
+  // `connectionId ?? 'main'` que usa la limpieza del discovery.
+  const esDeMain = (data: { connectionId?: unknown }): boolean => (data.connectionId ?? 'main') === 'main';
   assets.docs.forEach((d) => {
-    const data = d.data() as { assetType?: unknown };
+    const data = d.data() as { assetType?: unknown; connectionId?: unknown };
+    if (!esDeMain(data)) return;
     if (data.assetType === 'whatsapp_phone_number') {
       // MERGE a propósito: `automationMode` y `sessionKey` no se nombran, así que no se tocan.
       // Escribirlos —aunque fuera con su valor actual— convertiría esto en una decisión sobre el
@@ -117,8 +125,11 @@ export async function disconnectMeta(tenantId: string): Promise<void> {
     }
     batch.delete(d.ref);
   });
-  // El índice SÍ se borra: es el ruteo, y es lo que deja al número efectivamente callado.
-  idx.docs.forEach((d) => batch.delete(d.ref));
+  // El índice SÍ se borra — pero solo el de ESTA conexión: es su ruteo, y es lo que deja al
+  // número de main efectivamente callado.
+  idx.docs.forEach((d) => {
+    if (esDeMain(d.data() as { connectionId?: unknown })) batch.delete(d.ref);
+  });
   await batch.commit();
   logger.info('Conexión Meta desconectada', { tenantId });
   await recordAudit({ tenantId, action: 'meta.disconnected', targetType: 'meta', summary: 'Conexión Meta desconectada' });

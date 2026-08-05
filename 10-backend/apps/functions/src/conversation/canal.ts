@@ -18,7 +18,7 @@
  * NO se resuelve adivinando: se falla. Caer a `active` ahí sería tomar (o devolverle al bot) la
  * conversación del número que está vendiendo, por un hipo de Firestore.
  */
-import { LEGACY_SESSION_KEY } from '@vpw/shared';
+import { LEGACY_SESSION_KEY, sessionKeyDePlataforma } from '@vpw/shared';
 import { resolveAutomationMode } from '../meta/automationMode.js';
 import { db, paths } from '../lib/firebase.js';
 
@@ -45,12 +45,32 @@ export async function resolverCanalDePnid(tenantId: string, receivedVia: string 
 }
 
 /**
- * Canal de la conversación de un cliente, leído de su resumen (`conversation.receivedVia`) — el
- * mismo campo que ya decide por qué número SALE el mensaje manual, para que el gate y el envío no
- * puedan estar mirando conversaciones distintas.
+ * Canal propio de una plataforma que NO es WhatsApp, o `null` si la conversación es de WhatsApp
+ * (o anterior a que el resumen registrara la plataforma). Pura, sin I/O — es LA regla, y vive en
+ * un solo lugar para que el panel y el mensaje manual no puedan divergir.
+ *
+ * Existe porque `receivedVia` lo escribe únicamente WhatsApp: resolver el canal SOLO por ese campo
+ * mandaba las conversaciones de Instagram/Messenger al fallback legacy `active` — el canal del
+ * número de WhatsApp que vende — mientras el motor les escribe en `ig`/`msgr`. Tomar un chat de
+ * Instagram desde el panel silenciaba al bot en el número equivocado.
+ */
+export function canalDePlataformaNoWhatsapp(channel: string | null | undefined): string | null {
+  const plataforma = (channel ?? '').trim();
+  if (plataforma === '' || plataforma === 'whatsapp') return null;
+  return sessionKeyDePlataforma(plataforma);
+}
+
+/**
+ * Canal de la conversación de un cliente, leído de su resumen: primero la PLATAFORMA
+ * (`conversation.channel` — Instagram/Messenger tienen canal fijo propio, sin PNID que autorizar)
+ * y recién después el número receptor (`conversation.receivedVia`) — el mismo campo que ya decide
+ * por qué número SALE el mensaje manual, para que el gate y el envío no puedan estar mirando
+ * conversaciones distintas.
  */
 export async function resolverCanalDeConversacion(tenantId: string, customerId: string): Promise<string> {
   const snap = await db().doc(paths.customer(tenantId, customerId)).get();
-  const conv = (snap.data() as { conversation?: { receivedVia?: string | null } } | undefined)?.conversation;
+  const conv = (snap.data() as { conversation?: { channel?: string | null; receivedVia?: string | null } } | undefined)?.conversation;
+  const porPlataforma = canalDePlataformaNoWhatsapp(conv?.channel);
+  if (porPlataforma !== null) return porPlataforma;
   return resolverCanalDePnid(tenantId, conv?.receivedVia ?? null);
 }

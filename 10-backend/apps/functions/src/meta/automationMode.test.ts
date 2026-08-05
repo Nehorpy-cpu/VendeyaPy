@@ -30,7 +30,7 @@ vi.mock('../lib/firebase.js', () => ({
   },
 }));
 
-import { resolveAutomationMode, CANAL_SIN_GATE } from './automationMode.js';
+import { resolveAutomationMode, canalSinGate } from './automationMode.js';
 
 /** Multi-tenant: ningún tenant real aparece en el código ni en los tests. */
 const TENANT = 'tnt_alpha';
@@ -243,13 +243,14 @@ describe('resolveAutomationMode — el canal heredado es de UN solo número', ()
   });
 });
 
-describe('CANAL_SIN_GATE — el escape EXPLÍCITO para lo que no es un número de WhatsApp', () => {
-  it('automatiza sobre el canal heredado (Instagram/Messenger no tienen PNID que autorizar)', () => {
-    expect(CANAL_SIN_GATE.mode).toBe('live');
-    expect(CANAL_SIN_GATE.sessionKey).toBe('active');
+describe('canalSinGate — el escape EXPLÍCITO para lo que no es un número de WhatsApp', () => {
+  it('automatiza, pero en el canal PROPIO de su plataforma (ADR-0017 §2): nunca en `active`', () => {
+    expect(canalSinGate('instagram').mode).toBe('live');
+    expect(canalSinGate('instagram').sessionKey).toBe('ig');
+    expect(canalSinGate('messenger').sessionKey).toBe('msgr');
   });
 
   it('es inmutable: nadie puede convertirlo en el default de WhatsApp por accidente', () => {
-    expect(Object.isFrozen(CANAL_SIN_GATE)).toBe(true);
+    expect(Object.isFrozen(canalSinGate('instagram'))).toBe(true);
   });
 });

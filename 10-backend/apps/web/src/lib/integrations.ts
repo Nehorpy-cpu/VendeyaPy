@@ -178,6 +178,73 @@ export async function coexistenceConnect(tenantId: string, input: CoexistenceCon
   return res.data;
 }
 
+/**
+ * HISTORIAL DE COEXISTENCE (ADR-0017 §5) — los tres pasos humanos, en orden.
+ * El `phoneNumberId` que viaja acá SIEMPRE sale de los assets del tenant que la página ya listó
+ * (jamás de un input libre), y el backend lo re-verifica contra la conexión `wa_{pnid}` propia:
+ * el frontend no puede apuntar la decisión ni el disparo —que es de UN solo uso— a otro número.
+ */
+export type HistorySharingDecision = 'share' | 'skip';
+
+export interface CoexistenceSyncStatus {
+  ok: boolean;
+  exists: boolean;
+  /** false ⇒ la conexión de ese número NO es de Coexistence (alta manual): no hay historial que pedir. */
+  coexistence?: boolean;
+  status?: 'pending_request' | 'requested' | 'receiving' | 'completed' | 'declined' | 'expired' | 'failed';
+  sharingDecision?: HistorySharingDecision | null;
+  syncGeneration?: number;
+  deadlineAtMs?: number | null;
+  requestedAtMs?: number | null;
+  lastChunkAtMs?: number | null;
+  syncTypesRequested?: string[];
+  progress?: number | null;
+  chunks?: number;
+  chunksDuplicados?: number;
+  chunksPendientes?: number;
+  chunksSinTenant?: number;
+  mediaObservados?: number;
+  declineCode?: number | null;
+  errorMessage?: string;
+}
+
+/** La decisión humana, explícita y previa: `share` o `skip`. `skip` es terminal en este ciclo. */
+export async function coexistenceDecideHistorySharing(
+  tenantId: string,
+  phoneNumberId: string,
+  decision: HistorySharingDecision,
+): Promise<{ ok: boolean; status: string; deadlineAtMs: number | null }> {
+  const call = httpsCallable<
+    { tenantId: string; phoneNumberId: string; decision: HistorySharingDecision },
+    { ok: boolean; status: string; deadlineAtMs: number | null }
+  >(firebaseFunctions(), 'coexistenceDecideHistorySharing');
+  const res = await call({ tenantId, phoneNumberId, decision });
+  return res.data;
+}
+
+/** EL disparo (único): `smb_app_data`. El coordinador lo rechaza si no corresponde. */
+export async function coexistenceRequestHistorySync(
+  tenantId: string,
+  phoneNumberId: string,
+): Promise<{ ok: boolean; syncTypes: string[] }> {
+  const call = httpsCallable<{ tenantId: string; phoneNumberId: string }, { ok: boolean; syncTypes: string[] }>(
+    firebaseFunctions(),
+    'coexistenceRequestHistorySync',
+  );
+  const res = await call({ tenantId, phoneNumberId });
+  return res.data;
+}
+
+/** Estado SANEADO del ciclo (sin conversaciones, sin teléfonos): lo que el panel puede mostrar. */
+export async function coexistenceSyncStatus(tenantId: string, phoneNumberId: string): Promise<CoexistenceSyncStatus> {
+  const call = httpsCallable<{ tenantId: string; phoneNumberId: string }, CoexistenceSyncStatus>(
+    firebaseFunctions(),
+    'coexistenceSyncStatus',
+  );
+  const res = await call({ tenantId, phoneNumberId });
+  return res.data;
+}
+
 /** Preflight bajo demanda: revalida token/número y actualiza el estado de la conexión. */
 export async function verifyMetaChannel(tenantId: string): Promise<MetaVerifyResult> {
   const call = httpsCallable<{ tenantId: string }, MetaVerifyResult>(firebaseFunctions(), 'verifyMetaChannel');

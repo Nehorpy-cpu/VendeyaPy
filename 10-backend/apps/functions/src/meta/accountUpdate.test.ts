@@ -21,11 +21,20 @@ vi.mock('../lib/logger.js', () => ({ logger: { info: vi.fn(), warn: vi.fn(), err
 const auditorias: Array<Record<string, unknown>> = [];
 vi.mock('../audit/audit.js', () => ({ recordAudit: async (e: Record<string, unknown>) => { auditorias.push(e); } }));
 
+// El CIERRE de la generación vigente del historial es parte del contrato del offboarding
+// (correctivo ADR-0017 §5): acá se afirma el ENGANCHE — se invoca en la desconexión y NO en la
+// reconexión. La lógica interna (terminal intocable, `failed` honesto) vive en su propio test.
+vi.mock('./historyCoordinator.js', () => ({ cerrarGeneracionPorOffboarding: vi.fn(async () => undefined) }));
+
 vi.mock('../lib/firebase.js', () => ({
   db: () => ({
     doc: (path: string) => ({
       path,
       get: async () => ({ exists: docs.has(path), data: () => docs.get(path) }),
+      create: async (data: Record<string, unknown>) => {
+        if (docs.has(path)) throw Object.assign(new Error('already exists'), { code: 6 });
+        docs.set(path, { ...data });
+      },
       set: async (data: Record<string, unknown>, opts?: { merge?: boolean }) => {
         docs.set(path, opts?.merge ? { ...(docs.get(path) ?? {}), ...data } : { ...data });
       },
@@ -45,6 +54,7 @@ vi.mock('../lib/firebase.js', () => ({
 }));
 
 import { aplicarAccountUpdate, degradaPermiso } from './accountUpdate.js';
+import { cerrarGeneracionPorOffboarding } from './historyCoordinator.js';
 import type { NormalizedAccountUpdate } from './parseWebhook.js';
 
 const TENANT = 'tnt_alpha';
@@ -84,6 +94,8 @@ describe('ACCOUNT_OFFBOARDED / PARTNER_REMOVED — el número deja de automatiza
 
     expect(r).toEqual({ aplicado: true, accion: 'degradado', tenantId: TENANT });
     expect(docs.get(assetPath)!['automationMode']).toBe('inactive');
+    // Y cierra la generación vigente del historial: la ventana murió con la desconexión.
+    expect(cerrarGeneracionPorOffboarding).toHaveBeenCalledWith(TENANT, PNID, T0);
   });
 
   it('y también el índice: el desempate es por el más restrictivo', async () => {
@@ -126,6 +138,9 @@ describe('ACCOUNT_RECONNECTED — reconectar no es autorizar', () => {
 
     expect(r).toEqual({ aplicado: true, accion: 'reconectado_sin_permiso', tenantId: TENANT });
     expect(docs.get(assetPath)!['automationMode']).toBe('inactive');
+    // Reconectar NO cierra la generación: no es un offboarding, y cerrar acá borraría el estado
+    // de una sincronización que sigue siendo la del mismo onboarding.
+    expect(cerrarGeneracionPorOffboarding).not.toHaveBeenCalled();
   });
 });
 
@@ -163,5 +178,35 @@ describe('lo que NO se hace', () => {
 
     expect(r).toEqual({ aplicado: false, motivo: 'sin_asset' });
     expect(docs.get(idxPath)).not.toHaveProperty('automationMode');
+  });
+});
+
+describe('reentrega — el mismo evento no se aplica dos veces (correctivo, MEDIO 17)', () => {
+  it('un ACCOUNT_OFFBOARDED reentregado NO re-degrada un número que un humano ya re-promovió', async () => {
+    sembrar();
+    const ev = evento('ACCOUNT_OFFBOARDED');
+    await aplicarAccountUpdate(ev, T0);
+    // Entre la entrega y la reentrega, la recuperación documentada re-promovió el número.
+    docs.set(assetPath, { ...docs.get(assetPath)!, automationMode: 'live' });
+    docs.set(idxPath, { ...docs.get(idxPath)!, automationMode: 'live' });
+    vi.mocked(cerrarGeneracionPorOffboarding).mockClear();
+
+    const r = await aplicarAccountUpdate(ev, T0 + 60_000);
+
+    expect(r).toEqual({ aplicado: false, motivo: 'reentrega' });
+    // Ni el permiso ni la generación de la sincronización se tocan por una reentrega.
+    expect(docs.get(assetPath)!['automationMode']).toBe('live');
+    expect(cerrarGeneracionPorOffboarding).not.toHaveBeenCalled();
+  });
+
+  it('un OFFBOARDED NUEVO (posterior, otro timestamp) SÍ aplica: no es la reentrega, es otra desconexión', async () => {
+    sembrar();
+    await aplicarAccountUpdate(evento('ACCOUNT_OFFBOARDED'), T0);
+    docs.set(assetPath, { ...docs.get(assetPath)!, automationMode: 'live' });
+
+    const r = await aplicarAccountUpdate({ ...evento('ACCOUNT_OFFBOARDED'), timestamp: (T0 + 3_600_000) / 1000 }, T0 + 3_600_000);
+
+    expect(r).toEqual({ aplicado: true, accion: 'degradado', tenantId: TENANT });
+    expect(docs.get(assetPath)!['automationMode']).toBe('inactive');
   });
 });

@@ -258,6 +258,32 @@ Emulador con **`--project demo-aiafg`** (con otro, las callables dan 404). Sembr
    plazo duro, no una mejora opcional. Decisión aparte.
 5. Deploy de índices **NUNCA con `--force`**: borra los field overrides que no estén en el archivo, incluida
    la política TTL de consola de `metaWebhookInbox`, que no está en IaC a propósito.
-6. `SESIONES_POR_CANAL_MIGRADAS` sigue en `false` en `scripts/migrate-whatsapp-automation-mode.mjs`. El
-   inventario está 100 % migrado (0 callsites runtime sin clave) y el E2E de dos PNID pasa; **cambiarlo es
-   una decisión deliberada del Programa 2**, no un efecto secundario.
+6. **CERRADO por el correctivo (2026-08-04)**: el gate `SESIONES_POR_CANAL_MIGRADAS` fue RETIRADO del
+   script — la garantía es estructural (`paths.session` exige la clave; compilador) y la demuestra
+   `verify-coexistence-dual.mjs` con la herramienta real. Ver el runbook, Paso 12.
+
+### Correctivo de cierre del Programa 1 — 2026-08-04 (continuación sobre `9413047`)
+
+Los 7 gates que el reporte anterior no había cerrado, cerrados con tests rojos primero:
+
+1. **`live` real para el canal nuevo**: el gate `SESIONES_POR_CANAL_MIGRADAS` fue **retirado** (no
+   puesto en `true`): la garantía es estructural (`paths.session` exige la clave; compilador) y la
+   demuestra `verify-coexistence-dual.mjs` (20/20) — dos PNID, mismo cliente, promoción a `live` con
+   `migrarModoAutomatizacion(...,--apply)`, jamás escritura directa. `verify-coexistence.mjs` también
+   promueve con la herramienta real (checks 25/27).
+2. **Instagram/Messenger con canal propio** (`ig`/`msgr`): ya no comparten `active` con el número que
+   vende. El panel resuelve el canal primero por plataforma (`conversation.channel`).
+3. **Cutover seguro del número por defecto**: `cutover-whatsapp-number.mjs` (una transacción, firma
+   sha256 del dry-run obligatoria en `--apply`, `--degradar-anterior shadow|inactive`, registro de
+   reversa en `whatsappCutovers/`, rollback byte a byte) + guard en `selectMetaPhoneNumber` (rechaza
+   default no-live cuando otro asset declara live; pre-migración intacta). `verify-cutover.mjs` 22/22.
+4. **UI humana del historial**: tarjeta en /integrations — decidir share/skip, disparar el único
+   pedido, ver estado saneado con `aria-live`. Wrappers nuevos en `integrations.ts`.
+5. **Generaciones del historial**: offboard cierra la vigente honesta; solo un signup nuevo (claim de
+   code) abre la siguiente; la anterior se archiva íntegra (`{pnid}_gen{N}`); replay viejo bloqueado;
+   `skip` anterior no bloquea reconexión.
+6. **Backup de Storage con BYTES**: `backup-storage.mjs` copia y verifica todo (manifest
+   `copiaDeBytes:true`); `restore-storage.mjs` nuevo (producción prohibida sin excepción);
+   `backup-restore-e2e.mjs` exige los TRES emuladores (sin Storage ⇒ exit 1) — 51/51.
+7. **Runbook** al día: pasos 2-3 exigen export administrado + restore aislado con Graph GET read-only
+   + política de Auth explícita; paso 12 documenta el cutover; hallazgos 4 y 5 cerrados.

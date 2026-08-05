@@ -32,11 +32,13 @@
  * `multiNumber.ts` y es la que se usa. Acá vive lo que multiNumber no puede saber: cómo se llega
  * al token y al PNID cuando lo único que hay es un `code` y un WABA.
  */
+import { Timestamp } from 'firebase-admin/firestore';
 import type { MetaConnection, MetaConnectionStatus } from '@vpw/shared';
 import { db, paths } from '../lib/firebase.js';
 import { logger } from '../lib/logger.js';
 import { missingScopes, wabaAutorizado } from './connectFlow.js';
 import { META_REQUIRED_SCOPES } from './scopes.js';
+import { metaNumberTokenSecretName } from './secretName.js';
 import { runAddWhatsappNumber, waConnectionId, type AddNumberDeps } from './multiNumber.js';
 import type { MetaGraphClient, MetaPhoneNumber } from './graphClient.js';
 
@@ -179,16 +181,31 @@ export async function runCoexistenceConnect(
     return { ok: true, connectionId: alta.connectionId, phoneNumberId: alta.phoneNumberId, phoneNumber: alta.phoneNumber, status: alta.status, replay: false };
   }
 
-  // 6) REPLAY DEL CALLBACK ⇒ MISMO RESULTADO. `already_active` significa que ese número ya está
-  // conectado en ESTA empresa; el alta corta ANTES de guardar un token, así que un segundo callback
-  // no produce ni otra conexión ni otro secreto. Devolverlo como error obligaría al panel a
-  // distinguir «falló» de «ya estaba», y la respuesta correcta para el usuario es la misma que la
-  // primera vez.
+  // 6) REPLAY DEL CALLBACK ⇒ MISMO RESULTADO, PERO CON LA CREDENCIAL FRESCA (correctivo, ALTO 6).
+  // `already_active` cubre dos casos que se veían iguales y no lo son: el callback repetido del
+  // MISMO signup (donde no hay nada que refrescar) y el RE-ONBOARDING tras un offboarding, donde
+  // el signup nuevo acaba de emitir un token NUEVO. Descartarlo dejaba a la conexión con el token
+  // del ciclo anterior — y el ciclo de recuperación del ADR §5 («offboardear y rehacer el
+  // Embedded Signup») no convergía nunca: la generación nueva corría su ventana de 24 h con una
+  // credencial vieja. El secreto del número tiene naming determinístico, así que refrescarlo es
+  // un `set` sobre el mismo documento: ni segunda conexión ni segundo secreto — el invariante del
+  // replay se conserva.
   if (alta.reason === 'already_active') {
     const connectionId = waConnectionId(pnid);
+    try {
+      await deps.storeToken(metaNumberTokenSecretName(tenantId, pnid), token);
+      await db().doc(paths.metaConnection(tenantId, connectionId)).set(
+        { status: 'active', lastVerifiedAt: Timestamp.now(), updatedAt: Timestamp.now() },
+        { merge: true },
+      );
+    } catch (e) {
+      // El refresco es best-effort: si falla, la conexión queda como estaba (el replay clásico) y
+      // el diagnóstico es visible. No se aborta un onboarding que Meta ya dio por bueno.
+      logger.error('Coexistence: no se pudo refrescar la credencial en el re-onboarding', e, { tenantId });
+    }
     const conn = (await db().doc(paths.metaConnection(tenantId, connectionId)).get()).data() as MetaConnection | undefined;
     const status: MetaConnectionStatus | string = conn?.status ?? 'active';
-    logger.info('Coexistence: callback repetido, la conexión ya existía (sin escrituras)', { tenantId, connectionId });
+    logger.info('Coexistence: conexión ya existente; credencial refrescada con el token del signup nuevo', { tenantId, connectionId });
     return { ok: true, connectionId, phoneNumberId: pnid, phoneNumber: phone?.displayPhoneNumber ?? null, status, replay: true };
   }
 

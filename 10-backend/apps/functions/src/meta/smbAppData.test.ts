@@ -193,7 +193,7 @@ describe('ejecutarSincronizacionDeHistorial — el disparo, una sola vez', () =>
     expect((await leerCoordinador(TENANT, PNID_PRINCIPAL))!.status).toBe('pending_request');
   });
 
-  it('sin credenciales: el disparo queda consumido y el coordinador `failed`, sin reintento', async () => {
+  it('sin credenciales: el disparo NO se consume — es un fallo LOCAL con Meta sin enterarse (correctivo, MEDIO 14)', async () => {
     sembrarNumeroNuevo();
     await decidirCompartir();
     credsRespuesta = { ok: false, reason: 'token_unavailable' };
@@ -203,9 +203,16 @@ describe('ejecutarSincronizacionDeHistorial — el disparo, una sola vez', () =>
 
     expect(r).toMatchObject({ ok: false, motivo: 'sin_credenciales' });
     expect(llamadas).toEqual([]);
+    // El comportamiento anterior consumía el ÚNICO disparo de la vida del número por un token
+    // vencido local. Ahora el coordinador sigue disponible: arreglada la conexión, se dispara.
     const coord = await leerCoordinador(TENANT, PNID);
-    expect(coord!.status).toBe('failed');
-    expect(coord!.errorMessage).toMatch(/no se puede reintentar/i);
+    expect(coord!.status).toBe('pending_request');
+    expect(r.explicacion).toMatch(/NO se consumió/i);
+
+    // Y arreglada la credencial, el disparo único funciona — una sola vez, como siempre.
+    credsRespuesta = { ok: true, accessToken: 'token-ok' };
+    const r2 = await ejecutarSincronizacionDeHistorial(TENANT, PNID, graph(llamadas), T0 + 6000);
+    expect(r2.ok).toBe(true);
   });
 
   it('si Graph rechaza el historial, queda `failed` con la agenda ya pedida', async () => {

@@ -22,6 +22,12 @@ import { fileURLToPath } from 'node:url';
 const fake = vi.hoisted(() => {
   const escrituras: Array<{ collection: string; id: string; data: Record<string, unknown> }> = [];
   const existentes = new Set<string>();
+  /** Documentos legibles por path (índice de ruteo, coordinadores). */
+  const legibles = new Map<string, Record<string, unknown>>();
+  const estado = {
+    /** true ⇒ toda LECTURA por path lanza: modela el índice/coordinador caídos (ALTO 9). */
+    lecturaRota: false,
+  };
   let seq = 0;
   const db = () => ({
     collection: (collection: string) => ({
@@ -38,8 +44,20 @@ const fake = vi.hoisted(() => {
         };
       },
     }),
+    // Lectura por path (resolveTenantsDelArchivo): ausente ⇒ «no rutea» (fail-soft legítimo);
+    // `lecturaRota` ⇒ LANZA, que es el escenario del 503 del correctivo.
+    doc: (path: string) => ({
+      path,
+      get: async () => {
+        if (estado.lecturaRota) throw new Error('firestore caído (simulado)');
+        return { exists: legibles.has(path), data: () => legibles.get(path) };
+      },
+    }),
   });
-  return { escrituras, existentes, db, reset: () => { escrituras.length = 0; existentes.clear(); seq = 0; } };
+  return {
+    escrituras, existentes, legibles, estado, db,
+    reset: () => { escrituras.length = 0; existentes.clear(); legibles.clear(); estado.lecturaRota = false; seq = 0; },
+  };
 });
 
 const log = vi.hoisted(() => ({ debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }));
@@ -47,7 +65,10 @@ const log = vi.hoisted(() => ({ debug: vi.fn(), info: vi.fn(), warn: vi.fn(), er
 vi.mock('../../lib/firebase.js', () => ({
   db: fake.db,
   storage: () => ({}),
-  paths: { metaWebhookInbox: () => 'metaWebhookInbox' },
+  paths: {
+    metaWebhookInbox: () => 'metaWebhookInbox',
+    metaExternalIndexEntry: (id: string) => `metaExternalIndex/${id}`,
+  },
 }));
 vi.mock('../../lib/logger.js', () => ({ logger: log }));
 // La firma ya tiene su propio test; acá lo que se prueba es el RUTEO.
@@ -203,6 +224,18 @@ describe('metaWebhook (handler real, Firestore de mentira)', () => {
     await post(historyBody());
     expect(fake.escrituras.map((e) => e.collection)).toEqual([COEXISTENCE_HISTORY_COLLECTION]);
     expect(fake.escrituras.some((e) => e.collection === 'metaWebhookInbox')).toBe(false);
+  });
+
+  it('lectura de índice/coordinador CAÍDA con archivo en el lote ⇒ 503 y CERO escrituras (correctivo, ALTO 9)', async () => {
+    // Con la lectura rota no se puede saber la generación: una clave sin sufijo colisionaría con
+    // los documentos de la generación 1 y el resync moriría como falso duplicado, en silencio.
+    // La única red que existe es el reintento de Meta — y se pide ANTES de escribir nada.
+    fake.estado.lecturaRota = true;
+
+    const r = await post(historyBody());
+
+    expect(r.code).toBe(503);
+    expect(fake.escrituras).toHaveLength(0);
   });
 
   it('B8: un chunk de historial duplicado sube a WARN y tiene contador propio', async () => {

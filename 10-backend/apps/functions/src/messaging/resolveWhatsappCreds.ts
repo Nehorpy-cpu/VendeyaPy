@@ -72,18 +72,28 @@ export async function resolveTenantWhatsappCreds(tenantId?: string): Promise<Wha
   const nowMs = Date.now();
   if (!tenantId) return decideWhatsappCreds({ nowMs });
   try {
-    const conn = (await db().doc(paths.metaConnection(tenantId, 'main')).get()).data() as MetaConnection | undefined;
-    const connectionStatus = conn?.status ?? null;
-    const tokenExpiresAtMs = conn?.tokenExpiresAt ? conn.tokenExpiresAt.toMillis() : null;
-    if (connectionStatus !== 'active') return decideWhatsappCreds({ tenantId, connectionStatus, nowMs });
-
+    /**
+     * Correctivo (ALTO 7): el remitente por defecto y su credencial salen del MISMO lugar. El
+     * asset seleccionado se lee PRIMERO y decide qué conexión provee el token: post-cutover el
+     * número por defecto vive en `wa_{pnid}` con su propio secreto, y leer siempre `main`
+     * emparejaba el PNID nuevo con el token del legacy — un par que Meta rechaza, o peor. Un asset
+     * sin `connectionId` (anterior al campo) sigue siendo de `main`, así que producción de hoy
+     * resuelve idéntico.
+     */
     const assetSnap = await db()
       .collection(paths.metaAssets(tenantId))
       .where('assetType', '==', 'whatsapp_phone_number')
       .where('selected', '==', true)
       .limit(1)
       .get();
-    const phoneNumberId = (assetSnap.docs[0]?.data() as MetaAsset | undefined)?.externalId ?? null;
+    const asset = assetSnap.docs[0]?.data() as (MetaAsset & { connectionId?: string }) | undefined;
+    const phoneNumberId = asset?.externalId ?? null;
+    const connectionId = asset?.connectionId ?? 'main';
+
+    const conn = (await db().doc(paths.metaConnection(tenantId, connectionId)).get()).data() as MetaConnection | undefined;
+    const connectionStatus = conn?.status ?? null;
+    const tokenExpiresAtMs = conn?.tokenExpiresAt ? conn.tokenExpiresAt.toMillis() : null;
+    if (connectionStatus !== 'active') return decideWhatsappCreds({ tenantId, connectionStatus, nowMs });
 
     let token: string | null = null;
     if (conn?.tokenSecretRef) {

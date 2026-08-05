@@ -49,6 +49,13 @@ const fake = vi.hoisted(() => {
         docs.set(path, opts?.merge ? { ...(docs.get(path) ?? {}), ...data } : { ...data });
         versiones.set(path, (versiones.get(path) ?? 0) + 1);
       },
+      // El dedup de `account_update` (correctivo, MEDIO 17) usa `create`: primera vez escribe,
+      // reentrega (mismo id) lanza already-exists — igual que Firestore.
+      create: async (data: Record<string, unknown>) => {
+        if (docs.has(path)) throw Object.assign(new Error('already exists'), { code: 6 });
+        docs.set(path, { ...data });
+        versiones.set(path, (versiones.get(path) ?? 0) + 1);
+      },
     }),
     batch: () => {
       const ops: Array<{ path: string; data: Record<string, unknown>; merge?: boolean }> = [];

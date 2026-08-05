@@ -338,6 +338,9 @@ describe('registrarObservaciones — progreso DURABLE', () => {
 
   it('el conteo de adjuntos del historial se acumula aparte', async () => {
     await decidir('share');
+    // El disparo va primero: los media del historial solo existen tras una sincronización real.
+    // Sin él, el correctivo los clasifica (correctamente) como material fuera de ciclo.
+    await reclamarDisparo(TENANT, PNID, T0);
     await registrarObservaciones({ tenantId: TENANT, phoneNumberId: PNID, observaciones: [], mediaObservados: 3, nowMs: T0 });
     await registrarObservaciones({ tenantId: TENANT, phoneNumberId: PNID, observaciones: [], mediaObservados: 2, nowMs: T0 + 1 });
 

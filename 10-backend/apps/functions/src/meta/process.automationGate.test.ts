@@ -428,12 +428,64 @@ describe('un cliente en dos PNID NO comparte sesión', () => {
  * Retrocompatibilidad dura: el gate es de NÚMEROS de WhatsApp. Instagram y Messenger no tienen
  * `phone_number_id` que autorizar y ya tienen su propio gate (`multiChannel` del plan): meterlos
  * en el fail-closed los apagaría a todos de golpe al desplegar.
+ *
+ * PERO cada plataforma conversa en su PROPIO canal (ADR-0017 §2). Compartir el canal mutable
+ * `active` significaba: un cliente que escribe por Instagram y por WhatsApp compartía carrito,
+ * takeover y estado con el número que vende — y Messenger con Instagram entre sí. Dato verificado
+ * de producción (2026-08-04): hay UNA sola entrada de ruteo y es whatsapp ⇒ no existen sesiones
+ * IG/Messenger reales que este cambio abandone.
  */
-describe('canales sin PNID — Instagram/Messenger no se gatean', () => {
+describe('canales sin PNID — Instagram/Messenger no se gatean, pero conversan en su PROPIO canal', () => {
   it('un inbound de Instagram sigue llegando al motor', async () => {
     evento(texto('hola por IG', 'ig_1'), { platform: 'instagram', pnid: 'IG_ACCOUNT_1' });
     await processWebhookEvent(EVENTO);
     expect(handleMessage).toHaveBeenCalledTimes(1);
     expect(enviados).toHaveLength(1);
+  });
+
+  it('la conversación de Instagram vive en `ig` — motor y guard de silencio miran el MISMO canal', async () => {
+    evento(texto('hola por IG', 'ig_1'), { platform: 'instagram', pnid: 'IG_ACCOUNT_1' });
+    await processWebhookEvent(EVENTO);
+    expect((handleMessage.mock.calls[0]![0] as { sessionKey?: string }).sessionKey).toBe('ig');
+    expect(evaluarSilencioPreEnvio.mock.calls[0]![3]).toBe('ig');
+  });
+
+  it('Messenger tiene el suyo (`msgr`), distinto del de Instagram y del heredado', async () => {
+    evento(texto('hola por Messenger', 'msgr_1'), { platform: 'messenger', pnid: 'PAGE_1' });
+    await processWebhookEvent(EVENTO);
+    const clave = (handleMessage.mock.calls[0]![0] as { sessionKey?: string }).sessionKey;
+    expect(clave).toBe('msgr');
+    expect(clave).not.toBe('ig');
+    expect(clave).not.toBe('active');
+  });
+
+  /**
+   * COMPATIBILIDAD, no asumida: el `customerId` de IG/Messenger es el id que asigna Meta —no un
+   * teléfono—, pero si alguna vez coincidiera con un wa_id, el canal por plataforma es lo único
+   * que impide que compartan carrito/takeover. Se prueba con el MISMO id de cliente en las tres
+   * plataformas: tres claves, tres conversaciones.
+   */
+  it('el MISMO id de cliente por WhatsApp, IG y Messenger ⇒ TRES canales distintos', async () => {
+    docs.set(assetPath(PNID_ACTUAL), { automationMode: 'live' });
+    evento(texto('hola por whatsapp', 'wamid.W1'), { id: 'ev_w', pnid: PNID_ACTUAL });
+    await processWebhookEvent('ev_w');
+    evento(texto('hola por IG', 'ig_2'), { id: 'ev_ig', platform: 'instagram', pnid: 'IG_ACCOUNT_1' });
+    await processWebhookEvent('ev_ig');
+    evento(texto('hola por msgr', 'msgr_2'), { id: 'ev_ms', platform: 'messenger', pnid: 'PAGE_1' });
+    await processWebhookEvent('ev_ms');
+
+    const claves = handleMessage.mock.calls.map((c) => (c[0] as { sessionKey?: string }).sessionKey);
+    expect(claves).toEqual(['active', 'ig', 'msgr']);
+    expect(new Set(claves).size).toBe(3);
+    // Y el guard autoritativo del borde de envío miró canal por canal, nunca el de otro.
+    expect(evaluarSilencioPreEnvio.mock.calls.map((c) => c[3])).toEqual(['active', 'ig', 'msgr']);
+  });
+
+  /** Una sesión que YA exista en el canal nuevo se sigue leyendo tal cual (documento con campo). */
+  it('una sesión ya existente en `ig` no se abandona: la clave es determinística', async () => {
+    docs.set(`tenants/${TENANT}/customers/${TEL}/sessions/ig`, { id: 'ig', context: {} });
+    evento(texto('sigo por IG', 'ig_3'), { platform: 'instagram', pnid: 'IG_ACCOUNT_1' });
+    await processWebhookEvent(EVENTO);
+    expect((handleMessage.mock.calls[0]![0] as { sessionKey?: string }).sessionKey).toBe('ig');
   });
 });

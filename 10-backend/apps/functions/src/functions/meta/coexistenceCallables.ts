@@ -25,7 +25,7 @@ import { db, paths } from '../../lib/firebase.js';
 import { logger } from '../../lib/logger.js';
 import { recordAudit } from '../../audit/audit.js';
 import { resolveMetaConnectAuth } from '../../meta/authz.js';
-import { createMetaConnectNonce, consumeMetaConnectNonce, claimMetaConnectCode, type MetaConnectMode } from '../../meta/nonce.js';
+import { createMetaConnectNonce, consumeMetaConnectNonce, claimMetaConnectCode, claimIdDeCodigo, type MetaConnectMode } from '../../meta/nonce.js';
 import { getMetaGraphClient } from '../../meta/graphClient.js';
 import { META_APP_SECRET } from '../../meta/metaSecrets.js';
 import { assertWhatsappNumbersEntitled } from '../../entitlements/entitlements.js';
@@ -33,6 +33,8 @@ import { defaultAddDeps, waConnectionId } from '../../meta/multiNumber.js';
 import { runCoexistenceConnect, type CoexistenceConnectFailReason } from '../../meta/coexistenceConnect.js';
 import { ejecutarSincronizacionDeHistorial } from '../../meta/smbAppData.js';
 import {
+  abrirNuevaGeneracion,
+  conReintentos,
   leerCoordinador,
   registrarDecisionDeHistorial,
   vencido,
@@ -140,6 +142,37 @@ export const coexistenceConnect = onCall<{
       metadata: { source: 'coexistence', connectionId: result.connectionId, status: result.status, automationMode: 'inactive' },
     });
   }
+
+  /**
+   * GENERACIONES DEL HISTORIAL (ADR-0017 §5). Cada onboarding autorizado —y este acaba de
+   * demostrarse: el claim del code pasó, que es de un solo uso— abre (o ancla, la primera vez) la
+   * generación de sincronización. Se invoca SIEMPRE, incluso con `result.replay`: un re-onboarding
+   * tras offboarding encuentra la conexión `wa_{pnid}` existente (replay a nivel conexión) pero su
+   * code es NUEVO, y esa es exactamente la señal de que la ventana de 24 h volvió a nacer. El
+   * momento del connect ES el onboarding: la ventana corre desde acá.
+   *
+   * Un fallo acá no tumba el connect (la conexión ya persistió y romperla no la desharía): queda
+   * logueado como error y es diagnosticable — `decide`/`request` rechazarían con el estado de la
+   * generación anterior, que es visible en el panel.
+   */
+  try {
+    // Capturado en constante: el narrowing del guard `if (!d.code) throw` no entra al closure.
+    const claimId = claimIdDeCodigo(d.code);
+    const apertura = await conReintentos(() => abrirNuevaGeneracion({
+      tenantId,
+      phoneNumberId: result.phoneNumberId,
+      connectionId: result.connectionId,
+      claimId,
+      onboardedAtMs: Date.now(),
+      nowMs: Date.now(),
+    }), 3);
+    if (!apertura.ok) {
+      // No debería poder pasar (el claim recién se consumió por primera vez); si pasa, es evidencia.
+      logger.error('Coexistence: la apertura de generación rechazó un claim recién consumido', undefined, { tenantId, reason: apertura.reason });
+    }
+  } catch (e) {
+    logger.error('Coexistence: no se pudo abrir la generación del historial tras el onboarding', e, { tenantId });
+  }
   return {
     ok: true,
     connectionId: result.connectionId,
@@ -167,6 +200,16 @@ async function onboardingDe(tenantId: string, phoneNumberId: string, nowMs: numb
  * cambiarla exige offboardear el número y rehacer el Embedded Signup, así que fingir que un botón
  * alcanza sería mentir.
  */
+/**
+ * ¿Esta conexión nació del Embedded Signup de Coexistence? PURA y exportada para testearla.
+ * El historial de Business App es un concepto EXCLUSIVO de Coexistence: un número dado de alta a
+ * mano (source manual_admin) no tiene historial que pedir, y dejarlo pasar quemaba el ÚNICO
+ * disparo contra un número que jamás lo tuvo (correctivo, MEDIO 12).
+ */
+export function esConexionDeCoexistence(conn: { source?: unknown } | null | undefined): boolean {
+  return conn?.source === 'embedded_signup';
+}
+
 export const coexistenceDecideHistorySharing = onCall<{ tenantId?: string; phoneNumberId?: string; decision?: string }>(
   { region: 'us-central1' },
   async (req) => {
@@ -178,7 +221,8 @@ export const coexistenceDecideHistorySharing = onCall<{ tenantId?: string; phone
       throw new HttpsError('invalid-argument', 'La decisión tiene que ser exactamente `share` o `skip`.');
     }
     const connectionId = waConnectionId(phoneNumberId);
-    if (!(await db().doc(paths.metaConnection(tenantId, connectionId)).get()).exists) {
+    const connGuard = (await db().doc(paths.metaConnection(tenantId, connectionId)).get()).data() as { source?: unknown } | undefined;
+    if (!connGuard || !esConexionDeCoexistence(connGuard)) {
       throw new HttpsError('failed-precondition', 'Ese número no está conectado por Coexistence en esta empresa.');
     }
 
@@ -213,6 +257,11 @@ export const coexistenceRequestHistorySync = onCall<{ tenantId?: string; phoneNu
     const { tenantId, uid } = authorize(req, req.data?.tenantId);
     const phoneNumberId = pnidDe(req.data?.phoneNumberId);
     if (!phoneNumberId) throw new HttpsError('invalid-argument', 'Falta phoneNumberId.');
+    // Misma guarda que la decisión: el frontend no puede apuntar el disparo —que es de un solo
+    // uso— a un PNID que no sea una conexión de Coexistence de ESTA empresa.
+    if (!(await db().doc(paths.metaConnection(tenantId, waConnectionId(phoneNumberId))).get()).exists) {
+      throw new HttpsError('failed-precondition', 'Ese número no está conectado por Coexistence en esta empresa.');
+    }
 
     const graph = await getMetaGraphClient();
     const r = await ejecutarSincronizacionDeHistorial(tenantId, phoneNumberId, graph, Date.now());
@@ -240,12 +289,15 @@ export const coexistenceSyncStatus = onCall<{ tenantId?: string; phoneNumberId?:
     const phoneNumberId = pnidDe(req.data?.phoneNumberId);
     if (!phoneNumberId) throw new HttpsError('invalid-argument', 'Falta phoneNumberId.');
 
+    const connStatus = (await db().doc(paths.metaConnection(tenantId, waConnectionId(phoneNumberId))).get()).data() as { source?: unknown } | undefined;
+    const coexistence = esConexionDeCoexistence(connStatus);
     const coord = await leerCoordinador(tenantId, phoneNumberId);
-    if (!coord) return { ok: true, exists: false };
+    if (!coord) return { ok: true, exists: false, coexistence };
     const nowMs = Date.now();
     return {
       ok: true,
       exists: true,
+      coexistence,
       // El vencimiento se DERIVA en la lectura además de persistirse: un coordinador al que no le
       // llegó ningún chunk después del deadline no tiene quién lo mueva, y mostrar `receiving`
       // sobre una ventana cerrada haría esperar a alguien para siempre.

@@ -20,7 +20,7 @@ import { appendMessage } from '../conversation/messages.js';
 import { procesarUbicacionEntrante, coberturaVigente } from '../conversation/coverage.js';
 import { coverageHold } from '../conversation/coverageTestHooks.js';
 import { attachmentFromInboxPayload, unsupportedFromInboxPayload } from './parseWebhook.js';
-import { resolveAutomationMode, CANAL_SIN_GATE, type CanalAutomatizacion, type OrigenAutomatizacion } from './automationMode.js';
+import { resolveAutomationMode, canalSinGate, type CanalAutomatizacion, type OrigenAutomatizacion } from './automationMode.js';
 import { consumirEcho, registrarObservacion } from './echoConsumer.js';
 import { ingestInboundAttachment, recordUnsupportedInbound, recordAttachmentIngestDisabled } from './attachmentIngest.js';
 import { getAttachmentGate } from './attachmentGate.js';
@@ -467,12 +467,14 @@ export async function processWebhookEvent(eventId: string): Promise<void> {
      * cosas eran la misma: registrar el número real del negocio lo ponía a contestarle a clientes
      * de verdad en el acto.
      *
-     * Instagram y Messenger quedan FUERA a propósito (`CANAL_SIN_GATE`): no tienen
+     * Instagram y Messenger quedan FUERA a propósito (`canalSinGate`): no tienen
      * `phone_number_id` que autorizar y ya tienen su propio gate de plan más abajo. Meterlos en el
-     * fail-closed los apagaría a todos de golpe al desplegar.
+     * fail-closed los apagaría a todos de golpe al desplegar. Pero cada plataforma conversa en su
+     * canal PROPIO (`ig` / `msgr`, ADR-0017 §2): compartir `active` compartía carrito y takeover
+     * con el número que vende.
      */
     const canal: CanalAutomatizacion =
-      ev.platform === 'whatsapp' ? await resolveAutomationMode(tenantId, receivedBy, idxData) : CANAL_SIN_GATE;
+      ev.platform === 'whatsapp' ? await resolveAutomationMode(tenantId, receivedBy, idxData) : canalSinGate(ev.platform);
 
     if (modoIndeterminado(canal)) {
       await devolverALaCola(ref, ev, tenantId, canal);

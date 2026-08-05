@@ -170,3 +170,54 @@ describe('writeDiscoveredAssets — no se puede reclamar el PNID de otro tenant'
     ).resolves.toBeUndefined();
   });
 });
+
+describe('writeDiscoveredAssets — el espejo del guard: main no absorbe ni re-corona (correctivo, ALTO 4/5/8)', () => {
+  const PNID_COEX = '777888999';
+
+  /** El estado post-Coexistence: el número real en su propia conexión, con permiso y canal. */
+  const sembrarCoexistence = (over: Record<string, unknown> = {}): void => {
+    docs.set(assetPath(TENANT, PNID_COEX), {
+      id: PNID_COEX, tenantId: TENANT, connectionId: `wa_${PNID_COEX}`, assetType: 'whatsapp_phone_number',
+      externalId: PNID_COEX, status: 'active', selected: false, automationMode: 'shadow', sessionKey: `wa_${PNID_COEX}`, ...over,
+    });
+    docs.set(idxPath(PNID_COEX), {
+      id: `whatsapp_${PNID_COEX}`, tenantId: TENANT, connectionId: `wa_${PNID_COEX}`, platform: 'whatsapp',
+      externalId: PNID_COEX, status: 'active',
+    });
+  };
+
+  it('una reconexión de main cuyo WABA LISTA el número de Coexistence NO lo recablea a main', async () => {
+    sembrarCoexistence();
+
+    // El WABA compartido devuelve los dos números; el de Coexistence NO es de esta conexión.
+    await writeDiscoveredAssets(TENANT, 'main', numeros(PNID, PNID_COEX));
+
+    const asset = docs.get(assetPath(TENANT, PNID_COEX)) as Record<string, unknown>;
+    expect(asset['connectionId']).toBe(`wa_${PNID_COEX}`);
+    expect(asset['automationMode']).toBe('shadow');
+    expect((docs.get(idxPath(PNID_COEX)) as Record<string, unknown>)['connectionId']).toBe(`wa_${PNID_COEX}`);
+    // Y el número propio de main se escribió normal.
+    expect((docs.get(assetPath(TENANT, PNID)) as Record<string, unknown>)['connectionId']).toBe('main');
+  });
+
+  it('tampoco RESUCITA un número de Coexistence que un humano apagó', async () => {
+    sembrarCoexistence({ status: 'inactive', automationMode: 'inactive' });
+
+    await writeDiscoveredAssets(TENANT, 'main', numeros(PNID, PNID_COEX));
+
+    const asset = docs.get(assetPath(TENANT, PNID_COEX)) as Record<string, unknown>;
+    expect(asset['status']).toBe('inactive');
+    expect(asset['automationMode']).toBe('inactive');
+  });
+
+  it('post-cutover (el número de Coexistence quedó selected), reconectar main NO re-corona al legacy', async () => {
+    sembrarCoexistence({ selected: true, automationMode: 'live' });
+
+    await writeDiscoveredAssets(TENANT, 'main', numeros(PNID));
+
+    // Dos seleccionados = dos números creyéndose el remitente por defecto. La reconexión respeta
+    // la corona ajena: el de main entra selected:false, y cambiar eso es una decisión aparte.
+    expect((docs.get(assetPath(TENANT, PNID)) as Record<string, unknown>)['selected']).toBe(false);
+    expect((docs.get(assetPath(TENANT, PNID_COEX)) as Record<string, unknown>)['selected']).toBe(true);
+  });
+});

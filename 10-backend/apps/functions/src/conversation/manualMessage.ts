@@ -23,7 +23,7 @@ import { db, paths } from '../lib/firebase.js';
 import { logger } from '../lib/logger.js';
 import { appendMessage, type AppendMessageInput } from './messages.js';
 import { getWhatsAppClient, type WhatsAppClient } from '../messaging/whatsappClient.js';
-import { resolverCanalDePnid } from './canal.js';
+import { canalDePlataformaNoWhatsapp, resolverCanalDePnid } from './canal.js';
 
 /** Tope de la Cloud API para texto (Meta rechaza >4096; validamos antes de gastar el request). */
 export const MANUAL_MESSAGE_MAX_CHARS = 4096;
@@ -154,14 +154,19 @@ export async function sendManualMessage(
   const customer = await deps.getCustomer(input.tenantId, input.customerId);
   if (!customer) throw new HttpsError('not-found', 'Esa conversación no existe.');
 
-  const conv = (customer as { conversation?: { humanTakeover?: boolean; receivedVia?: string | null } }).conversation;
+  const conv = (customer as { conversation?: { humanTakeover?: boolean; receivedVia?: string | null; channel?: string | null } }).conversation;
   /**
    * ADR-0017 §2 — el gate se evalúa contra la conversación QUE EL VENDEDOR ESTÁ MIRANDO. Leyendo
    * siempre `sessions/active`, los dos errores posibles eran igual de malos: rebotarle su propio
    * mensaje («tocá Tomar conversación») sobre un chat que ya tomó, o dar por bueno el takeover del
    * otro número y saltear el gate de cotización de envío escribiéndole al cliente igual.
+   *
+   * La PLATAFORMA decide antes que el número receptor: `receivedVia` lo escribe solo WhatsApp, así
+   * que una conversación de Instagram/Messenger caería al canal legacy `active` — la conversación
+   * del número de WhatsApp que vende — y el gate miraría el takeover equivocado.
    */
-  const sessionKey = await deps.resolverCanal(input.tenantId, conv?.receivedVia ?? null);
+  const sessionKey =
+    canalDePlataformaNoWhatsapp(conv?.channel) ?? (await deps.resolverCanal(input.tenantId, conv?.receivedVia ?? null));
   // Sesión (fuente de verdad) con fallback al resumen del customer (conversaciones sin sesión).
   const gate = await deps.getGateContext(input.tenantId, input.customerId, sessionKey);
   const humanTakeover = gate.humanTakeover ?? conv?.humanTakeover === true;

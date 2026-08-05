@@ -314,6 +314,13 @@ export function planWebhookWrites(
  *     un documento sin tenant no expone nada de más.
  */
 export interface ResolucionDelArchivo {
+  /**
+   * true ⇒ ALGUNA lectura (índice o coordinador) LANZÓ: la generación es indeterminable y una
+   * clave sin sufijo colisionaría con los documentos de la generación 1 — el chunk moriría como
+   * falso duplicado (correctivo, ALTO 9). El lote del archivo se responde 503 para que Meta lo
+   * reintente con la lectura sana; los mensajes vivos del mismo lote son idempotentes por wamid.
+   */
+  lecturaFallo: boolean;
   /** PNID → empresa (o `null` si el índice no resolvió). */
   tenants: Map<string, string | null>;
   /** PNID → generación de la sincronización, del coordinador durable. Ver `sufijoDeGeneracion`. */
@@ -323,11 +330,12 @@ export interface ResolucionDelArchivo {
 export async function resolveTenantsDelArchivo(parsed: ParseResult): Promise<ResolucionDelArchivo> {
   const tenants = new Map<string, string | null>();
   const generaciones = new Map<string, number>();
+  let lecturaFallo = false;
   const pendientes = new Set<string>();
   for (const c of parsed.historyChunks) if (c.externalId) pendientes.add(`${c.platform}_${c.externalId}`);
   for (const m of parsed.historyMedia) if (m.externalId) pendientes.add(`${m.platform}_${m.externalId}`);
   for (const a of parsed.appStateChanges) if (a.externalId) pendientes.add(`${a.platform}_${a.externalId}`);
-  if (pendientes.size === 0) return { tenants, generaciones };
+  if (pendientes.size === 0) return { tenants, generaciones, lecturaFallo };
 
   for (const clave of pendientes) {
     const externalId = clave.slice(clave.indexOf('_') + 1);
@@ -348,9 +356,10 @@ export async function resolveTenantsDelArchivo(parsed: ParseResult): Promise<Res
         error: e instanceof Error ? e.name : 'desconocido',
       });
       tenants.set(externalId, null);
+      lecturaFallo = true;
     }
   }
-  return { tenants, generaciones };
+  return { tenants, generaciones, lecturaFallo };
 }
 
 export const metaWebhook = onRequest({ region: 'us-central1', cors: false }, async (req, res) => {
@@ -394,6 +403,14 @@ export const metaWebhook = onRequest({ region: 'us-central1', cors: false }, asy
     const parsed = parseMetaWebhookPayload(req.body);
     const nowMs = Date.now();
     const archivo = await resolveTenantsDelArchivo(parsed);
+    // Correctivo (ALTO 9): con la lectura de generaciones/índice CAÍDA, las claves del archivo se
+    // generarían sin sufijo y colisionarían con la generación 1 — el resync entero moriría como
+    // falso duplicado, en silencio. Se pide el reintento a Meta ANTES de escribir nada del lote.
+    if (archivo.lecturaFallo && (parsed.historyChunks.length > 0 || parsed.historyMedia.length > 0 || parsed.appStateChanges.length > 0)) {
+      logger.error('metaWebhook: lectura de generación/índice caída con archivo en el lote; se pide reintento a Meta');
+      res.status(503).json({ ok: false, retry: true });
+      return;
+    }
     const plan = planWebhookWrites(parsed, nowMs, archivo.tenants, archivo.generaciones);
     let written = 0;
     const dups = { duplicates: 0, historyDuplicates: 0, appStateDuplicates: 0 };

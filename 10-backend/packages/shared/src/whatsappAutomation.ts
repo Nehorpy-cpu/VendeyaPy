@@ -139,6 +139,49 @@ export function parseSessionKey(value: unknown, fallback: string): string {
  */
 export const CONEXION_HEREDADA = 'main';
 
+// ---------------------------------------------------------------------------
+// ADR-0017 §2 aplicado a las plataformas SIN número: Instagram y Messenger
+// ---------------------------------------------------------------------------
+
+/**
+ * Clave de canal por PLATAFORMA. Instagram y Messenger no tienen `phone_number_id` del que derivar
+ * canal, y hasta esta ronda compartían el mutable `active`: un cliente que escribía por Instagram
+ * y por WhatsApp compartía carrito, takeover y estado con el número que vende — y Messenger con
+ * Instagram entre sí. Cada plataforma estrena la suya.
+ *
+ * COMPATIBILIDAD (dato verificado de producción, 2026-08-04, no re-derivar): el índice de ruteo
+ * tiene UNA sola entrada y es whatsapp ⇒ no existen conversaciones IG/Messenger reales que este
+ * cambio abandone. Las claves son cortas, estables y de documento válido; cambiarlas después SÍ
+ * sería una migración de datos.
+ *
+ * Vive acá —la MISMA abstracción central que las claves de WhatsApp— por la razón de siempre:
+ * dos construcciones del mismo canal terminan divergiendo, y la laxa es la que comparte sesión.
+ */
+export const PLATFORM_SESSION_KEYS = Object.freeze({
+  instagram: 'ig',
+  messenger: 'msgr',
+} as const);
+
+/**
+ * El canal PROPIO de una plataforma sin PNID. Solo el string EXACTO mapea (mismo criterio que
+ * `parseAutomationMode`): una variante rara no puede terminar en el canal de la plataforma real.
+ * Una plataforma que este código no conoce JAMÁS comparte canal — ni `active`, ni `wa_*`, ni el
+ * de otra—: estrena una clave derivada con prefijo propio y saneo de id de documento (la cadena
+ * termina siendo un segmento de path, misma razón que `whatsappSessionKey`).
+ *
+ * WhatsApp LANZA: su canal se deriva del PNID (`whatsappSessionKey` / `derivarSessionKey`) y una
+ * respuesta "por defecto" acá sería exactamente la clase de default silencioso que ADR-0017 veda.
+ */
+export function sessionKeyDePlataforma(platform: string): string {
+  const nombre = String(platform ?? '');
+  if (nombre === 'whatsapp' || nombre.trim() === '') {
+    throw new Error('sessionKeyDePlataforma: el canal de WhatsApp se deriva del PNID (ADR-0017 §2)');
+  }
+  const conocida = (PLATFORM_SESSION_KEYS as Readonly<Record<string, string>>)[nombre];
+  if (conocida !== undefined) return conocida;
+  return `ch_${nombre.replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 60)}`;
+}
+
 /** Forma CRUDA de un documento que puede declarar algo sobre el canal (asset o índice). */
 export interface DeclaracionDeCanal {
   sessionKey?: unknown;

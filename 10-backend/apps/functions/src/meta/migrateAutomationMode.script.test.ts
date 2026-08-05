@@ -240,14 +240,6 @@ describe('migrarModoAutomatizacion — solo se bendice el asset que RUTEA', () =
     expect(escrituras).toEqual([]);
   });
 
-  it('`live` exige que sea el número por defecto del tenant', async () => {
-    sembrarAsset({ selected: false });
-    const r = await migrarModoAutomatizacion(db, { tenantId: TENANT, phoneNumberId: PNID, mode: 'live', apply: true });
-
-    expect(r.outcome).toBe('no_es_el_numero_por_defecto');
-    expect(escrituras).toEqual([]);
-  });
-
   /** Fail-closed es «cuesta encender», nunca «cuesta apagar»: el rollback no se bloquea jamás. */
   it('apagar SIEMPRE se puede, aunque el ruteo esté roto y el asset desactivado', async () => {
     sembrarAsset({ status: 'inactive', selected: false, automationMode: 'live' });
@@ -260,20 +252,30 @@ describe('migrarModoAutomatizacion — solo se bendice el asset que RUTEA', () =
 });
 
 /**
- * DEFECTO 5 (relacionado) — ADR-0017: «Hay ~25 lugares que hoy asumen `sessions/active`;
- * migrarlos es CONDICIÓN para pasar a `live`». El script no puede confiar en que el operador se
- * acuerde: si el número vive en un canal propio, `live` se rechaza.
+ * EX-DEFECTO (esta ronda) — EL CUTOVER ERA IMPOSIBLE CON LA HERRAMIENTA REAL.
+ * ===========================================================================
+ * ADR-0017: «Hay ~25 lugares que hoy asumen `sessions/active`; migrarlos es CONDICIÓN para pasar
+ * a `live`». Mientras esa migración estuvo abierta, el script se negaba con la constante
+ * `SESIONES_POR_CANAL_MIGRADAS = false` — correcto entonces, pero el Paso 12 del runbook promueve
+ * el número NUEVO (canal propio, `selected: false`) con esta misma herramienta, así que el gate
+ * dejaba el desenlace del programa entero inalcanzable: `sesion_por_canal_no_migrada` primero, y
+ * de haberse volteado solo el flag, `no_es_el_numero_por_defecto` después (el número nuevo JAMÁS
+ * es el remitente por defecto: ese sigue siendo el que hoy vende).
+ *
+ * Hoy la garantía de los call sites es ESTRUCTURAL (`paths.session` exige la clave: lo vigila el
+ * compilador) y el aislamiento está demostrado EN EJECUCIÓN (`verify-coexistence-dual.mjs`, con
+ * esta herramienta y no escribiendo el campo a mano). Estos tests fijan el contrato nuevo.
  */
-describe('migrarModoAutomatizacion — `live` solo sobre un canal que el código sabe leer', () => {
-  it('un número con canal propio NO puede pasar a `live`', async () => {
-    sembrarAsset({ sessionKey: `wa_${PNID}` });
+describe('migrarModoAutomatizacion — `live` sobre canal propio: el cutover del runbook (Paso 12)', () => {
+  it('un número con canal propio y NO seleccionado SÍ pasa a `live` (es el número nuevo del cutover)', async () => {
+    sembrarAsset({ connectionId: `wa_${PNID}`, sessionKey: `wa_${PNID}`, selected: false });
     const r = await migrarModoAutomatizacion(db, { tenantId: TENANT, phoneNumberId: PNID, mode: 'live', apply: true });
 
-    expect(r.outcome).toBe('sesion_por_canal_no_migrada');
-    expect(escrituras).toEqual([]);
+    expect(r.outcome).toBe('written');
+    expect(modoEscrito()).toBe('live');
   });
 
-  it('pero SÍ puede pasar a `shadow`: mirar no comparte carrito, takeover ni pedido', async () => {
+  it('`shadow` sobre canal propio sigue igual: mirar no comparte carrito, takeover ni pedido', async () => {
     sembrarAsset({ sessionKey: `wa_${PNID}`, selected: false });
     const r = await migrarModoAutomatizacion(db, { tenantId: TENANT, phoneNumberId: PNID, mode: 'shadow', apply: true });
 
@@ -281,11 +283,26 @@ describe('migrarModoAutomatizacion — `live` solo sobre un canal que el código
     expect(modoEscrito()).toBe('shadow');
   });
 
-  it('un número de una conexión ADICIONAL sin `sessionKey` tampoco es el canal heredado', async () => {
-    sembrarAsset({ connectionId: `wa_${PNID}` });
+  it('un número de una conexión ADICIONAL sin `sessionKey` es canal propio: también puede `live`', async () => {
+    sembrarAsset({ connectionId: `wa_${PNID}`, selected: false });
     const r = await migrarModoAutomatizacion(db, { tenantId: TENANT, phoneNumberId: PNID, mode: 'live', apply: true });
 
-    expect(r.outcome).toBe('sesion_por_canal_no_migrada');
+    expect(r.outcome).toBe('written');
+    expect(modoEscrito()).toBe('live');
+  });
+
+  /**
+   * La exigencia de `selected` NO desaparece: se ACOTA al canal heredado, que es donde su razón
+   * vive — el número del canal heredado es el que resuelven las credenciales de salida cuando el
+   * outbound no sabe por qué número entró. Exigírsela al número nuevo obligaría a marcarlo
+   * `selected`, o sea a mover el remitente por defecto del tenant al número recién onboardeado.
+   */
+  it('el canal HEREDADO sigue exigiendo ser el número por defecto para `live`', async () => {
+    sembrarAsset({ selected: false });
+    const r = await migrarModoAutomatizacion(db, { tenantId: TENANT, phoneNumberId: PNID, mode: 'live', apply: true });
+
+    expect(r.outcome).toBe('no_es_el_numero_por_defecto');
+    expect(escrituras).toEqual([]);
   });
 
   /** Dos números automatizados en el MISMO canal = un solo carrito, un solo takeover. */

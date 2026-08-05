@@ -44,7 +44,7 @@ incidente, el manifiesto se lee durante.
 |---|---|---|
 | `apps/functions/scripts/backup-firestore.mjs` | Backup de Firestore de un tenant: subárbol completo por descubrimiento recursivo + colecciones globales del tenant + ciphertext de los secretos referenciados | **Sí** |
 | `apps/functions/scripts/backup-auth.mjs` | Usuarios, pertenencia y **custom claims** | **Sí** (sin contraseñas — ver §5) |
-| `apps/functions/scripts/backup-storage.mjs` | **Inventario** verificable de objetos (no copia bytes) | No: el inventario permite *verificar* una copia hecha con la herramienta del proveedor |
+| `apps/functions/scripts/backup-storage.mjs` | **COPIA COMPLETA de bytes** + inventario, verificación md5/tamaño por objeto (correctivo 2026-08-04) | Sí: `restore-storage.mjs` restaura a emulador o destino aislado (producción PROHIBIDA sin excepción), con verificación posterior completa |
 | `apps/functions/scripts/backup-infra.mjs` | Manifiesto de infraestructura: commit, Rules, índices, **TTL**, Functions, schedulers, nombres de secretos y config | No: es documentación ejecutable de lo que hay que recrear |
 | `apps/functions/scripts/restore-firestore.mjs` | Restauración de Firestore | — |
 | `apps/functions/scripts/restore-auth.mjs` | Restauración de identidad y claims | — |
@@ -69,7 +69,10 @@ node apps/functions/scripts/backup-firestore.mjs --project <projectId> --tenant 
 # 2) Aplicar, pieza por pieza
 node apps/functions/scripts/backup-firestore.mjs --project <projectId> --tenant <tenantId> --out "$DEST" --apply
 node apps/functions/scripts/backup-auth.mjs      --project <projectId> --tenant <tenantId> --out "$DEST" --apply
-node apps/functions/scripts/backup-storage.mjs   --project <projectId> --tenant <tenantId> --out "$DEST" --muestra 5 --apply
+node apps/functions/scripts/backup-storage.mjs   --project <projectId> --tenant <tenantId> --out "$DEST" --apply
+# restaurar (emulador o destino aislado; producción prohibida):
+# node apps/functions/scripts/restore-storage.mjs --project <demo-*> --desde "$DEST" --out <reporte> [--bucket <b>]  # dry-run imprime la huella
+# node apps/functions/scripts/restore-storage.mjs ... --confirmo <huella> --apply
 node apps/functions/scripts/backup-infra.mjs     --project <projectId> --out "$DEST" --apply
 ```
 
@@ -199,7 +202,7 @@ restaurado descifra al mismo plaintext** (comparado por hash: el valor no se imp
 | Limitación | Por qué | Qué hacer |
 |---|---|---|
 | **Sin hashes de contraseña** | Reimportarlos exige además el `hash_config` del proyecto, que es configuración y no dato del usuario; guardar el hash sin él produce material de credenciales que además no restaura | Complementar con `firebase auth:export` (ese archivo **sí** contiene credenciales) o hacer que los usuarios restablezcan contraseña |
-| **Storage: inventario, no bytes** | Duplicar fotos y PDF de clientes multiplica la superficie de un dato que las Rules tienen cerrado | Copiar objetos con la herramienta del proveedor y **verificar** contra `storage.ndjson` |
+| **Storage: bytes con custodia** | Los bytes copiados son fotos y PDF de clientes: el destino es OBLIGATORIAMENTE fuera del repo, con permisos 0600 y logs por huella | El backup viejo (solo inventario, sin `copiaDeBytes`) lo rechaza `restore-storage.mjs` con explicación |
 | **TTL no se repone** | Es configuración de la base | §3.3 paso 1 |
 | **Clave de cifrado fuera del backup** | A propósito: un backup que trae la clave y el ciphertext juntos no protege nada | §3.3 paso 2 |
 | **`backup-infra.mjs` no lee IAM ni Scheduler** | Requieren `gcloud`, no `firebase` | Los comandos exactos están en `manifest-infra.json → pendientesFueraDeAlcance` |

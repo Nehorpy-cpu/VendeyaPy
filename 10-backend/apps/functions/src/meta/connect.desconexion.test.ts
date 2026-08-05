@@ -156,6 +156,31 @@ beforeEach(() => {
   secretosBorrados.length = 0;
 });
 
+describe('disconnectMeta — desconecta MAIN, no al tenant entero (correctivo, CRÍTICO 1)', () => {
+  it('el ruteo y el asset de una conexión `wa_{pnid}` de Coexistence quedan INTACTOS', async () => {
+    sembrarNumeroQueVende();
+    const PNID_COEX = '777888999';
+    docs.set(assetPath(PNID_COEX), {
+      id: PNID_COEX, tenantId: TENANT, connectionId: `wa_${PNID_COEX}`, assetType: 'whatsapp_phone_number',
+      externalId: PNID_COEX, status: 'active', selected: false, automationMode: 'shadow', sessionKey: `wa_${PNID_COEX}`,
+    });
+    docs.set(idxPath(PNID_COEX), {
+      id: `whatsapp_${PNID_COEX}`, tenantId: TENANT, connectionId: `wa_${PNID_COEX}`, platform: 'whatsapp',
+      externalId: PNID_COEX, status: 'active',
+    });
+
+    await disconnectMeta(TENANT);
+
+    // «Desconectar» es sobre la conexión MAIN: el número de Coexistence tiene su propio ciclo
+    // (`deactivateWhatsappNumber`). Borrarle el índice acá lo dejaba mudo con un click del panel —
+    // en `shadow` la observación moría en silencio, y post-cutover silenciaba AL QUE VENDE.
+    expect(docs.has(idxPath(PNID_COEX))).toBe(true);
+    expect((docs.get(assetPath(PNID_COEX)) as { status?: string }).status).toBe('active');
+    // Y el de main sí dejó de rutear (comportamiento de siempre).
+    expect(docs.has(idxPath(PNID_QUE_VENDE))).toBe(false);
+  });
+});
+
 describe('disconnectMeta — el permiso del número sobrevive a la desconexión', () => {
   it('NO borra el asset del número: conserva su permiso y su canal', async () => {
     sembrarNumeroQueVende();

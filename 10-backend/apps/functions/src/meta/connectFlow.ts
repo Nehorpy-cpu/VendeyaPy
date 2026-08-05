@@ -123,8 +123,28 @@ async function refDelSecretoPrevio(tenantId: string): Promise<string | null> {
  * exactamente el desenlace que este endurecimiento existe para impedir—. Por eso se compara contra
  * la referencia preexistente y solo se limpia lo que este intento creó.
  */
-async function revertirSecretoNuevo(tenantId: string, refNueva: string, refPrevia: string | null): Promise<void> {
-  if (!refNueva || refNueva === refPrevia) return;
+async function revertirSecretoNuevo(
+  tenantId: string,
+  refNueva: string,
+  refPrevia: string | null,
+  valorPrevio: string | null,
+): Promise<void> {
+  if (!refNueva) return;
+  if (refNueva === refPrevia) {
+    // CRÍTICO del correctivo: misma referencia NO significa mismo valor. El naming es
+    // determinístico y `set` sobreescribe el documento, así que a esta altura el token que vendía
+    // ya fue PISADO por el del intento fallido — y comparar strings de referencia lo dejaba ahí,
+    // con la conexión `active` apuntando a una credencial destruida. La referencia es una
+    // indirección: lo que hay que devolver es el VALOR.
+    if (valorPrevio !== null) {
+      try {
+        await getSecretStore().set(metaTokenSecretName(tenantId), valorPrevio);
+      } catch {
+        logger.error('Meta connect: NO se pudo restaurar el token previo tras el fallo — la conexión principal puede quedar sin credencial válida', undefined, { tenantId });
+      }
+    }
+    return;
+  }
   try {
     await getSecretStore().remove(refNueva);
   } catch {
@@ -236,7 +256,11 @@ export async function runMetaConnect(tenantId: string, input: ConnectInput, byUi
   }
 
   // 5) Token por REFERENCIA (SecretStore, naming seguro). Nunca en claro en Firestore.
+  // El VALOR previo se lee ANTES del set: con naming determinístico, el set pisa el documento, y
+  // si algo falla después la única forma de devolverle la credencial al número que vende es tener
+  // el valor en la mano (la referencia sola no alcanza — es la misma string).
   const refPrevia = await refDelSecretoPrevio(tenantId);
+  const valorPrevio = refPrevia ? await getSecretStore().get(refPrevia).catch(() => null) : null;
   const tokenSecretRef = await getSecretStore().set(metaTokenSecretName(tenantId), token);
 
   /**
@@ -254,7 +278,7 @@ export async function runMetaConnect(tenantId: string, input: ConnectInput, byUi
     await writeDiscoveredAssets(tenantId, 'main', assets);
     await writeActiveConnection(tenantId, { byUid, tokenSecretRef, tokenExpiresAtMs: dbg.expiresAtMs, scopes: dbg.scopes, businessId: input.businessId, businessName: input.businessName });
   } catch (e) {
-    await revertirSecretoNuevo(tenantId, tokenSecretRef, refPrevia);
+    await revertirSecretoNuevo(tenantId, tokenSecretRef, refPrevia, valorPrevio);
     if (e instanceof PnidOcupadoError) {
       logger.warn('Meta connect: el número ya está conectado en otra empresa', { tenantId, conflictTenantId: e.conflictTenantId });
       await registrarFalloDeConexion(tenantId, 'el número de WhatsApp ya está conectado en otra empresa');

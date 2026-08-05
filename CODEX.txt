@@ -126,3 +126,12 @@ sola vez: repetirlo exige que el cliente offboardee y rehaga el flujo.
 
 El cutover es el Programa 2: `docs/coexistence-release-runbook.md`. La migración del PNID actual a `live` va
 ANTES del deploy. Gate externo abierto: elegibilidad de Paraguay, que Meta no documenta.
+
+### Correctivo Coexistence — 2026-08-04 (cierre del Programa 1)
+
+Cerrados los 7 gates restantes: live real por herramienta (gate transicional retirado con garantía
+estructural + E2E dual 20/20), IG/Messenger con canal propio, cutover transaccional con rollback byte
+a byte (verify-cutover 22/22), UI humana del historial (share/skip/disparo/estado), generaciones del
+historial (offboard cierra honesto; solo un signup nuevo abre la siguiente), backup de Storage con
+bytes + restore aislado (backup-restore-e2e 51/51, exige los tres emuladores). Sigue: NO desplegado,
+número real NO conectado, QR NO ejecutado, backup productivo NO ejecutado. Cutover = Programa 2.

@@ -19,7 +19,11 @@
  *   20-23. Eventos falsos: `object` desconocido, `change.field` desconocido, `account_update` con
  *         evento inventado y un echo cuyo `from` es el NEGOCIO (jamás abre conversación consigo mismo).
  *   24-27. El gate por número en vivo: `inactive` no deja rastro, `shadow` observa en superficie
- *         propia y no toca la conversación, `live` automatiza.
+ *         propia y no toca la conversación, `live` automatiza. Las promociones del número de
+ *         Coexistence entran por la HERRAMIENTA REAL del runbook (`migrarModoAutomatizacion`),
+ *         jamás escribiendo el campo a mano: demostrar el gate escribiendo `automationMode`
+ *         directo probaría un camino que en producción no existe. (La única escritura directa
+ *         legítima es la del PNID legacy, que modela la migración pre-deploy del Paso 5.)
  *   28-35. DOS PNID, EL MISMO CLIENTE, AISLADOS: sesión, carrito, estado, takeover, vendedor,
  *         cobertura, pedido pendiente y destino de la respuesta.
  *   36-45. El coordinador durable del historial: decisión única, disparo único, chunks duplicados /
@@ -40,9 +44,38 @@ process.env.FIRESTORE_EMULATOR_HOST = '127.0.0.1:8080';
 process.env.FIREBASE_AUTH_EMULATOR_HOST = '127.0.0.1:9099';
 process.env.GCLOUD_PROJECT = 'demo-aiafg';
 
+import { readFileSync } from 'node:fs';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { initializeApp } from 'firebase-admin/app';
 import { getFirestore, Timestamp } from 'firebase-admin/firestore';
 import { masRestrictivo } from '@vpw/shared';
+
+/**
+ * Cifra un secreto EXACTAMENTE como lo descifra el functions del emulador: mismo módulo compilado
+ * (`lib/lib/crypto.js`) y misma clave (`TENANT_SECRETS_ENCRYPTION_KEY` de `.env.local`). Lazy: solo
+ * los fixtures de archivo lo necesitan.
+ */
+const AQUI = dirname(fileURLToPath(import.meta.url));
+let cifrador = null;
+async function cifrarComoElEmulador(valor) {
+  if (!cifrador) {
+    // `getConfig()` valida el env ENTERO con zod: se carga el mismo `.env.local` que usa el
+    // functions del emulador (sin pisar lo ya seteado), y recién ahí se importa el módulo.
+    const envLocal = readFileSync(join(AQUI, '..', '.env.local'), 'utf8');
+    for (const linea of envLocal.split(/\r?\n/)) {
+      const m = /^([A-Z0-9_]+)=(.*)$/.exec(linea);
+      if (m) process.env[m[1]] ??= m[2].trim();
+    }
+    if (!process.env.TENANT_SECRETS_ENCRYPTION_KEY) {
+      throw new Error('verify-coexistence: falta TENANT_SECRETS_ENCRYPTION_KEY en apps/functions/.env.local');
+    }
+    const rutaCrypto = join(AQUI, '..', 'lib', 'lib', 'crypto.js');
+    const { encrypt } = await import(`file://${rutaCrypto.replace(/\\/g, '/')}`);
+    cifrador = encrypt;
+  }
+  return cifrador(valor);
+}
 // La MISMA herramienta que documenta el runbook (Paso 5 / Paso 11 / Paso 13). Importarla —y no
 // reimplementar la escritura— es lo único que hace que este E2E mida la recuperación REAL.
 import { migrarModoAutomatizacion } from './migrate-whatsapp-automation-mode.mjs';
@@ -432,25 +465,29 @@ check('24. `inactive`: ACK y nada más — evento cerrado con el motivo, sin men
   (await mensajes(T1, CUST)).length === 0 && (await trazaEnvio(T1)) === null,
   `status=${evInactive?.processingStatus} mode=${evInactive?.automationMode}`);
 
-await db.doc(`tenants/${T1}/metaAssets/${PNID_COEX}`).set({ automationMode: 'shadow' }, { merge: true });
+// Paso 11 del runbook, con la herramienta REAL (no se escribe el campo a mano).
+const rShadowCoex = await migrarModoAutomatizacion(db, { tenantId: T1, phoneNumberId: PNID_COEX, mode: 'shadow', apply: true });
 const wamidShadow = nuevoWamid('SHADOW');
 await postWebhook(inbound(PNID_COEX, CUST, 'esto se mira, no se contesta', wamidShadow));
 const huboSombra = await waitFor(async () => (await docsDe('metaWebhookShadow', 'phoneNumberId', PNID_COEX)).length > 0, 12_000);
 const sombra = (await docsDe('metaWebhookShadow', 'phoneNumberId', PNID_COEX))[0];
-check('25. `shadow`: se observa en superficie PROPIA, marcada inerte y con el canal del número',
-  huboSombra && sombra?.tenantId === T1 && sombra?.automationEligible === false && sombra?.unread === false &&
-  sombra?.sessionKey === `wa_${PNID_COEX}`,
-  `obs=${huboSombra} sessionKey=${sombra?.sessionKey}`);
+check('25. `shadow` por la herramienta real: se observa en superficie PROPIA, inerte y con el canal del número',
+  rShadowCoex.outcome === 'written' && huboSombra && sombra?.tenantId === T1 &&
+  sombra?.automationEligible === false && sombra?.unread === false && sombra?.sessionKey === `wa_${PNID_COEX}`,
+  `migracion=${rShadowCoex.outcome} obs=${huboSombra} sessionKey=${sombra?.sessionKey}`);
 check('26. `shadow` NO toca la conversación del cliente: ni mensajes, ni resumen, ni envío',
   (await mensajes(T1, CUST)).length === 0 && !(await db.doc(`tenants/${T1}/customers/${CUST}`).get()).exists &&
   (await trazaEnvio(T1)) === null);
 
-await db.doc(`tenants/${T1}/metaAssets/${PNID_COEX}`).set({ automationMode: 'live' }, { merge: true });
+// Paso 12 del runbook, con la herramienta REAL: el PNID de canal propio (`wa_{pnid}`, no
+// seleccionado) llega a `live` únicamente por `migrarModoAutomatizacion`. Escribir el campo a
+// mano acá escondería que el cutover del programa fuera imposible con la herramienta de verdad.
+const rLiveCoex = await migrarModoAutomatizacion(db, { tenantId: T1, phoneNumberId: PNID_COEX, mode: 'live', apply: true });
 await postWebhook(inbound(PNID_COEX, CUST, 'hola'));
 const contestoCoex = await waitFor(async () => (await mensajes(T1, CUST)).some((m) => m.direction === 'out' && m.receivedVia === PNID_COEX), 20_000);
-check('27. `live`: recién ahí el bot contesta, y lo hace por el número que recibió',
-  contestoCoex && (await trazaEnvio(T1))?.phoneNumberId === PNID_COEX,
-  `contesto=${contestoCoex} via=${(await trazaEnvio(T1))?.phoneNumberId}`);
+check('27. `live` por la herramienta real: recién ahí el bot contesta, y lo hace por el número que recibió',
+  rLiveCoex.outcome === 'written' && contestoCoex && (await trazaEnvio(T1))?.phoneNumberId === PNID_COEX,
+  `migracion=${rLiveCoex.outcome} contesto=${contestoCoex} via=${(await trazaEnvio(T1))?.phoneNumberId}`);
 
 // ===========================================================================
 // 28-35. DOS PNID, EL MISMO CLIENTE, TOTALMENTE AISLADOS
@@ -592,8 +629,11 @@ check('43. con el 100 % y sin fallos pendientes, la sincronización se declara C
   `status=${rEstado.result?.status} progress=${rEstado.result?.progress}`);
 
 // --- DECLINED (2593109) sobre un número aparte: es un desenlace terminal. Y llega SIN envelope. ---
+// El 2593109 es la RESPUESTA a un `smb_app_data`: sin disparo no hay sincronización que declinar.
+// (El material que llega con la generación sin disparar es «fuera de ciclo» y no la gobierna.)
 await sembrarNumeroDeArchivo(PNID_DECL, Date.now());
 await call('coexistenceDecideHistorySharing', ownerT1, { tenantId: T1, phoneNumberId: PNID_DECL, decision: 'share' });
+await call('coexistenceRequestHistorySync', ownerT1, { tenantId: T1, phoneNumberId: PNID_DECL });
 await postWebhook({ value: { messaging_product: 'whatsapp', metadata: { phone_number_id: PNID_DECL }, history: [{ metadata: { phase: 0, chunk_order: 1, progress: 0 }, threads: [], errors: [{ code: 2593109, title: 'Business did not share history' }] }] } });
 await sleep(1500);
 const rDeclinado = await call('coexistenceSyncStatus', ownerT1, { tenantId: T1, phoneNumberId: PNID_DECL });
@@ -710,9 +750,18 @@ process.exit(ok ? 0 : 1);
 async function sembrarNumeroDeArchivo(pnid, onboardedAtMs) {
   const now = Timestamp.now();
   const creado = Timestamp.fromMillis(onboardedAtMs);
+  /**
+   * TOKEN REAL sembrado (correctivo): el disparo del historial resuelve credenciales ANTES de
+   * reclamar —un fallo local no puede consumir el único disparo—, así que un fixture con
+   * `tokenSecretRef: ''` ya no llega ni al vencimiento ni al reclamo. Se cifra con el MISMO módulo
+   * compilado y la MISMA clave que usa el functions del emulador (`.env.local`), igual que hace
+   * `backup-restore-e2e.mjs`: los secretos de mentira no prueban nada.
+   */
+  const nombreSecreto = `meta-token-${T1}-${pnid}`;
+  await db.doc(`secrets/${nombreSecreto}`).set({ name: nombreSecreto, ciphertext: await cifrarComoElEmulador(`token-archivo-${pnid}`), updatedAt: now });
   await db.doc(`tenants/${T1}/metaConnections/wa_${pnid}`).set({
     id: `wa_${pnid}`, tenantId: T1, connectionId: `wa_${pnid}`, metaBusinessId: 'BIZ-COEX', metaBusinessName: 'Perfumería Coex',
-    connectedUserId: '', tokenSecretRef: '', tokenType: 'live', tokenExpiresAt: null, scopes: [],
+    connectedUserId: '', tokenSecretRef: `secret://firestore/${nombreSecreto}`, tokenType: 'live', tokenExpiresAt: null, scopes: [],
     status: 'active', source: 'embedded_signup', wabaId: WABA, lastVerifiedAt: now, errorMessage: '',
     createdAt: creado, updatedAt: now,
   });

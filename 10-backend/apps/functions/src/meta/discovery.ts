@@ -10,6 +10,7 @@ import { Timestamp } from 'firebase-admin/firestore';
 import type { MetaAssetType } from '@vpw/shared';
 import { declaredAutomationMode, isSessionKey, whatsappSessionKey } from '@vpw/shared';
 import { db, paths } from '../lib/firebase.js';
+import { logger } from '../lib/logger.js';
 import { assertPnidLibre } from './pnidOwnership.js';
 import type { MetaPhoneNumber } from './graphClient.js';
 
@@ -167,10 +168,40 @@ export async function writeDiscoveredAssets(tenantId: string, connectionId: stri
       if (esDeEstaConexion(data)) tx.delete(d.ref);
     });
 
+    /**
+     * Correctivo (ALTO 4/5) — el espejo del guard `is_main_number`: un PNID que YA pertenece a otra
+     * conexión del MISMO tenant (`wa_{pnid}`, Coexistence/multi-número) NO se absorbe. El WABA
+     * compartido es un caso contemplado en la otra dirección (el onboarding del número real puede
+     * listar el que ya vende), y en esta dirección pasaba lo simétrico: una reconexión legítima de
+     * `main` listaba también el número de Coexistence y lo recableaba a `main` — `connectionId`,
+     * `status: 'active'` (aunque un humano lo hubiera apagado) y ruteo incluidos.
+     */
+    const dePropiedadAjena = (externalId: string): boolean => {
+      const dueño =
+        (previoAsset.get(externalId)?.['connectionId'] as string | undefined) ??
+        (previoIdx.get(`whatsapp_${externalId}`)?.['connectionId'] as string | undefined);
+      return typeof dueño === 'string' && dueño !== connectionId && dueño.startsWith('wa_');
+    };
+
+    /**
+     * Correctivo (ALTO 8) — la reconexión de `main` no puede RE-CORONAR al número legacy: si otra
+     * conexión del tenant ya tiene un número `selected:true` (el desenlace normal del cutover), los
+     * assets de esta conexión entran `selected:false`. Dos seleccionados = dos números creyéndose
+     * el remitente por defecto. Cambiar el default es una decisión (el cutover o el panel), no un
+     * efecto colateral de reconectar.
+     */
+    const seleccionadoAjeno = [...previoAsset.values()].some(
+      (d) => d['selected'] === true && typeof d['connectionId'] === 'string' && (d['connectionId'] as string) !== connectionId && (d['connectionId'] as string).startsWith('wa_'),
+    );
+
     for (const a of assets) {
+      if (a.assetType === 'whatsapp_phone_number' && dePropiedadAjena(a.externalId)) {
+        logger.info('discovery: número de OTRA conexión del tenant listado por este WABA; no se absorbe', { tenantId, connectionId });
+        continue;
+      }
       const previo = previoAsset.get(a.externalId);
       tx.set(db().doc(paths.metaAsset(tenantId, a.externalId)), {
-        id: a.externalId, tenantId, connectionId, assetType: a.assetType, externalId: a.externalId, name: a.name, status: 'active', selected: a.selected, createdAt: now, updatedAt: now,
+        id: a.externalId, tenantId, connectionId, assetType: a.assetType, externalId: a.externalId, name: a.name, status: 'active', selected: seleccionadoAjeno ? false : a.selected, createdAt: now, updatedAt: now,
         ...canalDeAlta(a, previo),
         ...camposPreservados(previo),
       });

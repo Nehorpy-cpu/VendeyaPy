@@ -74,16 +74,41 @@ describe('derivarSessionKey — la función PURA que es la única autoridad', ()
   });
 });
 
-describe('canalSinGate — el escape no puede alcanzar a un número de WhatsApp', () => {
-  it('Instagram y Messenger siguen en el canal heredado (deuda DECLARADA, no default silencioso)', () => {
-    expect(canalSinGate('instagram').sessionKey).toBe('active');
-    expect(canalSinGate('messenger').mode).toBe('live');
+describe('canalSinGate — cada plataforma sin PNID conversa en su PROPIO canal', () => {
+  it('Instagram y Messenger dejan de compartir `active`: clave propia por plataforma', () => {
+    // La deuda que cerraba §2: compartir el canal mutable `active` significaba compartir carrito,
+    // takeover y estado con el número que vende (y Messenger con Instagram entre sí).
+    expect(canalSinGate('instagram').sessionKey).toBe('ig');
+    expect(canalSinGate('messenger').sessionKey).toBe('msgr');
+    expect(canalSinGate('instagram').sessionKey).not.toBe(canalSinGate('messenger').sessionKey);
   });
 
-  it('WhatsApp LANZA: `live` + `active` juntos es la combinación que ADR-0017 existe para impedir', () => {
-    // Un número de Coexistence que obtuviera este objeto automatizaría sobre la conversación del
-    // número que ya vende, sin pasar por el permiso. Hoy el webhook no lo hace; esto lo vuelve
-    // imposible de hacer por descuido.
+  it('siguen automatizando (`live`): el gate de ADR-0017 §1 es de números de WhatsApp', () => {
+    expect(canalSinGate('instagram').mode).toBe('live');
+    expect(canalSinGate('messenger').mode).toBe('live');
+    expect(canalSinGate('instagram').origen).toBe('sin_gate');
+  });
+
+  it('ninguna plataforma reclama el canal heredado ni el espacio `wa_*` de un número', () => {
+    for (const p of ['instagram', 'messenger', 'plataforma_nueva']) {
+      expect(canalSinGate(p).sessionKey, p).not.toBe('active');
+      expect(canalSinGate(p).sessionKey.startsWith('wa_'), p).toBe(false);
+    }
+  });
+
+  it('la clave sale de la MISMA abstracción central de @vpw/shared (no hay segunda construcción)', async () => {
+    const { PLATFORM_SESSION_KEYS } = await import('@vpw/shared');
+    expect(canalSinGate('instagram').sessionKey).toBe(PLATFORM_SESSION_KEYS.instagram);
+    expect(canalSinGate('messenger').sessionKey).toBe(PLATFORM_SESSION_KEYS.messenger);
+  });
+
+  it('el veredicto es inmutable', () => {
+    expect(Object.isFrozen(canalSinGate('instagram'))).toBe(true);
+  });
+
+  it('WhatsApp LANZA: `live` sin pasar por el permiso es la combinación que ADR-0017 impide', () => {
+    // Un número de Coexistence que obtuviera este objeto automatizaría sin pasar por el permiso
+    // por número. Hoy el webhook no lo hace; esto lo vuelve imposible de hacer por descuido.
     expect(() => canalSinGate('whatsapp')).toThrow(/ADR-0017/);
   });
 });

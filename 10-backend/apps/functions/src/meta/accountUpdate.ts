@@ -31,13 +31,14 @@ import { db, paths } from '../lib/firebase.js';
 import { logger } from '../lib/logger.js';
 import { recordAudit } from '../audit/audit.js';
 import { whatsappIndexId } from './pnidOwnership.js';
+import { cerrarGeneracionPorOffboarding } from './historyCoordinator.js';
 import type { AccountUpdateEvent, NormalizedAccountUpdate } from './parseWebhook.js';
 
 /** Los eventos que APAGAN el permiso porque el número dejó de estar conectado. */
 const EVENTOS_DE_DESCONEXION: readonly AccountUpdateEvent[] = Object.freeze(['ACCOUNT_OFFBOARDED', 'PARTNER_REMOVED']);
 
 export type AccountUpdateAccion = 'degradado' | 'reconectado_sin_permiso';
-export type AccountUpdateOmision = 'sin_pnid' | 'evento_desconocido' | 'sin_tenant' | 'sin_asset' | 'error';
+export type AccountUpdateOmision = 'sin_pnid' | 'evento_desconocido' | 'sin_tenant' | 'sin_asset' | 'reentrega' | 'error';
 
 export type AccountUpdateResultado =
   | { aplicado: true; accion: AccountUpdateAccion; tenantId: string }
@@ -78,6 +79,27 @@ export async function aplicarAccountUpdate(update: NormalizedAccountUpdate, nowM
       logger.warn('accountUpdate: no se pudo resolver la empresa del número', { event: update.event });
       return { aplicado: false, motivo: 'sin_tenant' };
     }
+    /**
+     * Correctivo (MEDIO 17): DEDUP por evento. Meta reentrega `account_update` (at-least-once), y
+     * aplicarlo en cada entrega significaba que un ACCOUNT_OFFBOARDED viejo, reentregado después
+     * de que un humano re-promoviera el número, lo degradaba de nuevo Y cerraba una generación que
+     * no le pertenecía. La identidad del evento es (pnid, evento, timestamp de Meta): la reentrega
+     * trae el MISMO timestamp; una desconexión NUEVA trae otro y aplica normal. El registro es
+     * evidencia mínima sin PII (colección Admin-only por default-deny), y no lleva TTL: su volumen
+     * es el de las desconexiones reales.
+     */
+    const dedupId = `au_${pnid}_${update.event}_${Math.round((update.timestamp ?? 0) * 1000)}`;
+    try {
+      await db().doc(`metaAccountUpdates/${dedupId}`).create({ tenantId, event: update.event, appliedAt: Timestamp.fromMillis(nowMs) });
+    } catch (e) {
+      const code = (e as { code?: number | string }).code;
+      if (code === 6 || code === 'already-exists') {
+        logger.info('accountUpdate: reentrega del mismo evento; sin efecto', { tenantId, event: update.event });
+        return { aplicado: false, motivo: 'reentrega' };
+      }
+      throw e;
+    }
+
     const assetRef = db().doc(paths.metaAsset(tenantId, pnid));
     if (!(await assetRef.get()).exists) {
       logger.warn('accountUpdate: el número no tiene asset en esa empresa', { tenantId, event: update.event });
@@ -99,6 +121,15 @@ export async function aplicarAccountUpdate(update: NormalizedAccountUpdate, nowM
     // que ver el permiso cerrado igual.
     batch.set(idxRef, { automationMode: AUTOMATION_MODE_FAIL_CLOSED, updatedAt: now }, { merge: true });
     await batch.commit();
+
+    // Un offboarding también cierra la generación VIGENTE del historial (si no era terminal): esa
+    // ventana murió con la desconexión, y dejarla "receiving" para siempre le mentiría al panel.
+    // No inventa consentimiento ni toca una generación ya terminal — solo la marca con el motivo.
+    // Después del cierre, únicamente un nuevo Embedded Signup (claim de code nuevo) abre la
+    // siguiente. `ACCOUNT_RECONNECTED` no pasa por acá: reconectar no es offboardear.
+    if (esDesconexion) {
+      await cerrarGeneracionPorOffboarding(tenantId, pnid, nowMs);
+    }
 
     const accion: AccountUpdateAccion = esDesconexion ? 'degradado' : 'reconectado_sin_permiso';
     await recordAudit({

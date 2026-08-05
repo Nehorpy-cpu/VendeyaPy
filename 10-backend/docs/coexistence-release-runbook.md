@@ -131,13 +131,20 @@ avanza: ningún paso posterior es reversible barato.
 ```
 node apps/functions/scripts/backup-firestore.mjs --project vpw-prod-dd6ff --tenant <tenantId> --out <ruta ABSOLUTA fuera del repo> --apply
 node apps/functions/scripts/backup-auth.mjs      --project vpw-prod-dd6ff --tenant <tenantId> --out <…> --apply
-node apps/functions/scripts/backup-storage.mjs   --project vpw-prod-dd6ff --tenant <tenantId> --out <…> --muestra <N> --apply
+node apps/functions/scripts/backup-storage.mjs   --project vpw-prod-dd6ff --tenant <tenantId> --out <…> --apply
 ```
 Guardar los tres manifiestos con sus conteos y hashes. Tres límites que van escritos, no supuestos:
 - **Auth no respalda hashes de contraseña**: tras un restore los usuarios conservan uid, claims y
   perfil y **necesitan restablecer contraseña**.
-- **Storage respalda el INVENTARIO, no los bytes**: para los bytes, copia de objetos del proveedor.
-  Un restore de Firestore sin los objetos deja adjuntos y comprobantes **rotos**.
+- **Storage COPIA los bytes** (correctivo 2026-08-04): todos los objetos del prefijo del tenant, con
+  verificación md5/tamaño por objeto y sha256 en el NDJSON (manifest `copiaDeBytes: true`). Un
+  backup viejo sin ese campo es solo inventario y `restore-storage.mjs` lo rechaza.
+- Además del export lógico por tenant, hacer el **export ADMINISTRADO y consistente de Firestore**
+  del proyecto entero (`gcloud firestore export` a un bucket privado) ANTES del QR: el export
+  lógico es la verificación complementaria, no el único respaldo.
+- **Política de Auth, decidida y escrita**: el backup lógico NO lleva hashes de contraseña. O se
+  hace el export de Auth con hashes protegido (herramienta del proveedor, custodia aparte), o se
+  acepta explícitamente que un restore obliga a restablecer contraseñas. Elegir UNA y anotarla.
 - Sin el **ciphertext de `secrets/`** y sin **`metaExternalIndex`**, un restore deja las conexiones
   Meta muertas y el inbound sin tenant. Verificar que ambos están en el manifiesto.
 
@@ -145,7 +152,14 @@ Guardar los tres manifiestos con sus conteos y hashes. Tres límites que van esc
 Restaurar en un proyecto **demo/emulador**, nunca en producción ni en staging con datos vivos.
 Verificar: conteos por colección, tipos round-trip (`Timestamp`, `GeoPoint`, `Bytes`), subcolecciones
 de `customers` (sesiones y mensajes), ítems de pedido, `metaExternalIndex` y los `secrets/`
-referenciados. **Un backup que nadie restauró no es un backup.**
+referenciados. Restaurar también los BYTES de Storage con `restore-storage.mjs` (emulador o bucket
+aislado; producción PROHIBIDA sin excepción) y exigir su verificación completa (exit 0 = todos los
+objetos releídos y comparados). Con el token restaurado y descifrado en el entorno de prueba, hacer
+UNA llamada **Graph GET estrictamente read-only** (p. ej. `GET /<PNID>?fields=display_phone_number`)
+para probar que la credencial restaurada sirve — sin imprimirla. Verificar además que el destino
+restaurado documenta lo que un restore NO repone: **políticas TTL** (se re-declaran con el deploy
+de índices, jamás `--force`), **IAM** y **schedulers** (se comparan contra el manifiesto de
+infraestructura de `backup-infra.mjs`). **Un backup que nadie restauró no es un backup.**
 
 ### Paso 4 — Verificar el backup NATIVO del teléfono
 Es del owner y lo hace el owner. Antes del Embedded Signup:
@@ -302,6 +316,21 @@ Si se comparte: el historial va a `metaWebhookHistory` (cerrada al cliente, con 
 `chunk.errors` — «no compartió» llega como `history[0].errors[0].code = 2593109` y sin leerlo el
 coordinador espera hasta quemar la ventana.
 
+**El flujo es del OWNER, desde el panel** (correctivo 2026-08-04): la tarjeta «Historial del número
+conectado» en /integrations permite decidir `share`/`skip` (con confirmación), disparar el único
+pedido (confirmación aparte que dice que no se repite) y ver el estado saneado
+(`pending_request → requested → receiving → completed | declined | expired | failed`). El backend
+re-verifica que el PNID sea una conexión `wa_{pnid}` del tenant: el frontend no puede apuntar a
+otro número.
+
+**Generaciones** (ADR-0017 §5, correctivo): si el número se offboardea (`ACCOUNT_OFFBOARDED`), la
+generación vigente del historial se cierra de forma honesta (`failed` con el motivo; una terminal
+queda intacta) y **solo un nuevo Embedded Signup** — claim de `code` nuevo — abre la siguiente:
+sin decisión heredada, contadores a cero, ventana de 24 h nueva. La generación anterior queda
+archivada íntegra en `coexistenceHistorySyncs/{pnid}_gen{N}` (auditoría; jamás se borra). Un
+callback viejo o un replay no pueden resetear la generación vigente. Una decisión `skip` anterior
+NO bloquea una reconexión legítima.
+
 ### Paso 11 — `shadow`, sin una sola respuesta
 ```
 node apps/functions/scripts/migrate-whatsapp-automation-mode.mjs --tenant <tenantId> --pnid <pnid nuevo> --mode shadow --apply
@@ -319,12 +348,35 @@ Qué se observa durante la ventana de `shadow`: los inbound y los echoes del nú
 ### Paso 12 — Promoción explícita a `live`
 **`live` no se alcanza por deploy.** Requisitos previos, todos:
 1. smoke humano de `shadow` aprobado (Paso 11);
-2. **`SESIONES_POR_CANAL_MIGRADAS = true`** en `migrate-whatsapp-automation-mode.mjs`. Hoy está en
-   `false` y el script **se niega** a poner en `live` un número que no vive en el canal heredado.
-   Ponerlo en `true` exige lo que el propio archivo declara pendiente: un **E2E contra el emulador
-   con DOS PNID del mismo tenant y el MISMO cliente**, e Instagram/Messenger dejando de compartir la
-   clave `active`;
+2. `verify-coexistence-dual.mjs` en VERDE contra el emulador. El gate transicional
+   `SESIONES_POR_CANAL_MIGRADAS` fue **RETIRADO** (no puesto en `true`): la garantía de sesiones por
+   canal hoy es **estructural** — `paths.session` exige la clave y la vigila el compilador; el canal
+   viaja persistido en `Session.id`, `Order.sessionKey` y los documentos de Coverage — y está
+   demostrada en ejecución por ese E2E (**dos PNID del mismo tenant, el MISMO cliente, promovido a
+   `live` con la herramienta real**, jamás escribiendo el campo). Las dos deudas que el gate
+   custodiaba están cerradas: el E2E dual existe, e Instagram/Messenger tienen canal propio
+   (`ig`/`msgr`, `sessionKeyDePlataforma` en `@vpw/shared`) en vez de compartir `active`.
+   La promoción del número NUEVO no exige `selected` (eso obligaría a mover el remitente por
+   defecto del tenant antes de tiempo): `no_es_el_numero_por_defecto` aplica solo al canal heredado;
 3. aprobación explícita del owner, aparte del smoke.
+
+**Cambiar el número por DEFECTO del tenant (si el owner lo decide) no se hace a mano**: la
+secuencia «seleccionar acá, migrar allá» son dos escrituras independientes con una ventana en la
+que hay dos números contestando o ninguno. La herramienta release-only es:
+```
+node apps/functions/scripts/cutover-whatsapp-number.mjs --tenant <t> --nuevo <pnid> --degradar-anterior shadow|inactive
+```
+Dry-run por defecto: imprime la **firma** del estado (sha256 + updateTimes) que el `--apply` exige
+(`--firma <valor>`); todas las escrituras van en UNA transacción (asset nuevo `selected+live`,
+anterior degradado, índices si declaran otro modo) con precondiciones frescas re-verificadas
+adentro; el registro de reversa queda en `tenants/{t}/whatsappCutovers/{co_<firma>}` y el rollback
+(`--rollback <cutoverId> --apply`) restaura **byte a byte**, disponible aunque una verificación
+secundaria falle. El kill-switch sigue siendo la migración `--mode inactive`, que el rollback jamás
+pisa. Precondiciones: anterior seleccionado+`live`, nuevo en `shadow` (de `inactive` no se salta a
+`live`), un solo seleccionado. El panel NO puede hacer el cutover: `selectMetaPhoneNumber` rechaza
+(`failed-precondition`) elegir de default un número que no resuelve `live` cuando otro asset del
+tenant declara `live` — compatible hacia atrás: sin ningún `live` declarado (producción pre-Paso 5)
+no bloquea nada. Ciclo completo probado en `verify-cutover.mjs` (22 checks).
 
 Recordar en `live` (contrato oficial, ARCHITECTURE §12.1): un echo activa el control humano pero
 **no abre ni extiende la ventana de servicio de Cloud API**. Si la ventana está cerrada, la única
@@ -367,12 +419,13 @@ tenant, y con ADR-0017 eso ya no es solo «se pierde el ruteo local» — el nú
 3. **Embedded Signup queda en v2**: `apps/web/src/lib/metaEmbeddedSignup.ts` manda
    `extras: { setup, featureType, sessionInfoVersion }` **sin `version`**, y ARCHITECTURE §12.1 dice
    que omitirlo deja el flujo en v2, **deprecado el 2026-10-15**. Es un plazo duro.
-4. **`live` sigue bloqueado por diseño** para un número en canal propio:
-   `SESIONES_POR_CANAL_MIGRADAS = false`, y las dos deudas que lo desbloquean (E2E de dos PNID;
-   Instagram/Messenger fuera de `CANAL_SIN_GATE`) están declaradas en el propio script.
-5. **`releaseToBot` destruye el estado de checkout** (`conversation/handoff.ts`), defecto ALTO
-   preexistente ya documentado en `HANDOFF` §4/0b. Con echoes, tomar y liberar deja de ser
-   excepcional y pasa a ser el ritmo normal del vendedor: conviene cerrarlo antes del Paso 12.
+4. **CERRADO por el correctivo (2026-08-04)**: el gate `SESIONES_POR_CANAL_MIGRADAS` fue retirado
+   con la garantía estructural + `verify-coexistence-dual.mjs` (Paso 12), e Instagram/Messenger
+   tienen canal propio (`ig`/`msgr`). `live` para un número en canal propio ya es alcanzable con la
+   herramienta real — y SOLO con ella.
+5. **CERRADO en `4af6607`**: `releaseToBot` preserva `AWAITING_PAYMENT`/`SELECTING_PAYMENT` al
+   liberar (`conversation/handoff.release.test.ts`). Tomar y liberar puede ser el ritmo normal del
+   vendedor sin destruir el checkout.
 6. **El selector es todo el proyecto** (§1.1). No es un error de cálculo; es la consecuencia de que
    el arranque de `index.ts` importe módulos que cambiaron.
 

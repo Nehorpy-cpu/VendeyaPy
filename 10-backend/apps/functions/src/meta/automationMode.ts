@@ -23,6 +23,7 @@ import {
   declaredAutomationMode,
   derivarSessionKey,
   masRestrictivo,
+  sessionKeyDePlataforma,
   LEGACY_SESSION_KEY,
   AUTOMATION_MODE_FAIL_CLOSED,
   type WhatsappAutomationMode,
@@ -53,35 +54,28 @@ export interface CanalAutomatizacion {
  * meterlos en el fail-closed de ADR-0017 los apagaría a todos de golpe al desplegar, que es
  * exactamente el tipo de regresión que este programa existe para evitar.
  *
- * Es una constante congelada y con nombre propio —y no un `if` suelto en el webhook— para que
- * quien la use tenga que nombrar la excepción.
+ * Es la ÚNICA puerta del escape —una función con nombre propio, no un `if` suelto en el webhook—
+ * para que quien la use tenga que nombrar la excepción, y para cerrar el peor camino posible: que
+ * un número de WhatsApp la obtenga. Un veredicto `live` sin pasar por el permiso por número es
+ * exactamente lo que ADR-0017 existe para impedir; WhatsApp acá LANZA, siempre.
  *
- * SOBRE SU `sessionKey` (ETAPA E, deuda DECLARADA): sigue siendo `active`, que es donde viven hoy
- * las conversaciones de Instagram y Messenger. Darles canal propio ahora las dejaría HUÉRFANAS —
- * carrito, takeover y pedido pendiente de charlas vivas apuntando a un documento que nadie
- * escribió—, y eso es una migración de datos, no un cambio aditivo. No hay colisión con WhatsApp
- * porque el `customerId` de esas plataformas no es un teléfono sino el id que asigna Meta, así que
- * son documentos de clientes distintos. Queda pendiente para el programa que migre esas
- * conversaciones; mientras tanto el fallback es explícito y está probado, no un default silencioso.
- */
-export const CANAL_SIN_GATE: CanalAutomatizacion = Object.freeze({
-  mode: 'live' as WhatsappAutomationMode,
-  sessionKey: LEGACY_SESSION_KEY,
-  origen: 'sin_gate' as OrigenAutomatizacion,
-});
-
-/**
- * La ÚNICA puerta para usar el escape, y existe para cerrar el peor camino posible: que un número
- * de WhatsApp lo obtenga. Ese objeto dice `live` Y `active` a la vez, o sea «automatizá y hacelo
- * sobre la conversación del número que ya vende» — exactamente lo que ADR-0017 existe para impedir.
- * Hoy el webhook no lo hace; esto lo vuelve imposible de hacer por descuido en un refactor, en vez
- * de dejarlo dependiendo de que nadie toque un ternario.
+ * SOBRE SU `sessionKey` (ADR-0017 §2, deuda CERRADA en esta ronda): cada plataforma conversa en
+ * su canal PROPIO (`ig` / `msgr`, de `sessionKeyDePlataforma` en `@vpw/shared` — la misma
+ * abstracción central que deriva los canales de WhatsApp). Compartir el mutable `active`
+ * significaba que un cliente escribiendo por Instagram y por WhatsApp compartía carrito, takeover
+ * y estado con el número que vende, y Messenger con Instagram entre sí. Dato verificado de
+ * producción (2026-08-04): el índice de ruteo tiene UNA sola entrada y es whatsapp ⇒ no existen
+ * conversaciones IG/Messenger reales que el cambio de clave abandone.
  */
 export function canalSinGate(platform: string): CanalAutomatizacion {
   if (platform === 'whatsapp') {
     throw new Error('canalSinGate: WhatsApp SIEMPRE pasa por resolveAutomationMode (ADR-0017 §1)');
   }
-  return CANAL_SIN_GATE;
+  return Object.freeze({
+    mode: 'live' as WhatsappAutomationMode,
+    sessionKey: sessionKeyDePlataforma(platform),
+    origen: 'sin_gate' as OrigenAutomatizacion,
+  });
 }
 
 /** Veredicto cuando no hay nada confiable que leer. */

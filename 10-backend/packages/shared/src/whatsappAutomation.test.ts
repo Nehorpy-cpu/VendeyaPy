@@ -23,6 +23,8 @@ import {
   isSessionKey,
   parseSessionKey,
   whatsappSessionKey,
+  PLATFORM_SESSION_KEYS,
+  sessionKeyDePlataforma,
 } from './whatsappAutomation.js';
 
 /** Todo lo que un panel mal tipado, un import o un dedo distraído puede dejar escrito. */
@@ -192,5 +194,46 @@ describe('sessionKey — derivación y compatibilidad con el canal heredado', ()
     expect(parseSessionKey(undefined, 'active')).toBe('active');
     expect(parseSessionKey('a/b', 'wa_9')).toBe('wa_9');
     expect(parseSessionKey(42, 'active')).toBe('active');
+  });
+});
+
+/**
+ * ADR-0017 §2 aplicado a las plataformas SIN número. Instagram y Messenger compartían el canal
+ * mutable `active` (vía el escape del gate): un cliente escribiendo por Instagram y por WhatsApp
+ * compartía carrito, takeover y estado con el número que vende — y Messenger con Instagram entre
+ * sí. La clave de canal por plataforma sale de ACÁ, de la misma abstracción central que la de
+ * WhatsApp, para que nadie vuelva a construirla a mano en un borde.
+ */
+describe('sessionKeyDePlataforma — el canal PROPIO de una plataforma sin PNID', () => {
+  it('Instagram y Messenger tienen clave propia, estable y distinta entre sí', () => {
+    expect(sessionKeyDePlataforma('instagram')).toBe('ig');
+    expect(sessionKeyDePlataforma('messenger')).toBe('msgr');
+    expect(sessionKeyDePlataforma('instagram')).not.toBe(sessionKeyDePlataforma('messenger'));
+    expect(PLATFORM_SESSION_KEYS).toEqual({ instagram: 'ig', messenger: 'msgr' });
+    expect(Object.isFrozen(PLATFORM_SESSION_KEYS)).toBe(true);
+  });
+
+  it('ninguna clave de plataforma es el canal heredado ni pisa el espacio de WhatsApp', () => {
+    for (const p of ['instagram', 'messenger', 'plataforma_nueva']) {
+      const k = sessionKeyDePlataforma(p);
+      expect(k, p).not.toBe(LEGACY_SESSION_KEY);
+      expect(k.startsWith('wa_'), p).toBe(false);
+      expect(isSessionKey(k), p).toBe(true);
+    }
+  });
+
+  it('una plataforma DESCONOCIDA estrena clave derivada propia, jamás `active` ni la de otra', () => {
+    expect(sessionKeyDePlataforma('threads')).toBe('ch_threads');
+    // Solo el string EXACTO mapea (mismo criterio que parseAutomationMode): una variante rara no
+    // puede terminar en el canal de la plataforma real.
+    expect(sessionKeyDePlataforma('Instagram')).toBe('ch_Instagram');
+    expect(sessionKeyDePlataforma('a/b c')).not.toContain('/');
+    expect(isSessionKey(sessionKeyDePlataforma('a/b c'))).toBe(true);
+  });
+
+  it('WhatsApp NO tiene canal de plataforma: su canal se deriva del PNID', () => {
+    expect(() => sessionKeyDePlataforma('whatsapp')).toThrow(/PNID/);
+    expect(() => sessionKeyDePlataforma('')).toThrow();
+    expect(() => sessionKeyDePlataforma('   ')).toThrow();
   });
 });

@@ -16,6 +16,15 @@ import { db } from '../lib/firebase.js';
 
 const COLL = 'metaOAuthStates';
 const NONCE_TTL_MS = 10 * 60_000; // 10 minutos
+/**
+ * Correctivo (MEDIO 13): el onboarding de COEXISTENCE es un acto humano con el teléfono en la mano
+ * — escanear el QR, esperar la verificación, revincular dispositivos. Diez minutos alcanzaban para
+ * el flujo estándar (todo en el navegador) y se quedaban cortos acá: el nonce moría DESPUÉS de que
+ * Meta ya había onboardeado el número real, dejando el peor estado posible (onboarding hecho,
+ * conexión local no creada). Sigue siendo de un solo uso y atado a tenant+uid+modo: alargar la
+ * ventana no relaja ninguna de esas tres cosas.
+ */
+const NONCE_TTL_COEXISTENCE_MS = 30 * 60_000; // 30 minutos
 
 /**
  * EL MODO DEL ONBOARDING (ADR-0017 §5).
@@ -78,12 +87,12 @@ export async function createMetaConnectNonce(tenantId: string, uid: string, mode
   const nonce = randomBytes(24).toString('hex');
   const now = Date.now();
   await db().doc(`${COLL}/${nonce}`).set({
-    tenantId, uid, mode, createdAtMs: now, expiresAtMs: now + NONCE_TTL_MS, createdAt: Timestamp.now(),
+    tenantId, uid, mode, createdAtMs: now, expiresAtMs: now + (mode === 'coexistence' ? NONCE_TTL_COEXISTENCE_MS : NONCE_TTL_MS), createdAt: Timestamp.now(),
     // Campo Timestamp para que la colección PUEDA tener política TTL. Hoy `metaOAuthStates` crece
     // sin límite: los nonces que nadie consume (el usuario abandona el flujo) quedan para siempre.
     // Declarar la política sobre una colección que ya existe es un PASO OPERATIVO aparte — este
     // código solo deja el campo listo; nadie lo hace solo por desplegar.
-    expiresAt: Timestamp.fromMillis(now + NONCE_TTL_MS),
+    expiresAt: Timestamp.fromMillis(now + (mode === 'coexistence' ? NONCE_TTL_COEXISTENCE_MS : NONCE_TTL_MS)),
   });
   return nonce;
 }
@@ -110,6 +119,16 @@ export async function consumeMetaConnectNonce(nonce: string, ctx: { tenantId: st
 /** Id del registro de un code usado. Se guarda el HASH, jamás el code. */
 function idDeCodigo(code: string): string {
   return `code_${createHash('sha256').update(code).digest('hex')}`;
+}
+
+/**
+ * Identidad PÚBLICA del reclamo de un code: la misma que usa el registro transaccional. El
+ * coordinador de historial la usa como identidad de la GENERACIÓN («solo un nuevo Embedded Signup
+ * habilita una generación posterior»): como un code no se puede reclamar dos veces, este id existe
+ * a lo sumo una vez por onboarding real. Es un hash — jamás el code.
+ */
+export function claimIdDeCodigo(code: string): string {
+  return idDeCodigo(code);
 }
 
 /**
@@ -146,6 +165,7 @@ export async function claimMetaConnectCode(code: string, ctx: { tenantId: string
       createdAtMs: now,
       expiresAtMs: now + NONCE_TTL_MS,
       createdAt: Timestamp.now(),
+      // El registro del code es evidencia, no una sesión: su retención no depende del modo.
       expiresAt: Timestamp.fromMillis(now + NONCE_TTL_MS),
     });
     return true;
