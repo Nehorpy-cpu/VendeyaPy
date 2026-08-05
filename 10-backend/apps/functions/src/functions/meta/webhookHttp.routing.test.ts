@@ -204,6 +204,10 @@ describe('metaWebhook (handler real, Firestore de mentira)', () => {
 
   beforeEach(() => { fake.reset(); log.warn.mockClear(); log.info.mockClear(); });
 
+  // El binding PNID→tenant se siembra SANO en los tests que postean archivo: sin índice el
+  // webhook ahora cuarentena con 503 (H11), y lo que se prueba acá son los DESTINOS.
+  const sembrarIndice = () => fake.legibles.set(`metaExternalIndex/whatsapp_${PNID}`, { tenantId: 'empresa-de-prueba' });
+
   it('un echo NO aterriza como mensaje: mismo inbox, otro id, otro tipo', async () => {
     const r = await post(echoBody());
     expect(r.code).toBe(200);
@@ -221,6 +225,7 @@ describe('metaWebhook (handler real, Firestore de mentira)', () => {
   });
 
   it('el historial NO toca metaWebhookInbox', async () => {
+    sembrarIndice();
     await post(historyBody());
     expect(fake.escrituras.map((e) => e.collection)).toEqual([COEXISTENCE_HISTORY_COLLECTION]);
     expect(fake.escrituras.some((e) => e.collection === 'metaWebhookInbox')).toBe(false);
@@ -239,6 +244,7 @@ describe('metaWebhook (handler real, Firestore de mentira)', () => {
   });
 
   it('B8: un chunk de historial duplicado sube a WARN y tiene contador propio', async () => {
+    sembrarIndice();
     await post(historyBody());
     log.warn.mockClear();
     const r = await post(historyBody());
@@ -249,6 +255,7 @@ describe('metaWebhook (handler real, Firestore de mentira)', () => {
   });
 
   it('la agenda del vendedor no crea nada en el inbox', async () => {
+    sembrarIndice();
     await post(appStateBody());
     expect(fake.escrituras.map((e) => e.collection)).toEqual([COEXISTENCE_APP_STATE_COLLECTION]);
   });

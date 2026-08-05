@@ -106,9 +106,10 @@ export interface HistorySyncDoc {
   claimsUsados: string[];
   /**
    * true ⇒ la generación fue cerrada ADMINISTRATIVAMENTE (offboarding o superación por un nuevo
-   * onboarding). Ese `failed` es PEGAJOSO: material tardío no lo reabre — reabrirlo borraría el
+   * onboarding). Ese cierre es PEGAJOSO: material tardío no lo reabre — reabrirlo borraría el
    * motivo por el que alguien tiene que mirar. El `failed` «por fallo de persistencia» NO lleva
-   * esta marca y sigue siendo recuperable si el chunk faltante vuelve a llegar.
+   * esta marca y sigue siendo recuperable si el chunk faltante vuelve a llegar — HASTA que un
+   * offboarding lo selle: el sello no reescribe el desenlace, solo cierra la recepción (H6).
    */
   cierreAdministrativo: boolean;
   /** Chunks que llegaron con la generación cerrada o sin disparo usado: material de OTRO ciclo. */
@@ -192,6 +193,16 @@ export function puedeDisparar(coord: Partial<HistorySyncDoc> | null | undefined,
   }
   if (coord.sharingDecision !== 'share') {
     return { puede: false, motivo: 'sin_decision', explicacion: 'Falta la decisión humana explícita de compartir el historial. La opción segura por defecto es no compartir.' };
+  }
+  // El SELLO manda sobre el estado: una generación cerrada administrativamente (offboarding, o
+  // superada por un onboarding nuevo) no recibe más material, así que disparar contra ella gasta
+  // el único pedido de la vida del número contra una recepción muerta.
+  if (coord.cierreAdministrativo === true) {
+    return {
+      puede: false,
+      motivo: 'ya_disparado',
+      explicacion: 'La sincronización de este número está cerrada (el número fue desconectado o el ciclo fue superado por un onboarding nuevo). Pedir el historial acá no traería nada: hay que rehacer el Embedded Signup.',
+    };
   }
   if (coord.status !== 'pending_request') {
     return {
@@ -389,6 +400,21 @@ export async function registrarDecisionDeHistorial(args: {
         explicacion: `Ya hay una decisión registrada para este número (${previo.sharingDecision}, estado ${previo.status}). Cambiarla exige offboardear el número y rehacer el Embedded Signup.`,
       };
     }
+    /**
+     * Una generación SELLADA o TERMINAL no se re-arma decidiendo (review final). Sin este gate, un
+     * coordinador `failed` con `cierreAdministrativo` —el número fue offboardeado— aceptaba una
+     * decisión nueva y REESCRIBÍA `status` a `pending_request`, contradiciendo el sello: desde ahí
+     * `puedeDisparar` daba luz verde y el disparo único se consumía contra una recepción que ya
+     * estaba cerrada (todo el material entrante cuenta como fuera de ciclo). El operador quedaba
+     * con la ventana de 24 h quemada creyendo que había pedido el historial.
+     */
+    if (previo && (previo.cierreAdministrativo === true || esEstadoTerminal(previo.status))) {
+      return {
+        ok: false as const,
+        reason: 'ya_decidido' as const,
+        explicacion: 'La sincronización de este número está cerrada (el número fue desconectado o el ciclo terminó). Para volver a decidir hay que rehacer el Embedded Signup: eso abre un ciclo nuevo.',
+      };
+    }
     const now = Timestamp.fromMillis(args.nowMs);
     const status: HistorySyncStatus = args.decision === 'share' ? 'pending_request' : 'declined';
     // DECIDIR NO FABRICA GENERACIONES. La generación la mueve exclusivamente un onboarding
@@ -467,28 +493,49 @@ export async function reclamarDisparo(tenantId: string, phoneNumberId: string, n
   });
 }
 
-/** Cierra el disparo: qué `sync_type` se llegaron a pedir, y si alguno falló. */
+/**
+ * Cierra el disparo: qué `sync_type` se llegaron a pedir, y si alguno falló.
+ *
+ * (correctivo H8) TRANSACCIONAL y CERCADO por generación: `generation` es la que devolvió
+ * `reclamarDisparo`, y el settlement solo puede escribir sobre ESE ciclo. El merge ciego anterior
+ * dejaba que una respuesta tardía de Graph —con un re-onboarding legítimo en el medio— cerrara o
+ * fallara la generación N+1 recién abierta, matando su único disparo antes de que existiera. Si la
+ * vigente ya es otra, no se escribe nada y queda rastro observable (sin PNID: identifica al negocio).
+ */
 export async function registrarResultadoDelDisparo(
   tenantId: string,
   phoneNumberId: string,
+  /** La generación RECLAMADA en `reclamarDisparo`: la identidad del trabajo que se está cerrando. */
+  generation: number,
   resultado: { ok: boolean; syncTypes: readonly string[]; error?: string },
   nowMs: number,
 ): Promise<void> {
   const ref = db().doc(coexistenceHistorySyncPath(tenantId, phoneNumberId));
-  await ref.set(
-    {
-      syncTypesRequested: [...resultado.syncTypes],
-      ...(resultado.ok
-        ? {}
-        : {
-            status: 'failed' satisfies HistorySyncStatus,
-            // El texto explica la ÚNICA recuperación real: no hay reintento posible.
-            errorMessage: `el disparo falló (${resultado.error ?? 'desconocido'}); no se puede reintentar: hay que offboardear el número y rehacer el Embedded Signup`,
-          }),
-      updatedAt: Timestamp.fromMillis(nowMs),
-    },
-    { merge: true },
-  );
+  await db().runTransaction(async (tx) => {
+    const previo = (await tx.get(ref)).data() as HistorySyncDoc | undefined;
+    const generacionVigente = previo?.syncGeneration ?? 1;
+    if (generacionVigente !== generation) {
+      logger.warn('historyCoordinator: settlement de un disparo de una generación superada, descartado', {
+        tenantId, generacionReclamada: generation, generacionVigente,
+      });
+      return;
+    }
+    tx.set(
+      ref,
+      {
+        syncTypesRequested: [...resultado.syncTypes],
+        ...(resultado.ok
+          ? {}
+          : {
+              status: 'failed' satisfies HistorySyncStatus,
+              // El texto explica la ÚNICA recuperación real: no hay reintento posible.
+              errorMessage: `el disparo falló (${resultado.error ?? 'desconocido'}); no se puede reintentar: hay que offboardear el número y rehacer el Embedded Signup`,
+            }),
+        updatedAt: Timestamp.fromMillis(nowMs),
+      },
+      { merge: true },
+    );
+  });
 }
 
 /**
@@ -504,6 +551,20 @@ export async function registrarObservaciones(args: {
   phoneNumberId: string;
   observaciones: readonly ChunkObservado[];
   mediaObservados?: number;
+  /**
+   * (correctivo H9) Generación que el WEBHOOK selló al PERSISTIR estos chunks — la misma del sufijo
+   * de su clave de idempotencia. Si viene y NO coincide con la vigente, el material es reentrega de
+   * OTRO ciclo: cuenta en `chunksFueraDeCiclo` y no gobierna el desenlace. Opcional a propósito:
+   * sin etiqueta el comportamiento es el histórico, para no romper al llamador actual.
+   */
+  generacionEtiquetada?: number;
+  /**
+   * true ⇒ el webhook YA decidió, con la misma lectura del coordinador que eligió la clave `_fdc`,
+   * que este material es de otro ciclo. Se respeta INCONDICIONALMENTE: re-derivarlo acá abriría una
+   * carrera —entre aquella lectura y esta transacción puede commitear un `reclamarDisparo`— y el
+   * material quedaría acumulado como si fuera del ciclo vigente.
+   */
+  materialDeOtraGeneracion?: boolean;
   nowMs: number;
 }): Promise<void> {
   if (args.observaciones.length === 0 && !args.mediaObservados) return;
@@ -513,21 +574,28 @@ export async function registrarObservaciones(args: {
       const previo = (await tx.get(ref)).data() as HistorySyncDoc | undefined;
       const now = Timestamp.fromMillis(args.nowMs);
       /**
-       * MATERIAL FUERA DE CICLO (correctivo, ALTO 10 / MEDIO 18). Dos casos en los que la
-       * generación vigente NO es receptora de chunks, y dejarlos pasar la gobernaba con material
-       * de OTRO ciclo:
-       *  · cierre ADMINISTRATIVO (offboarding / superación): el `failed` es pegajoso — reabrirlo a
+       * MATERIAL FUERA DE CICLO (correctivo, ALTO 10 / MEDIO 18 / H9). Tres casos en los que la
+       * generación vigente NO es receptora de estos chunks, y dejarlos pasar la gobernaba con
+       * material de OTRO ciclo:
+       *  · cierre ADMINISTRATIVO (offboarding / superación): el cierre es pegajoso — reabrirlo a
        *    `receiving`/`completed` borraría el motivo por el que alguien tiene que mirar;
        *  · `pending_request` sin `requestedAt`: la generación nueva TODAVÍA no disparó, así que su
        *    historial no puede estar llegando — esto es reentrega tardía de la generación anterior,
-       *    y moverle el estado quemaría el disparo único antes de usarse.
+       *    y moverle el estado quemaría el disparo único antes de usarse;
+       *  · etiqueta de OTRA generación (H9): el webhook selló la generación al persistir el chunk;
+       *    si no es la vigente, es reentrega de un ciclo anterior aunque la vigente esté
+       *    recibiendo — sin este cerco, un chunk viejo al 100 % «completaba» la generación nueva.
        * El material queda contado (`chunksFueraDeCiclo`) y los chunks ya persistieron en su
        * colección con su clave: no se pierde nada, solo no gobierna.
        */
       const receptorCerrado =
         previo?.cierreAdministrativo === true ||
         (previo?.status === 'pending_request' && !previo?.requestedAt);
-      if (previo && receptorCerrado) {
+      const materialDeOtraGeneracion =
+        previo !== undefined &&
+        args.generacionEtiquetada !== undefined &&
+        args.generacionEtiquetada !== (previo.syncGeneration ?? 1);
+      if (previo && (receptorCerrado || materialDeOtraGeneracion)) {
         tx.set(
           ref,
           {
@@ -604,16 +672,50 @@ export async function conReintentos<T>(fn: () => Promise<T>, intentos: number): 
 /**
  * Cierra la generación vigente cuando Meta desconecta el número (`ACCOUNT_OFFBOARDED` /
  * `PARTNER_REMOVED`). Honesta en los dos sentidos: una sincronización en curso queda `failed` con
- * el motivo real —no `completed`, no borrada—, y una generación ya terminal queda EXACTAMENTE como
- * estaba (cerrar no es decidir, y offboardear no reescribe la historia). No inventa consentimiento:
+ * el motivo real —no `completed`, no borrada—, y una generación ya terminal conserva su desenlace
+ * EXACTO (cerrar no es decidir, y offboardear no reescribe la historia). No inventa consentimiento:
  * `sharingDecision` no se toca.
+ *
+ * (correctivo H6) Pero conservar el desenlace NO es lo mismo que no escribir nada: el offboarding
+ * SELLA todo estado que no esté sellado, incluso los terminales. El caso real es el `failed` por
+ * fallo de persistencia, que por diseño sigue siendo receptor —el chunk faltante puede volver—;
+ * retornar temprano sobre él dejaba la generación offboardeada reabrible a `receiving`/`completed`
+ * por material tardío, borrando el motivo por el que alguien tenía que mirar.
  */
-export async function cerrarGeneracionPorOffboarding(tenantId: string, phoneNumberId: string, nowMs: number): Promise<void> {
+export async function cerrarGeneracionPorOffboarding(
+  tenantId: string,
+  phoneNumberId: string,
+  nowMs: number,
+  /**
+   * Cuándo OCURRIÓ la desconexión, según Meta (ms). FENCE TEMPORAL: un `account_update` reentregado
+   * tarde —o retomado tras un claim fallido— puede llegar DESPUÉS de que el cliente rehizo el
+   * Embedded Signup. Sellar ahí mataría la generación N+1 recién abierta: su disparo único quedaría
+   * quemado sin haberse usado, y la recuperación que el propio ADR promete sería imposible. Una
+   * desconexión no puede ser noticia sobre una generación que nació después de ella.
+   * `undefined` (Meta no garantiza el campo) ⇒ no se cerca: manda el fail-closed.
+   */
+  eventoOcurridoMs?: number,
+): Promise<void> {
   const ref = db().doc(coexistenceHistorySyncPath(tenantId, phoneNumberId));
   await db().runTransaction(async (tx) => {
     const previo = (await tx.get(ref)).data() as HistorySyncDoc | undefined;
     if (!previo) return; // sin coordinador no hay nada que cerrar — y no se inventa uno
-    if (esEstadoTerminal(previo.status)) return; // la historia terminal es intocable
+    if (previo.cierreAdministrativo === true) return; // ya sellada: el reintento es idempotente
+    const nacioDespues =
+      eventoOcurridoMs !== undefined &&
+      previo.onboardedAt !== null &&
+      previo.onboardedAt !== undefined &&
+      previo.onboardedAt.toMillis() > eventoOcurridoMs;
+    if (nacioDespues) {
+      logger.info('historyCoordinator: la desconexión es anterior a la generación vigente; no la sella', { tenantId });
+      return;
+    }
+    if (esEstadoTerminal(previo.status)) {
+      // Terminal sin sello: el desenlace y su motivo quedan como estaban — solo gana el sello,
+      // que es lo que cierra la recepción de material para siempre.
+      tx.set(ref, { cierreAdministrativo: true, updatedAt: Timestamp.fromMillis(nowMs) }, { merge: true });
+      return;
+    }
     tx.set(
       ref,
       {

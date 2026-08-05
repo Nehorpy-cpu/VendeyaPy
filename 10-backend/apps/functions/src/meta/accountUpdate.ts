@@ -25,6 +25,7 @@
  * `ACCOUNT_RECONNECTED` **no re-otorga permiso**: vuelve a nacer sin automatización (ADR-0017 §6).
  * Que Meta reconecte el canal no es que un humano haya decidido que el bot puede contestar por ahí.
  */
+import { createHash } from 'node:crypto';
 import { Timestamp } from 'firebase-admin/firestore';
 import { AUTOMATION_MODE_FAIL_CLOSED } from '@vpw/shared';
 import { db, paths } from '../lib/firebase.js';
@@ -38,7 +39,14 @@ import type { AccountUpdateEvent, NormalizedAccountUpdate } from './parseWebhook
 const EVENTOS_DE_DESCONEXION: readonly AccountUpdateEvent[] = Object.freeze(['ACCOUNT_OFFBOARDED', 'PARTNER_REMOVED']);
 
 export type AccountUpdateAccion = 'degradado' | 'reconectado_sin_permiso';
-export type AccountUpdateOmision = 'sin_pnid' | 'evento_desconocido' | 'sin_tenant' | 'sin_asset' | 'reentrega' | 'error';
+export type AccountUpdateOmision = 'sin_pnid' | 'evento_desconocido' | 'sin_tenant' | 'sin_asset' | 'reentrega' | 'en_proceso' | 'error';
+
+/**
+ * Cuánto vive un claim `processing` antes de considerarse MUERTO. El handler corre dentro del
+ * request HTTP del webhook (segundos, no minutos): dos minutos cubren de sobra cualquier corrida
+ * viva, y una corrida que murió sin marcar nada no retrasa el reintento más que eso.
+ */
+export const ACCOUNT_UPDATE_CLAIM_LEASE_MS = 2 * 60 * 1000;
 
 export type AccountUpdateResultado =
   | { aplicado: true; accion: AccountUpdateAccion; tenantId: string }
@@ -57,6 +65,8 @@ export function degradaPermiso(event: AccountUpdateEvent): boolean {
  * que no cambia nada.
  */
 export async function aplicarAccountUpdate(update: NormalizedAccountUpdate, nowMs: number): Promise<AccountUpdateResultado> {
+  /** Ref del claim si esta corrida llegó a tomarlo: el `catch` lo libera como `failed`. */
+  let claimTomado: ReturnType<ReturnType<typeof db>['doc']> | null = null;
   const pnid = update.externalId.trim();
   if (pnid === '') {
     // Sin PNID no se sabe a quién degradar. Auditar y NO adivinar: silenciar el número equivocado
@@ -80,29 +90,66 @@ export async function aplicarAccountUpdate(update: NormalizedAccountUpdate, nowM
       return { aplicado: false, motivo: 'sin_tenant' };
     }
     /**
-     * Correctivo (MEDIO 17): DEDUP por evento. Meta reentrega `account_update` (at-least-once), y
-     * aplicarlo en cada entrega significaba que un ACCOUNT_OFFBOARDED viejo, reentregado después
-     * de que un humano re-promoviera el número, lo degradaba de nuevo Y cerraba una generación que
-     * no le pertenecía. La identidad del evento es (pnid, evento, timestamp de Meta): la reentrega
-     * trae el MISMO timestamp; una desconexión NUEVA trae otro y aplica normal. El registro es
-     * evidencia mínima sin PII (colección Admin-only por default-deny), y no lleva TTL: su volumen
-     * es el de las desconexiones reales.
+     * Correctivo (MEDIO 17 → H3): claim CON ESTADO, transaccional y reanudable. El `create`
+     * permanente de antes deduplicaba ANTES de degradar/cerrar/auditar: si un efecto posterior
+     * fallaba, la reentrega de Meta encontraba el claim y NUNCA reintentaba el cierre — el número
+     * quedaba a medio degradar para siempre, que es un evento de SEGURIDAD aplicado a medias.
+     * La idempotencia se modela como COMPLETITUD, no como «lo vi llegar»:
+     *
+     *   · solo un claim `completed` con identidad CIERTA deduplica de verdad (la reentrega trae
+     *     el MISMO timestamp; una desconexión NUEVA trae otro y aplica normal);
+     *   · `processing` con lease vivo ⇒ otro dueño está trabajando ahora: se corta sin efectos;
+     *   · `processing` con lease vencido, o `failed` ⇒ la corrida anterior murió o falló: se
+     *     RETOMA — los efectos son idempotentes (merges y cierre honesto), reintentarlos es seguro.
+     *
+     * El registro sigue siendo evidencia mínima sin PII (colección Admin-only por default-deny) y
+     * sin TTL: su volumen es el de las desconexiones reales.
+     *
+     * DIFERIDO (Programa 2) — TIMESTAMP NULL: Meta NO garantiza el campo `timestamp` (contrato
+     * sin confirmar; esto NO quedó validado contra Meta y la confirmación queda para el Programa
+     * 2). Sin timestamp la identidad cae a un hash canónico estable del evento y el claim queda
+     * REPROCESABLE aunque complete: no hay forma de distinguir la reentrega de una desconexión
+     * nueva, y fail-closed acá es re-aplicar — un número degradado de más se revierte con una
+     * escritura humana; uno que sigue automatizando contra una conexión muerta es el desenlace
+     * prohibido.
      */
-    const dedupId = `au_${pnid}_${update.event}_${Math.round((update.timestamp ?? 0) * 1000)}`;
-    try {
-      await db().doc(`metaAccountUpdates/${dedupId}`).create({ tenantId, event: update.event, appliedAt: Timestamp.fromMillis(nowMs) });
-    } catch (e) {
-      const code = (e as { code?: number | string }).code;
-      if (code === 6 || code === 'already-exists') {
-        logger.info('accountUpdate: reentrega del mismo evento; sin efecto', { tenantId, event: update.event });
-        return { aplicado: false, motivo: 'reentrega' };
+    const identidadIncierta = typeof update.timestamp !== 'number';
+    const dedupId = identidadIncierta
+      ? `au_${pnid}_${update.event}_h${createHash('sha256').update(`${pnid}|${update.event}|${update.wabaId}|${update.rawEvent}`).digest('hex').slice(0, 16)}`
+      : `au_${pnid}_${update.event}_${Math.round((update.timestamp as number) * 1000)}`;
+    const claimRef = db().doc(`metaAccountUpdates/${dedupId}`);
+    const claim = await db().runTransaction(async (tx) => {
+      const snap = await tx.get(claimRef);
+      if (snap.exists) {
+        const previo = snap.data() as
+          | { status?: unknown; claimedAt?: { toMillis?: () => number } | null; identidadIncierta?: unknown }
+          | undefined;
+        if (previo?.status === 'completed' && previo?.identidadIncierta !== true) return 'reentrega' as const;
+        if (previo?.status === 'processing') {
+          const claimedMs = previo.claimedAt?.toMillis?.() ?? 0;
+          if (nowMs - claimedMs < ACCOUNT_UPDATE_CLAIM_LEASE_MS) return 'en_proceso' as const;
+        }
+        // Lease vencido, `failed`, completitud con identidad incierta o estado ilegible: se retoma.
       }
-      throw e;
+      tx.set(
+        claimRef,
+        { tenantId, event: update.event, status: 'processing', claimedAt: Timestamp.fromMillis(nowMs), identidadIncierta },
+        { merge: true },
+      );
+      return 'tomado' as const;
+    });
+    if (claim !== 'tomado') {
+      logger.info('accountUpdate: claim no disponible; sin efecto en esta entrega', { tenantId, event: update.event, motivo: claim });
+      return { aplicado: false, motivo: claim };
     }
+    claimTomado = claimRef;
 
     const assetRef = db().doc(paths.metaAsset(tenantId, pnid));
     if (!(await assetRef.get()).exists) {
       logger.warn('accountUpdate: el número no tiene asset en esa empresa', { tenantId, event: update.event });
+      // El claim NO se consuma: no se aplicó nada. `failed` lo deja reanudable en el acto — el
+      // asset puede aparecer con un onboarding en curso, y reintentar los efectos es seguro.
+      await claimRef.set({ status: 'failed', errorAt: Timestamp.fromMillis(nowMs) }, { merge: true });
       return { aplicado: false, motivo: 'sin_asset' };
     }
 
@@ -128,7 +175,9 @@ export async function aplicarAccountUpdate(update: NormalizedAccountUpdate, nowM
     // Después del cierre, únicamente un nuevo Embedded Signup (claim de code nuevo) abre la
     // siguiente. `ACCOUNT_RECONNECTED` no pasa por acá: reconectar no es offboardear.
     if (esDesconexion) {
-      await cerrarGeneracionPorOffboarding(tenantId, pnid, nowMs);
+      // El timestamp de META (no el reloj local): si la generación vigente nació DESPUÉS de esta
+      // desconexión, el evento no es noticia sobre ella y no la sella.
+      await cerrarGeneracionPorOffboarding(tenantId, pnid, nowMs, update.timestamp ? update.timestamp * 1000 : undefined);
     }
 
     const accion: AccountUpdateAccion = esDesconexion ? 'degradado' : 'reconectado_sin_permiso';
@@ -145,10 +194,20 @@ export async function aplicarAccountUpdate(update: NormalizedAccountUpdate, nowM
         : 'Meta reconectó el número: vuelve sin permiso de automatización (ADR-0017 §6)',
       metadata: { source: 'account_update', event: update.event, accion },
     });
+    // El claim recién se CONSUMA acá, con todos los efectos hechos. Antes de esta línea una
+    // reentrega puede —y debe— retomar el trabajo; después, deduplica de verdad.
+    await claimRef.set({ status: 'completed', appliedAt: Timestamp.fromMillis(nowMs) }, { merge: true });
+
     logger.info('accountUpdate aplicado', { tenantId, event: update.event, accion });
     return { aplicado: true, accion, tenantId };
   } catch (e) {
     logger.error('accountUpdate: no se pudo aplicar el evento', e, { event: update.event });
+    // Se libera el claim como `failed` para que la reentrega retome SIN esperar el lease. Best
+    // effort a propósito: si esta escritura también falla, el lease vencido garantiza igual la
+    // reanudación — nunca se responde 500 a Meta por esto.
+    if (claimTomado) {
+      await claimTomado.set({ status: 'failed', errorAt: Timestamp.fromMillis(nowMs) }, { merge: true }).catch(() => undefined);
+    }
     return { aplicado: false, motivo: 'error' };
   }
 }

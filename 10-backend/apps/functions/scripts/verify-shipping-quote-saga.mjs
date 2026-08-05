@@ -883,7 +883,20 @@ const rHHok = await call('coverageQuoteAndApprove', owner, payloadHH);
 // esto, el mensaje bancario podía llegar después del snapshot y dar un falso rojo (review).
 await waitFor(async () => (await ordersOf(HH)).length === 1 && (await sessionOf(HH))?.state === 'AWAITING_PAYMENT', 20000);
 const ordHH = (await ordersOf(HH))[0];
-const outsHH = await outsCount(HH);
+// Y esperar además a que la cuenta de salientes se ESTABILICE: `AWAITING_PAYMENT` se persiste
+// ANTES de mandar las instrucciones bancarias, así que el estado de sesión no alcanza como señal
+// de «ya terminó de hablar». Sin esto, el mensaje bancario aterriza después del snapshot y el
+// check 44 mide un saliente de más que no tiene nada que ver con el retry corrupto que evalúa.
+const outsHH = await (async () => {
+  let previo = -1;
+  for (let i = 0; i < 20; i++) {
+    const actual = await outsCount(HH);
+    if (actual === previo) return actual;
+    previo = actual;
+    await sleep(600);
+  }
+  return previo;
+})();
 // Corrupción simulada del snapshot persistido (jamás pasaría por TX-C — data corrupta real):
 await db.collection(`tenants/${T}/coverageRequests`).doc(reqHH.id).update({ 'cartSnapshot.subtotal': Number.MAX_SAFE_INTEGER - 1000 });
 const rHHidem = await call('coverageQuoteAndApprove', owner, payloadHH);

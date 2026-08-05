@@ -60,6 +60,14 @@ vi.mock('../lib/firebase.js', () => ({
   db: () => ({
     doc: (path: string) => refFor(path),
     collection: (path: string) => ({ doc: (id?: string) => refFor(`${path}/${id ?? 'auto'}`) }),
+    // Transacción de juguete: el claim del inbox (H4) lee y escribe en un acto. Acá alcanza con
+    // ejecutarla secuencial — la CONTENCIÓN real se prueba en `process.claim.test.ts`.
+    runTransaction: async <T>(fn: (tx: unknown) => Promise<T>): Promise<T> =>
+      fn({
+        get: async (ref: { get: () => Promise<unknown> }) => ref.get(),
+        update: (ref: { update: (d: Record<string, unknown>) => Promise<void> }, d: Record<string, unknown>) => void ref.update(d),
+        set: (ref: { set: (d: Record<string, unknown>, o?: { merge?: boolean }) => Promise<void> }, d: Record<string, unknown>, o?: { merge?: boolean }) => void ref.set(d, o),
+      }),
   }),
   storage: () => ({
     bucket: () => ({ file: (path: string) => ({ save: async () => { bytesGuardados.push(path); } }) }),

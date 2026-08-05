@@ -195,13 +195,29 @@ export interface DeclaracionDeCanal {
  * eso le mudaría el canal al número que está vendiendo, con carrito, takeover y checkout vivos
  * adentro. `connectionId` no lo toca ninguna acción de panel.
  *
- * Un asset sin `connectionId` (o directamente ausente) cuenta como heredado: son los documentos
- * escritos antes de que el campo existiera, y ahí `active` es efectivamente donde viven sus
- * conversaciones.
+ * Un documento PRESENTE sin `connectionId` cuenta como heredado: son los escritos antes de que el
+ * campo existiera, y ahí `active` es efectivamente donde viven sus conversaciones. El asset
+ * AUSENTE (null/undefined) NO cuenta (cierre Codex 2026-08-05, hallazgo 5): «no hay documento» no
+ * es evidencia de nada, y tratarlo como heredado le regalaba la sesión compartida `active`
+ * —carrito, takeover y checkout del número que vende— a cualquier PNID cuyo asset se perdiera en
+ * un offboarding o cutover parcial mientras el índice todavía lo ruteaba.
  */
 function esConexionHeredada(asset: DeclaracionDeCanal | null | undefined): boolean {
-  const conexion = asset?.connectionId;
+  if (asset === null || asset === undefined) return false;
+  const conexion = asset.connectionId;
   return conexion === undefined || conexion === null || conexion === CONEXION_HEREDADA;
+}
+
+/**
+ * El canal que el ÍNDICE conserva para un asset AUSENTE. Solo cuenta como evidencia una conexión
+ * propia de WhatsApp (`wa_*`) que sirva como id de documento: la conexión de un número adicional
+ * ES su clave de sesión por construcción (`multiNumber.ts`). `main` no alcanza — reclamar el
+ * canal heredado exige el documento legacy presente, no un espejo del índice.
+ */
+function canalConservadoPorElIndice(indice: DeclaracionDeCanal | null | undefined): string | null {
+  const conexion = indice?.connectionId;
+  if (typeof conexion === 'string' && conexion.startsWith('wa_') && isSessionKey(conexion)) return conexion;
+  return null;
 }
 
 /**
@@ -215,7 +231,7 @@ function esConexionHeredada(asset: DeclaracionDeCanal | null | undefined): boole
  * propio» por la migración. Las dos mitades opinando distinto sobre el mismo número es exactamente
  * cómo un número nuevo termina compartiendo carrito y takeover con el que ya vende.
  *
- * Las tres reglas, en orden:
+ * Las cuatro reglas, en orden:
  *  1. NADIE declara ⇒ el asset de la conexión heredada va a `active`; cualquier otro estrena la
  *     suya. Un número adicional no puede heredar el canal del que vende por no declarar nada.
  *  2. Declaración MALFORMADA ⇒ se deriva del PNID. Ante basura, la opción segura es la que nunca
@@ -223,6 +239,10 @@ function esConexionHeredada(asset: DeclaracionDeCanal | null | undefined): boole
  *  3. Una declaración que manda el número al canal HEREDADO solo vale si el asset ES el heredado.
  *     El canal del número que ya vende no se reclama por un espejo del índice ni por un valor
  *     viejo que quedó dando vueltas en el documento.
+ *  4. Asset AUSENTE ≠ documento legacy presente (cierre Codex 2026-08-05, hallazgo 5): sin
+ *     documento no hay evidencia del canal heredado. Si el índice conserva la conexión propia del
+ *     número (`wa_*`), la sesión es la de ESA conexión; sin ninguna evidencia, se deriva del
+ *     PNID. En ningún caso `active`: mezclaría takeover, carrito y checkout con el que vende.
  */
 export function derivarSessionKey(
   phoneNumberId: string,
@@ -232,6 +252,8 @@ export function derivarSessionKey(
   const propia = whatsappSessionKey(phoneNumberId);
   const declarada = asset?.sessionKey ?? indice?.sessionKey;
   if (declarada === undefined || declarada === null) {
+    // Regla 4: con el asset ausente la única evidencia admisible es la conexión `wa_*` del índice.
+    if (asset === null || asset === undefined) return canalConservadoPorElIndice(indice) ?? propia;
     return esConexionHeredada(asset) ? LEGACY_SESSION_KEY : propia;
   }
   const leida = parseSessionKey(declarada, propia);

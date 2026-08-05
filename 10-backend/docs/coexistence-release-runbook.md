@@ -365,13 +365,18 @@ secuencia «seleccionar acá, migrar allá» son dos escrituras independientes c
 que hay dos números contestando o ninguno. La herramienta release-only es:
 ```
 node apps/functions/scripts/cutover-whatsapp-number.mjs --tenant <t> --nuevo <pnid> --degradar-anterior shadow|inactive
+node apps/functions/scripts/cutover-whatsapp-number.mjs --tenant <t> --nuevo <pnid> --degradar-anterior shadow|inactive --project <id> --firma <valor> --apply
 ```
-Dry-run por defecto: imprime la **firma** del estado (sha256 + updateTimes) que el `--apply` exige
-(`--firma <valor>`); todas las escrituras van en UNA transacción (asset nuevo `selected+live`,
-anterior degradado, índices si declaran otro modo) con precondiciones frescas re-verificadas
-adentro; el registro de reversa queda en `tenants/{t}/whatsappCutovers/{co_<firma>}` y el rollback
-(`--rollback <cutoverId> --apply`) restaura **byte a byte**, disponible aunque una verificación
-secundaria falle. El kill-switch sigue siendo la migración `--mode inactive`, que el rollback jamás
+Dry-run por defecto: imprime la **firma v2** del estado (sha256 + updateTimes de assets, índices,
+**conexión destino y existencia de su credencial** — jamás se lee ni descifra el ciphertext) que el
+`--apply` exige (`--firma <valor>`); **`--apply` exige además `--project` explícito** (aborta si
+contradice `GCLOUD_PROJECT`) y el prechequeo verifica el cierre completo: índice del anterior
+perteneciente al tenant, conexión destino `active`, índice ruteando a la MISMA conexión que el
+asset. Todas las escrituras van en UNA transacción con precondiciones frescas re-verificadas
+adentro; el registro de reversa queda en `tenants/{t}/whatsappCutovers/{co_<firma>}` **con el
+`projectId` grabado**, y el rollback (`--rollback <cutoverId> --project <id> --apply`) verifica ese
+binding (proyecto distinto, ausente o registro sin proyecto ⇒ aborta) y restaura **byte a byte**,
+disponible aunque una verificación secundaria falle. El kill-switch sigue siendo la migración `--mode inactive`, que el rollback jamás
 pisa. Precondiciones: anterior seleccionado+`live`, nuevo en `shadow` (de `inactive` no se salta a
 `live`), un solo seleccionado. El panel NO puede hacer el cutover: `selectMetaPhoneNumber` rechaza
 (`failed-precondition`) elegir de default un número que no resuelve `live` cuando otro asset del

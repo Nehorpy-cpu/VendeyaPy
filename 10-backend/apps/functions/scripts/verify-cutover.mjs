@@ -12,11 +12,15 @@
  *   3.  El guard del panel: `selectMetaPhoneNumber` RECHAZA elegir el número que no automatiza
  *       (failed-precondition) y sigue aceptando al que está `live` (sin regresión).
  *   4.  `shadow` sin tocar el default (Paso 11): el actual sigue seleccionado+`live`.
- *   5.  Cutover: dry-run primero (firma), CONFLICTO en el medio (el asset cambió entre el dry-run
- *       y el apply ⇒ la precondición fresca lo aborta sin escribir), después el apply real.
- *   6.  Invariantes post-cutover con la función PURA de la herramienta + resumen enmascarado.
- *   7.  Rollback: dry-run, apply, y TODO vuelve al estado anterior byte a byte (data completa de
- *       assets e índices, no solo los campos tocados).
+ *   5.  Cutover: CIERRE COMPLETO primero (sin el doc de la credencial del destino se bloquea con
+ *       `credencial_destino_ausente`; el valor del secreto jamás se lee), dry-run (firma),
+ *       CONFLICTO en el medio (el asset cambió entre el dry-run y el apply ⇒ la precondición
+ *       fresca lo aborta sin escribir), después el apply real con `projectId` explícito.
+ *   6.  Invariantes post-cutover con la función PURA de la herramienta + resumen enmascarado,
+ *       y el registro persiste el PROYECTO del apply (invariante 10).
+ *   7.  Rollback: atado al proyecto EXACTO del registro (otro proyecto o ninguno se rechazan),
+ *       dry-run, apply, y TODO vuelve al estado anterior byte a byte (data completa de assets e
+ *       índices, no solo los campos tocados).
  *   8.  El kill-switch del runbook sigue disponible después de todo.
  *
  * Si la constante del árbol compartido (`SESIONES_POR_CANAL_MIGRADAS`) todavía bloquea `live`
@@ -87,6 +91,7 @@ async function limpiar() {
     await db.doc(`tenants/${T}/metaAssets/${pnid}`).delete().catch(() => {});
     await db.doc(`metaExternalIndex/whatsapp_${pnid}`).delete().catch(() => {});
     await db.doc(`tenants/${T}/metaConnections/${pnid === PNID_A ? 'main' : `wa_${pnid}`}`).delete().catch(() => {});
+    await db.doc(`secrets/meta-token-${T}-${pnid}`).delete().catch(() => {});
   }
   for (const d of await registros()) await d.ref.delete().catch(() => {});
 }
@@ -121,8 +126,11 @@ check('1b. Y sigue seleccionado: la migración no toca el ruteo', (await asset(P
 // ---------------------------------------------------------------------------
 // 2) Alta del nuevo con la forma EXACTA de multiNumber: nace sin permiso y sin selección.
 // ---------------------------------------------------------------------------
+// La conexión con la forma REAL de multiNumber: referencia de credencial determinística. El doc
+// del secreto se siembra recién en el paso 5, para poder demostrar antes el cierre completo.
 await db.doc(`tenants/${T}/metaConnections/wa_${PNID_B}`).set({
-  id: `wa_${PNID_B}`, tenantId: T, status: 'active', source: 'coexistence', tokenSecretRef: '', updatedAt: now,
+  id: `wa_${PNID_B}`, tenantId: T, status: 'active', source: 'coexistence',
+  tokenSecretRef: `secret://firestore/meta-token-${T}-${PNID_B}`, updatedAt: now,
 });
 await db.doc(`tenants/${T}/metaAssets/${PNID_B}`).set({
   id: PNID_B, tenantId: T, connectionId: `wa_${PNID_B}`, assetType: 'whatsapp_phone_number',
@@ -166,7 +174,16 @@ check('4b. Sin alterar el default: el actual sigue seleccionado+`live`',
 // ---------------------------------------------------------------------------
 // 5) El cutover: dry-run → conflicto (precondición fresca) → apply real.
 // ---------------------------------------------------------------------------
-const argsCutover = { tenantId: T, phoneNumberId: PNID_B, degradarAnterior: 'shadow' };
+const argsCutover = { tenantId: T, phoneNumberId: PNID_B, degradarAnterior: 'shadow', projectId: 'demo-aiafg' };
+
+// 5-pre) CIERRE COMPLETO (correctivo release-safety): sin el documento de la credencial del
+// destino, el cutover ni arranca — promover una ruta sin credencial sería un apagón con exit 0.
+// La EXISTENCIA del secreto se verifica; su valor jamás se lee.
+const sinCredencial = await cutoverNumeroWhatsapp(db, argsCutover);
+check('5-pre. Sin credencial del destino el cutover bloquea (credencial_destino_ausente)',
+  sinCredencial.outcome === 'credencial_destino_ausente', sinCredencial.outcome);
+await db.doc(`secrets/meta-token-${T}-${PNID_B}`).set({ name: `meta-token-${T}-${PNID_B}`, ciphertext: 'cifrado-e2e', updatedAt: now });
+
 const dry1 = await cutoverNumeroWhatsapp(db, argsCutover);
 if (dry1.outcome === 'sesion_por_canal_no_migrada') {
   console.log('\n⏳ ESPERANDO: `SESIONES_POR_CANAL_MIGRADAS` sigue en false (árbol compartido con otro agente).');
@@ -207,6 +224,8 @@ check('5e. Cutover aplicado', aplicado.outcome === 'written', aplicado.outcome);
   const recs = await registros();
   check('6c. El registro de reversa quedó persistido (misma transacción que el cutover)',
     recs.length === 1 && recs[0].data().estado === 'aplicado' && recs[0].id === aplicado.cutoverId);
+  check('6e. El registro persiste el PROYECTO del apply (invariante 10)',
+    recs[0].data().projectId === 'demo-aiafg', String(recs[0].data().projectId));
   const texto = JSON.stringify(aplicado);
   check('6d. El resumen está SANEADO: números enmascarados, sin tokens', !texto.includes(PNID_A) && !texto.includes(PNID_B) && !/token|secret/i.test(texto));
 }
@@ -216,11 +235,17 @@ check('5e. Cutover aplicado', aplicado.outcome === 'written', aplicado.outcome);
 // ---------------------------------------------------------------------------
 const rbDry = await rollbackCutover(db, { tenantId: T, cutoverId: aplicado.cutoverId });
 check('7. Dry-run del rollback: `would_write` sin escribir', rbDry.outcome === 'would_write' && (await asset(PNID_B))?.selected === true, rbDry.outcome);
-const rb = await rollbackCutover(db, { tenantId: T, cutoverId: aplicado.cutoverId, apply: true });
+// 7-pre) Invariante 10: la reversa pertenece al proyecto del cutover — otro proyecto (o ninguno)
+// no puede aplicarla.
+const rbOtroProyecto = await rollbackCutover(db, { tenantId: T, cutoverId: aplicado.cutoverId, apply: true, projectId: 'demo-otro' });
+check('7-pre. Rollback con OTRO proyecto se rechaza (proyecto_no_coincide)', rbOtroProyecto.outcome === 'proyecto_no_coincide', rbOtroProyecto.outcome);
+const rbSinProyecto = await rollbackCutover(db, { tenantId: T, cutoverId: aplicado.cutoverId, apply: true });
+check('7-pre-b. Rollback sin proyecto explícito se rechaza (falta_project)', rbSinProyecto.outcome === 'falta_project', rbSinProyecto.outcome);
+const rb = await rollbackCutover(db, { tenantId: T, cutoverId: aplicado.cutoverId, apply: true, projectId: 'demo-aiafg' });
 check('7b. Rollback aplicado', rb.outcome === 'written', rb.outcome);
 check('7c. TODO volvió al estado anterior EXACTO (data completa de assets e índices, byte a byte)', (await foto()) === fotoPreCutover);
 check('7d. El registro quedó marcado `revertido` y no se puede repetir',
-  (await registros())[0]?.data()?.estado === 'revertido' && (await rollbackCutover(db, { tenantId: T, cutoverId: aplicado.cutoverId, apply: true })).outcome === 'ya_revertido');
+  (await registros())[0]?.data()?.estado === 'revertido' && (await rollbackCutover(db, { tenantId: T, cutoverId: aplicado.cutoverId, apply: true, projectId: 'demo-aiafg' })).outcome === 'ya_revertido');
 
 // ---------------------------------------------------------------------------
 // 8) El kill-switch del runbook sigue disponible (apagar nunca se bloquea).

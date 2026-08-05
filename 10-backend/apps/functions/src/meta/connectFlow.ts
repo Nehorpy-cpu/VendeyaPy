@@ -221,10 +221,16 @@ export async function runMetaConnect(tenantId: string, input: ConnectInput, byUi
   }
 
   // 3) WABA: el del input (sessionInfo del ES, o sea del navegador) contrastado contra los
-  // granular_scopes del token; si el input no trae ninguno, el del token.
-  const wabaId = input.wabaId || dbg.wabaIds[0];
+  // granular_scopes del token; si el input no trae ninguno, el del token — PERO solo cuando el
+  // token autoriza EXACTAMENTE uno. Con varios, «el primero de la lista» puede ser el WABA de
+  // OTRO cliente del Tech Provider, y conectar `main` contra esa cuenta redirige el negocio
+  // entero: la elección tiene que ser explícita (mismo criterio que `elegirWabaDeCoexistencia`).
+  const wabaId = input.wabaId || (dbg.wabaIds.length === 1 ? dbg.wabaIds[0] : undefined);
   if (!wabaId) {
-    await registrarFalloDeConexion(tenantId, 'sin WhatsApp Business Account');
+    await registrarFalloDeConexion(
+      tenantId,
+      dbg.wabaIds.length > 1 ? 'varias cuentas de WhatsApp Business autorizadas: falta la elección explícita' : 'sin WhatsApp Business Account',
+    );
     return { ok: false, reason: 'no_waba', status: 'error' };
   }
   if (!wabaAutorizado(wabaId, dbg.wabaIds)) {

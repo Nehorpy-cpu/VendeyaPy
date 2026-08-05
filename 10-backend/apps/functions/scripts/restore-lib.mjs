@@ -103,6 +103,24 @@ export const AYUDA_RESTORE = {
 };
 
 // ---------------------------------------------------------------------------
+// Contención de caminos que vienen DEL BUNDLE (correctivo release-safety)
+// ---------------------------------------------------------------------------
+
+/**
+ * ¿Un camino que viene del bundle (nombre de objeto de Storage o path de documento de Firestore)
+ * tiene estructura sana? Un bundle es un archivo en disco: nada garantiza su procedencia, así que
+ * NADA de lo que trae puede convertirse en una ruta sin pasar por acá primero.
+ *
+ * Rechaza: no-strings, vacío, backslashes (en Windows `\` también navega), absolutos (primer
+ * segmento vacío), `.` y `..` (traversal), y segmentos vacíos (`//`, barra final).
+ */
+export function caminoSano(camino) {
+  if (typeof camino !== 'string' || camino.length === 0) return false;
+  if (camino.includes('\\')) return false;
+  return camino.split('/').every((s) => s.length > 0 && s !== '.' && s !== '..');
+}
+
+// ---------------------------------------------------------------------------
 // Lectura del volcado
 // ---------------------------------------------------------------------------
 

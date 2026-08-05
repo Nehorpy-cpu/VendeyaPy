@@ -62,6 +62,7 @@ export type CoexistenceConnectFailReason =
   | 'token_invalid'
   | 'scopes_insuficientes'
   | 'no_waba'
+  | 'waba_ambiguo'
   | 'no_phone_number'
   | 'phone_number_mismatch'
   | 'phone_number_ambiguo'
@@ -105,6 +106,30 @@ export function elegirNumeroDeCoexistencia(
 }
 
 /**
+ * Elige el WABA con el MISMO criterio estricto que `elegirNumeroDeCoexistencia` (correctivo
+ * release-safety): adivinar «el primero autorizado» es cómo se termina operando sobre la cuenta de
+ * otro negocio — un token de Tech Provider puede autorizar más de un WABA, y su cardinalidad REAL
+ * queda por confirmar contra el token productivo en el Programa 2. Hasta esa confirmación, este
+ * código asume lo peor:
+ *
+ *  - sin pedido y con UN solo WABA autorizado ⇒ ese (el caso normal de hoy, sin cambios);
+ *  - sin pedido y con VARIOS ⇒ rechazo con `waba_ambiguo`: la elección tiene que ser explícita;
+ *  - con pedido ⇒ tiene que estar entre los autorizados del token, si no `waba_no_autorizado`.
+ */
+export function elegirWabaDeCoexistencia(
+  wabaIdsDelToken: readonly string[],
+  pedido?: string,
+): { ok: true; wabaId: string } | { ok: false; motivo: 'sin_waba' | 'waba_no_autorizado' | 'waba_ambiguo' } {
+  const limpio = (pedido ?? '').trim();
+  if (limpio) {
+    return wabaAutorizado(limpio, [...wabaIdsDelToken]) ? { ok: true, wabaId: limpio } : { ok: false, motivo: 'waba_no_autorizado' };
+  }
+  if (wabaIdsDelToken.length === 0) return { ok: false, motivo: 'sin_waba' };
+  if (wabaIdsDelToken.length > 1) return { ok: false, motivo: 'waba_ambiguo' };
+  return { ok: true, wabaId: wabaIdsDelToken[0]! };
+}
+
+/**
  * Ejecuta la conexión de Coexistence. `deps` son las MISMAS de `runAddWhatsappNumber` (el
  * llamador arma el gate del plan igual que el alta manual): acá no se reimplementa ninguna.
  */
@@ -134,13 +159,16 @@ export async function runCoexistenceConnect(
   }
 
   // 3) WABA: el que declaró el evento de cierre, contrastado contra los granular_scopes del token.
-  // Un WABA que el token no respalda no se toca: sería operar sobre la cuenta de otro negocio.
-  const wabaId = (input.wabaId ?? '').trim() || dbg.wabaIds[0] || '';
-  if (!wabaId) return { ok: false, reason: 'no_waba' };
-  if (!wabaAutorizado(wabaId, dbg.wabaIds)) {
-    logger.warn('Coexistence: el WABA pedido no está entre los que autoriza el token', { tenantId });
-    return { ok: false, reason: 'no_waba' };
+  // Un WABA que el token no respalda no se toca (sería operar sobre la cuenta de otro negocio), y
+  // con VARIOS autorizados y ningún pedido explícito tampoco se adivina «el primero»: el primero
+  // de la lista puede ser el WABA de OTRO cliente del Tech Provider. El caso ambiguo viaja con su
+  // PROPIA reason para que el panel pida la elección explícita en vez de un error genérico.
+  const waba = elegirWabaDeCoexistencia(dbg.wabaIds, input.wabaId);
+  if (!waba.ok) {
+    logger.warn('Coexistence: no se pudo determinar el WABA', { tenantId, motivo: waba.motivo, autorizados: dbg.wabaIds.length });
+    return { ok: false, reason: waba.motivo === 'waba_ambiguo' ? 'waba_ambiguo' : 'no_waba' };
   }
+  const wabaId = waba.wabaId;
 
   // 4) EL PNID, RESUELTO SERVER-SIDE (ver el encabezado, punto 1).
   const phones = await graph.listWabaPhoneNumbers(wabaId, token);

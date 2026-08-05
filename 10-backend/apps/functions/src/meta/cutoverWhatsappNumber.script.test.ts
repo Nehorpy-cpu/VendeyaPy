@@ -32,6 +32,8 @@ import {
 
 const TENANT = 'tnt_cutover';
 const OTRO_TENANT = 'tnt_ajeno';
+/** El proyecto EXPLÍCITO del apply: el cutover y su rollback quedan atados a él, no al ambiente. */
+const PROYECTO = 'demo-cutover-test';
 /** El número que HOY vende: canal heredado, seleccionado, `live` (post Paso 5 del runbook). */
 const PNID_ANT = '111000111';
 /** El número REAL de Coexistence: canal propio, no seleccionado, en `shadow` (post Paso 11). */
@@ -39,6 +41,11 @@ const PNID_NVO = '222000222';
 const PNID_TER = '333000333';
 const ASSET = (pnid: string) => `tenants/${TENANT}/metaAssets/${pnid}`;
 const IDX = (pnid: string) => `metaExternalIndex/whatsapp_${pnid}`;
+const CONN = (id: string) => `tenants/${TENANT}/metaConnections/${id}`;
+/** La conexión destino del cutover y su credencial (solo EXISTENCIA: el valor jamás se lee). */
+const CONN_NVO = CONN(`wa_${PNID_NVO}`);
+const REF_CREDENCIAL = `secret://firestore/meta-token-${TENANT}-${PNID_NVO}`;
+const DOC_CREDENCIAL = `secrets/meta-token-${TENANT}-${PNID_NVO}`;
 const RECORDS = `tenants/${TENANT}/whatsappCutovers`;
 
 // ---------------------------------------------------------------------------
@@ -146,6 +153,16 @@ const sembrarNuevo = (extra: Record<string, unknown> = {}, updateTime: unknown =
     data: { id: `whatsapp_${PNID_NVO}`, tenantId: TENANT, connectionId: `wa_${PNID_NVO}`, assetType: 'whatsapp_phone_number', platform: 'whatsapp', externalId: PNID_NVO, status: 'active' },
     updateTime: { seconds: 201, nanoseconds: 0 },
   });
+  // La conexión DESTINO con su credencial: lo que el cutover tiene que verificar antes de degradar
+  // al número que vende. El secreto se siembra solo como documento — el valor no se mira nunca.
+  docs.set(CONN_NVO, {
+    data: { id: `wa_${PNID_NVO}`, tenantId: TENANT, status: 'active', tokenSecretRef: REF_CREDENCIAL, source: 'embedded_signup' },
+    updateTime: { seconds: 210, nanoseconds: 0 },
+  });
+  docs.set(DOC_CREDENCIAL, {
+    data: { name: `meta-token-${TENANT}-${PNID_NVO}`, ciphertext: 'cifrado-de-prueba' },
+    updateTime: { seconds: 211, nanoseconds: 0 },
+  });
 };
 
 const sembrarCiclo = () => { sembrarAnterior(); sembrarNuevo(); };
@@ -154,7 +171,7 @@ const sembrarCiclo = () => { sembrarAnterior(); sembrarNuevo(); };
 const probeOk = { probarPromocion: async () => ({ outcome: 'no_es_el_numero_por_defecto' }) };
 
 const args = (extra: Record<string, unknown> = {}) =>
-  ({ tenantId: TENANT, phoneNumberId: PNID_NVO, degradarAnterior: 'shadow', ...extra });
+  ({ tenantId: TENANT, phoneNumberId: PNID_NVO, degradarAnterior: 'shadow', projectId: PROYECTO, ...extra });
 
 const asset = (pnid: string) => docs.get(ASSET(pnid))?.data ?? {};
 const indice = (pnid: string) => docs.get(IDX(pnid))?.data ?? {};
@@ -410,7 +427,7 @@ describe('rollback — la vuelta atrás es exacta', () => {
     };
     const { r } = await aplicarCutover();
     escrituras.length = 0;
-    const rb = await rollbackCutover(db, { tenantId: TENANT, cutoverId: r.cutoverId as string, apply: true });
+    const rb = await rollbackCutover(db, { tenantId: TENANT, cutoverId: r.cutoverId as string, apply: true, projectId: PROYECTO });
     expect(rb.outcome).toBe('written');
     expect(JSON.stringify(asset(PNID_ANT))).toBe(antes.ant);
     expect(JSON.stringify(asset(PNID_NVO))).toBe(antes.nvo);
@@ -425,7 +442,7 @@ describe('rollback — la vuelta atrás es exacta', () => {
     delete docs.get(ASSET(PNID_NVO))!.data['selected']; // el asset nunca declaró `selected`
     const { r } = await aplicarCutover();
     expect(asset(PNID_NVO)['selected']).toBe(true);
-    const rb = await rollbackCutover(db, { tenantId: TENANT, cutoverId: r.cutoverId as string, apply: true });
+    const rb = await rollbackCutover(db, { tenantId: TENANT, cutoverId: r.cutoverId as string, apply: true, projectId: PROYECTO });
     expect(rb.outcome).toBe('written');
     expect('selected' in asset(PNID_NVO)).toBe(false);
   });
@@ -435,7 +452,7 @@ describe('rollback — la vuelta atrás es exacta', () => {
     docs.get(IDX(PNID_NVO))!.data['automationMode'] = 'shadow';
     docs.get(IDX(PNID_ANT))!.data['automationMode'] = 'live';
     const { r } = await aplicarCutover();
-    const rb = await rollbackCutover(db, { tenantId: TENANT, cutoverId: r.cutoverId as string, apply: true });
+    const rb = await rollbackCutover(db, { tenantId: TENANT, cutoverId: r.cutoverId as string, apply: true, projectId: PROYECTO });
     expect(rb.outcome).toBe('written');
     expect(indice(PNID_NVO)['automationMode']).toBe('shadow');
     expect(indice(PNID_ANT)['automationMode']).toBe('live');
@@ -445,7 +462,7 @@ describe('rollback — la vuelta atrás es exacta', () => {
     sembrarCiclo();
     const { r } = await aplicarCutover();
     docs.delete(IDX(PNID_NVO)); // una verificación posterior fallaría: el índice desapareció
-    const rb = await rollbackCutover(db, { tenantId: TENANT, cutoverId: r.cutoverId as string, apply: true });
+    const rb = await rollbackCutover(db, { tenantId: TENANT, cutoverId: r.cutoverId as string, apply: true, projectId: PROYECTO });
     expect(rb.outcome).toBe('written');
     expect(asset(PNID_ANT)['selected']).toBe(true);
     expect(asset(PNID_ANT)['automationMode']).toBe('live');
@@ -457,7 +474,7 @@ describe('rollback — la vuelta atrás es exacta', () => {
     // Kill-switch del runbook sobre el nuevo: migrar --mode inactive.
     docs.get(ASSET(PNID_NVO))!.data['automationMode'] = 'inactive';
     escrituras.length = 0;
-    const rb = await rollbackCutover(db, { tenantId: TENANT, cutoverId: r.cutoverId as string, apply: true });
+    const rb = await rollbackCutover(db, { tenantId: TENANT, cutoverId: r.cutoverId as string, apply: true, projectId: PROYECTO });
     expect(rb.outcome).toBe('estado_inesperado');
     expect(escrituras).toEqual([]);
     expect(asset(PNID_NVO)['automationMode']).toBe('inactive'); // la decisión humana queda
@@ -466,9 +483,9 @@ describe('rollback — la vuelta atrás es exacta', () => {
   it('un rollback ya hecho no se repite; un registro inexistente no restaura nada', async () => {
     sembrarCiclo();
     const { r } = await aplicarCutover();
-    await rollbackCutover(db, { tenantId: TENANT, cutoverId: r.cutoverId as string, apply: true });
-    expect((await rollbackCutover(db, { tenantId: TENANT, cutoverId: r.cutoverId as string, apply: true })).outcome).toBe('ya_revertido');
-    expect((await rollbackCutover(db, { tenantId: TENANT, cutoverId: 'co_inexistente', apply: true })).outcome).toBe('not_found');
+    await rollbackCutover(db, { tenantId: TENANT, cutoverId: r.cutoverId as string, apply: true, projectId: PROYECTO });
+    expect((await rollbackCutover(db, { tenantId: TENANT, cutoverId: r.cutoverId as string, apply: true, projectId: PROYECTO })).outcome).toBe('ya_revertido');
+    expect((await rollbackCutover(db, { tenantId: TENANT, cutoverId: 'co_inexistente', apply: true, projectId: PROYECTO })).outcome).toBe('not_found');
   });
 });
 
@@ -528,5 +545,116 @@ describe('cutover — éxito honesto y reporte saneado', () => {
     expect(rec).toBeTruthy();
     const creacion = escrituras.find((e) => e.tipo === 'create');
     expect(creacion?.tx).toBe(escrituras.find((e) => e.path === ASSET(PNID_NVO))?.tx);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Correctivo release-safety — CIERRE COMPLETO del destino antes de degradar al que vende.
+// Cada test de acá DEMOSTRÓ un defecto contra 2798296 (el cutover seguía con `would_write`).
+// ---------------------------------------------------------------------------
+describe('cutover — cierre completo: índice del anterior, conexión destino y credencial', () => {
+  it('DEFECTO: el índice del ANTERIOR perteneciente a OTRO tenant bloquea (jamás mutar un índice ajeno)', async () => {
+    sembrarCiclo();
+    // El estado que deja un cutover/offboarding parcial en el índice global: la entrada del número
+    // anterior quedó a nombre de otro tenant. Corregirle el `automationMode` desde ACÁ sería una
+    // escritura cross-tenant — exactamente lo que el aislamiento multi-tenant prohíbe.
+    docs.get(IDX(PNID_ANT))!.data['tenantId'] = OTRO_TENANT;
+    docs.get(IDX(PNID_ANT))!.data['automationMode'] = 'live'; // declara ⇒ el cutover lo tocaría
+    const r = await dryRun();
+    expect(r.outcome).toBe('ruteo_anterior_de_otro_tenant');
+    expect(escrituras).toEqual([]);
+  });
+
+  it('DEFECTO: sin conexión destino no hay cutover (promover una ruta sin credencial es un apagón)', async () => {
+    sembrarCiclo();
+    docs.delete(CONN_NVO);
+    const r = await dryRun();
+    expect(r.outcome).toBe('sin_conexion_destino');
+    expect(escrituras).toEqual([]);
+  });
+
+  it('DEFECTO: una conexión destino que NO está activa bloquea', async () => {
+    sembrarCiclo();
+    docs.get(CONN_NVO)!.data['status'] = 'error';
+    expect((await dryRun()).outcome).toBe('conexion_destino_invalida');
+    docs.get(CONN_NVO)!.data['status'] = 'pending_review';
+    expect((await dryRun()).outcome).toBe('conexion_destino_invalida');
+    expect(escrituras).toEqual([]);
+  });
+
+  it('DEFECTO: un índice que rutea a OTRA conexión que la del asset destino bloquea', async () => {
+    sembrarCiclo();
+    // El inbound saldría por una conexión distinta de la que se verificó: ruteo partido.
+    docs.get(IDX(PNID_NVO))!.data['connectionId'] = 'main';
+    expect((await dryRun()).outcome).toBe('conexion_destino_invalida');
+    expect(escrituras).toEqual([]);
+  });
+
+  it('DEFECTO: la credencial referenciada tiene que EXISTIR (sin descifrarla ni imprimirla)', async () => {
+    sembrarCiclo();
+    docs.delete(DOC_CREDENCIAL);
+    const r = await dryRun();
+    expect(r.outcome).toBe('credencial_destino_ausente');
+    expect(escrituras).toEqual([]);
+  });
+
+  it('DEFECTO: una conexión sin referencia de credencial también bloquea', async () => {
+    sembrarCiclo();
+    docs.get(CONN_NVO)!.data['tokenSecretRef'] = '';
+    expect((await dryRun()).outcome).toBe('credencial_destino_ausente');
+    expect(escrituras).toEqual([]);
+  });
+
+  it('DEFECTO: si la credencial desaparece ENTRE el dry-run y el apply, el apply no escribe', async () => {
+    sembrarCiclo();
+    const plan = await dryRun();
+    expect(plan.outcome).toBe('would_write');
+    docs.delete(DOC_CREDENCIAL);
+    const r = await cutoverNumeroWhatsapp(db, args({ apply: true, firma: plan.firma }), probeOk);
+    expect(r.outcome).toBe('credencial_destino_ausente');
+    expect(escrituras).toEqual([]);
+    expect(asset(PNID_ANT)['automationMode']).toBe('live'); // el que vende sigue intacto
+  });
+});
+
+describe('cutover — el apply y el rollback quedan atados al proyecto EXACTO', () => {
+  it('DEFECTO: el apply sin `projectId` explícito se rechaza (el destino no puede ser ambiental)', async () => {
+    sembrarCiclo();
+    const plan = await dryRun();
+    const a = args({ apply: true, firma: plan.firma });
+    delete (a as Record<string, unknown>)['projectId'];
+    const r = await cutoverNumeroWhatsapp(db, a, probeOk);
+    expect(r.outcome).toBe('falta_project');
+    expect(escrituras).toEqual([]);
+  });
+
+  it('DEFECTO: el registro persiste el projectId y el rollback exige EL MISMO', async () => {
+    sembrarCiclo();
+    const { r } = await aplicarCutover();
+    expect(registro(r.cutoverId as string)!['projectId']).toBe(PROYECTO);
+    escrituras.length = 0;
+
+    // Otro proyecto: la reversa de un mundo no es la reversa de otro.
+    const otro = await rollbackCutover(db, { tenantId: TENANT, cutoverId: r.cutoverId as string, apply: true, projectId: 'demo-otro' });
+    expect(otro.outcome).toBe('proyecto_no_coincide');
+    // Sin proyecto: apply del rollback también lo exige.
+    const sin = await rollbackCutover(db, { tenantId: TENANT, cutoverId: r.cutoverId as string, apply: true });
+    expect(sin.outcome).toBe('falta_project');
+    expect(escrituras).toEqual([]);
+    expect(asset(PNID_NVO)['selected']).toBe(true); // nada se restauró
+
+    // Con el proyecto EXACTO del registro, el rollback sigue disponible (invariante 8 intacto).
+    const ok = await rollbackCutover(db, { tenantId: TENANT, cutoverId: r.cutoverId as string, apply: true, projectId: PROYECTO });
+    expect(ok.outcome).toBe('written');
+    expect(asset(PNID_ANT)['selected']).toBe(true);
+  });
+
+  it('el dry-run del rollback avisa la discrepancia de proyecto sin escribir', async () => {
+    sembrarCiclo();
+    const { r } = await aplicarCutover();
+    escrituras.length = 0;
+    const rb = await rollbackCutover(db, { tenantId: TENANT, cutoverId: r.cutoverId as string, projectId: 'demo-otro' });
+    expect(rb.outcome).toBe('proyecto_no_coincide');
+    expect(escrituras).toEqual([]);
   });
 });

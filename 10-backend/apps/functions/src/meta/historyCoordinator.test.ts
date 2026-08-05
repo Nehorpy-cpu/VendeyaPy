@@ -196,7 +196,8 @@ describe('el disparo se usa UNA sola vez, y el rechazo dice por qué', () => {
     await decidir('share');
     await reclamarDisparo(TENANT, PNID, T0 + 120_000);
 
-    await registrarResultadoDelDisparo(TENANT, PNID, { ok: false, syncTypes: ['smb_app_state_sync'], error: 'graph_error_100' }, T0 + 130_000);
+    // La generación reclamada (1) viaja al settlement: es la identidad del trabajo que se cierra (H8).
+    await registrarResultadoDelDisparo(TENANT, PNID, 1, { ok: false, syncTypes: ['smb_app_state_sync'], error: 'graph_error_100' }, T0 + 130_000);
 
     const coord = await leerCoordinador(TENANT, PNID);
     expect(coord!.status).toBe('failed');

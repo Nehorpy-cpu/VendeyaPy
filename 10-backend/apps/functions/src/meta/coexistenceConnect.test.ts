@@ -89,7 +89,7 @@ vi.mock('../lib/secretStore.js', () => ({
   }),
 }));
 
-import { runCoexistenceConnect, elegirNumeroDeCoexistencia } from './coexistenceConnect.js';
+import { runCoexistenceConnect, elegirNumeroDeCoexistencia, elegirWabaDeCoexistencia } from './coexistenceConnect.js';
 import type { AddNumberDeps } from './multiNumber.js';
 import type { MetaGraphClient, MetaPhoneNumber } from './graphClient.js';
 
@@ -175,6 +175,26 @@ describe('elegirNumeroDeCoexistencia — el PNID no se adivina', () => {
 
   it('sin números: no_phone_number', () => {
     expect(elegirNumeroDeCoexistencia([])).toEqual({ ok: false, reason: 'no_phone_number' });
+  });
+});
+
+describe('elegirWabaDeCoexistencia — el WABA tampoco se adivina (correctivo release-safety)', () => {
+  it('un solo WABA autorizado y sin pedido: ese', () => {
+    expect(elegirWabaDeCoexistencia([WABA])).toEqual({ ok: true, wabaId: WABA });
+  });
+
+  it('VARIOS autorizados y sin pedido: ambiguo — el primero puede ser el de OTRO negocio', () => {
+    expect(elegirWabaDeCoexistencia([WABA, 'waba-2'])).toEqual({ ok: false, motivo: 'waba_ambiguo' });
+  });
+
+  it('un pedido explícito tiene que estar autorizado por el token', () => {
+    expect(elegirWabaDeCoexistencia([WABA, 'waba-2'], 'waba-2')).toEqual({ ok: true, wabaId: 'waba-2' });
+    expect(elegirWabaDeCoexistencia([WABA], 'waba-de-otro')).toEqual({ ok: false, motivo: 'waba_no_autorizado' });
+  });
+
+  it('sin ninguno autorizado: sin_waba', () => {
+    expect(elegirWabaDeCoexistencia([])).toEqual({ ok: false, motivo: 'sin_waba' });
+    expect(elegirWabaDeCoexistencia([], '  ')).toEqual({ ok: false, motivo: 'sin_waba' });
   });
 });
 
@@ -269,6 +289,49 @@ describe('runCoexistenceConnect — el PNID se resuelve SERVER-SIDE', () => {
 
     expect(r).toEqual({ ok: false, reason: 'is_main_number' });
     expect(fotoDelPrincipal()).toEqual(antes);
+  });
+
+  it('DEFECTO (correctivo release-safety): token que autoriza DOS WABAs y sin `wabaId` ⇒ rechazo, no «el primero»', async () => {
+    // El paralelo exacto de `elegirNumeroDeCoexistencia`: adivinar el primer WABA autorizado es
+    // cómo se termina operando sobre la cuenta equivocada — un token de Tech Provider puede
+    // alcanzar más de un negocio (cardinalidad real por confirmar en el Programa 2).
+    sembrarPrincipalSano();
+    const antes = fotoDelPrincipal();
+    const listados: string[] = [];
+
+    const r = await runCoexistenceConnect(
+      TENANT, { code: 'code-de-prueba' }, 'uid-owner',
+      graph({
+        debugToken: async () => ({ isValid: true, scopes: ['whatsapp_business_messaging', 'whatsapp_business_management'], wabaIds: [WABA, 'waba-2'], expiresAtMs: null }),
+        listWabaPhoneNumbers: async (w) => { listados.push(w); return [numero(PNID_NUEVO)]; },
+      }),
+      deps(),
+    );
+
+    expect(r.ok).toBe(false);
+    // Reason PROPIA (integración del cierre): el panel puede pedir la elección explícita en vez
+    // de mostrar un error genérico. Sigue siendo el mismo rechazo fail-closed.
+    expect((r as { reason: string }).reason).toBe('waba_ambiguo');
+    expect(listados).toEqual([]); // ni siquiera se listaron números: no se adivinó ningún WABA
+    expect(fotoDelPrincipal()).toEqual(antes);
+    expect(docs.has(connPath(`wa_${PNID_NUEVO}`))).toBe(false);
+    expect(secretos.size).toBe(1); // solo el del principal
+  });
+
+  it('con UN solo WABA autorizado y sin `wabaId`, sigue como hoy', async () => {
+    sembrarPrincipalSano();
+    const r = await runCoexistenceConnect(TENANT, { code: 'code-de-prueba' }, 'uid-owner', graph(), deps());
+    expect(r).toMatchObject({ ok: true, connectionId: `wa_${PNID_NUEVO}`, phoneNumberId: PNID_NUEVO });
+  });
+
+  it('un `wabaId` explícito entre VARIOS autorizados sigue funcionando', async () => {
+    sembrarPrincipalSano();
+    const r = await runCoexistenceConnect(
+      TENANT, { code: 'code-de-prueba', wabaId: WABA }, 'uid-owner',
+      graph({ debugToken: async () => ({ isValid: true, scopes: ['whatsapp_business_messaging', 'whatsapp_business_management'], wabaIds: [WABA, 'waba-2'], expiresAtMs: null }) }),
+      deps(),
+    );
+    expect(r).toMatchObject({ ok: true, phoneNumberId: PNID_NUEVO });
   });
 
   it('un WABA que el token no respalda no se toca', async () => {

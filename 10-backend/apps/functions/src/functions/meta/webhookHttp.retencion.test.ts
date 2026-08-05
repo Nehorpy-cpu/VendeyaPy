@@ -178,11 +178,15 @@ describe('tenantId en el archivo de Coexistence', () => {
     expect(fake.escrituras[0]!.data['tenantId']).toBe(TENANT);
   });
 
-  it('índice sin entrada: el chunk NO se pierde (queda sin tenant, nunca descartado)', async () => {
-    // Meta da 24 h para sincronizar; perder un chunk obliga a rehacer todo el onboarding del número.
-    await post(historyBody());
-    expect(fake.escrituras).toHaveLength(1);
-    expect(fake.escrituras[0]!.data['tenantId']).toBeNull();
+  it('índice sin entrada: el chunk NO se persiste sin tenant — 503 y reintento de Meta (H11)', async () => {
+    // Antes esto era fail-soft (`tenantId: null` + 200) y quemaba el reintento de Meta para
+    // siempre, con la generación 1 inventada. Sin saber NI el tenant no hay aislamiento
+    // verificable: el chunk no se pierde porque el 503 hace que Meta lo traiga de vuelta cuando
+    // el binding exista.
+    const r = await post(historyBody());
+    expect(r.code).toBe(503);
+    expect((r.body as Record<string, unknown>)['retry']).toBe(true);
+    expect(fake.escrituras).toHaveLength(0);
   });
 
   it('SIN REGRESIÓN DE COSTO: un `messages` normal no paga ninguna lectura extra', async () => {

@@ -32,18 +32,41 @@ import {
   puedeDisparar,
   reclamarDisparo,
   registrarResultadoDelDisparo,
+  type HistorySyncDoc,
   type HistorySyncStatus,
   type MotivoDeRechazo,
 } from './historyCoordinator.js';
 
-/** Marca `expired` con merge — el mismo desenlace que dejaría el reclamo al rechazar por vencido. */
-async function marcarVencido(tenantId: string, phoneNumberId: string, nowMs: number): Promise<void> {
-  await db()
-    .doc(coexistenceHistorySyncPath(tenantId, phoneNumberId))
-    .set(
+/**
+ * Marca `expired` — el mismo desenlace que dejaría el reclamo al rechazar por vencido.
+ *
+ * (correctivo H10) Read+decisión+escritura en UNA transacción, exigiendo la generación que vio el
+ * precheck (CAS). El merge ciego posterior a una lectura suelta podía aterrizar sobre la generación
+ * N+1 abierta EN EL MEDIO por un re-onboarding legítimo — y vencer una ventana de 24 h que recién
+ * nacía, sin usarse. Si la vigente ya es otra, o el vencimiento dejó de ser cierto con la lectura
+ * fresca, no se escribe nada (la nota del reclamo en `reclamarDisparo` no necesita esto: su rama
+ * `vencido` lee y escribe dentro de la MISMA transacción, así que la contención del SDK ya la cerca).
+ */
+async function marcarVencido(tenantId: string, phoneNumberId: string, generacionLeida: number, nowMs: number): Promise<void> {
+  const ref = db().doc(coexistenceHistorySyncPath(tenantId, phoneNumberId));
+  await db().runTransaction(async (tx) => {
+    const previo = (await tx.get(ref)).data() as HistorySyncDoc | undefined;
+    if (!previo) return; // sin coordinador no hay ventana que vencer
+    if ((previo.syncGeneration ?? 1) !== generacionLeida) {
+      logger.warn('smbAppData: el vencimiento visto por el precheck es de una generación superada; no se marca', {
+        tenantId, generacionLeida, generacionVigente: previo.syncGeneration ?? 1,
+      });
+      return;
+    }
+    // La decisión se re-deriva sobre la lectura DE ESTA transacción: si otra escritura concurrente
+    // movió el estado, el SDK reintenta el cuerpo con la lectura fresca y la decisión se rehace.
+    if (puedeDisparar(previo, nowMs).motivo !== 'vencido') return;
+    tx.set(
+      ref,
       { status: 'expired' satisfies HistorySyncStatus, errorMessage: 'venció la ventana de 24 h sin disparar', updatedAt: Timestamp.fromMillis(nowMs) },
       { merge: true },
     );
+  });
 }
 
 export type DisparoFallo = MotivoDeRechazo | 'es_numero_principal' | 'sin_credenciales' | 'graph_error';
@@ -119,7 +142,8 @@ export async function ejecutarSincronizacionDeHistorial(
   const coordPrevio = await leerCoordinador(tenantId, phoneNumberId);
   const preVeredicto = puedeDisparar(coordPrevio, nowMs);
   if (!preVeredicto.puede && preVeredicto.motivo === 'vencido') {
-    await marcarVencido(tenantId, phoneNumberId, nowMs);
+    // La generación LEÍDA viaja al marcado (H10): el veredicto vale para ese ciclo y ningún otro.
+    await marcarVencido(tenantId, phoneNumberId, coordPrevio?.syncGeneration ?? 1, nowMs);
     return { ok: false, motivo: 'vencido', explicacion: preVeredicto.explicacion, syncTypes: [] };
   }
 
@@ -144,7 +168,9 @@ export async function ejecutarSincronizacionDeHistorial(
   if (!reclamo.ok) return { ok: false, motivo: reclamo.motivo, explicacion: reclamo.explicacion, syncTypes: [] };
 
   const pedido = await pedirSmbAppData(phoneNumberId, creds.accessToken, graph);
-  await registrarResultadoDelDisparo(tenantId, phoneNumberId, pedido, nowMs);
+  // La generación RECLAMADA viaja al settlement (H8): si un re-onboarding abrió la N+1 mientras
+  // Graph estaba en vuelo, este desenlace pertenece a la N y no puede escribir sobre la nueva.
+  await registrarResultadoDelDisparo(tenantId, phoneNumberId, reclamo.syncGeneration, pedido, nowMs);
   if (!pedido.ok) {
     logger.warn('smbAppData: el disparo del historial falló', { tenantId, syncTypes: pedido.syncTypes, error: pedido.error });
     return {

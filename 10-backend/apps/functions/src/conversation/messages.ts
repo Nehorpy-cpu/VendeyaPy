@@ -124,13 +124,35 @@ export async function appendMessage(
   }
 
   // Resumen denormalizado (deep-merge sobre el doc del cliente).
-  const conv: Record<string, unknown> = {
-    lastMessageAt: now,
-    lastMessagePreview: preview(input.text) || (attachmentIds.length ? PREVIEW_SOLO_ADJUNTO : ''),
-    lastMessageDirection: input.direction,
-    channel,
-  };
-  if (input.receivedVia) conv['receivedVia'] = input.receivedVia; // para el badge de /conversations
+  //
+  // MONOTÓNICO (H7 / ADR-0017 §2): este resumen es el que lee `resolverCanalDeConversacion` para
+  // decidir por dónde SALE la próxima respuesta manual. Sin comparar contra el `lastMessageAt`
+  // vigente, una operación VIEJA que termina tarde pisaba `channel`/`receivedVia` y ruteaba al
+  // vendedor contra la conversación equivocada. Por eso los campos de «última actividad» solo se
+  // escriben si este mensaje es más nuevo o igual que el vigente. Cuesta 1 lectura por mensaje:
+  // Firestore no tiene precondición por campo en un set/merge, y leer el resumen es la única
+  // forma de saber si este mensaje sigue siendo el último. Queda una ventana residual si dos
+  // resúmenes se leen/escriben exactamente intercalados (cerrarla del todo exige transacción).
+  const customerRef = db().doc(paths.customer(tenantId, customerId));
+  const prevAt = ((await customerRef.get()).data() as { conversation?: { lastMessageAt?: { toMillis?: () => number } } } | undefined)
+    ?.conversation?.lastMessageAt;
+  // EMPATE (>=): gana la operación que termina última — es el comportamiento vigente para los
+  // pares in/out agrupados con el MISMO reloj (`input.now` compartido): el out se escribe segundo
+  // y debe quedar como último mensaje del resumen. Un resumen sin `lastMessageAt` legible
+  // (cliente nuevo o dato viejo con otra forma) no veta nada: se escribe, como siempre.
+  const esMasNuevo = typeof prevAt?.toMillis !== 'function' || now.toMillis() >= prevAt.toMillis();
+
+  const conv: Record<string, unknown> = {};
+  if (esMasNuevo) {
+    conv['lastMessageAt'] = now;
+    conv['lastMessagePreview'] = preview(input.text) || (attachmentIds.length ? PREVIEW_SOLO_ADJUNTO : '');
+    conv['lastMessageDirection'] = input.direction;
+    conv['channel'] = channel;
+    if (input.receivedVia) conv['receivedVia'] = input.receivedVia; // para el badge de /conversations
+  }
+  // Lo que NO es «última actividad» se aplica igual aunque el mensaje sea viejo: `state` y
+  // `humanTakeover` son decisiones EXPLÍCITAS del llamador (handoff/motor), y el contador de
+  // no-leídos es un increment conmutativo — el orden de llegada no le cambia el resultado.
   if (input.state !== undefined) conv['state'] = input.state ?? null;
   if (input.humanTakeover !== undefined) conv['humanTakeover'] = input.humanTakeover;
   // "Sin leer" para el vendedor: solo cuando el bot no está atendiendo (handoff/bot off).
@@ -138,9 +160,19 @@ export async function appendMessage(
     conv['unreadForSeller'] = FieldValue.increment(1);
   }
 
-  await db()
-    .doc(paths.customer(tenantId, customerId))
-    .set({ id: customerId, tenantId, conversation: conv, updatedAt: now }, { merge: true });
+  /**
+   * `conversation` SOLO viaja si tiene algo adentro. Un mapa VACÍO con `merge:true` NO fusiona:
+   * el SDK serializa `updateMask: ["conversation"]` con `mapValue:{}` y REEMPLAZA el mapa entero
+   * (verificado contra @google-cloud/firestore 7.11.6; con contenido serializa `conversation.x`,
+   * que sí es merge de hoja). Con el guard monotónico de arriba, un mensaje viejo sin `state`,
+   * `humanTakeover` ni `countUnread` —la forma exacta del mensaje manual del panel y de la
+   * ingesta de adjuntos— dejaba `conv` vacío y BORRABA el resumen del cliente: `receivedVia`
+   * (por dónde sale la próxima respuesta manual), `channel`, `humanTakeover`, `state` y el
+   * contador de no leídos.
+   */
+  const resumen: Record<string, unknown> = { id: customerId, tenantId, updatedAt: now };
+  if (Object.keys(conv).length > 0) resumen['conversation'] = conv;
+  await customerRef.set(resumen, { merge: true });
 
   return msg;
 }

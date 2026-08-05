@@ -56,6 +56,7 @@ const CONNECT_FAIL_MESSAGE: Record<CoexistenceConnectFailReason, string> = {
   token_invalid: 'El token que devolvió Meta no es válido. Reiniciá el proceso.',
   scopes_insuficientes: 'Faltan permisos de WhatsApp. Aceptá todos los permisos durante el onboarding.',
   no_waba: 'La cuenta de WhatsApp Business no está autorizada por esta conexión.',
+  waba_ambiguo: 'Tu autorización de Meta alcanza a más de una cuenta de WhatsApp Business. Elegí explícitamente cuál conectar y volvé a intentar.',
   no_phone_number: 'Esa cuenta de WhatsApp Business no tiene ningún número.',
   phone_number_mismatch: 'El número elegido no pertenece a esa cuenta de WhatsApp Business.',
   phone_number_ambiguo: 'Esa cuenta tiene más de un número: elegí explícitamente cuál conectar (no se adivina, para no tocar el número que ya está vendiendo).',

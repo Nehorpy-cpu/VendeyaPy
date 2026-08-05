@@ -10,6 +10,7 @@
  * se responde. Recibir un archivo NUNCA cambia por sí solo el estado de un pedido.
  */
 
+import { randomUUID } from 'node:crypto';
 import { Timestamp } from 'firebase-admin/firestore';
 import type { WebhookInboxEvent, MetaExternalIndexEntry, MessageChannel, WebhookEventKind } from '@vpw/shared';
 import { permiteAutomatizacion, persisteEntrante, readWebhookEventKind } from '@vpw/shared';
@@ -162,6 +163,8 @@ async function devolverALaCola(
       ...comun,
       processingStatus: 'failed',
       processingStartedAt: null,
+      // El lease muere con el evento: un dueño residual en un evento cerrado solo confundiría.
+      claimOwner: null,
       errorMessage: 'no se pudo resolver el permiso del número: reintento agotado',
       processedAt: Timestamp.now(),
     });
@@ -175,6 +178,8 @@ async function devolverALaCola(
     ...comun,
     processingStatus: 'received',
     processingStartedAt: null,
+    // Se libera el lease junto con el evento: la reentrega tiene que poder reclamarlo limpio.
+    claimOwner: null,
     errorMessage: 'no se pudo resolver el permiso del número: reintentable',
   });
   logger.error('No se pudo resolver el permiso del número; se pide REENTREGA del evento', undefined, {
@@ -389,15 +394,33 @@ async function entregarRespuestaAutomatica(args: EntregaAutomaticaArgs): Promise
 
 export async function processWebhookEvent(eventId: string): Promise<void> {
   const ref = db().doc(paths.metaWebhookEvent(eventId));
-  const snap = await ref.get();
-  if (!snap.exists) return;
-  const ev = snap.data() as WebhookInboxEvent;
-  const ahora = Timestamp.now();
-  if (!puedeTomarseElEvento(ev, ahora.toMillis())) return; // ya procesado / en proceso
+  /**
+   * CLAIM TRANSACCIONAL (correctivo, MEDIUM H4). El `get` + `update({processing})` de antes eran
+   * dos actos separados: la entrega de Eventarc es at-least-once y dos invocaciones concurrentes
+   * podían leer `received` LAS DOS, marcarse dueñas las dos y ejecutar motor y outbound las dos —
+   * respuesta duplicada al cliente, sobre el número que vende. Leer el estado y escribir el claim
+   * tienen que ser UN solo acto: la segunda invocación relee dentro de su transacción, encuentra
+   * `processing` fresco y corta sin efectos.
+   *
+   * `claimOwner` es el dueño del lease (evidencia de quién tomó el evento). El RESCATE por
+   * antigüedad no cambia: `puedeTomarseElEvento` sigue decidiendo, así que un claim con lease
+   * vencido (`WEBHOOK_STUCK_MS`) es re-reclamable — también en un solo acto.
+   */
+  const claimOwner = randomUUID();
+  const tomado = await db().runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    if (!snap.exists) return null;
+    const previo = snap.data() as WebhookInboxEvent;
+    const ahora = Timestamp.now();
+    if (!puedeTomarseElEvento(previo, ahora.toMillis())) return null; // ya procesado / en proceso
+    tx.update(ref, { processingStatus: 'processing', processingStartedAt: ahora, claimOwner });
+    return previo;
+  });
+  if (!tomado) return;
+  const ev = tomado;
   if (ev.processingStatus === 'processing') {
     logger.warn('Webhook con adjunto clavado en processing: se retoma', { eventId, tenantId: ev.tenantId ?? undefined });
   }
-  await ref.update({ processingStatus: 'processing', processingStartedAt: ahora });
 
   try {
     // Resolver empresa por el índice global (platform_externalId).

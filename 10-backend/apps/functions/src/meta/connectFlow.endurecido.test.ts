@@ -331,3 +331,31 @@ describe('MEDIO — el alta REAL también deja auditoría', () => {
     expect(JSON.stringify(entrada)).not.toContain('token-de-prueba');
   });
 });
+
+describe('C6 — el WABA del flujo estándar también se elige EXPLÍCITO (release-safety del cierre final)', () => {
+  it('varios WABAs autorizados y ningún pedido ⇒ rechaza en vez de adivinar el primero', async () => {
+    sembrarConexionQueVende();
+
+    const r = await runMetaConnect(
+      TENANT,
+      { code: 'code-de-prueba' }, // sin wabaId: el token autoriza DOS cuentas
+      'uid-1',
+      graphFake({ dbg: { wabaIds: [WABA, 'waba_de_otro_cliente'] } }),
+    );
+
+    // «El primero de la lista» puede ser el WABA de OTRO cliente del Tech Provider: conectar main
+    // contra esa cuenta redirigiría el negocio entero. La elección tiene que ser explícita.
+    expect(r.ok).toBe(false);
+    expect((r as { reason?: string }).reason).toBe('no_waba');
+    // Y la conexión que vende quedó intacta.
+    expect((h.docs.get(CONN) as { status?: string })['status']).toBe('active');
+  });
+
+  it('CERO REGRESIÓN: un solo WABA autorizado sin pedido sigue conectando', async () => {
+    sembrarConexionQueVende();
+
+    const r = await runMetaConnect(TENANT, { code: 'code-de-prueba' }, 'uid-1', graphFake());
+
+    expect(r.ok).toBe(true);
+  });
+});

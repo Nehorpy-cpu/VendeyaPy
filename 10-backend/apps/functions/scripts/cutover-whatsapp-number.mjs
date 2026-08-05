@@ -15,13 +15,23 @@
  *   4. sin ventana peligrosa: TODAS las escrituras en UNA transacción (assets + índices que
  *      declaren + registro de reversa);
  *   5. precondiciones FRESCAS: la FIRMA del dry-run ata el apply al estado que el operador miró
- *      (estado + updateTimes + la decisión de degradación), se re-verifica DENTRO de la
- *      transacción, y cada update lleva además su `lastUpdateTime`;
- *   6. dry-run por defecto; `--apply` explícito y exige `--firma`;
+ *      (estado + updateTimes + la decisión de degradación + conexión/credencial del destino), se
+ *      re-verifica DENTRO de la transacción, y cada update lleva además su `lastUpdateTime`;
+ *   6. dry-run por defecto; `--apply` explícito y exige `--firma` Y `--project`;
  *   7. resumen SANEADO y determinístico (números enmascarados, sin timestamps);
  *   8. el rollback depende SOLO del registro persistido (misma transacción que el cutover): una
  *      verificación secundaria rota no lo bloquea;
- *   9. ningún token ni secreto interviene: este script no mira Secret Manager ni credenciales.
+ *   9. ningún valor de token se LEE ni se imprime jamás. El cierre completo del destino
+ *      (correctivo release-safety) exige que la conexión del número nuevo exista, esté `active` y
+ *      que el DOCUMENTO del secreto referenciado exista — la existencia se mira, el ciphertext no
+ *      se toca ni se descifra. Promover una ruta sin credencial degradaba al número que vende y
+ *      dejaba al nuevo sin poder mandar un solo mensaje: un apagón con exit 0;
+ *  10. el rollback queda atado al PROYECTO EXACTO del cutover: el apply exige `--project`, el
+ *      registro lo persiste y revertir con otro proyecto (u otro ambiente) se rechaza. Antes, el
+ *      destino real dependía de `GCLOUD_PROJECT` ambiental — la reversa de un mundo aplicada a
+ *      otro;
+ *  11. el índice global del número ANTERIOR solo se corrige si pertenece a ESTE tenant: un índice
+ *      a nombre de otro tenant frena el cutover en vez de sufrir una escritura cross-tenant.
  *
  * QUÉ ESCRIBE (y nada más):
  *   · asset nuevo:    { selected: true,  automationMode: 'live' }
@@ -46,9 +56,9 @@
  *
  * USO:
  *   node scripts/cutover-whatsapp-number.mjs --tenant <id> --nuevo <pnid> --degradar-anterior shadow|inactive
- *   node scripts/cutover-whatsapp-number.mjs --tenant <id> --nuevo <pnid> --degradar-anterior shadow --firma <hex> --apply
+ *   node scripts/cutover-whatsapp-number.mjs --tenant <id> --nuevo <pnid> --degradar-anterior shadow --firma <hex> --project <id> --apply
  *   node scripts/cutover-whatsapp-number.mjs --tenant <id> --rollback <cutoverId>            (dry-run)
- *   node scripts/cutover-whatsapp-number.mjs --tenant <id> --rollback <cutoverId> --apply
+ *   node scripts/cutover-whatsapp-number.mjs --tenant <id> --rollback <cutoverId> --project <id> --apply
  */
 import { createHash } from 'node:crypto';
 import { initializeApp, getApps } from 'firebase-admin/app';
@@ -111,7 +121,12 @@ export function violacionesDeInvariantes(assets, indices = {}) {
 
 const rutaAsset = (t, pnid) => `tenants/${t}/metaAssets/${pnid}`;
 const rutaIdx = (pnid) => `metaExternalIndex/whatsapp_${pnid}`;
+const rutaConexion = (t, id) => `tenants/${t}/metaConnections/${id}`;
 const rutaRegistro = (t, id) => `tenants/${t}/whatsappCutovers/${id}`;
+
+/** Prefijo de las referencias del SecretStore (`lib/secretStore.ts`). Solo para derivar la RUTA
+ *  del documento del secreto: el valor cifrado no se lee jamás desde acá. */
+const PREFIJO_CREDENCIAL = 'secret://firestore/';
 
 async function leerEstado(db, tenantId, phoneNumberId, leer) {
   const snap = await leer(db.collection(`tenants/${tenantId}/metaAssets`).where('assetType', '==', 'whatsapp_phone_number'));
@@ -120,14 +135,25 @@ async function leerEstado(db, tenantId, phoneNumberId, leer) {
     .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   const seleccionados = assets.filter((a) => a.data.selected === true);
   const anteriorId = seleccionados.length === 1 ? seleccionados[0].id : null;
-  const leerIdx = async (pnid) => {
-    if (!pnid) return { exists: false, data: {}, updateTime: null };
-    const s = await leer(db.doc(rutaIdx(pnid)));
+  const leerDoc = async (ruta) => {
+    const s = await leer(db.doc(ruta));
     return { exists: !!s.exists, data: s.data() ?? {}, updateTime: s.updateTime ?? null };
   };
+  const AUSENTE = { exists: false, data: {}, updateTime: null };
+  const leerIdx = (pnid) => (pnid ? leerDoc(rutaIdx(pnid)) : Promise.resolve(AUSENTE));
   const idxNuevo = await leerIdx(phoneNumberId);
-  const idxAnterior = anteriorId && anteriorId !== phoneNumberId ? await leerIdx(anteriorId) : { exists: false, data: {}, updateTime: null };
-  return { assets, seleccionados, anteriorId, idxNuevo, idxAnterior };
+  const idxAnterior = anteriorId && anteriorId !== phoneNumberId ? await leerIdx(anteriorId) : AUSENTE;
+  // CIERRE COMPLETO del destino (correctivo release-safety): la conexión que el asset nuevo declara
+  // y la EXISTENCIA del documento de su credencial. Se leen con el mismo lector inyectado para que
+  // la firma los cubra igual que a los assets — dentro y fuera de la transacción.
+  const nuevo = assets.find((a) => a.id === phoneNumberId);
+  const connIdNuevo = typeof nuevo?.data?.connectionId === 'string' && nuevo.data.connectionId ? nuevo.data.connectionId : null;
+  const conexionDestino = connIdNuevo ? await leerDoc(rutaConexion(tenantId, connIdNuevo)) : AUSENTE;
+  const ref = typeof conexionDestino.data.tokenSecretRef === 'string' ? conexionDestino.data.tokenSecretRef : '';
+  const nombreCredencial = ref.startsWith(PREFIJO_CREDENCIAL) ? ref.slice(PREFIJO_CREDENCIAL.length) : '';
+  // Un nombre con '/' no es un doc válido de `secrets/{name}`: se trata como ausente (fail-closed).
+  const credencialDestino = nombreCredencial && !nombreCredencial.includes('/') ? await leerDoc(`secrets/${nombreCredencial}`) : AUSENTE;
+  return { assets, seleccionados, anteriorId, idxNuevo, idxAnterior, connIdNuevo, conexionDestino, credencialDestino };
 }
 
 /** Un valor CRUDO apto para serializar en la firma (nada exótico puede romper el hash). */
@@ -142,7 +168,9 @@ const serialIdx = (i) => ({ existe: i.exists, modo: crudo(i.data.automationMode)
  */
 export function firmaDeEstado(tenantId, phoneNumberId, degradarAnterior, estado) {
   const cuerpo = JSON.stringify({
-    v: 1,
+    // v2: la firma también cubre la conexión destino y la credencial (correctivo release-safety):
+    // si desaparecen o cambian entre el dry-run y el apply, la firma deja de coincidir y se aborta.
+    v: 2,
     tenantId,
     nuevo: phoneNumberId,
     degradarAnterior,
@@ -157,6 +185,14 @@ export function firmaDeEstado(tenantId, phoneNumberId, degradarAnterior, estado)
     })),
     idxNuevo: serialIdx(estado.idxNuevo),
     idxAnterior: serialIdx(estado.idxAnterior),
+    conexionDestino: {
+      existe: estado.conexionDestino.exists,
+      st: crudo(estado.conexionDestino.data.status),
+      // La REFERENCIA opaca del secreto entra al hash (jamás se imprime); el valor no se lee.
+      ref: crudo(estado.conexionDestino.data.tokenSecretRef),
+      ut: serialTs(estado.conexionDestino.updateTime),
+    },
+    credencialDestino: { existe: estado.credencialDestino.exists, ut: serialTs(estado.credencialDestino.updateTime) },
   });
   return createHash('sha256').update(cuerpo).digest('hex').slice(0, 24);
 }
@@ -179,6 +215,21 @@ function motivoDeBloqueo(estado, tenantId, phoneNumberId) {
   // El nuevo tiene que RUTEAR el inbound de ESTE tenant (mismo criterio que la migración).
   if (!estado.idxNuevo.exists) return 'sin_ruteo';
   if (estado.idxNuevo.data.tenantId !== tenantId) return 'ruteo_de_otro_tenant';
+  // El índice del ANTERIOR también tiene que ser propio: el cutover le corrige `automationMode` si
+  // declara, y hacerlo sobre una entrada a nombre de otro tenant sería una escritura cross-tenant.
+  // Ese estado (residuo de un cutover/offboarding parcial) lo repara un humano, no esta tool.
+  if (estado.idxAnterior.exists && estado.idxAnterior.data.tenantId !== tenantId) return 'ruteo_anterior_de_otro_tenant';
+  // CIERRE COMPLETO del destino: la conexión del nuevo tiene que existir y estar sana ANTES de
+  // degradar al número que vende — si no, el cutover fabrica un apagón con exit 0.
+  if (!estado.connIdNuevo || !estado.conexionDestino.exists) return 'sin_conexion_destino';
+  // El índice tiene que rutear a la MISMA conexión que el asset declara: si difieren, el inbound
+  // saldría por una conexión distinta de la que se verificó acá.
+  const connDelIdx = estado.idxNuevo.data.connectionId;
+  if (typeof connDelIdx === 'string' && connDelIdx && connDelIdx !== estado.connIdNuevo) return 'conexion_destino_invalida';
+  if (estado.conexionDestino.data.status !== 'active') return 'conexion_destino_invalida';
+  // Salud de la credencial: EXISTENCIA del documento referenciado, nada más. El ciphertext no se
+  // lee ni se descifra (invariante 9).
+  if (!estado.credencialDestino.exists) return 'credencial_destino_ausente';
   // Canales: el nuevo no puede compartir canal con el anterior ni con ningún otro `live`.
   const canalNuevo = canalDeclarado(nuevo.data, phoneNumberId);
   if (canalDeclarado(anterior.data, estado.anteriorId) === canalNuevo) return 'canal_compartido';
@@ -200,7 +251,7 @@ const fotoDeCampo = (data, campo) =>
  * `migrarModoAutomatizacion`.
  */
 export async function cutoverNumeroWhatsapp(db, opts = {}, deps = {}) {
-  const { tenantId, phoneNumberId, degradarAnterior, apply = false, firma = null, cutoverId = null } = opts;
+  const { tenantId, phoneNumberId, degradarAnterior, apply = false, firma = null, cutoverId = null, projectId = null } = opts;
   const degradarValido = DEGRADACIONES_VALIDAS.includes(degradarAnterior);
   const base = {
     tenant: tenantId ?? null,
@@ -212,6 +263,9 @@ export async function cutoverNumeroWhatsapp(db, opts = {}, deps = {}) {
   if (!tenantId || !phoneNumberId) return { ...base, outcome: 'invalid_args' };
   if (!degradarValido) return { ...base, outcome: 'invalid_degradar' };
   if (apply && !firma) return { ...base, outcome: 'falta_firma' };
+  // Invariante 10: el apply declara EXPLÍCITO contra qué proyecto escribe. Sin esto, el destino
+  // real era el `GCLOUD_PROJECT` ambiental — y el registro de reversa no sabía de qué mundo era.
+  if (apply && !projectId) return { ...base, outcome: 'falta_project' };
 
   const estado = await leerEstado(db, tenantId, phoneNumberId, (x) => x.get());
   base.numeroAnterior = estado.anteriorId ? enmascararPnid(estado.anteriorId) : null;
@@ -305,6 +359,9 @@ export async function cutoverNumeroWhatsapp(db, opts = {}, deps = {}) {
         tenantId,
         tipo: 'whatsapp_cutover',
         estado: 'aplicado',
+        // El PROYECTO del apply queda en el registro: la reversa pertenece a ESTE mundo y el
+        // rollback lo verifica antes de restaurar nada (invariante 10).
+        projectId,
         numeroNuevo: phoneNumberId,
         numeroAnterior: e2.anteriorId,
         degradarAnterior,
@@ -331,7 +388,7 @@ export async function cutoverNumeroWhatsapp(db, opts = {}, deps = {}) {
  * kill-switch del runbook), NO se pisa esa decisión (`estado_inesperado`).
  */
 export async function rollbackCutover(db, opts = {}) {
-  const { tenantId, cutoverId, apply = false } = opts;
+  const { tenantId, cutoverId, apply = false, projectId = null } = opts;
   const base = { tenant: tenantId ?? null, cutoverId: cutoverId ?? null, apply };
   if (!tenantId || !cutoverId) return { ...base, outcome: 'invalid_args' };
 
@@ -345,6 +402,16 @@ export async function rollbackCutover(db, opts = {}) {
     numeroNuevo: enmascararPnid(reg.numeroNuevo),
     numeroAnterior: enmascararPnid(reg.numeroAnterior),
   };
+
+  // Invariante 10: la reversa pertenece al proyecto donde se aplicó el cutover. Restaurarla en
+  // OTRO mundo (u omitir la declaración y depender del ambiente) no es un rollback: es escribir
+  // el estado de una base sobre otra. Se compara también en dry-run cuando el operador lo declara,
+  // para que la discrepancia se vea ANTES de intentar aplicar.
+  const proyectoDelRegistro = typeof reg.projectId === 'string' && reg.projectId ? reg.projectId : null;
+  if (projectId && proyectoDelRegistro && projectId !== proyectoDelRegistro) return { ...resumen, outcome: 'proyecto_no_coincide' };
+  if (apply && !projectId) return { ...resumen, outcome: 'falta_project' };
+  // Un registro sin proyecto es anterior a este correctivo (no hay ninguno desplegado): fail-closed.
+  if (apply && !proyectoDelRegistro) return { ...resumen, outcome: 'registro_sin_proyecto' };
 
   /** Documentos a restaurar: [ruta, foto previa (reversa), foto escrita (escrito)]. */
   const objetivos = [
@@ -417,15 +484,24 @@ if (isMain) {
   const degradarAnterior = arg('degradar-anterior');
   const firma = arg('firma');
   const cutoverId = arg('id');
+  const project = arg('project');
   const apply = process.argv.includes('--apply');
 
-  if (!tenantId || (!rollbackId && !phoneNumberId)) {
-    console.log('uso: node scripts/cutover-whatsapp-number.mjs --tenant <id> --nuevo <pnid> --degradar-anterior shadow|inactive [--firma <hex> --apply]');
-    console.log('     node scripts/cutover-whatsapp-number.mjs --tenant <id> --rollback <cutoverId> [--apply]');
-    console.log('     dry-run por defecto. --apply exige la --firma que imprimió el dry-run.');
+  if (!tenantId || (!rollbackId && !phoneNumberId) || (apply && !project)) {
+    console.log('uso: node scripts/cutover-whatsapp-number.mjs --tenant <id> --nuevo <pnid> --degradar-anterior shadow|inactive [--firma <hex> --project <id> --apply]');
+    console.log('     node scripts/cutover-whatsapp-number.mjs --tenant <id> --rollback <cutoverId> [--project <id> --apply]');
+    console.log('     dry-run por defecto. --apply exige la --firma que imprimió el dry-run Y el --project EXPLÍCITO (invariante 10: el destino no se hereda del ambiente).');
     process.exit(2);
   }
 
+  // El proyecto declarado no puede contradecir al ambiente: dos fuentes en desacuerdo sobre a qué
+  // base se escribe no se resuelven eligiendo una (misma lección que `resolverDestino` de backup).
+  const ambiental = process.env.GCLOUD_PROJECT || process.env.GOOGLE_CLOUD_PROJECT;
+  if (project && ambiental && ambiental !== project) {
+    console.error(`ABORTADO: --project ${project} contradice al GCLOUD_PROJECT del ambiente (${ambiental}).`);
+    process.exit(2);
+  }
+  if (project) process.env.GCLOUD_PROJECT = project;
   process.env.GCLOUD_PROJECT ??= 'demo-aiafg';
   const onEmulator = !!process.env.FIRESTORE_EMULATOR_HOST;
   if (!getApps().length) initializeApp({ projectId: process.env.GCLOUD_PROJECT });
@@ -439,8 +515,8 @@ if (isMain) {
   if (!apply) console.log('  (dry-run: usá --apply con la --firma impresa abajo; en prod, guardá este resumen antes de aplicar)');
 
   const r = rollbackId
-    ? await rollbackCutover(db, { tenantId, cutoverId: rollbackId, apply })
-    : await cutoverNumeroWhatsapp(db, { tenantId, phoneNumberId, degradarAnterior, apply, firma: firma || null, cutoverId: cutoverId || null });
+    ? await rollbackCutover(db, { tenantId, cutoverId: rollbackId, apply, projectId: project || null })
+    : await cutoverNumeroWhatsapp(db, { tenantId, phoneNumberId, degradarAnterior, apply, firma: firma || null, cutoverId: cutoverId || null, projectId: project || null });
   console.log('RESUMEN:', JSON.stringify(r, null, 2));
   process.exitCode = ['written', 'would_write', 'already'].includes(r.outcome) ? 0 : 1;
 }

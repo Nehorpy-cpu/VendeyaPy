@@ -23,6 +23,7 @@ import {
   isSessionKey,
   parseSessionKey,
   whatsappSessionKey,
+  derivarSessionKey,
   PLATFORM_SESSION_KEYS,
   sessionKeyDePlataforma,
 } from './whatsappAutomation.js';
@@ -194,6 +195,52 @@ describe('sessionKey — derivación y compatibilidad con el canal heredado', ()
     expect(parseSessionKey(undefined, 'active')).toBe('active');
     expect(parseSessionKey('a/b', 'wa_9')).toBe('wa_9');
     expect(parseSessionKey(42, 'active')).toBe('active');
+  });
+});
+
+/**
+ * CIERRE CORRECTIVO (Codex 2026-08-05, hallazgo 5) — ASSET AUSENTE ≠ DOCUMENTO LEGACY PRESENTE.
+ *
+ * El helper trataba `asset = null` («no hay documento») igual que «documento viejo sin
+ * `connectionId`», y por esa vía cualquier PNID cuyo asset se perdiera (offboarding o cutover
+ * parcial) caía en la sesión compartida `active`: el carrito, el takeover y el checkout del
+ * número que HOY vende, mezclados con un canal que ni siquiera tiene asset. La evidencia legacy
+ * tiene que ser un documento PRESENTE; la ausencia no es evidencia de nada.
+ */
+describe('derivarSessionKey — el asset AUSENTE no es evidencia legacy', () => {
+  const PNID = '444555666';
+
+  it('asset null + índice que conserva connectionId `wa_*` ⇒ la clave es la de ESA conexión, jamás `active`', () => {
+    expect(derivarSessionKey(PNID, null, { connectionId: 'wa_999888777' })).toBe('wa_999888777');
+  });
+
+  it('asset null sin ninguna evidencia ⇒ deriva del PNID, jamás `active`', () => {
+    expect(derivarSessionKey(PNID, null)).toBe(`wa_${PNID}`);
+    expect(derivarSessionKey(PNID, undefined, null)).toBe(`wa_${PNID}`);
+    expect(derivarSessionKey(PNID, null, {})).toBe(`wa_${PNID}`);
+  });
+
+  it('asset null + índice espejando `sessionKey: active` ⇒ jamás `active` (no hay documento que lo respalde)', () => {
+    expect(derivarSessionKey(PNID, null, { sessionKey: 'active' })).toBe(`wa_${PNID}`);
+  });
+
+  it('asset null + índice con connectionId `main` ⇒ sin documento legacy no se reclama `active`', () => {
+    expect(derivarSessionKey(PNID, null, { connectionId: 'main' })).toBe(`wa_${PNID}`);
+  });
+
+  it('asset null + connectionId del índice malformado ⇒ deriva del PNID (la clave es un id de documento)', () => {
+    expect(derivarSessionKey(PNID, null, { connectionId: 'wa_a/b' })).toBe(`wa_${PNID}`);
+    expect(derivarSessionKey(PNID, null, { connectionId: 42 })).toBe(`wa_${PNID}`);
+  });
+
+  it('dos PNID sin asset JAMÁS derivan la misma sesión', () => {
+    expect(derivarSessionKey('111000111', null)).not.toBe(derivarSessionKey('222000222', null));
+  });
+
+  it('documento legacy PRESENTE ⇒ `active` (cero regresión: `main`, anterior al campo, o declarado)', () => {
+    expect(derivarSessionKey('111222333', { connectionId: 'main' })).toBe('active');
+    expect(derivarSessionKey('111222333', {})).toBe('active');
+    expect(derivarSessionKey('111222333', { connectionId: 'main', sessionKey: 'active' })).toBe('active');
   });
 });
 

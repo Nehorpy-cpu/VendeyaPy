@@ -46,6 +46,13 @@ vi.mock('../lib/firebase.js', () => ({
         commit: async () => { for (const o of ops) docs.set(o.path, o.merge ? { ...(docs.get(o.path) ?? {}), ...o.data } : { ...o.data }); },
       };
     },
+    // Transacción de juguete: el claim del evento (H3) lee y escribe en un acto. Acá alcanza con
+    // ejecutarla secuencial — la CONTENCIÓN real se prueba en `accountUpdate.reanudable.test.ts`.
+    runTransaction: async <T>(fn: (tx: unknown) => Promise<T>): Promise<T> =>
+      fn({
+        get: async (ref: { get: () => Promise<unknown> }) => ref.get(),
+        set: (ref: { set: (d: Record<string, unknown>, o?: { merge?: boolean }) => Promise<void> }, d: Record<string, unknown>, o?: { merge?: boolean }) => void ref.set(d, o),
+      }),
   }),
   paths: {
     metaAsset: (t: string, id: string) => `tenants/${t}/metaAssets/${id}`,
@@ -94,8 +101,10 @@ describe('ACCOUNT_OFFBOARDED / PARTNER_REMOVED — el número deja de automatiza
 
     expect(r).toEqual({ aplicado: true, accion: 'degradado', tenantId: TENANT });
     expect(docs.get(assetPath)!['automationMode']).toBe('inactive');
-    // Y cierra la generación vigente del historial: la ventana murió con la desconexión.
-    expect(cerrarGeneracionPorOffboarding).toHaveBeenCalledWith(TENANT, PNID, T0);
+    // Y cierra la generación vigente del historial: la ventana murió con la desconexión. El 4.º
+    // argumento es el FENCE temporal (cuándo ocurrió según Meta): una generación que nació después
+    // de esta desconexión no puede ser sellada por ella.
+    expect(cerrarGeneracionPorOffboarding).toHaveBeenCalledWith(TENANT, PNID, T0, T0);
   });
 
   it('y también el índice: el desempate es por el más restrictivo', async () => {

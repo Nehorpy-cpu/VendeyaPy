@@ -25,6 +25,7 @@ import {
   masRestrictivo,
   sessionKeyDePlataforma,
   LEGACY_SESSION_KEY,
+  CONEXION_HEREDADA,
   AUTOMATION_MODE_FAIL_CLOSED,
   type WhatsappAutomationMode,
 } from '@vpw/shared';
@@ -38,6 +39,10 @@ export type OrigenAutomatizacion =
   | 'sin_declarar'
   | 'sin_pnid'
   | 'error_lectura'
+  // El índice opina pero el asset no existe o lo contradice (cierre Codex 2026-08-05, hallazgo 1).
+  // Terminal como los demás `inactive` —el sistema SABE que este ruteo no es confiable— pero con
+  // nombre propio para que el desenlace sea observable y un reconciliador futuro pueda barrerlo.
+  | 'inconsistencia_ruteo'
   | 'sin_gate';
 
 export interface CanalAutomatizacion {
@@ -86,7 +91,9 @@ const CANAL_CERRADO = (origen: OrigenAutomatizacion): CanalAutomatizacion => ({
 });
 
 /** Forma CRUDA de los dos documentos que pueden declarar algo sobre el canal. */
-type DeclaracionCruda = { automationMode?: unknown; sessionKey?: unknown; connectionId?: unknown } | null;
+type DeclaracionCruda =
+  | { automationMode?: unknown; sessionKey?: unknown; connectionId?: unknown; tenantId?: unknown; status?: unknown }
+  | null;
 
 /**
  * LA AUTORIDAD para derivar el canal, re-exportada desde acá porque este módulo es la puerta del
@@ -105,7 +112,39 @@ export { derivarSessionKey } from '@vpw/shared';
  */
 function leerDeclaracion(raw: unknown): DeclaracionCruda {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
-  return raw as { automationMode?: unknown; sessionKey?: unknown };
+  return raw as Exclude<DeclaracionCruda, null>;
+}
+
+/**
+ * Cierre Codex 2026-08-05 (hallazgo 1) — ¿el asset RESPALDA el `live` que declara el índice?
+ *
+ * El índice global es un ESPEJO de ruteo, no la autoridad: la autoridad es el asset del tenant.
+ * Un índice que quedó declarando `live` tras un fallo parcial de cutover u offboarding no puede
+ * alcanzar por sí solo para dejar pasar el mensaje al motor. Para que su `live` cuente, lo que el
+ * asset DECLARA no puede contradecirlo: no estar desactivado por un humano (`status`), ser del
+ * MISMO tenant que se está resolviendo y de la MISMA conexión que el índice dice rutear.
+ *
+ * La ausencia de un campo sigue sin votar (hay documentos anteriores a cada campo): lo que se
+ * exige no es que todo esté escrito, sino que NADA de lo escrito se contradiga. La dirección
+ * restrictiva del índice (`shadow`/`inactive`) no necesita respaldo — apagar de más es seguro.
+ */
+function assetRespaldaAlIndice(
+  tenantId: string,
+  asset: NonNullable<DeclaracionCruda>,
+  indice: DeclaracionCruda,
+): boolean {
+  // Un asset que un humano desactivó no corrobora ningún `live` residual del índice.
+  if (asset.status !== undefined && asset.status !== null && asset.status !== 'active') return false;
+  // Un índice que rutea hacia OTRO tenant es exactamente la clase de residuo que no puede mandar.
+  const tenantDelIndice = indice?.tenantId;
+  if (tenantDelIndice !== undefined && tenantDelIndice !== null && tenantDelIndice !== tenantId) return false;
+  // Si el índice declara conexión, el asset tiene que ser de ESA conexión. La ausencia del campo
+  // en el asset cuenta como la heredada: es lo que ya significa para `derivarSessionKey`.
+  const conexionDelIndice = indice?.connectionId;
+  if (conexionDelIndice !== undefined && conexionDelIndice !== null) {
+    if (conexionDelIndice !== (asset.connectionId ?? CONEXION_HEREDADA)) return false;
+  }
+  return true;
 }
 
 /**
@@ -148,6 +187,29 @@ export async function resolveAutomationMode(
   const opiniones: WhatsappAutomationMode[] = [];
   const delAsset = declaredAutomationMode(asset?.automationMode);
   const delIndice = declaredAutomationMode(indice?.automationMode);
+
+  // Cierre Codex 2026-08-05 (hallazgo 1): un índice residual NO es autoridad. Si el índice OPINA
+  // sobre un asset que no existe, eso no es «falta de evidencia» —es una INCONSISTENCIA de ruteo
+  // (cutover u offboarding parcial)— y se falla cerrado. Y si opina `live`, el asset además tiene
+  // que corroborarlo. La ausencia del asset SIN índice que opine sigue siendo el fail-closed de
+  // siempre (`sin_declarar`), y el flujo de la migración (asset `live`, índice callado) no cambia.
+  const inconsistente =
+    (delIndice !== null && asset === null) ||
+    (delIndice === 'live' && asset !== null && !assetRespaldaAlIndice(tenantId, asset, indice));
+  if (inconsistente) {
+    // Se loguea como WARN sin PNID ni claves: es la señal que el reconciliador futuro va a barrer.
+    logger.warn('automationMode: índice de ruteo inconsistente con el asset; queda INACTIVO', {
+      tenantId,
+      assetExiste: asset !== null,
+    });
+    // La clave sale de la MISMA autoridad de siempre: con el asset ausente deriva de la conexión
+    // `wa_*` que conserve el índice o del PNID — jamás `active` (ver `derivarSessionKey`).
+    return {
+      mode: AUTOMATION_MODE_FAIL_CLOSED,
+      sessionKey: derivarSessionKey(pnid, asset, indice),
+      origen: 'inconsistencia_ruteo',
+    };
+  }
   if (delAsset !== null) opiniones.push(delAsset);
   if (delIndice !== null) opiniones.push(delIndice);
   const mode = masRestrictivo(...opiniones);

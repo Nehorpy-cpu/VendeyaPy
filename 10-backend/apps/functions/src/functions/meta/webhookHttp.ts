@@ -104,13 +104,24 @@ function inboxEvent(id: string, platform: string, externalId: string, payload: u
   return baseEvent({ id, platform, kind: 'message', eventType: 'messages', externalId, payload, nowMs: Date.now(), ttlMs: TTL_MS });
 }
 
+/**
+ * Evento del ARCHIVO con la marca de MATERIAL DE OTRO CICLO (correctivo H9). Extensión LOCAL de
+ * `WebhookInboxEvent`: `fueraDeCiclo: true` declara que el chunk llegó cuando el coordinador
+ * vigente NO estaba recibiendo (generación nueva sin disparo usado, o cierre administrativo) —
+ * o sea, es material de una generación anterior que no puede gobernar ni contaminar la vigente.
+ * `generacionEtiquetada` deja explícito bajo qué generación vigente se lo recibió, porque la
+ * clave (`_fdc`) no siempre la transporta. Mudar ambos campos a `WebhookInboxEvent` en
+ * `@vpw/shared` cuando las superficies del programa se junten (ese archivo es de otra rama).
+ */
+type EventoDelArchivo = WebhookInboxEvent & { fueraDeCiclo?: boolean; generacionEtiquetada?: number };
+
 /** Una escritura ya DECIDIDA: qué colección, con qué id y con qué documento. */
 export interface PlannedWebhookWrite {
   collection: string;
   /** null ⇒ id automático (solo cuando no hay ninguna clave de idempotencia posible). */
   docId: string | null;
   kind: WebhookEventKind;
-  event: WebhookInboxEvent;
+  event: EventoDelArchivo;
   /**
    * Presente SOLO en los chunks de historial: lo que el coordinador durable necesita saber de ese
    * chunk para decidir si la sincronización avanzó, se rechazó o quedó incompleta. `nuevo` y
@@ -131,6 +142,14 @@ export interface PlannedWebhookWrite {
  * no duplica documentos por un cambio de formato.
  */
 const sufijoDeGeneracion = (generacion: number): string => (generacion > 1 ? `_g${generacion}` : '');
+
+/**
+ * Sufijo de MATERIAL FUERA DE CICLO (correctivo H9). Cuando el coordinador vigente no está
+ * recibiendo, el material es de OTRO ciclo y necesita una clave que no colisione ni con la
+ * generación anterior (sin sufijo o `_gN`) ni con la vigente (`_gN+1`): sin esto, una redelivery
+ * tardía de N robaba la clave de N+1 y el chunk real del ciclo nuevo moría como falso duplicado.
+ */
+const SUFIJO_FUERA_DE_CICLO = '_fdc';
 
 /**
  * Un duplicado NO significa lo mismo según el tipo. Un mensaje repetido es rutina de Meta
@@ -169,10 +188,19 @@ export function planWebhookWrites(
    * la clave histórica. Ver `sufijoDeGeneracion`.
    */
   generacionPorExternalId?: ReadonlyMap<string, number>,
+  /**
+   * PNIDs cuyo coordinador vigente NO está recibiendo (correctivo H9): el material del archivo es
+   * de otro ciclo y se persiste marcado y con clave propia. Ver `SUFIJO_FUERA_DE_CICLO`.
+   */
+  fueraDeCicloPorExternalId?: ReadonlySet<string>,
 ): PlannedWebhookWrite[] {
   const writes: PlannedWebhookWrite[] = [];
   const tenantDe = (externalId: string): string | null => tenantPorExternalId?.get(externalId) ?? null;
   const generacionDe = (externalId: string): number => generacionPorExternalId?.get(externalId) ?? 1;
+  const esFueraDeCiclo = (externalId: string): boolean => fueraDeCicloPorExternalId?.has(externalId) ?? false;
+  /** Los dos campos que declaran material de otro ciclo, o nada: el camino vigente no cambia. */
+  const marcaFueraDeCiclo = (externalId: string): Partial<EventoDelArchivo> =>
+    esFueraDeCiclo(externalId) ? { fueraDeCiclo: true, generacionEtiquetada: generacionDe(externalId) } : {};
 
   for (const m of parsed.messages) {
     const payload = {
@@ -233,7 +261,10 @@ export function planWebhookWrites(
     // sincronización de Meta. Sin fase ni orden no hay clave posible ⇒ id automático (mejor un
     // duplicado que perderlo: el historial no se puede volver a pedir).
     const generacion = generacionDe(c.externalId);
-    const clave = c.phase !== null && c.chunkOrder !== null ? `history_${c.externalId}_${c.phase}_${c.chunkOrder}${sufijoDeGeneracion(generacion)}` : '';
+    const fueraDeCiclo = esFueraDeCiclo(c.externalId);
+    const clave = c.phase !== null && c.chunkOrder !== null
+      ? `history_${c.externalId}_${c.phase}_${c.chunkOrder}${sufijoDeGeneracion(generacion)}${fueraDeCiclo ? SUFIJO_FUERA_DE_CICLO : ''}`
+      : '';
     const docId = inboxDocId(c.platform, clave);
     const declinado = esHistorialNoCompartido(c);
     const tenantId = tenantDe(c.externalId);
@@ -246,6 +277,7 @@ export function planWebhookWrites(
         historical: true,
         automationEligible: false,
         unread: false,
+        ...marcaFueraDeCiclo(c.externalId),
       },
       observacion: {
         phase: c.phase,
@@ -265,7 +297,10 @@ export function planWebhookWrites(
   // y NUNCA al inbox: `onWebhookInbox` dispara sobre todo documento de la bandeja, y estos son
   // material histórico. Sus mediaId sólo viven 14 días y no se pueden volver a pedir.
   for (const m of parsed.historyMedia) {
-    const docId = inboxDocId(m.platform, historyMediaIdempotencyKey(m, generacionDe(m.externalId)));
+    // La clave del adjunto la arma el parser; el sufijo fuera-de-ciclo se agrega acá porque la
+    // decisión de ciclo es del webhook (es quien lee el coordinador), no del parser.
+    const claveMedia = historyMediaIdempotencyKey(m, generacionDe(m.externalId)) + (esFueraDeCiclo(m.externalId) ? SUFIJO_FUERA_DE_CICLO : '');
+    const docId = inboxDocId(m.platform, claveMedia);
     writes.push({
       collection: COEXISTENCE_HISTORY_COLLECTION,
       docId: docId || null,
@@ -275,12 +310,15 @@ export function planWebhookWrites(
         historical: true,
         automationEligible: false,
         unread: false,
+        ...marcaFueraDeCiclo(m.externalId),
       },
     });
   }
 
   for (const a of parsed.appStateChanges) {
-    const clave = `appstate_${a.externalId}_${a.contactWaId}_${a.action}_${a.timestamp ?? 0}${sufijoDeGeneracion(generacionDe(a.externalId))}`;
+    // La agenda comparte el ciclo del historial (los dos `sync_type` salen del MISMO disparo
+    // único): si el receptor está cerrado, también es material de otro ciclo.
+    const clave = `appstate_${a.externalId}_${a.contactWaId}_${a.action}_${a.timestamp ?? 0}${sufijoDeGeneracion(generacionDe(a.externalId))}${esFueraDeCiclo(a.externalId) ? SUFIJO_FUERA_DE_CICLO : ''}`;
     const docId = inboxDocId(a.platform, clave);
     writes.push({
       collection: COEXISTENCE_APP_STATE_COLLECTION,
@@ -290,6 +328,7 @@ export function planWebhookWrites(
         ...baseEvent({ id: docId, platform: a.platform, kind: 'app_state', eventType: 'smb_app_state_sync', externalId: a.externalId, payload: { appState: a }, nowMs, ttlMs: APP_STATE_TTL_MS, tenantId: tenantDe(a.externalId) }),
         automationEligible: false,
         unread: false,
+        ...marcaFueraDeCiclo(a.externalId),
       },
     });
   }
@@ -307,11 +346,11 @@ export function planWebhookWrites(
  *     exactamente como estaba.
  *  2. Una lectura por PNID DISTINTO, no por chunk. Una sincronización de historial llega en
  *     tandas de chunks del mismo número.
- *  3. FAIL-SOFT: si el índice no resuelve o Firestore se cae, el chunk se escribe igual con
- *     `tenantId: null`. Meta da 24 h para sincronizar el historial y, pasadas, hay que desconectar
- *     el número y rehacer todo el onboarding sobre un número con clientes vivos: perder un chunk
- *     es peor que guardarlo sin etiquetar. La colección es `read: if false` y tiene TTL, así que
- *     un documento sin tenant no expone nada de más.
+ *  3. FAIL-CLOSED REANUDABLE (correctivo H11): si el índice no tiene el PNID, NO se persiste nada
+ *     del archivo — sin tenant no hay aislamiento verificable ni generación real, y el fail-soft
+ *     anterior (escribir con `tenantId: null` y generación 1 inventada) respondía 200 y quemaba
+ *     para siempre el único reintento que Meta ofrece. El 503 convierte ese reintento en la
+ *     cuarentena: cuando el binding exista, el MISMO evento vuelve y se persiste bien etiquetado.
  */
 export interface ResolucionDelArchivo {
   /**
@@ -321,21 +360,36 @@ export interface ResolucionDelArchivo {
    * reintente con la lectura sana; los mensajes vivos del mismo lote son idempotentes por wamid.
    */
   lecturaFallo: boolean;
+  /**
+   * true ⇒ la lectura ANDUVO pero el índice NO tiene el PNID de algún chunk del archivo: no se
+   * sabe ni el tenant, así que no hay generación real posible (correctivo H11). Persistir ahí era
+   * inventar la generación 1, responder 200 y perder para siempre el reintento de Meta. Mismo
+   * desenlace que `lecturaFallo`: 503 sin escribir nada del archivo.
+   */
+  bindingAusente: boolean;
   /** PNID → empresa (o `null` si el índice no resolvió). */
   tenants: Map<string, string | null>;
   /** PNID → generación de la sincronización, del coordinador durable. Ver `sufijoDeGeneracion`. */
   generaciones: Map<string, number>;
+  /**
+   * PNIDs cuyo coordinador vigente NO está recibiendo (correctivo H9): cierre administrativo, o
+   * generación nueva sin disparo usado. Su material es de OTRO ciclo — se persiste marcado
+   * (`fueraDeCiclo: true`) y con clave propia para no robarle la clave al ciclo vigente.
+   */
+  fueraDeCiclo: Set<string>;
 }
 
 export async function resolveTenantsDelArchivo(parsed: ParseResult): Promise<ResolucionDelArchivo> {
   const tenants = new Map<string, string | null>();
   const generaciones = new Map<string, number>();
+  const fueraDeCiclo = new Set<string>();
   let lecturaFallo = false;
+  let bindingAusente = false;
   const pendientes = new Set<string>();
   for (const c of parsed.historyChunks) if (c.externalId) pendientes.add(`${c.platform}_${c.externalId}`);
   for (const m of parsed.historyMedia) if (m.externalId) pendientes.add(`${m.platform}_${m.externalId}`);
   for (const a of parsed.appStateChanges) if (a.externalId) pendientes.add(`${a.platform}_${a.externalId}`);
-  if (pendientes.size === 0) return { tenants, generaciones, lecturaFallo };
+  if (pendientes.size === 0) return { tenants, generaciones, fueraDeCiclo, lecturaFallo, bindingAusente };
 
   for (const clave of pendientes) {
     const externalId = clave.slice(clave.indexOf('_') + 1);
@@ -345,10 +399,20 @@ export async function resolveTenantsDelArchivo(parsed: ParseResult): Promise<Res
       const tenantId = typeof crudo === 'string' && crudo !== '' ? crudo : null;
       tenants.set(externalId, tenantId);
       // La generación sólo se puede leer con el tenant resuelto (el coordinador vive bajo la
-      // empresa). Sin él queda 1: la clave histórica, que es la que no rompe nada.
+      // empresa). Sin tenant no hay generación QUE INVENTAR: el lote del archivo se cuarentena
+      // con 503 (correctivo H11) y el reintento de Meta lo trae cuando el binding exista.
       if (tenantId) {
         const coord = await leerCoordinador(tenantId, externalId);
         if (coord?.syncGeneration && coord.syncGeneration > 1) generaciones.set(externalId, coord.syncGeneration);
+        // ¿El coordinador vigente está RECIBIENDO? Mismo predicado que el `receptorCerrado` de
+        // `registrarObservaciones` (historyCoordinator): duplicarlo acá es deliberadamente
+        // temporal — cuando esa superficie exporte el predicado puro, consumirlo de ahí. Un
+        // coordinador AUSENTE no cierra nada: el huérfano es legítimo y queda visible como tal.
+        if (coord && (coord.cierreAdministrativo === true || (coord.status === 'pending_request' && !coord.requestedAt))) {
+          fueraDeCiclo.add(externalId);
+        }
+      } else {
+        bindingAusente = true;
       }
     } catch (e) {
       // Sin el PNID en el log: identifica al negocio. Solo el nombre del error.
@@ -359,7 +423,7 @@ export async function resolveTenantsDelArchivo(parsed: ParseResult): Promise<Res
       lecturaFallo = true;
     }
   }
-  return { tenants, generaciones, lecturaFallo };
+  return { tenants, generaciones, fueraDeCiclo, lecturaFallo, bindingAusente };
 }
 
 export const metaWebhook = onRequest({ region: 'us-central1', cors: false }, async (req, res) => {
@@ -403,19 +467,34 @@ export const metaWebhook = onRequest({ region: 'us-central1', cors: false }, asy
     const parsed = parseMetaWebhookPayload(req.body);
     const nowMs = Date.now();
     const archivo = await resolveTenantsDelArchivo(parsed);
+    const hayArchivo = parsed.historyChunks.length > 0 || parsed.historyMedia.length > 0 || parsed.appStateChanges.length > 0;
     // Correctivo (ALTO 9): con la lectura de generaciones/índice CAÍDA, las claves del archivo se
     // generarían sin sufijo y colisionarían con la generación 1 — el resync entero moriría como
     // falso duplicado, en silencio. Se pide el reintento a Meta ANTES de escribir nada del lote.
-    if (archivo.lecturaFallo && (parsed.historyChunks.length > 0 || parsed.historyMedia.length > 0 || parsed.appStateChanges.length > 0)) {
+    if (archivo.lecturaFallo && hayArchivo) {
       logger.error('metaWebhook: lectura de generación/índice caída con archivo en el lote; se pide reintento a Meta');
       res.status(503).json({ ok: false, retry: true });
       return;
     }
-    const plan = planWebhookWrites(parsed, nowMs, archivo.tenants, archivo.generaciones);
+    /**
+     * Correctivo H11 — mismo mecanismo, otra causa: el índice ANDA pero el PNID del archivo no
+     * está. Sin saber ni el tenant no se puede persistir historial: sería inventar la generación 1
+     * y clasificar PII bajo el ciclo equivocado, con un 200 que quema el único reintento posible.
+     *
+     * PERO el 503 NO puede tirar el lote entero (review final): Meta batchea varias  en un
+     * POST, así que el mismo cuerpo puede traer MENSAJES VIVOS del número que vende. Y el binding
+     * ausente NO siempre es transitorio — borra la entrada del índice a
+     * propósito—, así que la redelivery podría fallar para siempre y esos mensajes se perderían.
+     * Por eso: se ejecutan las escrituras que NO son de archivo (idempotentes por wamid: una
+     * redelivery las vuelve duplicados inocuos) y recién después se pide el reintento.
+     */
+    const soloArchivoSinBinding = archivo.bindingAusente && hayArchivo;
+    const plan = planWebhookWrites(parsed, nowMs, archivo.tenants, archivo.generaciones, archivo.fueraDeCiclo)
+      .filter((w) => !soloArchivoSinBinding || (w.kind !== 'history' && w.kind !== 'app_state'));
     let written = 0;
     const dups = { duplicates: 0, historyDuplicates: 0, appStateDuplicates: 0 };
     /** Observaciones del historial agrupadas por (empresa, número) para el coordinador durable. */
-    const observaciones = new Map<string, { tenantId: string; phoneNumberId: string; chunks: ChunkObservado[]; media: number }>();
+    const observaciones = new Map<string, { tenantId: string; phoneNumberId: string; generacionEtiquetada: number; fueraDeCiclo: boolean; chunks: ChunkObservado[]; media: number }>();
     /** ¿Falló la persistencia de algún chunk del ARCHIVO? Decide el código de respuesta. */
     let archivoNoPersistido = false;
     const anotar = (tenantId: string | null, phoneNumberId: string): { chunks: ChunkObservado[]; media: number } | null => {
@@ -423,7 +502,23 @@ export const metaWebhook = onRequest({ region: 'us-central1', cors: false }, asy
       // Meta, no inventando un destino.
       if (!tenantId || !phoneNumberId) return null;
       const clave = `${tenantId}|${phoneNumberId}`;
-      if (!observaciones.has(clave)) observaciones.set(clave, { tenantId, phoneNumberId, chunks: [], media: 0 });
+      if (!observaciones.has(clave)) {
+        observaciones.set(clave, {
+          tenantId,
+          phoneNumberId,
+          // Bajo qué generación vigente se recibió (y se claveó) este lote. Es lo que el
+          // coordinador necesita para contar material de otro ciclo sin gobernar con él (H9).
+          generacionEtiquetada: archivo.generaciones.get(phoneNumberId) ?? 1,
+          // Lo que se persistió con clave `_fdc` NO puede gobernar el ciclo vigente NUNCA: la
+          // decisión se toma acá, con la misma lectura del coordinador que decidió la clave, y
+          // viaja con el grupo. Re-derivarla en el coordinador abriría una carrera — entre esta
+          // lectura y su transacción puede commitear un `reclamarDisparo` y el material quedaría
+          // acumulado como si fuera del ciclo nuevo.
+          fueraDeCiclo: archivo.fueraDeCiclo.has(phoneNumberId),
+          chunks: [],
+          media: 0,
+        });
+      }
       return observaciones.get(clave)!;
     };
 
@@ -471,6 +566,11 @@ export const metaWebhook = onRequest({ region: 'us-central1', cors: false }, asy
         observaciones: grupo.chunks,
         mediaObservados: grupo.media,
         nowMs,
+        // H9 — la generación con la que se CLAVEÓ el material viaja al coordinador: si no coincide
+        // con la vigente al acumular (carrera entre esta lectura y un re-onboarding), el material
+        // cuenta como fuera de ciclo bajo SU etiqueta y no gobierna el estado del ciclo nuevo.
+        generacionEtiquetada: grupo.generacionEtiquetada,
+        materialDeOtraGeneracion: grupo.fueraDeCiclo,
       });
     }
 
@@ -512,6 +612,14 @@ export const metaWebhook = onRequest({ region: 'us-central1', cors: false }, asy
     // reintento de Meta es la única red que existe, y perderlo en silencio es lo prohibido.
     if (archivoNoPersistido) {
       logger.error('metaWebhook: un chunk del historial no se pudo persistir; se pide reintento a Meta');
+      res.status(503).json({ ok: false, retry: true, ...resumen });
+      return;
+    }
+    // H11 — el archivo de este lote NO se persistió (su PNID no resuelve tenant): se pide el
+    // reintento. Los mensajes VIVOS del mismo POST ya se escribieron arriba, así que la redelivery
+    // los reencuentra como duplicados inocuos en vez de perderlos con el lote.
+    if (soloArchivoSinBinding) {
+      logger.error('metaWebhook: archivo de Coexistence con PNID sin índice; se pide reintento a Meta (el tráfico vivo del lote ya se persistió)');
       res.status(503).json({ ok: false, retry: true, ...resumen });
       return;
     }

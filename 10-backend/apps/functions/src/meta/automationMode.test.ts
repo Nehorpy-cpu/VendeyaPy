@@ -243,6 +243,83 @@ describe('resolveAutomationMode — el canal heredado es de UN solo número', ()
   });
 });
 
+/**
+ * CIERRE CORRECTIVO (Codex 2026-08-05, hallazgo 1) — UN ÍNDICE RESIDUAL NO ES AUTORIDAD.
+ *
+ * Con el índice global declarando `live` y el asset del tenant INEXISTENTE, la «ausencia no vota»
+ * dejaba al índice como única opinión y el mensaje pasaba al motor. Pero un índice cuyo asset no
+ * existe es exactamente lo que deja un fallo parcial de cutover u offboarding: un residuo de
+ * ruteo, no una decisión humana. La regla nueva: para que el índice OPINE, el asset tiene que
+ * existir; y para que su `live` cuente, el asset tiene que corroborarlo (no estar desactivado,
+ * mismo tenant, misma conexión). La inconsistencia se falla cerrada con origen PROPIO
+ * (`inconsistencia_ruteo`) para que el reconciliador futuro pueda encontrarla.
+ */
+describe('resolveAutomationMode — un índice residual NO es autoridad (inconsistencia de ruteo)', () => {
+  it('índice `live` con asset AUSENTE ⇒ inactive: la ausencia del asset SÍ es inconsistencia', async () => {
+    const r = await resolveAutomationMode(TENANT, PNID_NUEVO, {
+      automationMode: 'live', connectionId: `wa_${PNID_NUEVO}`, tenantId: TENANT,
+    });
+    expect(r.mode).toBe('inactive');
+    expect(r.origen).toBe('inconsistencia_ruteo');
+  });
+
+  it('la sessionKey del veredicto inconsistente sale de la conexión del índice (`wa_*`), jamás `active`', async () => {
+    const r = await resolveAutomationMode(TENANT, PNID_NUEVO, { automationMode: 'live', connectionId: `wa_${PNID_NUEVO}` });
+    expect(r.sessionKey).toBe(`wa_${PNID_NUEVO}`);
+    expect(r.sessionKey).not.toBe('active');
+  });
+
+  it('índice `shadow` con asset AUSENTE tampoco observa nada: inconsistencia ⇒ inactive', async () => {
+    const r = await resolveAutomationMode(TENANT, PNID_NUEVO, { automationMode: 'shadow' });
+    expect(r.mode).toBe('inactive');
+    expect(r.origen).toBe('inconsistencia_ruteo');
+  });
+
+  it('índice live + asset live SANO (mismo tenant, misma conexión, activo) ⇒ live: cero regresión', async () => {
+    docs.set(assetPath(TENANT, PNID_ACTUAL), { automationMode: 'live', status: 'active', connectionId: 'main' });
+    const r = await resolveAutomationMode(TENANT, PNID_ACTUAL, { automationMode: 'live', connectionId: 'main', tenantId: TENANT });
+    expect(r.mode).toBe('live');
+  });
+
+  it('asset live + índice que NO opina ⇒ live: el flujo de la migración queda intacto', async () => {
+    docs.set(assetPath(TENANT, PNID_ACTUAL), { automationMode: 'live' });
+    expect((await resolveAutomationMode(TENANT, PNID_ACTUAL, { tenantId: TENANT })).mode).toBe('live');
+    expect((await resolveAutomationMode(TENANT, PNID_ACTUAL)).mode).toBe('live');
+  });
+
+  it('asset AUSENTE sin índice que opine ⇒ sigue el fail-closed normal (sin_declarar)', async () => {
+    const r = await resolveAutomationMode(TENANT, PNID_NUEVO);
+    expect(r.mode).toBe('inactive');
+    expect(r.origen).toBe('sin_declarar');
+  });
+
+  it('índice y asset de conexiones DISTINTAS ⇒ inactive (el ruteo y el permiso no hablan del mismo canal)', async () => {
+    docs.set(assetPath(TENANT, PNID_NUEVO), { automationMode: 'live', status: 'active', connectionId: `wa_${PNID_NUEVO}` });
+    const r = await resolveAutomationMode(TENANT, PNID_NUEVO, { automationMode: 'live', connectionId: 'main' });
+    expect(r.mode).toBe('inactive');
+    expect(r.origen).toBe('inconsistencia_ruteo');
+  });
+
+  it('índice live que declara OTRO tenant ⇒ inactive (el residuo no cruza tenants)', async () => {
+    docs.set(assetPath(TENANT, PNID_ACTUAL), { automationMode: 'live', status: 'active' });
+    const r = await resolveAutomationMode(TENANT, PNID_ACTUAL, { automationMode: 'live', tenantId: OTRO_TENANT });
+    expect(r.mode).toBe('inactive');
+    expect(r.origen).toBe('inconsistencia_ruteo');
+  });
+
+  it('índice live sobre un asset con `status` no-activo ⇒ inactive (apagar fue una decisión humana)', async () => {
+    docs.set(assetPath(TENANT, PNID_ACTUAL), { automationMode: 'live', status: 'disconnected' });
+    const r = await resolveAutomationMode(TENANT, PNID_ACTUAL, { automationMode: 'live' });
+    expect(r.mode).toBe('inactive');
+  });
+
+  it('la dirección RESTRICTIVA del índice no necesita respaldo: `inactive` del índice sigue apagando', async () => {
+    docs.set(assetPath(TENANT, PNID_ACTUAL), { automationMode: 'live', status: 'active', connectionId: 'main' });
+    const r = await resolveAutomationMode(TENANT, PNID_ACTUAL, { automationMode: 'inactive', connectionId: `wa_${PNID_ACTUAL}` });
+    expect(r.mode).toBe('inactive');
+  });
+});
+
 describe('canalSinGate — el escape EXPLÍCITO para lo que no es un número de WhatsApp', () => {
   it('automatiza, pero en el canal PROPIO de su plataforma (ADR-0017 §2): nunca en `active`', () => {
     expect(canalSinGate('instagram').mode).toBe('live');

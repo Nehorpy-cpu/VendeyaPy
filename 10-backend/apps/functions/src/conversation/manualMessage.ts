@@ -156,17 +156,38 @@ export async function sendManualMessage(
 
   const conv = (customer as { conversation?: { humanTakeover?: boolean; receivedVia?: string | null; channel?: string | null } }).conversation;
   /**
+   * DISPATCHER POR CANAL (H2 / ADR-0017 §2) — el transporte se decide ANTES que cualquier otra
+   * cosa. `getWhatsAppClient` es el único sender implementado: para una conversación de
+   * Instagram/Messenger no existe por dónde mandar, así que se RECHAZA fail-closed acá mismo —
+   * sin burbuja persistida y sin decir «enviado». Reutilizar WhatsApp como fallback filtraba el
+   * contenido del chat a un número (`whatsappPhone`/`customerId`) que puede ser de OTRA persona.
+   * La decisión sale de `canalDePlataformaNoWhatsapp` — la MISMA regla que usa el panel — para
+   * que el dispatcher y el resto del sistema no puedan divergir.
+   */
+  const canalPlataforma = canalDePlataformaNoWhatsapp(conv?.channel);
+  if (canalPlataforma !== null) {
+    // La plataforma no es PII (es 'instagram'/'messenger'); el teléfono va enmascarado como siempre.
+    logger.warn('Mensaje manual: la conversación es de otra plataforma y no hay sender implementado', {
+      tenantId: input.tenantId,
+      customerId: maskPhone(input.customerId),
+      channel: conv?.channel ?? null,
+    });
+    throw new HttpsError(
+      'failed-precondition',
+      'Todavía no se puede responder conversaciones de Instagram/Messenger desde el panel. El mensaje NO se envió.',
+      { kind: 'channel_send_unsupported' },
+    );
+  }
+  /**
    * ADR-0017 §2 — el gate se evalúa contra la conversación QUE EL VENDEDOR ESTÁ MIRANDO. Leyendo
    * siempre `sessions/active`, los dos errores posibles eran igual de malos: rebotarle su propio
    * mensaje («tocá Tomar conversación») sobre un chat que ya tomó, o dar por bueno el takeover del
    * otro número y saltear el gate de cotización de envío escribiéndole al cliente igual.
    *
-   * La PLATAFORMA decide antes que el número receptor: `receivedVia` lo escribe solo WhatsApp, así
-   * que una conversación de Instagram/Messenger caería al canal legacy `active` — la conversación
-   * del número de WhatsApp que vende — y el gate miraría el takeover equivocado.
+   * Llegado acá la conversación es de WhatsApp (el dispatcher ya rechazó las otras plataformas),
+   * así que el canal se resuelve con la autoridad del número receptor.
    */
-  const sessionKey =
-    canalDePlataformaNoWhatsapp(conv?.channel) ?? (await deps.resolverCanal(input.tenantId, conv?.receivedVia ?? null));
+  const sessionKey = await deps.resolverCanal(input.tenantId, conv?.receivedVia ?? null);
   // Sesión (fuente de verdad) con fallback al resumen del customer (conversaciones sin sesión).
   const gate = await deps.getGateContext(input.tenantId, input.customerId, sessionKey);
   const humanTakeover = gate.humanTakeover ?? conv?.humanTakeover === true;
