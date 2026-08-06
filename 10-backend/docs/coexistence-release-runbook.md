@@ -113,6 +113,13 @@ Verificación post-deploy obligatoria: `firebase functions:list` debe seguir **s
 | Webhooks suscritos: `messages`, `statuses`, `smb_message_echoes`, `history`, `smb_app_state_sync`, `account_update` | pendiente de evidencia |
 | **Elegibilidad de PARAGUAY para Coexistence** | **ABIERTO, y Meta NO lo documenta en ninguna lista maestra** |
 
+> **Precisión del preflight 2026-08-06 sobre el gate de webhooks**: el despachador consume
+> exactamente **5 fields** (`messages`, `smb_message_echoes`, `history`, `smb_app_state_sync`,
+> `account_update`); los `statuses` viajan DENTRO de `messages` como `value.statuses` — no hay un
+> case `statuses` separado. Y este gate es el único de los cinco verificable por lectura:
+> `GET /{app-id}/subscriptions` con app access token construido server-side (`META_APP_ID` +
+> `META_APP_SECRET`, ya en Secret Manager) lista los fields suscriptos sin mutar nada.
+
 > **El gate de país es el más peligroso porque no tiene fuente que consultar.** Meta no publica una
 > lista maestra de países habilitados para Coexistence. No se puede cerrar leyendo documentación ni
 > mirando el repo: hay que confirmarlo con el canal de soporte / partner manager **antes** de tocar
@@ -172,9 +179,16 @@ Es del owner y lo hace el owner. Antes del Embedded Signup:
 
 ### Paso 5 — Migrar el PNID actual a `live`, con precondición fresca, **ANTES del deploy**
 ```
-node apps/functions/scripts/migrate-whatsapp-automation-mode.mjs --tenant <tenantId> --pnid <pnid> --mode live          # dry-run: guardar el resumen
-node apps/functions/scripts/migrate-whatsapp-automation-mode.mjs --tenant <tenantId> --pnid <pnid> --mode live --apply
+GCLOUD_PROJECT=vpw-prod-dd6ff node apps/functions/scripts/migrate-whatsapp-automation-mode.mjs --tenant <tenantId> --pnid <pnid> --mode live          # dry-run: guardar el resumen
+GCLOUD_PROJECT=vpw-prod-dd6ff node apps/functions/scripts/migrate-whatsapp-automation-mode.mjs --tenant <tenantId> --pnid <pnid> --mode live --apply
 ```
+> ⚠️ **El prefijo `GCLOUD_PROJECT=vpw-prod-dd6ff` no es decorativo** (preflight 2026-08-06): el
+> script **no acepta `--project`** y resuelve el destino por `GCLOUD_PROJECT`, con **default
+> `demo-aiafg`** si falta (`migrate-whatsapp-automation-mode.mjs:261`). Sin el prefijo, la
+> migración — y peor, el kill-switch del Paso 13 — "aplican" contra el proyecto demo reportando
+> éxito mientras producción queda igual. Correr SIEMPRE con el prefijo explícito. Además el script
+> usa firebase-admin: necesita ADC en la máquina (`gcloud auth application-default login` o
+> `GOOGLE_APPLICATION_CREDENTIALS`), que la sesión del firebase CLI **no** provee.
 **Por qué antes y no después**: el gate de ADR-0017 es fail-closed. Si se despliega primero, el
 número que hoy vende lee el campo ausente, resuelve `inactive` y **queda mudo** hasta que alguien
 corra la migración. El código desplegado hoy ignora el campo, así que en este orden **no hay ventana
@@ -214,7 +228,10 @@ algo distinto de `live` bloquea el release (`motivo: 'indice_no_live'`) aunque e
 
 ### Paso 6 — Deploy
 Orden: **Rules → índices → Functions → Hosting**. Todo con `--project vpw-prod-dd6ff` explícito
-(el `default` de `.firebaserc` es `vpw-dev`) y con selector explícito.
+(el `default` de `.firebaserc` es `vpw-dev`) y con selector explícito. **Siempre con el CLI del
+repo** (`corepack pnpm exec firebase …` desde `10-backend`): el `firebase` global de la máquina es
+15.x y el validado por el walker del release-audit es el del repo (13.35.1) — dos majors de
+distancia en la herramienta de deploy no se estrenan el día del release.
 
 **6.1 Rules.** 4 matches nuevos, los cuatro `read, write: if false`
 (`metaWebhookHistory`, `metaWebhookAppState`, `metaWebhookShadow` y
@@ -262,11 +279,22 @@ hash de `.env.vpw-prod-dd6ff` idéntico antes y después, 8 schedulers con el nu
 público**.
 
 **6.4 Hosting.** Crear TEMPORAL `apps/web/.env.production.local` → desplegar → **borrarlo**.
-El temporal debe definir **las 10 claves** (las 9 de `HANDOFF` §5 **más**
-`NEXT_PUBLIC_META_COEXISTENCE_CONFIG_ID`): cualquier variable ausente cae al valor DEMO del
-`.env.local` de la máquina y un smoke de "/login responde 200" **no lo detecta**.
+El temporal debe definir **las 12 claves obligatorias** — corrección del preflight 2026-08-06: el
+código consume **14** `NEXT_PUBLIC_*`, no 10, y la lista anterior omitía dos SIN fallback. Son:
+las 9 de `HANDOFF` §5, más `NEXT_PUBLIC_META_COEXISTENCE_CONFIG_ID`, más
+`NEXT_PUBLIC_META_APP_ID` (obligatoria para AMBOS flujos del Embedded Signup, sin fallback:
+`metaEmbeddedSignup.ts` devuelve `null` y la opción muere en silencio — o peor, el build hornea el
+App ID demo del `.env.local` de la máquina) y `NEXT_PUBLIC_META_CONFIG_ID` (flujo estándar, sin
+fallback; en este release puede definirse **vacía a propósito**: deshabilita el flujo estándar en
+el panel, que es exactamente lo que el programa del número real exige). Las otras 2 consumidas son
+degradables pero conviene fijarlas: `NEXT_PUBLIC_META_GRAPH_VERSION` (default `v19.0`) y
+`NEXT_PUBLIC_SUPPORT_WHATSAPP` (vacía oculta los CTA de wa.me, incluida la página de registro por
+invitación). Cualquier variable ausente cae al valor DEMO del `.env.local` de la máquina y un smoke
+de "/login responde 200" **no lo detecta**.
 Verificación: descargar los chunks de la raíz y confirmar `vpw-prod-dd6ff.firebaseapp.com` presente y
-**cero** ocurrencias de `localhost:`, `vpw-staging`, `vpw-dev` y del projectId demo.
+**cero** ocurrencias de `localhost:`, `vpw-staging`, `vpw-dev`, del projectId demo **y del App ID
+demo de Meta**. Nota de plantilla: `apps/web/.env.production.example` todavía no lista
+`NEXT_PUBLIC_META_COEXISTENCE_CONFIG_ID` (solo está en `.env.example`); no usarla como checklist.
 
 ### Paso 7 — Verificación técnica CON EL NÚMERO ACTUAL
 Antes de tocar el número nuevo, demostrar que el que ya vende sigue vendiendo:
@@ -333,7 +361,7 @@ NO bloquea una reconexión legítima.
 
 ### Paso 11 — `shadow`, sin una sola respuesta
 ```
-node apps/functions/scripts/migrate-whatsapp-automation-mode.mjs --tenant <tenantId> --pnid <pnid nuevo> --mode shadow --apply
+GCLOUD_PROJECT=vpw-prod-dd6ff node apps/functions/scripts/migrate-whatsapp-automation-mode.mjs --tenant <tenantId> --pnid <pnid nuevo> --mode shadow --apply
 ```
 Qué se observa durante la ventana de `shadow`: los inbound y los echoes del número nuevo aparecen en
 `metaWebhookShadow`, **y nada más**. Lo que hay que verificar que NO pasó:
@@ -395,8 +423,11 @@ rechazados por Meta que el sistema leería como fallas propias.
 **Apagar nunca se bloquea.** El rollback del eje de automatización es un solo comando por número y no
 pasa por ninguna verificación de promoción:
 ```
-node apps/functions/scripts/migrate-whatsapp-automation-mode.mjs --tenant <tenantId> --pnid <pnid> --mode inactive --apply
+GCLOUD_PROJECT=vpw-prod-dd6ff node apps/functions/scripts/migrate-whatsapp-automation-mode.mjs --tenant <tenantId> --pnid <pnid> --mode inactive --apply
 ```
+> Sin el prefijo `GCLOUD_PROJECT=vpw-prod-dd6ff`, el kill-switch "apaga" el proyecto **demo** y
+> reporta éxito (ver la advertencia del Paso 5). En una emergencia ese error cuesta minutos con el
+> bot hablando: dejar el comando completo copiado en el registro del release.
 Deja el número **conectado y sin automatizar**. No desconecta nada.
 
 | Síntoma | Acción |
@@ -404,7 +435,7 @@ Deja el número **conectado y sin automatizar**. No desconecta nada.
 | El número nuevo contesta algo que no debía | `--mode inactive` sobre el número NUEVO |
 | El número que ya vende quedó mudo tras el deploy | Verificar el Paso 5; si el campo no quedó `live`, correr la migración (es la cura, no el rollback) |
 | El bot habla encima del vendedor | `--mode inactive` sobre ese número; revisar el consumo de `smb_message_echoes` |
-| Hay que revertir el código | Redeploy del artefacto de `30c1687` con el MISMO selector; el campo `automationMode` queda escrito y el código anterior **lo ignora**, así que revertir no deja a nadie mudo |
+| Hay que revertir el código | Redeploy del artefacto de `30c1687` con el selector **de reversa: solo las 115 UPDATE** — los 6 CREATE de coexistence* **no existen en `30c1687`** e incluirlos aborta el `firebase deploy` entero a mitad del rollback (corrección del preflight 2026-08-06; el texto anterior decía "el MISMO selector"). Las 6 functions nuevas QUEDAN desplegadas con su código nuevo: son superficie aditiva, borrarlas violaría el 0-DELETE, y el kill-switch las gobierna. El artefacto de reversa se arma con el **tooling de deploy de HEAD** (`build-deploy.mjs` actual, post-fix de fuga de secretos) sobre las FUENTES de `30c1687` — jamás con el tooling viejo de ese commit. El campo `automationMode` queda escrito y el código anterior **lo ignora**, así que revertir no deja a nadie mudo |
 | Meta desconectó el número solo | Llega por `account_update` (`ACCOUNT_OFFBOARDED`, `PARTNER_REMOVED`); ese PNID se degrada a `inactive` **en el asset y en el índice**. **La Deregister API está PROHIBIDA en coexistencia**: desconectar es un acto del cliente desde su app, nunca nuestro |
 | Reconectado tras un `ACCOUNT_OFFBOARDED` y hay que volver a habilitarlo | La misma migración (`--mode shadow`/`live --apply`) corrige **los dos** documentos y su resumen lo declara en `indice`. Verificar con `release-audit.mjs`: si el índice quedara en `inactive`, el número estaría mudo aunque el asset diga `live` |
 

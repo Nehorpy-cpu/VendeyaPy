@@ -143,3 +143,12 @@ Firestore, y el guard monotónico borraba el resumen del cliente. Dos pasadas E2
 emuladores limpios (14 suites cada una). Sin deploy, sin Meta, sin producción. Cuatro pruebas
 externas quedan diferidas al Programa 2 (contrato de timestamp, cardinalidad de WABA, prueba de
 offboarding, provenance de bundles) — resueltas fail-closed en código, sin validación real.
+
+### Programa 2 — Preflight del release (2026-08-06)
+Etapa A verde completa (batería + E2E + grafo 122 exports, CREATE=6/UPDATE=115/DELETE=0) y baseline
+productiva congelada read-only (un solo PNID, automationMode ausente = migracion_pendiente esperado;
+credipower intacto). Runbook corregido con 6 precisiones doc-only (lista real de claves de Hosting,
+selector de reversa sin los 6 CREATE, prefijo GCLOUD_PROJECT obligatorio en migrate, statuses dentro
+de messages, CLI del repo, comentario TTL). Detenido fail-closed antes de toda mutación: 5 gates
+externos de Meta sin evidencia (incl. Paraguay), config_id de Coexistence sin crear, ADC ausente en
+la máquina (backups/migración/kill-switch inejecutables), y decisión v2/v3 pendiente del owner.

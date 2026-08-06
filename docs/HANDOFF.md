@@ -321,3 +321,51 @@ requiere credenciales):
 3. Prueba durable de offboarding: no se abre generación nueva sin claim de code nuevo.
 4. Provenance/ACL de los bundles de restore: la contención de paths se aplica SIEMPRE, sin confiar
    en el origen.
+
+## Programa 2 — Preflight del release Coexistence (2026-08-06, sobre `b42a8fb`)
+
+**Etapa A (local) VERDE**: typecheck/lint/tests/build/diff-check en 0 (240 archivos de test);
+E2E coexistence 51/51, dual 20/20, cutover 26/26, backup-restore 51/51. Grafo recalculado del
+compilado: 122 exports (src == lib), 0 bloqueos locales, 53 módulos cambiados + 11 nuevos vs
+`30c1687`. Auditoría contra producción: **CREATE=6, UPDATE=115, DELETE=0** (coincide con el
+runbook) y veredicto **BLOQUEADO por `migracion_pendiente`** — el estado pre-Paso-5 esperado.
+
+**Etapa B (baseline productiva `vpw-prod-dd6ff`, read-only) CONGELADA**: tenants `arfagi` +
+`credipower`; un único PNID whatsapp ruteando (asset `125…04` de arfagi, `connectionId: main`,
+`status: active`, `automationMode` **ausente** en asset e índice); cero conexiones `wa_*`;
+`coexistenceHistorySyncs` vacía; credipower sin superficies whatsapp (intacto); 115 functions
+ACTIVE, `devRunMetaCatalogOutbox` ausente, 7 schedulers, 18 índices, `fieldOverrides: []` (sin TTL
+en prod, revalidado); Hosting con release del 2026-07-31; conteos arfagi: 6 customers / 16 orders /
+6 sessions. Hash sha256 de `apps/functions/.env.vpw-prod-dd6ff`:
+`9d78bbd95c0765e0ac771b20ea087721e72d0171183cea4f334ec5f12532391f`.
+
+**Correcciones doc-only aplicadas al runbook por el preflight** (verificadas contra código):
+1. §6.4: la lista del temporal de Hosting era incompleta — el código consume 14 `NEXT_PUBLIC_*`;
+   obligatorias 12 (se sumaron `NEXT_PUBLIC_META_APP_ID` y `NEXT_PUBLIC_META_CONFIG_ID`, ambas sin
+   fallback; la estándar puede ir vacía a propósito para deshabilitar ese flujo).
+2. Paso 13: el redeploy de reversa NO puede usar "el MISMO selector" — los 6 CREATE no existen en
+   `30c1687`; selector de reversa = solo las 115 UPDATE, artefacto armado con tooling de HEAD.
+3. Pasos 5/11/13: `migrate-whatsapp-automation-mode.mjs` no acepta `--project`; destino por
+   `GCLOUD_PROJECT` con default `demo-aiafg` — todos los comandos llevan ahora el prefijo
+   explícito. Hardening pendiente (código, fuera de este programa): flag `--project` como el cutover.
+4. §2: los `statuses` viajan dentro de `messages` (5 fields reales); ese gate es el único
+   verificable por Graph GET read-only (`/{app-id}/subscriptions` con app token server-side).
+5. Paso 6: deploy siempre con el CLI del repo (13.35.1), no el global 15.x.
+6. `firestore.indexes.json`: el comentario decía verificar "las dos" políticas TTL; son TRES.
+
+**BLOQUEANTES para la Etapa C (deploy), ninguno resoluble desde el repo**:
+- **Los 5 gates externos de Meta siguen sin evidencia de cierre** (Paso 1 bloquea todo), incluida
+  la elegibilidad de Paraguay (solo por soporte/partner manager). Tech Provider / App Live /
+  Advanced Access se cierran en pantallas del owner (App Dashboard app `1739140590442740`).
+- **`NEXT_PUBLIC_META_COEXISTENCE_CONFIG_ID` sin valor**: el owner debe crear la configuración
+  aparte en Meta (`featureType: whatsapp_business_app_onboarding`) y traer el config_id.
+- **ADC ausente en la máquina** (`gcloud` no instalado, sin `GOOGLE_APPLICATION_CREDENTIALS`):
+  los backups del Paso 2, la migración del Paso 5 y el kill-switch usan firebase-admin y hoy NO
+  pueden ejecutarse. La sesión del firebase CLI no alcanza. Resolver con el owner antes de tocar
+  producción; el rollback tiene que ser demostrable ANTES de la primera mutación.
+- **Deuda v2 del Embedded Signup** (sin `extras.version`; v2 se depreca el 2026-10-15): decisión
+  del owner — conectar en v2 ahora es funcional y la conexión persiste; v3 es cambio de código
+  aparte con su propio ciclo de tests/review.
+
+Sin gates cerrados + sin rollback demostrable ⇒ **el programa se detuvo fail-closed al final de la
+Etapa B, sin ninguna mutación productiva ni llamada a Meta.**
