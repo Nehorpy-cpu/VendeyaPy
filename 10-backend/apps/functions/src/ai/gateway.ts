@@ -107,9 +107,13 @@ export async function runAgent(input: RunAgentInput, deps: RunAgentDeps = defaul
   } catch (e) {
     const latencyMs = deps.now() - t0;
     const errorCode = safeErrorCode(e);
+    // ADR-0018 §3: el uso PARCIAL acumulado por las llamadas previas del loop viaja también en
+    // el error — la liquidación de la reserva necesita lo realmente consumido (antes se perdía).
+    const usage = { inputTokens, outputTokens };
+    const costUsd = estimateCostUsd(usage);
     // Logging SEGURO: NO pasamos el error crudo (su message/stack podría arrastrar contenido).
-    logger.error('AI gateway: error del modelo', undefined, { tenantId: input.tenantId, context: input.context, errorCode, latencyMs });
-    await deps.writeAudit({ tenantId: input.tenantId, context: input.context, model, status: 'error', latencyMs, errorCode });
-    return { status: 'error', model, latencyMs, errorCode };
+    logger.error('AI gateway: error del modelo', undefined, { tenantId: input.tenantId, context: input.context, errorCode, latencyMs, inputTokens, outputTokens });
+    await deps.writeAudit({ tenantId: input.tenantId, context: input.context, model, status: 'error', latencyMs, errorCode, inputTokens, outputTokens, costUsd });
+    return { status: 'error', model, latencyMs, errorCode, usage, costUsd };
   }
 }

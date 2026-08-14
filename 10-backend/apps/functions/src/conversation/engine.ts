@@ -1172,7 +1172,13 @@ export async function handleMessage(input: ConversationInput): Promise<Conversat
       return { used: false, reason: 'feature_unavailable' };
     }
     const historial = await listRecentMessages(tenantId, customerId, AI_HISTORY_MAX);
-    return runSalesAgent({ tenantId, agentConfig, messages: buildAiHistory(historial, text) });
+    // ADR-0018: la clave de facturación es el wamid del inbound — los reintentos del webhook
+    // re-entran con la misma clave y comparten UNA reserva (jamás doble cobro). Sin wamid
+    // (simulador/dev) el agente genera una clave efímera.
+    return runSalesAgent({
+      tenantId, agentConfig, messages: buildAiHistory(historial, text),
+      billingKey: input.messageId ? `ventas-${input.messageId}` : null,
+    });
   };
 
   // F3: la IA mostró productos → la oferta es LO QUE EL TEXTO PRESENTA (alineado), no el orden

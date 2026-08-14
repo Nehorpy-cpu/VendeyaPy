@@ -16,8 +16,16 @@ function makeDeps(over: Partial<InternalAssistantDeps> = {}): {
 } {
   const calls = { budget: [] as Array<[string, number, string | null | undefined]>, usage: [] as Array<[string, number, number]>, runAgent: [] as RunAgentInput[], execTool: [] as Array<[string, string, Record<string, unknown>]> };
   const deps: InternalAssistantDeps = {
-    assertBudget: async (t, est, uid) => { calls.budget.push([t, est, uid]); },
-    recordUsage: async (t, tokens, cost) => { calls.usage.push([t, tokens, cost]); },
+    // ADR-0018: seam nuevo — abre el ciclo y devuelve el handle; `calls` conserva la misma forma
+    // para no reescribir las aserciones (budget = estimación, usage = liquidación real).
+    openBudget: async (t, _clave, est, uid) => {
+      calls.budget.push([t, est, uid]);
+      return {
+        clave: _clave, cerrada: false,
+        liquidar: async (u, c) => { calls.usage.push([t, u.inputTokens + u.outputTokens, c]); return { aplicada: true }; },
+        liberar: async () => ({ aplicada: true }),
+      };
+    },
     runAgent: async (input) => { calls.runAgent.push(input); return okResult(); },
     execTool: async (t, name, input): Promise<ToolExecResult> => { calls.execTool.push([t, name, input]); return { ok: true, result: { ventas: 0 } }; },
     ...over,
@@ -40,7 +48,7 @@ describe('ai/internalAssistant runInternalAssistant', () => {
 
   it('gate deniega (feature off → failed-precondition / cuota → resource-exhausted) → ok:false reason gate', async () => {
     for (const code of ['failed-precondition', 'resource-exhausted']) {
-      const { deps, calls } = makeDeps({ assertBudget: async () => { throw httpErr(code); } });
+      const { deps, calls } = makeDeps({ openBudget: async () => { throw httpErr(code); } });
       const out = await runInternalAssistant(BASE, deps);
       expect(out).toMatchObject({ ok: false, reason: 'gate' });
       expect(out.ok === false && out.message.length > 0).toBe(true);
@@ -50,7 +58,7 @@ describe('ai/internalAssistant runInternalAssistant', () => {
   });
 
   it('gate con fallo de INFRA (Error plano, sin code de denegación) → ok:false reason error (no "sin cupo")', async () => {
-    const { deps, calls } = makeDeps({ assertBudget: async () => { throw new Error('firestore caído'); } });
+    const { deps, calls } = makeDeps({ openBudget: async () => { throw new Error('firestore caído'); } });
     const out = await runInternalAssistant(BASE, deps);
     expect(out).toMatchObject({ ok: false, reason: 'error' }); // NO 'gate': no le miente al owner sobre su plan
     expect(calls.runAgent).toHaveLength(0);
@@ -69,15 +77,22 @@ describe('ai/internalAssistant runInternalAssistant', () => {
     expect(out).toMatchObject({ ok: false, reason: 'error' });
   });
 
-  it('status ok con reply vacío → ok:false reason empty_reply, sin metering', async () => {
+  it('status ok con reply vacío → ok:false reason empty_reply, y LIQUIDA el consumo real (ADR-0018)', async () => {
     const { deps, calls } = makeDeps({ runAgent: async () => okResult({ reply: '   ' }) });
     const out = await runInternalAssistant(BASE, deps);
     expect(out).toMatchObject({ ok: false, reason: 'empty_reply' });
-    expect(calls.usage).toHaveLength(0);
+    // Antes no se contabilizaba (subconteo): el modelo SÍ consumió esos tokens.
+    expect(calls.usage).toEqual([['perfumeria', 290, 0.002]]);
   });
 
-  it('si el metering falla, NO rompe la respuesta (ok:true igual)', async () => {
-    const { deps } = makeDeps({ recordUsage: async () => { throw new Error('firestore caído'); } });
+  it('si la liquidación falla, NO rompe la respuesta (ok:true igual; la reserva vence sola)', async () => {
+    const { deps } = makeDeps({
+      openBudget: async (_t, clave) => ({
+        clave, cerrada: false,
+        liquidar: async () => { throw new Error('firestore caído'); },
+        liberar: async () => ({ aplicada: true }),
+      }),
+    });
     const out = await runInternalAssistant(BASE, deps);
     expect(out).toEqual({ ok: true, reply: 'Tus ventas crecieron 12% este mes 📈' });
   });

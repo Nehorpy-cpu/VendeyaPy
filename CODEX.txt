@@ -152,3 +152,11 @@ selector de reversa sin los 6 CREATE, prefijo GCLOUD_PROJECT obligatorio en migr
 de messages, CLI del repo, comentario TTL). Detenido fail-closed antes de toda mutación: 5 gates
 externos de Meta sin evidencia (incl. Paraguay), config_id de Coexistence sin crear, ADC ausente en
 la máquina (backups/migración/kill-switch inejecutables), y decisión v2/v3 pendiente del owner.
+
+### AI-USAGE-RESERVATION-AND-ALERTS-1 — 2026-08-14 (EN REPO — NO DESPLEGADO)
+ADR-0018: reserva transaccional de cuota IA (cierre de AI-GATE-RESERVA-1 + AI-QUOTA-ALERTS-1).
+Ciclo reservada→liquidada|liberada|vencida con clave determinística (wamid), contador espejo
+aiTokensReserved, liquidación exactamente-una-vez con uso real (incluye parcial en error),
+recuperación lazy + scheduler horario, alertas idempotentes 70/85/95/100 por campana. 12 casos
+discriminantes con neutralización demostrada + E2E 9/9 de concurrencia real. Visión/OCR sigue
+diferida. Cero deploy, cero mutaciones productivas.

@@ -19,12 +19,18 @@ const okResult = (over: Partial<RunAgentResult> = {}): RunAgentResult => ({
 /** Deps de test: todo inyectado (sin red, sin Firestore, sin entitlements reales). Captura las llamadas. */
 function makeDeps(over: Partial<SalesAgentDeps> = {}): {
   deps: SalesAgentDeps;
-  calls: { budget: number[]; usage: Array<[string, number, number]>; runAgent: RunAgentInput[]; execTool: Array<[string, string, Record<string, unknown>]> };
+  calls: { budget: number[]; usage: Array<[string, number, number]>; liberar: string[]; runAgent: RunAgentInput[]; execTool: Array<[string, string, Record<string, unknown>]> };
 } {
-  const calls = { budget: [] as number[], usage: [] as Array<[string, number, number]>, runAgent: [] as RunAgentInput[], execTool: [] as Array<[string, string, Record<string, unknown>]> };
+  const calls = { budget: [] as number[], usage: [] as Array<[string, number, number]>, liberar: [] as string[], runAgent: [] as RunAgentInput[], execTool: [] as Array<[string, string, Record<string, unknown>]> };
   const deps: SalesAgentDeps = {
-    assertBudget: async (_t, est) => { calls.budget.push(est); },
-    recordUsage: async (t, tokens, cost) => { calls.usage.push([t, tokens, cost]); },
+    openBudget: async (_t, _clave, est) => {
+      calls.budget.push(est);
+      return {
+        clave: _clave, cerrada: false,
+        liquidar: async (u, c) => { calls.usage.push([_t, u.inputTokens + u.outputTokens, c]); return { aplicada: true }; },
+        liberar: async () => { calls.liberar.push(_clave); return { aplicada: true }; },
+      };
+    },
     runAgent: async (input) => { calls.runAgent.push(input); return okResult(); },
     execTool: async (t, name, input): Promise<ToolExecResult> => { calls.execTool.push([t, name, input]); return { ok: true, result: { productos: [] } }; },
     ...over,
@@ -42,7 +48,7 @@ describe('ai/salesAgent runSalesAgent', () => {
   });
 
   it('gate falla (feature off / trial vencido) → used:false, NO llama al modelo ni mide', async () => {
-    const { deps, calls } = makeDeps({ assertBudget: async () => { const e = new Error('feature off'); (e as Error & { code: string }).code = 'failed-precondition'; throw e; } });
+    const { deps, calls } = makeDeps({ openBudget: async () => { const e = new Error('feature off'); (e as Error & { code: string }).code = 'failed-precondition'; throw e; } });
     const out = await runSalesAgent({ tenantId: 'perfumeria', agentConfig: AGENT, messages: [{ role: 'user', content: 'hola' }] }, deps);
     expect(out).toEqual({ used: false, reason: 'feature_unavailable' });
     expect(calls.runAgent).toHaveLength(0); // nunca se llamó a Claude
@@ -62,15 +68,16 @@ describe('ai/salesAgent runSalesAgent', () => {
     expect(out).toEqual({ used: false, reason: 'provider_transient_error' });
   });
 
-  it('respuesta vacía/inválida (status ok, texto vacío) → used:false, reason empty_reply, sin metering', async () => {
+  it('respuesta vacía/inválida (status ok, texto vacío) → used:false, reason empty_reply, y LIQUIDA lo consumido (ADR-0018)', async () => {
     const { deps, calls } = makeDeps({ runAgent: async () => okResult({ reply: '   ' }) });
     const out = await runSalesAgent({ tenantId: 'perfumeria', agentConfig: AGENT, messages: [{ role: 'user', content: 'hola' }] }, deps);
     expect(out).toEqual({ used: false, reason: 'empty_reply' }); // no 'ok': el reason refleja la causa real
-    expect(calls.usage).toHaveLength(0); // no se mide si no hubo respuesta usable
+    // Antes no se medía (subconteo): el modelo SÍ consumió esos tokens aunque el texto no sirva.
+    expect(calls.usage).toHaveLength(1);
   });
 
   it('si el metering falla, NO rompe la respuesta al cliente (used:true igual)', async () => {
-    const { deps } = makeDeps({ recordUsage: async () => { throw new Error('firestore caído'); } });
+    const { deps } = makeDeps({ openBudget: async (_t, clave) => ({ clave, cerrada: false, liquidar: async () => { throw new Error('firestore caído'); }, liberar: async () => ({ aplicada: true }) }) });
     const out = await runSalesAgent({ tenantId: 'perfumeria', agentConfig: AGENT, messages: [{ role: 'user', content: 'hola' }] }, deps);
     expect(out).toEqual({ used: true, reply: 'Te recomiendo el Lattafa Asad ✨', shownSkus: [], shownProducts: [], usedTools: [] });
   });
@@ -170,8 +177,7 @@ describe('ai/salesAgent extractShownSkus (fuente de verdad = resultado backend)'
 
 describe('ai/salesAgent — AI-FALLBACK-HONESTO-1: razones ESTRUCTURADAS de bloqueo', () => {
   const baseDeps = () => ({
-    assertBudget: vi.fn(async () => undefined),
-    recordUsage: vi.fn(async () => undefined),
+    openBudget: vi.fn(async (_t: string, clave: string) => ({ clave, cerrada: false, liquidar: async () => ({ aplicada: true }), liberar: async () => ({ aplicada: true }) })),
     runAgent: vi.fn(async () => ({ status: 'ok' as const, model: 'm', latencyMs: 1, reply: 'hola', usage: { inputTokens: 1, outputTokens: 1 }, costUsd: 0 })),
     execTool: vi.fn(async () => ({ ok: true as const, result: [] })),
   });
@@ -179,7 +185,7 @@ describe('ai/salesAgent — AI-FALLBACK-HONESTO-1: razones ESTRUCTURADAS de bloq
 
   it('cuota agotada (resource-exhausted) → quota_exhausted, sin llamar al proveedor', async () => {
     const deps = baseDeps();
-    deps.assertBudget = vi.fn(async () => { const e = new Error('límite'); (e as Error & { code: string }).code = 'resource-exhausted'; throw e; });
+    deps.openBudget = vi.fn(async () => { const e = new Error('límite'); (e as Error & { code: string }).code = 'resource-exhausted'; throw e; });
     const r = await runSalesAgent(input, deps as never);
     expect(r).toEqual({ used: false, reason: 'quota_exhausted' });
     expect(deps.runAgent).not.toHaveBeenCalled(); // el proveedor JAMÁS se llama con cuota agotada
@@ -187,7 +193,7 @@ describe('ai/salesAgent — AI-FALLBACK-HONESTO-1: razones ESTRUCTURADAS de bloq
 
   it('feature off / trial vencido (failed-precondition) → feature_unavailable (NO deriva)', async () => {
     const deps = baseDeps();
-    deps.assertBudget = vi.fn(async () => { const e = new Error('trial'); (e as Error & { code: string }).code = 'failed-precondition'; throw e; });
+    deps.openBudget = vi.fn(async () => { const e = new Error('trial'); (e as Error & { code: string }).code = 'failed-precondition'; throw e; });
     const r = await runSalesAgent(input, deps as never);
     expect(r).toEqual({ used: false, reason: 'feature_unavailable' });
   });
@@ -217,8 +223,7 @@ describe('ai/salesAgent — AI-FALLBACK-HONESTO-1: razones ESTRUCTURADAS de bloq
 describe('ai/salesAgent — review: errores de infraestructura del gate', () => {
   it('error del gate SIN código conocido → provider_transient_error (jamás cuota ni feature)', async () => {
     const deps = {
-      assertBudget: vi.fn(async () => { throw new Error('firestore UNAVAILABLE'); }),
-      recordUsage: vi.fn(async () => undefined),
+      openBudget: vi.fn(async () => { throw new Error('firestore UNAVAILABLE'); }),
       runAgent: vi.fn(),
       execTool: vi.fn(),
     };

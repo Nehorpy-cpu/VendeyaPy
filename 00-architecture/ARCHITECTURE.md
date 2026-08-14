@@ -271,6 +271,9 @@ Todo ID en el sistema sigue el patrón `{prefijo}_{nanoid}` donde `nanoid` gener
 │   ├── payments/{paymentId}          # Registros de transacciones de pago
 │   ├── invoices/{invoiceId}          # Facturas electrónicas (SET)
 │   ├── subscriptions/{subscriptionId} # Suscripciones recurrentes de clientes
+│   ├── aiRequests/{requestId}        # Auditoría del AI Gateway (solo metadatos; AG-1)
+│   ├── aiReservations/{clave}        # Ciclo de reserva de cuota IA (ADR-0018; solo backend)
+│   ├── notifications/{notifId}       # Campana del panel (trial/handoff/catálogo/ai_quota)
 │   └── webhookEvents/{eventId}       # Eventos de webhook recibidos (deduplicación)
 └── users/{userId}                    # Usuarios admin de la plataforma
 ```
@@ -1030,6 +1033,30 @@ Los siguientes templates deben ser aprobados por Meta para cada tenant:
 - Fuera de la ventana de 24h, solo se pueden enviar mensajes con templates aprobados
 - El sistema rastrea `usage.messagesThisMonth` por tenant y alerta al 80% del límite del plan
 - Los templates tienen tasa de aprobación de Meta de 24-48h, deben registrarse en la fase de onboarding
+
+#### 6.6.1 Cuota de IA: reserva transaccional + alertas (ADR-0018 — EN REPO, NO DESPLEGADO)
+
+Toda llamada facturable al modelo pasa por **`entitlements/aiReservation.ts`** (abstracción
+única para agente de ventas, asistente interno, simulador y la futura visión):
+
+1. **Reserva previa atómica**: `reservarTurnoDeIa(tenantId, clave, est)` — transacción que
+   valida plan/posture/trial/período y exige `aiTokensThisMonth + aiTokensReserved + est ≤ maxAiTokensPerMonth`.
+   Sin capacidad ⇒ NO se llama al proveedor (`resource-exhausted`, mismo contrato de error
+   que el gate anterior). La **clave** es el id lógico determinístico del turno
+   (`ventas-{wamid}`: los reintentos del webhook no facturan dos veces).
+2. **Ciclo persistido** en `tenants/{t}/aiReservations/{clave}`:
+   `reservada → liquidada | liberada | vencida` (lease 10 min). Solo metadata operativa —
+   jamás prompts, imágenes ni PII.
+3. **Liquidación exactamente-una-vez**: el uso real del proveedor se suma UNA vez
+   (`aiTokensThisMonth`/`aiCostUsdThisMonth`); la diferencia estimado-vs-real se libera;
+   reintentar no re-cobra; error pre-proveedor libera; resultado ambiguo vence y se
+   recupera (`aiReservationMaintenance` + barrido lazy) sin doble cobro.
+4. **Alertas por umbral** (70/85/95/100% — `UMBRALES_ALERTA_IA`): campana existente,
+   categoría `ai_quota`, idempotentes por tenant × período × umbral
+   (id `ai-quota-{AAAAMM}-{umbral}` + `.create()`). Sin PII.
+5. **Rules**: `aiReservations` es superficie exclusiva del backend
+   (`allow read, write: if false`); `usage.aiTokensReserved` vive en el doc tenant ya
+   protegido por la deny-list de `affectedKeys`.
 
 ---
 

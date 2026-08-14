@@ -7,14 +7,15 @@
  * otro caso { used: false } y el caller (handleMessage) usa el motor rule-based. Reversible: sin
  * feature/env/presupuesto, la IA nunca corre. El modelo NUNCA recibe datos privados (tools sanitizadas).
  */
+import { randomUUID } from 'node:crypto';
 import type { AgentConfig } from '@vpw/shared';
-import { assertAiBudget, recordAiUsage } from '../entitlements/ai.js';
+import { abrirPresupuestoDeIa } from '../entitlements/ai.js';
+import { estimacionDeTokens, type ReservaDeIa } from '../entitlements/aiReservation.js';
 import { runAgent } from './gateway.js';
 import { buildSalesSystemPrompt } from './prompts.js';
 import { toolDefinitionsForContext, executeTool } from './tools/registry.js';
 import type { AiMessage, RunAgentInput, RunAgentResult, ToolExecResult } from './types.js';
 
-const EST_TOKENS_PER_TURN = 1500; // estimación para el gate ANTES de llamar (presupuesto).
 const SALES_MAX_TOKENS = 700;
 /**
  * Tope de productos a recordar en el estado conversacional. Igual al límite del catálogo rule-based
@@ -82,28 +83,31 @@ export type SalesAgentOutcome =
   | { used: false; reason: SalesAgentBlockReason };
 
 export interface SalesAgentDeps {
-  assertBudget: (tenantId: string, estTokens: number) => Promise<void>;
-  recordUsage: (tenantId: string, tokens: number, costUsd: number) => Promise<void>;
+  /** ADR-0018: abre el ciclo reserva→liquidación (reemplaza assertBudget + recordUsage). */
+  openBudget: (tenantId: string, clave: string, estTokens: number) => Promise<ReservaDeIa>;
   runAgent: (input: RunAgentInput) => Promise<RunAgentResult>;
   execTool: (tenantId: string, name: string, input: Record<string, unknown>) => Promise<ToolExecResult>;
 }
 const defaultDeps: SalesAgentDeps = {
-  assertBudget: (t, est) => assertAiBudget(t, est),
-  recordUsage: (t, tokens, cost) => recordAiUsage(t, tokens, cost),
+  openBudget: (t, clave, est) => abrirPresupuestoDeIa(t, clave, est, 'whatsapp_sales_agent'),
   runAgent,
   execTool: (t, name, input) => executeTool('whatsapp_sales_agent', t, name, input),
 };
 
 export async function runSalesAgent(
-  input: { tenantId: string; agentConfig: AgentConfig; messages: AiMessage[] },
+  input: { tenantId: string; agentConfig: AgentConfig; messages: AiMessage[]; billingKey?: string | null },
   deps: SalesAgentDeps = defaultDeps,
 ): Promise<SalesAgentOutcome> {
-  // GATE: feature aiAssistant + presupuesto de tokens. Si no pasa → fallback con razón
+  // GATE (ADR-0018): feature aiAssistant + RESERVA transaccional del presupuesto. La clave
+  // lógica viene del caller (`ventas-{wamid}`: los reintentos del webhook comparten reserva);
+  // sin clave natural (simulador/dev) se genera una efímera. Si no pasa → fallback con razón
   // ESTRUCTURADA por código de error (HttpsError.code), jamás por texto:
   //  - 'resource-exhausted'  → cuota/presupuesto agotado (habilita el fallback honesto).
   //  - 'failed-precondition' → feature off / trial vencido / suspensión.
+  let reserva: ReservaDeIa;
   try {
-    await deps.assertBudget(input.tenantId, EST_TOKENS_PER_TURN);
+    const clave = input.billingKey ?? `ventas-${randomUUID()}`;
+    reserva = await deps.openBudget(input.tenantId, clave, estimacionDeTokens('texto_ventas'));
   } catch (e) {
     const code = (e as { code?: string }).code;
     const reason: SalesAgentBlockReason =
@@ -114,6 +118,9 @@ export async function runSalesAgent(
       : 'provider_transient_error';
     return { used: false, reason };
   }
+  // Clave ya facturada por una entrega anterior (reserva cerrada): NO volver a llamar al
+  // proveedor — el dedupe upstream (claim del inbox) hace de esto un caso excepcional.
+  if (reserva.cerrada) return { used: false, reason: 'provider_transient_error' };
 
   // Metadata SEGURA capturada server-side durante el loop de tools (no del texto del modelo).
   let shownProducts: Array<{ id: string; name: string }> = [];
@@ -144,16 +151,22 @@ export async function runSalesAgent(
       result.status === 'ok' ? 'empty_reply'
       : result.status === 'disabled' ? 'configuration_error'
       : 'provider_transient_error';
+    // Cierre de la reserva según lo que REALMENTE pasó (ADR-0018): 'disabled' = el proveedor
+    // jamás fue contactado → liberar completo; 'error'/vacío = pudo haber consumo parcial (el
+    // gateway lo acumula y lo devuelve) → liquidar lo real. Nunca rompe la respuesta.
+    try {
+      if (result.status === 'disabled') await reserva.liberar('proveedor_no_configurado');
+      else await reserva.liquidar(result.usage ?? { inputTokens: 0, outputTokens: 0 }, result.costUsd ?? 0);
+    } catch { /* el cierre del presupuesto nunca rompe el fallback */ }
     return { used: false, reason };
   }
 
-  // METER: registrar el uso real (tokens + costo). No bloquea la respuesta si falla.
-  if (result.usage) {
-    try {
-      await deps.recordUsage(input.tenantId, result.usage.inputTokens + result.usage.outputTokens, result.costUsd ?? 0);
-    } catch {
-      /* el metering nunca debe romper la respuesta al cliente */
-    }
+  // LIQUIDAR: uso real (tokens + costo) exactamente una vez. No bloquea la respuesta si falla
+  // (la reserva queda recuperable por vencimiento; jamás doble cobro).
+  try {
+    await reserva.liquidar(result.usage ?? { inputTokens: 0, outputTokens: 0 }, result.costUsd ?? 0);
+  } catch {
+    /* el metering nunca debe romper la respuesta al cliente */
   }
 
   return {

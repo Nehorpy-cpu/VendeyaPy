@@ -8,13 +8,14 @@
  * Read-only: no escribe, no cambia config, no envía mensajes, no crea promos/campañas. Si el gateway
  * está disabled / falla / sin cupo → devuelve un error CONTROLADO y amigable (nunca rompe el callable).
  */
-import { assertAiBudget, recordAiUsage } from '../entitlements/ai.js';
+import { randomUUID } from 'node:crypto';
+import { abrirPresupuestoDeIa } from '../entitlements/ai.js';
+import { estimacionDeTokens, type ReservaDeIa } from '../entitlements/aiReservation.js';
 import { runAgent } from './gateway.js';
 import { buildInternalSystemPrompt } from './prompts.js';
 import { toolDefinitionsForContext, executeTool } from './tools/registry.js';
 import type { RunAgentInput, RunAgentResult, ToolExecResult } from './types.js';
 
-const EST_TOKENS_PER_TURN = 1500; // estimación para el gate ANTES de llamar (presupuesto).
 const INTERNAL_MAX_TOKENS = 800;
 
 const MSG_GATE = 'El asistente de IA no está disponible en tu plan o alcanzaste el límite de uso de este mes.';
@@ -26,14 +27,13 @@ export type InternalAssistantOutcome =
   | { ok: false; reason: string; message: string };
 
 export interface InternalAssistantDeps {
-  assertBudget: (tenantId: string, estTokens: number, actorUid?: string | null) => Promise<void>;
-  recordUsage: (tenantId: string, tokens: number, costUsd: number) => Promise<void>;
+  /** ADR-0018: abre el ciclo reserva→liquidación (reemplaza assertBudget + recordUsage). */
+  openBudget: (tenantId: string, clave: string, estTokens: number, actorUid?: string | null) => Promise<ReservaDeIa>;
   runAgent: (input: RunAgentInput) => Promise<RunAgentResult>;
   execTool: (tenantId: string, name: string, input: Record<string, unknown>) => Promise<ToolExecResult>;
 }
 const defaultDeps: InternalAssistantDeps = {
-  assertBudget: (t, est, uid) => assertAiBudget(t, est, uid),
-  recordUsage: (t, tokens, cost) => recordAiUsage(t, tokens, cost),
+  openBudget: (t, clave, est, uid) => abrirPresupuestoDeIa(t, clave, est, 'internal_growth_assistant', uid),
   runAgent,
   execTool: (t, name, input) => executeTool('internal_growth_assistant', t, name, input),
 };
@@ -42,11 +42,13 @@ export async function runInternalAssistant(
   input: { tenantId: string; businessName: string; message: string; actorUid?: string | null },
   deps: InternalAssistantDeps = defaultDeps,
 ): Promise<InternalAssistantOutcome> {
-  // GATE: feature aiAssistant + presupuesto de tokens. Denegación legítima (feature off → 'failed-
-  // precondition'; cuota → 'resource-exhausted') → 'gate' (decile que actualice el plan). Cualquier
-  // otro error (infra/Firestore caído/inesperado) → 'error' genérico: no le mientas diciendo "sin cupo".
+  // GATE (ADR-0018): feature aiAssistant + RESERVA transaccional. La unidad de reintento acá es
+  // la propia invocación del callable (no hay re-entrega upstream) ⇒ clave efímera por turno.
+  // Denegación legítima (feature off → 'failed-precondition'; cuota → 'resource-exhausted') →
+  // 'gate'. Cualquier otro error (infra) → 'error' genérico: no le mientas diciendo "sin cupo".
+  let reserva: ReservaDeIa;
   try {
-    await deps.assertBudget(input.tenantId, EST_TOKENS_PER_TURN, input.actorUid);
+    reserva = await deps.openBudget(input.tenantId, `interno-${randomUUID()}`, estimacionDeTokens('texto_interno'), input.actorUid);
   } catch (e) {
     const code = (e as { code?: string } | null)?.code;
     if (code === 'failed-precondition' || code === 'resource-exhausted') {
@@ -54,6 +56,7 @@ export async function runInternalAssistant(
     }
     return { ok: false, reason: 'error', message: MSG_ERROR };
   }
+  if (reserva.cerrada) return { ok: false, reason: 'error', message: MSG_ERROR };
 
   const result = await deps.runAgent({
     tenantId: input.tenantId,
@@ -68,19 +71,23 @@ export async function runInternalAssistant(
     },
   });
 
-  // disabled (sin API key) / error (Claude falló) / texto vacío → error CONTROLADO (no rompe el callable).
-  if (result.status === 'disabled') return { ok: false, reason: 'disabled', message: MSG_DISABLED };
+  // disabled (sin API key) / error (Claude falló) / texto vacío → error CONTROLADO (no rompe el
+  // callable). Cierre de la reserva según lo que pasó: disabled = proveedor jamás contactado ⇒
+  // liberar; error/vacío ⇒ liquidar el consumo parcial real que el gateway acumuló (ADR-0018).
+  if (result.status === 'disabled') {
+    try { await reserva.liberar('proveedor_no_configurado'); } catch { /* nunca rompe */ }
+    return { ok: false, reason: 'disabled', message: MSG_DISABLED };
+  }
   if (result.status !== 'ok' || !result.reply || !result.reply.trim()) {
+    try { await reserva.liquidar(result.usage ?? { inputTokens: 0, outputTokens: 0 }, result.costUsd ?? 0); } catch { /* nunca rompe */ }
     return { ok: false, reason: result.status === 'ok' ? 'empty_reply' : result.status, message: MSG_ERROR };
   }
 
-  // METER: registrar el uso real (tokens + costo). No bloquea la respuesta si falla.
-  if (result.usage) {
-    try {
-      await deps.recordUsage(input.tenantId, result.usage.inputTokens + result.usage.outputTokens, result.costUsd ?? 0);
-    } catch {
-      /* el metering nunca debe romper la respuesta */
-    }
+  // LIQUIDAR: uso real exactamente una vez. No bloquea la respuesta si falla (la reserva vence sola).
+  try {
+    await reserva.liquidar(result.usage ?? { inputTokens: 0, outputTokens: 0 }, result.costUsd ?? 0);
+  } catch {
+    /* el metering nunca debe romper la respuesta */
   }
 
   return { ok: true, reply: result.reply.trim() };

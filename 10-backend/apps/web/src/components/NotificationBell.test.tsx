@@ -109,15 +109,18 @@ describe('ctaDeNotificacion — mapa EXHAUSTIVO de las categorías que el backen
     catalog_quality: { href: '/catalog', label: 'Ver catálogo' },
     catalog_source: { href: '/catalog', label: 'Ver catálogo' },
     catalog_verification: { href: '/catalog', label: 'Ver catálogo' },
+    // ADR-0018: el cupo de IA se amplía desde Billing.
+    ai_quota: { href: '/billing', label: 'Ver planes' },
   };
 
-  it('cada categoría viva cae en su pantalla (y solo `trial` va a Planes)', () => {
+  it('cada categoría viva cae en su pantalla (y solo `trial` y `ai_quota` van a Planes)', () => {
     for (const [category, esperado] of Object.entries(DESTINO_ESPERADO)) {
       const cta = ctaDeNotificacion({ category } as Pick<Notification, 'category' | 'customerId'>);
       expect(cta, category).toEqual(esperado);
     }
+    // ADR-0018: el cupo de IA también se resuelve en Billing (ampliar plan), igual que el trial.
     const aPlanes = Object.entries(DESTINO_ESPERADO).filter(([, d]) => d.href === '/billing');
-    expect(aPlanes.map(([c]) => c)).toEqual(['trial']);
+    expect(aPlanes.map(([c]) => c)).toEqual(['trial', 'ai_quota']);
   });
 
   it('las TRES categorías de catálogo se resuelven en /catalog (ninguna cae por descarte)', () => {

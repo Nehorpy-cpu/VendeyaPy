@@ -32,6 +32,8 @@ const CTA_POR_CATEGORIA: Record<Notification['category'], { href: string; label:
   catalog_source: { href: '/catalog', label: 'Ver catálogo' },
   // ADR-0015 §6: la config contradictoria que impide verificar también se corrige desde Catálogo.
   catalog_verification: { href: '/catalog', label: 'Ver catálogo' },
+  // ADR-0018: el cupo de IA se resuelve ampliando el plan — la acción vive en Billing.
+  ai_quota: { href: '/billing', label: 'Ver planes' },
 };
 
 /**

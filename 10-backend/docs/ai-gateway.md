@@ -38,10 +38,10 @@ Capa backend que integra **Claude Haiku 4.5** por tenant. Es el **único punto q
 
 ## Integración en el bot (AG-3)
 `salesAgent.ts` `runSalesAgent({tenantId, agentConfig, messages})` envuelve `runAgent` para el contexto sales:
-1. **Gate** `assertAiBudget(tenantId, ~tokens)` (feature `aiAssistant` + cuota `aiTokens`) **antes** de llamar. Falla → fallback.
+1. **Gate (ADR-0018)** `abrirPresupuestoDeIa(tenantId, clave, est)` — feature `aiAssistant` + RESERVA transaccional de la cuota `aiTokens` **antes** de llamar (la clave es el id lógico del turno, p. ej. `ventas-{wamid}`). Falla → fallback.
 2. `runAgent` con `buildSalesSystemPrompt`, las tools sales y un `executeTool` que enruta al `registry.executeTool('whatsapp_sales_agent', tenantId, …)`.
 3. `status!=='ok'` / reply vacío (sin key, Claude falló, texto inválido) → fallback.
-4. **Metering** `recordAiUsage(tenantId, inTok+outTok, costUsd)` **después** (best-effort; no rompe la respuesta).
+4. **Liquidación (ADR-0018)** `reserva.liquidar(usage, costUsd)` **después** con el uso REAL — exactamente una vez, best-effort (una reserva sin liquidar vence sola y su capacidad vuelve); `reserva.liberar()` si el proveedor jamás fue contactado.
 
 **Ruteo en `engine.ts handleMessage`:** solo los turnos que el motor rule-based mandaría a su **fallback genérico** (no saludo, no carrito/pagar/seleccionar, no catálogo) se delegan al agente IA — **advisory**: responde solo con info pública y **no** toca carrito/pedido. El flujo de conversión (navegar → elegir por número → carrito → pagar) queda 100% en las reglas (predicado puro `ruleEngineWouldFallback`, con test unitario).
 
@@ -52,7 +52,7 @@ Cuando la IA recomienda productos vía `buscar_productos`, `runSalesAgent` captu
 Callable **`askInternalGrowthAssistant`** (`functions/ai/internalAssistantCallable.ts`) — backend only, sin UI.
 - **Auth (repo: `resolveOwnerAdminAuth`):** `TENANT_OWNER` → SU empresa (se ignora cualquier `tenantId` pedido → cross-tenant bloqueado); `PLATFORM_ADMIN` → la empresa que indique en `tenantId`; `SELLER`/`VIEWER`/`MANAGER` → `permission-denied` (403).
 - **Contrato:** input `{ message: string, tenantId?: string (solo admin) }` (mensaje validado, ≤2000). Output `{ ok: true, reply }` | `{ ok: false, reason, message }` (error CONTROLADO y amigable: gate/disabled/error/empty — nunca rompe el callable).
-- **Núcleo `ai/internalAssistant.ts`:** gate `assertAiBudget` → `runAgent` contexto `internal_growth_assistant` (tools read-only: `resumen_ventas`) → metering `recordAiUsage`. El asistente SÍ ve agregados privados (ganancia/margen) pero **solo del tenant resuelto** y es **read-only** (no escribe, no envía, no crea promos/campañas, no cambia config). Auditoría en `aiRequests` (metadatos, sin prompt/PII).
+- **Núcleo `ai/internalAssistant.ts`:** gate `abrirPresupuestoDeIa` (reserva ADR-0018) → `runAgent` contexto `internal_growth_assistant` (tools read-only: `resumen_ventas`) → liquidación `reserva.liquidar`. El asistente SÍ ve agregados privados (ganancia/margen) pero **solo del tenant resuelto** y es **read-only** (no escribe, no envía, no crea promos/campañas, no cambia config). Auditoría en `aiRequests` (metadatos, sin prompt/PII).
 
 ## Verificación completa — "todo IA seguro" (AG-5)
 Matriz consolidada de los 20 invariantes de seguridad del módulo IA. **NUNCA** llama a Anthropic real
@@ -136,7 +136,7 @@ Ningún secreto/valor de key se versiona.
 ## Orden por sub-fases
 - **AG-1** (cerrado): gateway core.
 - **AG-2** (cerrado): contextos + data policy + tool/data layer (read-only).
-- **AG-3** (cerrado): sales agent cableado en `handleMessage` detrás de `aiAssistant`+env, con loop de tool-use, fallback rule-based, metering (`assertAiBudget`/`recordAiUsage`) y rules de `aiRequests`. e2e fixture-driven: `scripts/verify-ai-gateway.mjs`.
+- **AG-3** (cerrado): sales agent cableado en `handleMessage` detrás de `aiAssistant`+env, con loop de tool-use, fallback rule-based, metering (hoy: ciclo de reserva ADR-0018, `abrirPresupuestoDeIa` → `liquidar`) y rules de `aiRequests`. e2e fixture-driven: `scripts/verify-ai-gateway.mjs`.
 - **AG-4** (cerrado): callable `askInternalGrowthAssistant` (owner/admin, contexto internal read-only, gate/metering, error controlado). e2e: `scripts/verify-ai-internal.mjs`.
 - **AG-5** (cerrado): hardening final — matriz consolidada `scripts/verify-ai-hardening.mjs` (20 invariantes) + doc de verificación completa.
 - **AI-KEY-1** (cerrado): patrón seguro de la key real — `defineSecret('ANTHROPIC_API_KEY')` bindeado (least-privilege) a las functions del gateway + `.secret.local` gitignored + `scripts/smoke-ai-real.mjs` (manual) + comandos de config.

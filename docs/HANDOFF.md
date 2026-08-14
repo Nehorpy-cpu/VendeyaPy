@@ -369,3 +369,45 @@ en prod, revalidado); Hosting con release del 2026-07-31; conteos arfagi: 6 cust
 
 Sin gates cerrados + sin rollback demostrable ⇒ **el programa se detuvo fail-closed al final de la
 Etapa B, sin ninguna mutación productiva ni llamada a Meta.**
+
+## AI-USAGE-RESERVATION-AND-ALERTS-1 — 2026-08-14 (EN REPO — NO DESPLEGADO)
+
+Cierra `AI-GATE-RESERVA-1` y `AI-QUOTA-ALERTS-1` (§6.3) con **ADR-0018**: la base de control de
+consumo previa a visión/OCR (que sigue DIFERIDA al programa siguiente).
+
+**Contrato** (`entitlements/aiReservation.ts`, abstracción única): reserva transaccional ANTES del
+proveedor (`aiTokensThisMonth + aiTokensReserved + est ≤ límite`; la clave es el id lógico —
+`ventas-{wamid}`: reintentos del webhook no facturan dos veces) → ciclo persistido en
+`tenants/{t}/aiReservations/{clave}` (`reservada → liquidada | liberada | vencida`, lease 10 min)
+→ liquidación exactamente-una-vez con el uso REAL (el gateway ahora reporta el parcial acumulado
+también en error; los replies vacíos liquidan — antes subconteo) → recuperación lazy + scheduler
+`aiReservationMaintenance` (horario). Alertas idempotentes por campana (categoría `ai_quota`,
+70/85/95/100, id `ai-quota-{AAAAMM}-{umbral}`), CTA a /billing. `usage.aiTokensReserved` NO entra
+en el ZEROED del reset (las reservas en vuelo cruzan el mes; decremento con clamp ≥0).
+
+**Superficie del deploy futuro** (nada desplegado): scheduler nuevo `aiReservationMaintenance`
+(8→9 al desplegarse junto a Coexistence), 2 índices `aiReservations (status, expiresAt)`
+(COLLECTION + COLLECTION_GROUP), 1 match nuevo en rules (`aiReservations: read,write:false`), y
+los consumidores de IA existentes (onWebhookInbox, askInternalGrowthAssistant, agentTestCaseRun).
+
+**Verificación**: 12 casos discriminantes rojos→verdes→neutralización (gate anulado ⇒ 7 rojos ⇒
+restaurado 19/19); E2E nuevo `verify-ai-reservation.mjs` **9/9 con concurrencia real** contra el
+emulador (carrera por capacidad, misma clave en paralelo, liquidación concurrente, barrido,
+alertas, aislamiento); batería completa 243 archivos verde; regresiones handoff 11/11 + 8/8,
+fase6 6/6, p6-rules 5/5; typecheck/lint/build/diff-check en 0.
+
+**Review adversarial final** (concurrencia/idempotencia/contabilidad/multi-tenancy): cero
+CRITICAL/ALTO; el MEDIO (liquidar/liberar descontaban el estimado del closure, no el del doc —
+drift permanente del espejo en handles reusados) y el BAJO de umbrales perdidos quedaron
+CORREGIDOS con test discriminante y warn de clamp. Sobre-admisión concurrente, doble vencimiento,
+doble facturación por re-entrega, reset que pisa el espejo, cruces de tenant y regresión del
+mapeo de errores: REFUTADOS con evidencia.
+
+**Deudas honestas**: el costo USD sigue sin límite propio (solo tokens); el simulador consume
+cuota real (su exención es AI-USAGE-ATTRIBUTION-1, pendiente); los `aiReservations` liquidados no
+tienen TTL (volumen bajo, decisión de retención pendiente); dos ejecuciones VIVAS del mismo wamid
+(un zombi que supere el lease del claim del inbox) llaman al proveedor dos veces aunque facturan
+una — acotado por el claim upstream, sin fix barato; la alerta `agotada` puede dispararse por
+presión de reservas en vuelo antes del 100% liquidado (semántica declarada del ADR §5); el sweep
+va de a 200/hora secuenciales (suficiente en régimen normal; un incidente masivo lo drenaría en
+varias corridas).

@@ -120,7 +120,13 @@ const SEVERITY: Record<Notification['type'], number> = {
   // Debajo de los handoff (un cliente esperando manda) y a la par del trial vencido.
   catalog_quality_summary: 3,
   trial_expired: 3,
+  // ADR-0018: cupo de IA. Agotado = el bot ya deriva a humanos (a la par del trial vencido:
+  // hay que decidir plan). Los umbrales previos son avisos de tendencia, de fondo.
+  ai_quota_agotada: 3,
+  ai_quota_95: 2,
   trial_ending_today: 2,
+  ai_quota_85: 1,
+  ai_quota_70: 1,
   trial_ending_soon: 1,
 };
 

@@ -104,6 +104,8 @@ export { trialNotificationsDaily } from './functions/scheduled/trialNotification
 // que el panel migre del write directo en 5C) + reinicio mensual proactivo del uso.
 export { productUpsert } from './functions/products/productUpsert.js';
 export { resetUsageMonthly } from './functions/scheduled/resetUsage.js';
+// ADR-0018: recuperación horaria de reservas de IA con lease vencido (resultado ambiguo → vencida).
+export { aiReservationMaintenance } from './functions/scheduled/aiReservationMaintenance.js';
 
 // Scheduler diario (GROWTH-JOBS-SCHEDULER-1, 04:00 America/Asuncion) que refresca los jobs de growth
 // SEGUROS (rule-based, sin IA) para tenants ACTIVE: computeTracking/generateWinningReplies/

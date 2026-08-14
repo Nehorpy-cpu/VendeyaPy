@@ -34,7 +34,7 @@
 | `maxUsers` | ✅ sí (create) | `userManagement.ts:30` `assertWithinLimit('users')` + count `users` | **available** |
 | `maxDeliveryPersons` | ✅ sí (create) | `deliveryCallables.ts:37` + count activos | **available** |
 | `maxWhatsappMessagesPerMonth` | ✅ sí (bloquea inbound) | `lifecycle.ts:39` `checkQuota('messages')` + `:46` meter | **available** |
-| `maxAiTokensPerMonth` | ✅ sí | `entitlements/ai.ts:13` `assertAiBudget` (sales+internal) + `recordAiUsage` | **available** |
+| `maxAiTokensPerMonth` | ✅ sí | `entitlements/aiReservation.ts` reserva transaccional ADR-0018 (sales+internal) + liquidación exacta | **available** |
 | `maxAdSyncsPerMonth` | ✅ sí | `panelActions.ts:41` `assertWithinLimit('adSyncs')` (vía `runTenantJob`) | **available** |
 | `maxOrdersPerMonth` | ⚠️ **medido** (L2), sin gate | `engine.ts` `meterUsage('orders')` tras `createPendingOrder` (no bloqueante); gate `assertWithinLimit('orders')` = **L3** | **partial** |
 | `maxWhatsappNumbers` | ⚠️ parcial | gate booleano `≥1` (`assertWhatsappNumbersEntitled`); **L2** cableó `whatsappNumbers` al modelo de métricas (`QuotaMetric`+`COUNT_FN`); el gate de **conteo** = **L3** | **partial** |
@@ -61,9 +61,9 @@ pago/premium restantes están declaradas pero **no enforceadas**.
   tienen `write:if false` (solo Admin SDK) y se crean por callables **gateados** (`assertWithinLimit` antes
   del write). Default-deny cierra el resto.
 - **Ninguna función costosa de prod queda sin gate.** Bot real (`onWebhookInbox` → `checkTenantInboundGate`
-  messages + `assertAiBudget`), asistente interno (`assertAiBudget`), jobs Meta/marketing (solo vía
+  messages + reserva ADR-0018), asistente interno (reserva ADR-0018), jobs Meta/marketing (solo vía
   `runTenantJob` gateado), y los 19 `dev*` → **404 en prod** (`guardDevEndpoint`).
-- **AI 100% medido.** `salesAgent` + `internalAssistant` ambos `assertAiBudget` antes y `recordAiUsage`
+- **AI 100% medido.** `salesAgent` + `internalAssistant` ambos reservan (ADR-0018) antes y liquidan el uso real
   después; auditoría `aiRequests` (tokens/costo/modelo). *Detalle:* el gate usa una **estimación** (~1500 tok)
   antes; el real se registra después → un turno cerca del tope puede sobrepasar levemente (corregible).
 
@@ -378,7 +378,7 @@ tenant que activa un plan pago cambia `planId` (≠ free) → `trialExpired` fal
   `checkQuota('orders')` → respuesta SEGURA al cliente, sin revelar el vencimiento), **bot/WhatsApp inbound**
   (`checkTenantInboundGate` → no responde), y **writes con cuota** vía `assertWithinLimit` (productos, repartidores,
   usuarios → `failed-precondition` "Tu prueba gratis terminó…").
-- `assertFeatureEnabled` → si `trialExpired`: lanza `failed-precondition`. Cubre **IA interna** (`assertAiBudget`)
+- `assertFeatureEnabled` → si `trialExpired`: lanza `failed-precondition`. Cubre **IA interna** (la reserva de ADR-0018 rechaza igual)
   y **jobs de marketing** (`runTenantJob`). No se tocó engine.ts/ai.ts/runTenantJob: heredan el gate.
 
 **NO se bloquea** (por diseño): `requestManualPlanActivation` y `manualBillingActivate` (no pasan por gates de

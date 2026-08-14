@@ -48,17 +48,26 @@ export type CatalogSourceNotificationType = 'catalog_source_changed';
  */
 export type CatalogVerificationNotificationType = 'catalog_verification_blocked';
 
+/**
+ * ADR-0018: alertas AGREGADAS del cupo mensual de IA. Una por tenant × período × umbral
+ * (id determinístico `ai-quota-{AAAAMM}-{umbral}` + create()): 70/85/95% al cruzar liquidando,
+ * `agotada` al bloquear una reserva o llegar al 100%. Solo números (tokens/límite) — sin PII,
+ * sin prompts, sin proveedor.
+ */
+export type AiQuotaNotificationType = 'ai_quota_70' | 'ai_quota_85' | 'ai_quota_95' | 'ai_quota_agotada';
+
 export interface Notification {
   id: string;
   tenantId: string;
-  /** Categoría (`trial` | `handoff` | `catalog_quality` | `catalog_source` | `catalog_verification`). */
-  category: 'trial' | 'handoff' | 'catalog_quality' | 'catalog_source' | 'catalog_verification';
+  /** Categoría (`trial` | `handoff` | `catalog_quality` | `catalog_source` | `catalog_verification` | `ai_quota`). */
+  category: 'trial' | 'handoff' | 'catalog_quality' | 'catalog_source' | 'catalog_verification' | 'ai_quota';
   type:
     | TrialNotificationType
     | HandoffNotificationType
     | CatalogQualityNotificationType
     | CatalogSourceNotificationType
-    | CatalogVerificationNotificationType;
+    | CatalogVerificationNotificationType
+    | AiQuotaNotificationType;
   title: string;
   body: string;
   /** Clave determinística de idempotencia (= id del doc). 1 por (tenant, tipo) por trial. */
