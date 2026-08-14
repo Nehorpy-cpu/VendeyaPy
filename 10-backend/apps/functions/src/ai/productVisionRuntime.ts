@@ -25,16 +25,11 @@ import {
   type VisionJobDeps,
 } from './productVision.js';
 
-/** Flag tenant-scoped, FAIL-CLOSED, apagado por defecto: solo `enabled === true` literal enciende
- *  (mismo patrón que el nivel A de ingesta y el nivel B del receipt gate). */
-export async function productVisionActiva(tenantId: string): Promise<boolean> {
-  try {
-    const doc = (await db().doc(`${paths.tenant(tenantId)}/config/productVision`).get()).data() as { enabled?: unknown } | undefined;
-    return doc?.enabled === true;
-  } catch {
-    return false; // ante cualquier duda, apagado
-  }
-}
+/** Flag tenant-scoped, FAIL-CLOSED, apagado por defecto. Vive en su módulo HOJA
+ *  (productVisionFlag.ts) para que el productor no arrastre este runtime; se re-exporta acá
+ *  por compatibilidad con los consumidores existentes. */
+export { productVisionActiva } from './productVisionFlag.js';
+import { productVisionActiva } from './productVisionFlag.js';
 
 const MAX_VISION_BYTES = 10 * 1024 * 1024; // el mismo techo duro de la ingesta
 

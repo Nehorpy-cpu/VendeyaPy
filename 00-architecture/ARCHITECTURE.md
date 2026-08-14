@@ -1060,11 +1060,13 @@ Toda llamada facturable al modelo pasa por **`entitlements/aiReservation.ts`** (
 
 #### 6.6.2 Visión de productos contra el catálogo (ADR-0019 — EN REPO, NO DESPLEGADO, flag OFF)
 
-Una imagen entrante elegible (stored, MIME imagen verificado, NO propuesta como comprobante —
-el clasificador determinístico de ADR-0016 tiene precedencia absoluta —, sin takeover, flag
-`config/productVision.enabled === true` literal) encola un **job durable**
-`tenants/{t}/aiVisionJobs/{attachmentId}` (el id del adjunto ya es determinístico ⇒ reintentos
-del webhook no duplican; re-envíos son hechos nuevos). Worker con claim transaccional + lease
+Una imagen entrante elegible (stored, MIME imagen verificado, clasificación FINAL
+`generic_media` — el clasificador determinístico de ADR-0016 tiene precedencia absoluta y
+`unclassified` es fail-closed —, flag `config/productVision.enabled === true` literal) encola un
+**job durable** `tenants/{t}/aiVisionJobs/{attachmentId}` mediante el productor DESACOPLADO
+`onAiVisionProducer` (trigger sobre la transición del inbox a `processed` — v2: liberar visión no
+exige tocar `onWebhookInbox`). El id del adjunto ya es determinístico ⇒ reintentos del webhook no
+duplican; re-envíos son hechos nuevos. Worker con claim transaccional + lease
 60 s + **fencing por claimId** (un zombi no aplica resultados) + envío único
 (`envio: pendiente→en_vuelo→enviado`; incierto ⇒ jamás re-enviar). Reserva `imagen_vision`
 (ADR-0018) antes del proveedor. La IA solo devuelve **indicios universales** validados por

@@ -479,3 +479,18 @@ revisores están probando). Baseline por superficie demostrada (Hosting 2026-08-
 2026-08-01 = `30c1687`); grafo en dos pasadas coincidente (124 exports); `onWebhookInbox` es el
 ÚNICO export del release que arrastra el gate ADR-0017. Prerequisitos del correctivo: ADC en la
 máquina + autorización del owner para migrar ambos números.
+
+## AI-VISION-PRODUCER-DECOUPLE-1 — 2026-08-14 (EN REPO — NO DESPLEGADO)
+
+El productor de jobs de visión salió de `process.ts` (que quedó **byte-idéntico** a `855d553`) y
+ahora es el trigger propio **`onAiVisionProducer`** (`onDocumentUpdated` sobre la transición del
+inbox a `processed` — la escribe igual el process.ts productivo viejo, con tenantId sellado y
+después del gate de comprobantes). Reglas: clasificación estricta `generic_media` (`unclassified`
+= gate sin decidir ⇒ fail-closed); sessionKey por índice externo (`main`⇒`active`, `wa_*`⇒propia)
+sin importar process.ts; discriminador sin timers (mediaId anulado ⇒ almacenado ⇒ reintentar por
+redelivery; presente ⇒ jamás almacenado ⇒ cerrar). Grafo demostrado en dos pasadas: `onWebhookInbox
+→ productVision: false`; `onAiVisionProducer → process/engine: false`. **La visión completa ya no
+necesita tocar `onWebhookInbox`**; lo único que sigue esperando la migración bicéfala de
+`automationMode` es la cuota del sales agent (inherente al webhook). Plan de release recalculado
+en `10-backend/docs/ai-vision-release-plan.md`: Fase 1c = 3 CREATE + 6 UPDATE.
+16 tests nuevos del productor (rojo→verde) + E2E 12/12 con el trigger real de punta a punta.

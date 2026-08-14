@@ -2,9 +2,12 @@
 
 > Producido por `AI-VISION-RELEASE-TRAIN-PREP-1` (2026-08-14, HEAD `970c31e`), **read-only: nada
 > de este documento se ejecutó**. Complementa (no reemplaza) el runbook de Coexistence.
-> Veredicto: **SEPARABLE CON AJUSTE LOCAL** — la Fase 1 es independiente de Coexistence; la
-> Fase 2 (el productor) exige el programa correctivo de migración de `automationMode` para
-> DOS números, incluido el del tenant de App Review.
+> Veredicto ACTUALIZADO (AI-VISION-PRODUCER-DECOUPLE-1): **VISIÓN INDEPENDIENTE** — el productor
+> ya no vive en process.ts sino en el trigger propio `onAiVisionProducer` (transición del inbox a
+> `processed`, que el process.ts productivo VIEJO también escribe). El release de visión completa
+> + cuota de asistente/simulador NO toca `onWebhookInbox`. Lo ÚNICO que sigue esperando la
+> migración de `automationMode` (dos números: arfagi y meta-review) es la CUOTA DEL SALES AGENT,
+> que por naturaleza vive dentro del webhook.
 
 ## 1. Baseline por superficie (medida 2026-08-14 — NO es un solo commit)
 
@@ -41,7 +44,8 @@ Clasificación de los exports de ESTE release (evidencia: caminos de import veri
 | `agentTestCaseRun` | UPDATE directa (engine→salesAgent→reserva) | NO (engine no importa process.ts) |
 | `simulateAgentMessage` | UPDATE directa (mismo camino) | NO |
 | `devMessage` | UPDATE directa (dev*, ya desplegada) | NO |
-| `onWebhookInbox` | UPDATE directa (hook de visión + gateFallo en process.ts) | **SÍ — el ÚNICO** |
+| `onAiVisionProducer` | **CREATE** (productor v2; NO importa process.ts/engine/automationMode) | NO |
+| `onWebhookInbox` | UPDATE **solo por la cuota del sales agent** (engine→salesAgent→reserva); ya NO alcanza productVision (demostrado en el grafo compilado) | **SÍ — el ÚNICO** |
 | `resetUsageMonthly` | sin cambio semántico | NO |
 | `devRunMetaCatalogOutbox` | dev-only — **PROHIBIDA en producción** | — |
 | `coexistence*` (6) | Coexistence-only — fuera de este release | — |
@@ -62,8 +66,9 @@ Shared: los dos type-files cambiados compilan a **cero diferencia de runtime JS*
    Coexistence (mismo archivo, sin flag para separar — decisión explícita, ver Fase 1a).
 5. Cuota con visión apagada, sin UI de Coexistence: **sí** (Hosting excluido).
 6. Worker sin productor: **sí** — inerte (cero jobs posibles + flag apagado).
-7. El productor es `onWebhookInbox` (hook en `process.ts:751-765`): actualizarlo arrastra el
-   gate ADR-0017 y todo el cierre de Coexistence de `process.ts` (echo, shadow, historial).
+7. v2: el productor es `onAiVisionProducer` (CREATE independiente); `onWebhookInbox` quedó
+   acoplado SOLO por la cuota del sales agent (inherente: el agente corre dentro del webhook) y
+   su update sigue arrastrando el gate ADR-0017 — por eso espera la Fase 2.
 8. Impacto sobre App Review: la Fase 1 **no toca** los flujos del reviewer (su webhook corre
    el código viejo; su asistente interno cambia a reserva con contrato de errores idéntico).
    La Fase 2 SIN la migración del número `…5686` **silenciaría el bot que los revisores están
@@ -87,12 +92,15 @@ Publica los cierres `read,write:false` de `aiReservations`/`aiVisionJobs` + los 
 Coexistence (todos inertes: nada activable). Verificación: 403 sin auth y cross-tenant.
 Rollback: redeploy del ruleset anterior (`a9c99e05…`). App Review: sin impacto.
 
-**Fase 1c — Functions (núcleo independiente)** ·
-`firebase deploy --only functions:aiReservationMaintenance,functions:onAiVisionJob,functions:askInternalGrowthAssistant,functions:agentTestCaseRun,functions:simulateAgentMessage,functions:devMessage --config firebase.functions.json --project vpw-prod-dd6ff`
-— **2 CREATE + 4 UPDATE + 0 DELETE**. Precondiciones: Fase 1a en READY (las queries de
+**Fase 1c — Functions (núcleo independiente + VISIÓN COMPLETA)** ·
+`firebase deploy --only functions:aiReservationMaintenance,functions:onAiVisionJob,functions:onAiVisionProducer,functions:askInternalGrowthAssistant,functions:agentTestCaseRun,functions:agentTestCaseUpsert,functions:agentTestCaseDelete,functions:simulateAgentMessage,functions:runTenantJob --config firebase.functions.json --project vpw-prod-dd6ff`
+— **3 CREATE + 6 UPDATE + 0 DELETE** (el selector definitivo lo emite release-audit.mjs; el
+audit clasifica por archivo definidor, por eso los hermanos agentTestCase*/runTenantJob entran).
+Con esto la VISIÓN queda desplegada de punta a punta (productor + worker + scheduler), inerte
+por flag en todos los tenants. Precondiciones: Fase 1a en READY (las queries de
 recuperación las necesitan), 1b aplicada, flag de visión AUSENTE en todos los tenants
 (verificado). Aborto: cualquier DELETE/recreate propuesto por el CLI, o si el plan difiere de
-2C+4U. Verificación: 117 ACTIVE, `devRunMetaCatalogOutbox` y `coexistence*` siguen ausentes,
+3C+6U. Verificación: 118 ACTIVE (115+3), `devRunMetaCatalogOutbox` y `coexistence*` siguen ausentes,
 scheduler nuevo **sin invoker público**, hash del `.env` productivo intacto. Efecto inmediato
 honesto: los turnos del ASISTENTE INTERNO y el SIMULADOR pasan a reserva transaccional (mismo
 contrato de errores — 180 tests + E2E); el SALES AGENT de WhatsApp **no cambia** (su función no

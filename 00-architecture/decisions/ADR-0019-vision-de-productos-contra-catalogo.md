@@ -17,8 +17,18 @@ precedencia absoluta, el caption jamás entra al modelo, y el catálogo local es
 
 ### 1. Elegibilidad: visión corre DESPUÉS y DEBAJO de todo lo existente
 
-El gancho vive en `meta/process.ts`, en la rama de adjuntos, **después** del gate de comprobantes;
-si el gate LANZÓ (su decisión no llegó a escribirse), la visión tampoco corre — fail-closed (review).
+**v2 (AI-VISION-PRODUCER-DECOUPLE-1):** el productor ya NO vive en `meta/process.ts` — es el
+trigger propio **`onAiVisionProducer`** (`onDocumentUpdated` sobre `metaWebhookInbox`) que observa
+la transición durable a `processed`, la cual el process.ts productivo escribe con el `tenantId`
+sellado y DESPUÉS de que el gate de comprobantes persistió la clasificación final. Así, liberar
+visión NO exige actualizar `onWebhookInbox` (que arrastraría el gate de automatización de
+ADR-0017 sobre números sin migrar). El productor exige clasificación **estrictamente
+`generic_media`** (`unclassified` = el gate no decidió ⇒ fail-closed, sin job), resuelve la
+sessionKey por el índice externo (`main` ⇒ canal heredado; `wa_*` ⇒ sesión propia) sin importar
+process.ts, y usa un discriminador SIN timers para la carrera de visibilidad: al marcar
+`processed`, process.ts anula `payload.attachment.mediaId` SOLO si el archivo quedó almacenado —
+mediaId null + adjunto no visible ⇒ reintentar (redelivery); mediaId presente ⇒ jamás se
+almacenó ⇒ cerrar sin job.
 Un adjunto es elegible SOLO si (todas, fail-closed — cualquier duda ⇒ no hay visión):
 
 - ingesta `stored`, no `duplicate`, `class === 'image'`, MIME **verificado** ∈ {jpeg, png, webp}

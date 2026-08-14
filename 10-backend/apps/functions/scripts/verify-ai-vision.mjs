@@ -31,8 +31,9 @@ const { getStorage } = await import('firebase-admin/storage');
 if (!getApps().length) initializeApp({ projectId: process.env.GCLOUD_PROJECT, storageBucket: `${process.env.GCLOUD_PROJECT}.appspot.com` });
 const db = getFirestore();
 
-const { encolarVisionJob, aiVisionJobPath } = await import(new URL('../lib/ai/productVision.js', import.meta.url).href);
+const { aiVisionJobPath } = await import(new URL('../lib/ai/productVision.js', import.meta.url).href);
 const { ejecutarVisionJob } = await import(new URL('../lib/ai/productVisionRuntime.js', import.meta.url).href);
+const { hashProviderMessageId } = await import(new URL('../../../packages/shared/dist/attachmentIdentity.js', import.meta.url).href);
 
 let ok = 0, fail = 0;
 const check = (nombre, cond, extra = '') => {
@@ -120,10 +121,44 @@ const esperarTerminal = async (t, jobId, timeoutMs = 20_000) => {
 const outMsgs = async (t) => (await db.collection(`tenants/${t}/customers/${CUST}/messages`).get()).docs
   .map((d) => d.data()).filter((m) => m.direction === 'out');
 
-console.log('— 1/5: encolado idempotente —');
-const e1 = await encolarVisionJob({ tenantId: T, customerId: CUST, attachmentId: ATT, messageId: 'pmid_1', sessionKey: 'wa_e2e', channel: 'whatsapp', receivedVia: 'wa-e2e-1' });
-const e2 = await encolarVisionJob({ tenantId: T, customerId: CUST, attachmentId: ATT, messageId: 'pmid_1', sessionKey: 'wa_e2e', channel: 'whatsapp', receivedVia: 'wa-e2e-1' });
-check('1. primer encolado crea el job; el reintento del webhook NO duplica', e1.encolado === true && e2.encolado === false);
+console.log('— 1/5: el PRODUCTOR real (trigger onAiVisionProducer sobre la transición a processed) —');
+// El adjunto sembrado debe llevar el messageId determinístico que el productor recomputa.
+const WAMID = 'wamid_e2e_producer_1';
+const PMID = hashProviderMessageId(T, WAMID);
+await db.doc(`tenants/${T}/attachments/${ATT}`).update({ messageId: PMID });
+// La sessionKey la deriva la MISMA autoridad compartida (derivarSessionKey): el ASSET manda.
+// Se siembran asset + índice como en la realidad productiva del canal heredado.
+await db.doc(`tenants/${T}/metaAssets/wa-e2e-1`).set({ id: 'wa-e2e-1', tenantId: T, assetType: 'whatsapp_phone_number', externalId: 'wa-e2e-1', connectionId: 'main', sessionKey: 'active', status: 'active', selected: true });
+await db.doc(`metaExternalIndex/whatsapp_wa-e2e-1`).set({ id: 'whatsapp_wa-e2e-1', tenantId: T, connectionId: 'main', externalId: 'wa-e2e-1', platform: 'whatsapp', status: 'active' });
+const EV = `whatsapp_${WAMID}`;
+// Evento con el shape REAL del inbox: en 'processing', con tenantId sellado y mediaId ya anulado
+// (= el archivo quedó almacenado), tal como lo deja el process.ts productivo al cerrar.
+await db.doc(`metaWebhookInbox/${EV}`).set({
+  id: EV, platform: 'whatsapp', kind: 'message', objectType: 'message', eventType: 'messages',
+  externalId: 'wa-e2e-1', tenantId: T, processingStatus: 'processing', automationEligible: true,
+  payload: { from: CUST, messageId: WAMID, attachment: { kind: 'image', mediaId: null, declaredMime: 'image/jpeg' } },
+  receivedAt: now, processedAt: null, errorMessage: '',
+});
+// LA transición durable que el productor observa:
+await db.doc(`metaWebhookInbox/${EV}`).update({ processingStatus: 'processed', processedAt: Timestamp.now() });
+const esperarJob = async (t, jobId, timeoutMs = 20_000) => {
+  const fin = Date.now() + timeoutMs;
+  for (;;) {
+    const j = (await db.doc(aiVisionJobPath(t, jobId)).get()).data();
+    if (j) return j;
+    if (Date.now() > fin) return null;
+    await new Promise((r) => setTimeout(r, 400));
+  }
+};
+const jobCreado = await esperarJob(T, ATT);
+check('1. la transición processing→processed produce EXACTAMENTE un job (tenant sellado, sessionKey del índice)',
+  jobCreado !== null && jobCreado.tenantId === T && jobCreado.sessionKey === 'active' && jobCreado.receivedVia === 'wa-e2e-1',
+  `job=${JSON.stringify({ t: jobCreado?.tenantId, sk: jobCreado?.sessionKey })}`);
+// Redelivery/transición repetida: otro update sobre un doc YA processed ⇒ before=processed ⇒ no-op.
+await db.doc(`metaWebhookInbox/${EV}`).update({ processedAt: Timestamp.now() });
+await new Promise((r) => setTimeout(r, 2500));
+const jobsT = (await db.collection(`tenants/${T}/aiVisionJobs`).get()).size;
+check('1b. la transición repetida NO duplica (sigue habiendo un solo job)', jobsT === 1, `jobs=${jobsT}`);
 
 console.log('— 2/5: ciclo completo con coincidencia fuerte —');
 // El emulador de functions dispara onAiVisionJob REAL sobre el doc creado: se espera su desenlace.
@@ -154,7 +189,7 @@ const aiReqsT2 = (await db.collection(`tenants/${T2}/aiRequests`).get()).size;
 check('4. flag apagado ⇒ skipped y CERO llamadas de IA para ese tenant', jobOff?.status === 'skipped' && aiReqsT2 === 0, `job=${jobOff?.status}`);
 const PATH2 = `tenants/${T}/attachments/ab/${ATT2}`;
 await bucket.file(PATH2).save(JPEG, { contentType: 'image/jpeg' });
-await sembrarAdjunto(T, ATT2, PATH2, { classification: { value: 'payment_receipt_candidate', source: 'rule', confidence: 1, by: null, at: now } });
+await sembrarAdjunto(T, ATT2, PATH2, { classification: { value: 'payment_receipt_candidate', source: 'rule', confidence: 1, by: null, at: now }, messageId: hashProviderMessageId(T, 'wamid_e2e_rec') });
 await db.doc(aiVisionJobPath(T, ATT2)).set({ id: ATT2, tenantId: T, customerId: CUST, attachmentId: ATT2, messageId: 'x', sessionKey: 'wa_e2e', channel: 'whatsapp', receivedVia: null, status: 'queued', attempts: 0, leaseUntil: null, claimId: null, envio: 'pendiente', createdAt: now });
 const jobRec = await esperarTerminal(T, ATT2);
 check('4b. comprobante candidato ⇒ skipped SIN visión (precedencia absoluta)', jobRec?.status === 'skipped' && (await outMsgs(T)).length === 1, );

@@ -291,8 +291,10 @@ export { coverageQuoteAndApprove, coverageQuoteResolveUnknown, coverageQuoteAtte
 // (orden única + instrucciones por el mismo número) + mantenimiento diario (expiración + purga
 // de coordenadas a 30 días + recuperación de jobs retenidos/fallidos).
 export { onCoverageResumeJob } from './functions/coverage/onCoverageResumeJob.js';
-// ADR-0019: worker durable de visión de productos (flag por tenant, apagado por defecto).
+// ADR-0019: worker durable de visión de productos (flag por tenant, apagado por defecto) y su
+// PRODUCTOR desacoplado del webhook (observa la transición del inbox a processed — v2).
 export { onAiVisionJob } from './functions/ai/onAiVisionJob.js';
+export { onAiVisionProducer } from './functions/ai/onAiVisionProducer.js';
 export { coverageMaintenanceDaily } from './functions/scheduled/coverageMaintenance.js';
 export { devRunCoverageMaintenance } from './functions/coverage/devCoverageMaintenance.js';
 

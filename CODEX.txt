@@ -175,3 +175,10 @@ independiente (2 CREATE + 4 UPDATE sin el gate); Fase 2 (onWebhookInbox) bloquea
 automationMode de DOS números — arfagi y el de meta-review (…5686, conectado en la revisión).
 Cero deploy, cero mutaciones. Baseline por superficie demostrada; dos pasadas del grafo
 coincidentes; App Review protegida por diseño del selector.
+
+### AI-VISION-PRODUCER-DECOUPLE-1 — 2026-08-14 (EN REPO — NO DESPLEGADO)
+Productor de visión desacoplado: trigger onAiVisionProducer sobre inbox→processed (compatible con
+el process.ts productivo viejo); process.ts byte-idéntico a 855d553; clasificación estricta
+generic_media; discriminador mediaId sin timers; grafo probado en dos pasadas (onWebhookInbox ya
+no alcanza visión). Release de visión independiente; la cuota del sales agent sigue con el tren
+(inherente). 16 tests + E2E 12/12 por el trigger real.
