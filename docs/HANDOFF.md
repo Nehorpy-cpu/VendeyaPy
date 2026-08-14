@@ -465,3 +465,17 @@ muestra "analizando" en vivo (el estado aparece al terminar, con el refetch de 1
 acuse-primero/análisis-después no está garantizado formalmente (dos caminos asíncronos); un job
 `queued` cuyo evento de Eventarc se perdiera del todo depende del barrido horario; el gancho de
 encolado de process.ts se cubre por E2E (sin unit test propio).
+
+## AI-VISION-RELEASE-TRAIN-PREP-1 — 2026-08-14 (read-only, CERO deploy)
+
+Plan completo en **`10-backend/docs/ai-vision-release-plan.md`**. Veredicto: **SEPARABLE CON
+AJUSTE LOCAL** — la Fase 1 (índices+TTL, rules inertes, 2 CREATE + 4 UPDATE del asistente
+interno/simulador) es INDEPENDIENTE de Coexistence y no toca la experiencia de App Review; la
+Fase 2 (productor `onWebhookInbox` = cuota del sales agent + encolado de visión) queda BLOQUEADA
+hasta el programa correctivo de migración de `automationMode`, que ahora es BICÉFALO: el audit
+detecta DOS números sin el campo — `arfagi …7904` y **`meta-review …5686`** (el número de prueba
+conectado durante la revisión de Meta: desplegar el gate sin migrarlo silenciaría el bot que los
+revisores están probando). Baseline por superficie demostrada (Hosting 2026-08-11 ≠ Functions
+2026-08-01 = `30c1687`); grafo en dos pasadas coincidente (124 exports); `onWebhookInbox` es el
+ÚNICO export del release que arrastra el gate ADR-0017. Prerequisitos del correctivo: ADC en la
+máquina + autorización del owner para migrar ambos números.

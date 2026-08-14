@@ -168,3 +168,10 @@ claim+lease+fencing, envío único, reserva imagen_vision antes del proveedor, t
 precedencia absoluta, caption jamás al modelo, takeover = silencio. 28 tests núcleo con
 neutralización + E2E 11/11 con el trigger real del emulador. Flag apagado por defecto; activación
 productiva = programa aparte. Cero deploy, cero Meta, cero mutaciones productivas.
+
+### AI-VISION-RELEASE-TRAIN-PREP-1 — 2026-08-14 (read-only)
+Plan de release de ADR-0018/0019 en docs/ai-vision-release-plan.md. SEPARABLE: Fase 1
+independiente (2 CREATE + 4 UPDATE sin el gate); Fase 2 (onWebhookInbox) bloqueada hasta migrar
+automationMode de DOS números — arfagi y el de meta-review (…5686, conectado en la revisión).
+Cero deploy, cero mutaciones. Baseline por superficie demostrada; dos pasadas del grafo
+coincidentes; App Review protegida por diseño del selector.
