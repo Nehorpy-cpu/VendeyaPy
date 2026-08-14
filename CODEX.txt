@@ -160,3 +160,11 @@ aiTokensReserved, liquidación exactamente-una-vez con uso real (incluye parcial
 recuperación lazy + scheduler horario, alertas idempotentes 70/85/95/100 por campana. 12 casos
 discriminantes con neutralización demostrada + E2E 9/9 de concurrencia real. Visión/OCR sigue
 diferida. Cero deploy, cero mutaciones productivas.
+
+### PRODUCT-IMAGE-UNDERSTANDING-SAFE-1 — 2026-08-14 (EN REPO — NO DESPLEGADO, FLAG APAGADO)
+ADR-0019: visión de productos contra el catálogo local. Job durable idempotente por attachmentId,
+claim+lease+fencing, envío único, reserva imagen_vision antes del proveedor, tool forzada con zod
+(la IA describe, jamás decide), searchCatalog+guards como única autoridad, comprobantes con
+precedencia absoluta, caption jamás al modelo, takeover = silencio. 28 tests núcleo con
+neutralización + E2E 11/11 con el trigger real del emulador. Flag apagado por defecto; activación
+productiva = programa aparte. Cero deploy, cero Meta, cero mutaciones productivas.

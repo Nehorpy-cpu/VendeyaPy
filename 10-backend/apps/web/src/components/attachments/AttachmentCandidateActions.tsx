@@ -156,6 +156,27 @@ export function AttachmentCandidateActions({
             🧾 Comprobante vinculado
           </span>
         )}
+        {/* ADR-0019: desenlace discreto del análisis visual. Solo estado saneado + nombre del
+            producto si hubo match único — jamás confianza técnica, prompts ni rutas. Un
+            comprobante nunca trae este chip (la visión no corre sobre comprobantes). */}
+        {attachment.vision && (
+          <span
+            aria-live="polite"
+            className={
+              attachment.vision.state === 'identificado'
+                ? 'rounded-full bg-mint-100 px-2 py-0.5 text-[10px] font-semibold text-mint-800'
+                : 'rounded-full bg-ink-50 px-2 py-0.5 text-[10px] font-semibold text-ink-600'
+            }
+          >
+            {attachment.vision.state === 'identificado'
+              ? `📸 Producto identificado${attachment.vision.productName ? `: ${attachment.vision.productName}` : ''}`
+              : attachment.vision.state === 'aclaracion'
+                ? '📸 Necesita aclaración'
+                : attachment.vision.state === 'sin_match'
+                  ? '📸 Sin coincidencia en el catálogo'
+                  : '📸 No analizado'}
+          </span>
+        )}
         {/* Chip navegable: abre el pedido ACÁ MISMO. Nadie tiene que irse a la pantalla de Pedidos
             para saber de qué pedido se está hablando. */}
         {attachment.orderCandidateId && (

@@ -291,6 +291,8 @@ export { coverageQuoteAndApprove, coverageQuoteResolveUnknown, coverageQuoteAtte
 // (orden única + instrucciones por el mismo número) + mantenimiento diario (expiración + purga
 // de coordenadas a 30 días + recuperación de jobs retenidos/fallidos).
 export { onCoverageResumeJob } from './functions/coverage/onCoverageResumeJob.js';
+// ADR-0019: worker durable de visión de productos (flag por tenant, apagado por defecto).
+export { onAiVisionJob } from './functions/ai/onAiVisionJob.js';
 export { coverageMaintenanceDaily } from './functions/scheduled/coverageMaintenance.js';
 export { devRunCoverageMaintenance } from './functions/coverage/devCoverageMaintenance.js';
 

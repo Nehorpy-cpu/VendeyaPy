@@ -139,6 +139,13 @@ export interface Attachment {
   /** Retención configurable por tenant; la purga viene APAGADA por defecto. */
   retentionUntil: Timestamp | null;
   purgedAt: Timestamp | null;
+  /** ADR-0019: estado SANEADO del análisis visual (chip del panel). Jamás confianza cruda,
+   *  prompts, rutas ni URLs — solo el desenlace y, si hubo match único, el nombre del producto. */
+  vision?: {
+    state: 'identificado' | 'aclaracion' | 'sin_match' | 'no_analizado';
+    productName?: string;
+    at?: Timestamp;
+  } | null;
   createdAt: Timestamp;
   updatedAt: Timestamp;
   /** Último error SANEADO (sin URLs, sin teléfonos), para que un fallo sea visible y recuperable. */

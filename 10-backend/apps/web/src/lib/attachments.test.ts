@@ -109,6 +109,9 @@ describe('proyección al panel: la ruta de Storage NO sale de Firestore', () => 
     'lastError',
     'mime',
     'orderCandidateId',
+    // ADR-0019: desenlace SANEADO de la visión (estado + nombre del producto). Pensado a
+    // propósito: jamás confianza cruda, prompts, rutas de Storage ni URLs.
+    'vision',
   ];
 
   it('toPanelAttachment construye un objeto NUEVO y el path no está en él', () => {

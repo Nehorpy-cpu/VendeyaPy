@@ -71,6 +71,8 @@ export type PanelAttachment = Pick<
   /** Solo el MIME VERIFICADO: el declarado por el proveedor no tiene autoridad y no se muestra. */
   mime: { verified: string | null };
   createdAt: Attachment['createdAt'] | null;
+  /** ADR-0019: desenlace SANEADO del análisis visual (estado + nombre si hubo match único). */
+  vision?: { state: string; productName?: string | null } | null;
 };
 
 /**
@@ -103,6 +105,13 @@ export function toPanelAttachment(raw: unknown): PanelAttachment | null {
     orderCandidateId: typeof d.orderCandidateId === 'string' ? d.orderCandidateId : null,
     createdAt: d.createdAt ?? null,
     lastError: typeof d.lastError === 'string' ? d.lastError : null,
+    vision:
+      d.vision && typeof d.vision === 'object' && typeof (d.vision as { state?: unknown }).state === 'string'
+        ? {
+            state: (d.vision as { state: string }).state,
+            productName: typeof (d.vision as { productName?: unknown }).productName === 'string' ? (d.vision as { productName: string }).productName : null,
+          }
+        : null,
   };
 }
 

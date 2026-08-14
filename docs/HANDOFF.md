@@ -411,3 +411,57 @@ una — acotado por el claim upstream, sin fix barato; la alerta `agotada` puede
 presión de reservas en vuelo antes del 100% liquidado (semántica declarada del ADR §5); el sweep
 va de a 200/hora secuenciales (suficiente en régimen normal; un incidente masivo lo drenaría en
 varias corridas).
+
+## PRODUCT-IMAGE-UNDERSTANDING-SAFE-1 — 2026-08-14 (EN REPO — NO DESPLEGADO, FLAG APAGADO)
+
+Segundo y último programa del bloque de ADR-0018. **ADR-0019**: reconocimiento de imágenes de
+productos contra el catálogo local, multi-vertical (nada de perfumería hardcodeada), con el
+clasificador determinístico de comprobantes en precedencia absoluta.
+
+**Diseño**: adjunto elegible (stored + imagen verificada + NO propuesto como pago + flag
+`tenants/{t}/config/productVision.enabled === true` literal — apagado por defecto) ⇒ job durable
+`aiVisionJobs/{attachmentId}` (id determinístico ⇒ reintentos del webhook no duplican; re-envíos
+son hechos nuevos). Worker (trigger `onAiVisionJob`): claim transaccional + lease 60 s + fencing
+por claimId (un zombi no aplica NADA) + envío único (`pendiente→en_vuelo→enviado`; incierto ⇒
+failed sin re-enviar) + intentos ≤5 + recuperación en `aiReservationMaintenance` (lazy + barrido).
+Reserva `imagen_vision` (2.600 est.) ANTES del proveedor; liquidación con uso real (parcial en
+error). La IA solo devuelve indicios universales (tool forzada `reportar_indicios`, zod, campos
+capados, sin lugar para precios/IDs); el servidor busca con `searchCatalog` + guards vigentes
+(ACTIVE, stock, deriva) y responde SOLO con datos de Firestore; sin match ⇒ honestidad; ambiguo ⇒
+pregunta (máx. 3 opciones); indicios pobres ⇒ pedir nombre/marca. El caption sigue SIN viajar al
+modelo (ADR-0016 §9 intacto); takeover ⇒ silencio absoluto; purgado/PDF/MIME raro ⇒ fail-closed
+sin IA. Panel: campo saneado `attachment.vision` + chip discreto en Conversaciones.
+
+**Verificación**: núcleo 28 tests (claim/fencing/envío único/desenlaces/aislamiento/PII) con
+neutralización demostrada (fencing anulado ⇒ rojo ⇒ restaurado verde); E2E
+`verify-ai-vision.mjs` **11/11 con el trigger REAL del emulador** (imagen sintética en Storage,
+FakeAiClient por fixture, catálogo de macetas — multi-vertical), regresiones y batería completa
+(ver commit).
+
+**Superficie de deploy futura de ESTE programa** (nada desplegado): trigger `onAiVisionJob`
+(CREATE), 1 match de rules (`aiVisionJobs: read,write:false`), 1 índice collection-group
+`aiVisionJobs (status, leaseUntil)`, y el sweep ya viaja dentro de `aiReservationMaintenance`.
+**Depende del deploy pendiente del programa anterior** (ADR-0018: rules de `aiReservations`,
+2 índices y el scheduler). **La activación productiva (flag ON por tenant) requiere un programa
+separado**, con el proveedor real y calibración del extractor.
+
+**Review adversarial final** (separación comprobante/producto, idempotencia, fencing, autoridad,
+multi-tenant, privacidad, no-alucinación): 3 ALTO y 3 MEDIO confirmados y **corregidos con test**:
+(1) guard autoritativo de silencio pre-envío (`evaluarSilencioPreEnvio` como última operación antes
+del POST — takeover tardío o bot apagado callan la visión); (2) matching estricto
+(`splitByQueryMatch.pinned`: el relleno de sugerencias del buscador ya no se presenta como
+identificación — `sin_match` es alcanzable); (3) reserva por INTENTO (`vision-{att}-a{n}`: los
+reintentos dejaron de morir en `reserva_cerrada`); (4) el barrido re-DISPARA los jobs re-encolados
+(onDocumentCreated no ve updates); (5) si el gate de comprobantes LANZA, visión no corre
+(fail-closed); (6) lease 5 min + timeout 360 s del trigger (60 s producía claims solapados de
+workers vivos y doble llamada paga). Refutados con evidencia: alucinación en textos, doble mensaje
+físico, cruce de tenants, fuga de privacidad.
+
+**Limitaciones honestas**: PDF/documentos y OCR de comprobantes fuera de alcance; el matching es
+por búsqueda de texto sobre indicios (sin embeddings); la calidad real del extractor no está
+calibrada (el E2E usa FakeAiClient); un crash exactamente entre el envío y el settle termina
+`failed/envio_incierto` sin respuesta de visión (preferible al duplicado); el chip del panel no
+muestra "analizando" en vivo (el estado aparece al terminar, con el refetch de 10 s); el orden
+acuse-primero/análisis-después no está garantizado formalmente (dos caminos asíncronos); un job
+`queued` cuyo evento de Eventarc se perdiera del todo depende del barrido horario; el gancho de
+encolado de process.ts se cubre por E2E (sin unit test propio).

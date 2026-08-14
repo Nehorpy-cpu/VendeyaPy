@@ -142,3 +142,13 @@ Ningún secreto/valor de key se versiona.
 - **AI-KEY-1** (cerrado): patrón seguro de la key real — `defineSecret('ANTHROPIC_API_KEY')` bindeado (least-privilege) a las functions del gateway + `.secret.local` gitignored + `scripts/smoke-ai-real.mjs` (manual) + comandos de config.
 - **AI-SMOKE-REAL** (✅ cerrado): smoke real ejecutado 1 vez con key nueva — la API real funciona; modelo datado `claude-haiku-4-5-20251001` OK; auditoría sin prompt/PII; fallback OK. No re-ejecutar por ahora.
 - **AI-MODEL-PIN** (propuesta): fijar `AI_MODEL='claude-haiku-4-5-20251001'` (el modelo probado) + actualizar asserts/fixtures/docs. Backend/tests/docs only; sin deploy.
+- **ADR-0019 — Visión de productos** (EN REPO, NO DESPLEGADO, flag `config/productVision.enabled` apagado por defecto):
+  `runVisionExtraction` (una llamada, bloque de imagen base64 leído del Storage privado por el
+  backend, tool FORZADA `reportar_indicios`, contexto `product_vision` en `aiRequests`). El modelo
+  solo describe indicios universales validados con zod (`sanearIndicios`); el catálogo del tenant
+  es la única autoridad (`searchCatalog` + guards). Job durable `aiVisionJobs/{attachmentId}` con
+  claim + lease 60 s + fencing por claimId + envío único (`pendiente→en_vuelo→enviado`; incierto ⇒
+  jamás re-enviar); recuperación en `aiReservationMaintenance`. Reserva `imagen_vision` (ADR-0018)
+  antes del proveedor. El clasificador de comprobantes (ADR-0016) tiene precedencia absoluta y el
+  caption sigue sin viajar al modelo. e2e: `scripts/verify-ai-vision.mjs` (trigger real del
+  emulador + FakeAiClient + imagen sintética + catálogo NO-perfumería).

@@ -1058,6 +1058,21 @@ Toda llamada facturable al modelo pasa por **`entitlements/aiReservation.ts`** (
    (`allow read, write: if false`); `usage.aiTokensReserved` vive en el doc tenant ya
    protegido por la deny-list de `affectedKeys`.
 
+#### 6.6.2 Visión de productos contra el catálogo (ADR-0019 — EN REPO, NO DESPLEGADO, flag OFF)
+
+Una imagen entrante elegible (stored, MIME imagen verificado, NO propuesta como comprobante —
+el clasificador determinístico de ADR-0016 tiene precedencia absoluta —, sin takeover, flag
+`config/productVision.enabled === true` literal) encola un **job durable**
+`tenants/{t}/aiVisionJobs/{attachmentId}` (el id del adjunto ya es determinístico ⇒ reintentos
+del webhook no duplican; re-envíos son hechos nuevos). Worker con claim transaccional + lease
+60 s + **fencing por claimId** (un zombi no aplica resultados) + envío único
+(`envio: pendiente→en_vuelo→enviado`; incierto ⇒ jamás re-enviar). Reserva `imagen_vision`
+(ADR-0018) antes del proveedor. La IA solo devuelve **indicios universales** validados por
+schema (texto visible, marca aparente, categoría, rasgos, confianza); el servidor busca con
+`searchCatalog` + guards vigentes y responde SOLO con datos de Firestore. Sin match ⇒ honestidad;
+ambiguo ⇒ pregunta. El panel muestra un chip discreto (`vision.state` en el doc del adjunto).
+`aiVisionJobs`: `read, write: if false`.
+
 ---
 
 ## 7. Integración n8n

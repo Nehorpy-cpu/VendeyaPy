@@ -24,6 +24,8 @@ import { attachmentFromInboxPayload, unsupportedFromInboxPayload } from './parse
 import { resolveAutomationMode, canalSinGate, type CanalAutomatizacion, type OrigenAutomatizacion } from './automationMode.js';
 import { consumirEcho, registrarObservacion } from './echoConsumer.js';
 import { ingestInboundAttachment, recordUnsupportedInbound, recordAttachmentIngestDisabled } from './attachmentIngest.js';
+import { encolarVisionJob } from '../ai/productVision.js';
+import { productVisionActiva } from '../ai/productVisionRuntime.js';
 import { getAttachmentGate } from './attachmentGate.js';
 import { getAttachmentIngestPolicy } from './attachmentLimits.js';
 import { respuestaPorAdjunto, type AttachmentReplyClass, type AttachmentReplyReason } from './attachmentReplies.js';
@@ -693,6 +695,8 @@ export async function processWebhookEvent(eventId: string): Promise<void> {
         let motivo: AttachmentReplyReason | null = ingesta.reason;
         /** true ⇒ el gate ya le dio significado de PAGO al archivo (y ya se acusó recibo antes). */
         let yaPropuestoComoPago = false;
+        /** true ⇒ el gate LANZÓ: la precedencia del clasificador no llegó a decidir ⇒ visión NO corre (fail-closed, review MEDIO 5). */
+        let gateFallo = false;
         // El gate corre SOLO sobre un archivo efectivamente almacenado y solo la primera vez (un
         // reintento no vuelve a proponer nada). Si falla, el adjunto YA está guardado y visible:
         // la conversación no se rompe por un problema de clasificación.
@@ -717,6 +721,9 @@ export async function processWebhookEvent(eventId: string): Promise<void> {
               decision.classification === 'payment_receipt_candidate' ||
               decision.classification === 'payment_receipt_linked';
           } catch (e) {
+            // Review MEDIO 5: si el gate LANZÓ, la precedencia del clasificador no llegó a
+            // decidir — la visión tampoco corre (fail-closed).
+            gateFallo = true;
             logger.error('Gate de adjunto falló (el archivo ya quedó guardado)', e, { tenantId, attachmentId: ingesta.attachmentId });
           }
         }
@@ -730,6 +737,37 @@ export async function processWebhookEvent(eventId: string): Promise<void> {
         if (!adjuntoReply.trim() && !ingesta.duplicate && !yaPropuestoComoPago) {
           const clase: AttachmentReplyClass = ingesta.attachment?.class ?? adjunto.kind;
           adjuntoAcuse = respuestaPorAdjunto(motivo, clase);
+        }
+
+        // ADR-0019: visión de productos. SOLO si el gate NO lo propuso como pago (precedencia
+        // absoluta del clasificador determinístico), la ingesta quedó `stored`, es una imagen y
+        // el flag por tenant está encendido (fail-closed, apagado por defecto). El job es durable
+        // e idempotente por construcción (su id ES el attachmentId determinístico: el reintento
+        // del webhook choca en el create y no duplica). El worker re-verifica TODO de nuevo
+        // (clasificación, purga, takeover, MIME) antes de gastar un token.
+        if (
+          !ingesta.duplicate &&
+          !yaPropuestoComoPago &&
+          !gateFallo &&
+          ingesta.ingestState === 'stored' &&
+          (ingesta.attachment?.class ?? adjunto.kind) === 'image'
+        ) {
+          try {
+            if (await productVisionActiva(tenantId)) {
+              await encolarVisionJob({
+                tenantId,
+                customerId,
+                attachmentId: ingesta.attachmentId,
+                messageId: ingesta.messageId,
+                sessionKey,
+                channel: platform,
+                receivedVia: receivedBy ?? null,
+              });
+            }
+          } catch (e) {
+            // La visión es best-effort: un fallo del encolado jamás rompe el turno del adjunto.
+            logger.warn('Visión: encolado falló (el adjunto quedó igual)', { tenantId, attachmentId: ingesta.attachmentId });
+          }
         }
       }
     } else if (noSoportado) {

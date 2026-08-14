@@ -7,7 +7,7 @@
  */
 
 /** Contextos separados desde el inicio (data policy + prompts distintos en AG-2/AG-3). */
-export type AiContext = 'whatsapp_sales_agent' | 'internal_growth_assistant';
+export type AiContext = 'whatsapp_sales_agent' | 'internal_growth_assistant' | 'product_vision';
 
 /** Bloques de contenido (para round-trips de tool-use). El texto plano sigue siendo válido. */
 export interface AiTextBlock {
@@ -25,7 +25,15 @@ export interface AiToolResultBlock {
   toolUseId: string;
   content: string;
 }
-export type AiContentBlock = AiTextBlock | AiToolUseBlock | AiToolResultBlock;
+/** ADR-0019: imagen privada en base64, leída por el BACKEND del Storage del tenant.
+ *  Jamás una URL (ni pública ni firmada): los bytes viajan en el request y nada persiste. */
+export interface AiImageBlock {
+  type: 'image';
+  mediaType: 'image/jpeg' | 'image/png' | 'image/webp' | 'image/gif';
+  dataBase64: string;
+}
+
+export type AiContentBlock = AiTextBlock | AiToolUseBlock | AiToolResultBlock | AiImageBlock;
 
 export interface AiMessage {
   role: 'user' | 'assistant';
@@ -72,6 +80,8 @@ export interface CreateMessageParams {
   messages: AiMessage[];
   maxTokens: number;
   tools?: AiTool[];
+  /** ADR-0019: fuerza al modelo a responder por UNA tool (salida estructurada). */
+  toolChoice?: { type: 'tool'; name: string };
 }
 
 /** Cliente inyectable: real (Anthropic) en prod, fake (fixtures) en emulador/tests. */

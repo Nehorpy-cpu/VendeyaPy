@@ -20,6 +20,7 @@ function toSdkContent(content: AiMessage['content']): Anthropic.MessageParam['co
   return content.map((b: AiContentBlock) => {
     if (b.type === 'text') return { type: 'text' as const, text: b.text };
     if (b.type === 'tool_use') return { type: 'tool_use' as const, id: b.id, name: b.name, input: b.input };
+    if (b.type === 'image') return { type: 'image' as const, source: { type: 'base64' as const, media_type: b.mediaType, data: b.dataBase64 } };
     return { type: 'tool_result' as const, tool_use_id: b.toolUseId, content: b.content };
   });
 }
@@ -41,6 +42,7 @@ export class HttpAnthropicClient implements AiClient {
       ...(params.tools && params.tools.length
         ? { tools: params.tools.map((t) => ({ name: t.name, description: t.description, input_schema: t.inputSchema })) }
         : {}),
+      ...(params.toolChoice ? { tool_choice: { type: 'tool' as const, name: params.toolChoice.name } } : {}),
     });
 
     const text = res.content

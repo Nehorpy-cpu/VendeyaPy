@@ -361,6 +361,12 @@ service cloud.firestore {
         allow read, write: if false;
       }
 
+      // ADR-0019: jobs durables de visión de productos. SOLO backend; el panel ve el estado
+      // saneado por el campo `vision` del doc del adjunto, jamás el job.
+      match /aiVisionJobs/{jobId} {
+        allow read, write: if false;
+      }
+
       // Uso/costo de IA (AG-3): registro por request del gateway de Claude (modelo, tokens, costo,
       // contexto, status) SIN prompts ni PII. Contiene costos → lectura manager+ (el vendedor NO).
       // Lo escribe SOLO Cloud Functions (Admin SDK); nada es escribible desde el cliente.

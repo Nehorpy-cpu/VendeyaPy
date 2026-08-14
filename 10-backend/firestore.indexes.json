@@ -299,6 +299,20 @@
           "order": "ASCENDING"
         }
       ]
+    },
+    {
+      "collectionGroup": "aiVisionJobs",
+      "queryScope": "COLLECTION_GROUP",
+      "fields": [
+        {
+          "fieldPath": "status",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "leaseUntil",
+          "order": "ASCENDING"
+        }
+      ]
     }
   ],
   "//fieldOverrides": [
