@@ -194,3 +194,11 @@ humano verificado: reserva ventas-… creada→liquidada (est 1500/real 3770), e
 conciliado a token exacto, cero efectos externos, meta-review intacto. Flag de visión APAGADO
 en los 3 tenants. Fase 2 (sales agent) sigue bloqueada por la migración bicéfala de
 automationMode; el canary de visión es un programa aparte.
+
+### AI-VISION-PROVIDER-CANARY-ARFAGI-1 — 2026-08-15 (BLOQUEANTE DOCUMENTADO — RESTAURADO)
+Canary real de visión en arfagi: producer/job/claim/reserva(liquidada 2529)/extracción/catálogo
+TODO por contrato, cero duplicados ni efectos comerciales. Bloqueante hallado: el whatsappClient
+del artefacto nuevo aplica el gate ADR-0017 y automationMode está AUSENTE en …7904 ⇒ envío
+bloqueado ⇒ failed/envio_incierto. La entrega de visión requiere la migración bicéfala de
+automationMode (la de Fase 2). Kill-switch + flag restaurado a AUSENTE (verificado vs baseline).
+Precondición operativa aprendida: liberar takeovers residuales del tester antes de un canary.

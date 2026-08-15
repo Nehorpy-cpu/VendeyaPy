@@ -528,3 +528,33 @@ desde `bdaffbe`, sin tocar `onWebhookInbox` ni nada que arrastre el gate ADR-001
   migración bicéfala de `automationMode` (arfagi `…7904` + meta-review `…5686`); Fase 3 = canary de
   visión con proveedor real, programa aparte con aprobación separada. Flag de visión APAGADO en los 3
   tenants.
+
+## AI-VISION-PROVIDER-CANARY-ARFAGI-1 — 2026-08-15 (CANARY EJECUTADO — BLOQUEANTE REAL DOCUMENTADO — ESTADO RESTAURADO)
+
+Primer canary del proveedor real de visión en arfagi, con aprobación del owner y precondiciones
+extra (sesión del remitente sin takeover — hubo que LIBERAR un takeover residual del 2026-08-10
+del propio tester —, sin contexto de pago, sin pedido abierto). Activación quirúrgica del flag
+(`exists=false` + updateMask enabled/updatedAt) e imagen sintética inocua (frasco dibujado
+"ARMAF ODYSSEY MEGA", sin PII/montos).
+
+**Lo que FUNCIONÓ por contrato (proveedor real, producción):** producer → job único (tenant
+sellado, sessionKey `active` correcta), claim+lease intento 1, reserva `vision-att_…-a1` (est
+2.600) → proveedor real → **liquidada con uso real 2.529** (delta del mes conciliado a token
+exacto), extracción + catálogo con guards, job saneado (solo ids/estados), cero duplicados,
+cero pedidos/pagos/carrito, meta-review/credipower intactos.
+
+**El BLOQUEANTE:** la respuesta de visión NO llegó al cliente. El cliente de WhatsApp del
+ARTEFACTO NUEVO aplica el permiso de canal de ADR-0017 en modo automático y el número `…7904`
+tiene `automationMode` AUSENTE ⇒ `WhatsApp: envío BLOQUEADO por el permiso del canal (ADR-0017)`
+⇒ job `failed / envio_incierto` sin reintento (correcto: jamás duplicado). La nota de riesgo del
+plan ("su guard es silencio.ts") era INCOMPLETA: el worker no consulta automationMode, pero el
+whatsappClient compartido del artefacto nuevo SÍ — y fail-closed. **Consecuencia: la ENTREGA de
+visión en arfagi (y meta-review) requiere la migración bicéfala de `automationMode` — la misma
+que bloquea la Fase 2.** El bot común no lo sufre porque `onWebhookInbox` corre el artefacto
+viejo (pre-gate).
+
+Kill-switch inmediato al detectar la desviación (enabled=false con precondición fresca) y
+restauración final a **AUSENTE exacto** verificada contra la baseline. Rastros históricos
+legítimos: 1 job terminal saneado + 1 reserva liquidada. Próximo paso natural: el programa
+correctivo de migración `automationMode` (arfagi `…7904` + meta-review `…5686`) y recién
+después re-canary de visión.

@@ -158,9 +158,13 @@ asistente interno/simulador y deja el sales agent para la Fase 2.
 - La cuota no tiene kill-switch selectivo propio: mitigación gruesa (`features.aiAssistant`
   off) o redeploy de reversa — dejar el artefacto de reversa ARMADO antes de la Fase 1c.
 - El deploy de índices adelanta los 3 TTL de Coexistence (decisión explícita, bajo riesgo).
-- `onAiVisionJob`/`aiReservationMaintenance` pueden enviar WhatsApp sin consultar
-  `automationMode` (su guard es `silencio.ts`): inerte hoy (sin jobs, flag off); el programa de
-  activación debe decidir si suma ese chequeo.
+- ~~`onAiVisionJob`/`aiReservationMaintenance` pueden enviar WhatsApp sin consultar
+  `automationMode` (su guard es `silencio.ts`)~~ **CORREGIDO POR EVIDENCIA (canary 2026-08-15)**:
+  el worker no consulta `automationMode`, pero el `whatsappClient` compartido del artefacto
+  nuevo SÍ aplica el permiso de canal de ADR-0017 en modo automático y **fail-closed**: con
+  `automationMode` AUSENTE en el número, el envío de visión se bloquea (`failed/envio_incierto`,
+  sin duplicados). La ENTREGA de visión exige la migración bicéfala ANTES de cualquier
+  activación — el flag solo no alcanza.
 - El número `…5686` de meta-review convierte la migración correctiva en BICÉFALA: olvidarlo
   silencia la revisión de Meta en curso.
 - La base de reversa es hoy `30c1687` por función; si Coexistence despliega primero, la base

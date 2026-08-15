@@ -2,8 +2,12 @@
 
 - **Estado:** aceptado (2026-08-14) — **EN PROD INERTE desde 2026-08-15** (productor + worker +
   scheduler desplegados por `DEPLOY-AI-RESERVATION-VISION-INERT-1`; `productVision.enabled`
-  AUSENTE en todos los tenants, cero jobs). La activación con proveedor real es un programa
-  aparte con aprobación separada.
+  AUSENTE en todos los tenants). Canary real ejecutado el 2026-08-15
+  (`AI-VISION-PROVIDER-CANARY-ARFAGI-1`): extracción, reserva (liquidada con uso real), catálogo
+  y saneo TODO por contrato, pero la ENTREGA quedó bloqueada — el whatsappClient del artefacto
+  nuevo aplica el permiso de canal de ADR-0017 y `automationMode` está AUSENTE en el número ⇒
+  `failed/envio_incierto` sin duplicados. **La activación de visión REQUIERE la migración
+  bicéfala de `automationMode` primero**; flag restaurado a AUSENTE.
 - **Programa:** PRODUCT-IMAGE-UNDERSTANDING-SAFE-1 (segundo y último del bloque iniciado por ADR-0018)
 - **Relacionados:** ADR-0016 (adjuntos seguros; su §9 diferió visión hasta tener control de gasto),
   ADR-0018 (reserva de cuota — `imagen_vision` ya declarada), ADR-0015 (deriva externa del catálogo)
