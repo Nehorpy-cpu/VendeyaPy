@@ -202,3 +202,13 @@ del artefacto nuevo aplica el gate ADR-0017 y automationMode está AUSENTE en �
 bloqueado ⇒ failed/envio_incierto. La entrega de visión requiere la migración bicéfala de
 automationMode (la de Fase 2). Kill-switch + flag restaurado a AUSENTE (verificado vs baseline).
 Precondición operativa aprendida: liberar takeovers residuales del tester antes de un canary.
+
+### WHATSAPP-AUTOMATIONMODE-DUAL-MIGRATION-AND-VISION-RECANARY-1 — 2026-08-15 (EN PROD)
+Migración dual automationMode→live con la herramienta oficial: …7904 (arfagi) y …5686
+(meta-review) written; índice no tocado; conexiones byte-idénticas; rollback --mode inactive
+documentado (equivalente fail-closed, no byte-idéntico: el campo nacía AUSENTE). ADC habilitada
+por el owner tras stop fail-closed; PNID de meta-review leído del índice tras un not_found por
+reconstrucción de memoria. Runbook checks: dual 20/20 + coexistence 51/51. RE-CANARY de visión
+EXITOSO: job succeeded+enviado, reserva liquidada 2507, espejo 0, respuesta entregada por …7904,
+sin_match honesto (calibración de matcher pendiente para la activación). Flag restaurado a
+AUSENTE; live se conserva. Fase 2 desbloqueada, pendiente de aprobación.

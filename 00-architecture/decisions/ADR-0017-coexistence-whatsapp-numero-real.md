@@ -1,6 +1,11 @@
 # ADR-0017 — Coexistence: incorporar el número real sin apagar lo que ya vende
 
-- **Estado**: aceptado (fundación en implementación; el onboarding del número real es un acto humano posterior)
+- **Estado**: aceptado (fundación en implementación; el onboarding del número real es un acto humano posterior).
+  **Migración dual de `automationMode` EJECUTADA el 2026-08-15** (`WHATSAPP-AUTOMATIONMODE-DUAL-MIGRATION-AND-VISION-RECANARY-1`):
+  los DOS números que rutean inbound (arfagi `…7904` y meta-review `…5686`) quedaron en `live` crudo en el ASSET
+  vía `migrarModoAutomatizacion` (dry-run→apply, `written` ambos, índice `no_declara` sin tocar, conexiones intactas).
+  El rollback documentado (`--mode inactive --apply`) es funcionalmente equivalente al estado inicial fail-closed
+  pero NO byte-idéntico (el campo estaba AUSENTE al inicio). Precondición de la Fase 2 del release de IA: CUMPLIDA.
 - **Fecha**: 2026-08-03
 - **Contexto previo**: ADR-0003 (WhatsApp Cloud API), ADR-0009 (integración Meta), ADR-0010 (go-live), ADR-0016 (adjuntos)
 - **Programa**: `EMERGENCY-WHATSAPP-COEXISTENCE-SAFE-CUTOVER-1`, precedido por la auditoría read-only `…-CUTOVER-AUDIT-1`

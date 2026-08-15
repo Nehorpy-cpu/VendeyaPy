@@ -3,7 +3,9 @@
 - **Estado:** aceptado (2026-08-14) — **EN PROD desde 2026-08-15** para asistente interno y
   simulador/test-cases (deploy `DEPLOY-AI-RESERVATION-VISION-INERT-1`, Fase 1c; smoke verificado:
   reserva creada→liquidada, espejo en 0, conciliación a token exacto). El SALES AGENT de WhatsApp
-  sigue con el gate viejo hasta la Fase 2 (migración `automationMode` de los dos números).
+  sigue con el gate viejo hasta la Fase 2. La precondición de esa fase — la migración
+  `automationMode` de los dos números — quedó **CUMPLIDA el 2026-08-15**; el deploy de
+  `onWebhookInbox` sigue pendiente de aprobación del owner.
 - **Programa:** AI-USAGE-RESERVATION-AND-ALERTS-1 (cierra los pendientes `AI-GATE-RESERVA-1` y `AI-QUOTA-ALERTS-1` de HANDOFF §6.3)
 - **Relacionados:** ADR-0002 (multi-tenant), ADR-0016 §9 (adjuntos: la IA no ve captions), guía `docs/ai-backend-guide.md` (§Costos, §Jobs async, §Principios línea 19)
 

@@ -127,7 +127,9 @@ App Review: su asistente usa reserva (equivalente); nada más cambia.
 asistente interno propio (tenant interno, NO meta-review) y observar la reserva liquidada en
 `aiReservations`, logs sin errores nuevos, `usage.aiTokensReserved` apareciendo y drenando.
 
-**Fase 2 — Productor (BLOQUEADA hasta el programa correctivo)** ·
+**Fase 2 — ~~BLOQUEADA~~ DESBLOQUEADA (2026-08-15: migración dual `automationMode` EJECUTADA —
+ambos números en `live` crudo, ver ADR-0017; el deploy de esta fase sigue esperando aprobación
+del owner)** ·
 `firebase deploy --only functions:onWebhookInbox --config firebase.functions.json --project vpw-prod-dd6ff`.
 Precondición DURA: `release-audit.mjs --project vpw-prod-dd6ff` con **exit 0** — hoy sale
 BLOQUEADO porque `automationMode` está AUSENTE en los DOS números; el programa correctivo debe

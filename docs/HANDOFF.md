@@ -558,3 +558,34 @@ restauración final a **AUSENTE exacto** verificada contra la baseline. Rastros 
 legítimos: 1 job terminal saneado + 1 reserva liquidada. Próximo paso natural: el programa
 correctivo de migración `automationMode` (arfagi `…7904` + meta-review `…5686`) y recién
 después re-canary de visión.
+
+## WHATSAPP-AUTOMATIONMODE-DUAL-MIGRATION-AND-VISION-RECANARY-1 — 2026-08-15 (MIGRACIÓN EN PROD + RE-CANARY EXITOSO)
+
+**Migración dual `automationMode` → `live` EJECUTADA** con la herramienta oficial
+(`migrarModoAutomatizacion`, dry-run→apply, prefijo `GCLOUD_PROJECT` siempre): arfagi `…7904` y
+meta-review `…5686`, ambos `written` — un solo campo en cada ASSET, con precondición fresca;
+índice `no_declara` (NO tocado); conexiones con updateTime byte-idéntico a la baseline; cero
+Meta/tokens/WABA/webhooks; credipower fuera por construcción. ADC habilitada por el owner
+(gcloud application-default) tras detención fail-closed documentada; primer dry-run de
+meta-review rechazado `not_found` por un PNID reconstruido de memoria — corregido leyendo el
+identificador real del índice (lección: los identificadores se LEEN, no se recuerdan). Checks
+del runbook en verde: dual 20/20 + coexistence 51/51 (emulador, herramienta real). Rollback
+documentado `--mode inactive --apply` por número: funcionalmente equivalente al estado inicial
+fail-closed pero NO byte-idéntico (el campo estaba AUSENTE). El webhook productivo viejo ignora
+el campo ⇒ cero cambio de comportamiento visible hoy; lo que se desbloquea es el artefacto
+nuevo (visión + Fase 2).
+
+**RE-CANARY de visión EXITOSO** (mismo programa, precondiciones del owner verificadas — takeover
+residual del tester liberado antes): job único `att_45eba9d9…` `succeeded` + `envio=enviado`
+(terminal NO ambiguo, intento 1, 16 s), reserva `vision-…-a1` liquidada (est 2.600 / real
+2.507), espejo en 0, UNA llamada al proveedor real, adjunto `generic_media`, respuesta de
+visión entregada por el canal correcto (`via …7904`) y UNA sola: el desenlace fue el honesto
+`sin_match` ("no encontré ese producto… ¿me decís el nombre o la marca?") — el matcher estricto
+no ancló "ARMAF ODYSSEY MEGA" (imagen sintética) contra "ARMAF ODYSSEY MEGA LIMITED EDITION
+EDP" del catálogo. **Deuda de CALIBRACIÓN extractor/matcher para el programa de activación**;
+el ciclo técnico está demostrado de punta a punta. Cero pedidos/pagos/carrito/comprobantes;
+meta-review y credipower intactos. Gestión de ventana: el flag se apagó durante la espera del
+owner (20 min sin imagen) y se reencendió al confirmar — cero exposición a clientes reales.
+`productVision` RESTAURADO a AUSENTE (los 3 tenants); `automationMode=live` SE CONSERVA en los
+dos números (programa cerrado en verde). **Fase 2 (deploy de `onWebhookInbox`) queda
+DESBLOQUEADA y pendiente SOLO de aprobación del owner.**
