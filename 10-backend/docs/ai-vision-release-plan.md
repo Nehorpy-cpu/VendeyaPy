@@ -74,7 +74,19 @@ Shared: los dos type-files cambiados compilan a **cero diferencia de runtime JS*
    La Fase 2 SIN la migración del número `…5686` **silenciaría el bot que los revisores están
    probando** — por eso la migración correctiva cubre AMBOS números antes de esa fase.
 
-## 4. El orden del release (NADA ejecutado)
+## 4. El orden del release
+
+> **EJECUTADO (Fase 1 completa) — 2026-08-15, programa `DEPLOY-AI-RESERVATION-VISION-INERT-1`:**
+> Fase 1a: índices 18→21, los 3 `ai*` READY, 0 deletes, TTL overrides ACTIVE (inertes).
+> Fase 1b: ruleset `a9c99e05` → `132712ca`, 0 líneas quitadas, probes no autenticados 403.
+> Fase 1c: **3 CREATE + 6 UPDATE + 0 DELETE**, sin `--force` (prompt de failure policy de los
+> dos triggers respondido en modo interactivo), 115→118 ACTIVE, `onWebhookInbox` con updateTime
+> intacto (2026-08-01), hash idéntico en las 106 no tocadas, `.env` intacto.
+> Fase 1d: ejecución natural del scheduler observada (12:10Z, cierre en silencio); smoke humano
+> del simulador verificado (reserva `ventas-…` creada 15:21:30 → liquidada 15:21:33, est 1500 /
+> real 3770, espejo en 0, delta del mes conciliado a token exacto, cero efectos externos).
+> La Fase 2 sigue BLOQUEADA (migración `automationMode` bicéfala) y la Fase 3 (canary con
+> proveedor real) es un programa aparte con aprobación separada.
 
 > Reglas duras: jamás `--force`, jamás `--only functions` a secas, 0 DELETE, 0 recreates, CLI
 > del repo (13.35.1), `--project vpw-prod-dd6ff` explícito siempre, Hosting EXCLUIDO, cero Meta.
@@ -105,8 +117,10 @@ scheduler nuevo **sin invoker público**, hash del `.env` productivo intacto. Ef
 honesto: los turnos del ASISTENTE INTERNO y el SIMULADOR pasan a reserva transaccional (mismo
 contrato de errores — 180 tests + E2E); el SALES AGENT de WhatsApp **no cambia** (su función no
 se toca). Kill-switch: visión = flag ausente (ya apagada); cuota = redeploy del artefacto
-`30c1687` de las 4 UPDATE (selector de reversa SIN los CREATE; artefacto armado con tooling de
-HEAD). Los CREATE no se borran jamás (política 0-DELETE): quedan inertes si se revierte.
+`30c1687` de las **6 UPDATE** (la cifra "4" previa era del plan v1, antes del desacople del
+productor; selector de reversa SIN los CREATE; artefacto armado con tooling de HEAD — quedó
+CONSTRUIDO y verificado en `.claude/worktrees/rollback-30c1687` durante la Etapa B del deploy).
+Los CREATE no se borran jamás (política 0-DELETE): quedan inertes si se revierte.
 App Review: su asistente usa reserva (equivalente); nada más cambia.
 
 **Fase 1d — Verificación técnica** · read-only: `release-audit.mjs` (conteos), un turno del

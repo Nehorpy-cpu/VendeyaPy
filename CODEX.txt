@@ -182,3 +182,15 @@ el process.ts productivo viejo); process.ts byte-idéntico a 855d553; clasificac
 generic_media; discriminador mediaId sin timers; grafo probado en dos pasadas (onWebhookInbox ya
 no alcanza visión). Release de visión independiente; la cuota del sales agent sigue con el tren
 (inherente). 16 tests + E2E 12/12 por el trigger real.
+
+### DEPLOY-AI-RESERVATION-VISION-INERT-1 — 2026-08-15 (EN PROD — VISIÓN INERTE)
+Deploy de ADR-0018+0019 desde bdaffbe: índices 18→21 (3 ai* READY, 0 deletes), rules
+a9c99e05→132712ca (0 quitadas, 6 matches if false, probes 403), Functions 115→118 con selector
+exacto 3 CREATE + 6 UPDATE + 0 DELETE sin --force (prompt de retry respondido interactivo).
+onWebhookInbox intacto (updateTime 2026-08-01, hash idéntico en las 106 no tocadas). Rollback
+armado ANTES del deploy (worktree 30c1687 + tooling HEAD; cubre las 6 UPDATE; "4 UPDATE" del
+plan v1 corregido). Scheduler horario sin invoker público, ejecución natural en silencio. Smoke
+humano verificado: reserva ventas-… creada→liquidada (est 1500/real 3770), espejo en 0, delta
+conciliado a token exacto, cero efectos externos, meta-review intacto. Flag de visión APAGADO
+en los 3 tenants. Fase 2 (sales agent) sigue bloqueada por la migración bicéfala de
+automationMode; el canary de visión es un programa aparte.

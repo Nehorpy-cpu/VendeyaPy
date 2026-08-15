@@ -370,7 +370,7 @@ en prod, revalidado); Hosting con release del 2026-07-31; conteos arfagi: 6 cust
 Sin gates cerrados + sin rollback demostrable ⇒ **el programa se detuvo fail-closed al final de la
 Etapa B, sin ninguna mutación productiva ni llamada a Meta.**
 
-## AI-USAGE-RESERVATION-AND-ALERTS-1 — 2026-08-14 (EN REPO — NO DESPLEGADO)
+## AI-USAGE-RESERVATION-AND-ALERTS-1 — 2026-08-14 (EN PROD desde 2026-08-15 — ver DEPLOY-AI-RESERVATION-VISION-INERT-1)
 
 Cierra `AI-GATE-RESERVA-1` y `AI-QUOTA-ALERTS-1` (§6.3) con **ADR-0018**: la base de control de
 consumo previa a visión/OCR (que sigue DIFERIDA al programa siguiente).
@@ -412,7 +412,7 @@ presión de reservas en vuelo antes del 100% liquidado (semántica declarada del
 va de a 200/hora secuenciales (suficiente en régimen normal; un incidente masivo lo drenaría en
 varias corridas).
 
-## PRODUCT-IMAGE-UNDERSTANDING-SAFE-1 — 2026-08-14 (EN REPO — NO DESPLEGADO, FLAG APAGADO)
+## PRODUCT-IMAGE-UNDERSTANDING-SAFE-1 — 2026-08-14 (EN PROD INERTE desde 2026-08-15, FLAG APAGADO — ver DEPLOY-AI-RESERVATION-VISION-INERT-1)
 
 Segundo y último programa del bloque de ADR-0018. **ADR-0019**: reconocimiento de imágenes de
 productos contra el catálogo local, multi-vertical (nada de perfumería hardcodeada), con el
@@ -480,7 +480,7 @@ revisores están probando). Baseline por superficie demostrada (Hosting 2026-08-
 ÚNICO export del release que arrastra el gate ADR-0017. Prerequisitos del correctivo: ADC en la
 máquina + autorización del owner para migrar ambos números.
 
-## AI-VISION-PRODUCER-DECOUPLE-1 — 2026-08-14 (EN REPO — NO DESPLEGADO)
+## AI-VISION-PRODUCER-DECOUPLE-1 — 2026-08-14 (EN PROD desde 2026-08-15 — ver DEPLOY-AI-RESERVATION-VISION-INERT-1)
 
 El productor de jobs de visión salió de `process.ts` (que quedó **byte-idéntico** a `855d553`) y
 ahora es el trigger propio **`onAiVisionProducer`** (`onDocumentUpdated` sobre la transición del
@@ -494,3 +494,37 @@ necesita tocar `onWebhookInbox`**; lo único que sigue esperando la migración b
 `automationMode` es la cuota del sales agent (inherente al webhook). Plan de release recalculado
 en `10-backend/docs/ai-vision-release-plan.md`: Fase 1c = 3 CREATE + 6 UPDATE.
 16 tests nuevos del productor (rojo→verde) + E2E 12/12 con el trigger real de punta a punta.
+
+## DEPLOY-AI-RESERVATION-VISION-INERT-1 — 2026-08-15 (EN PROD, VISIÓN INERTE, SMOKE VERIFICADO)
+
+Deploy técnico de ADR-0018 + ADR-0019 (Fase 1 completa del plan `10-backend/docs/ai-vision-release-plan.md`),
+desde `bdaffbe`, sin tocar `onWebhookInbox` ni nada que arrastre el gate ADR-0017:
+- **Índices** 18→21 (los 3 `ai*` READY, 0 deletes) + 3 TTL overrides de Coexistence ACTIVE (inertes).
+- **Rules** `a9c99e05`→`132712ca`: 0 líneas quitadas, 6 matches nuevos todos `if false` (2 IA + 4
+  Coexistence); probes no autenticados 403 (lectura/listado/escritura); Storage rules intactas.
+- **Functions 115→118**: 3 CREATE (`aiReservationMaintenance`, `onAiVisionJob`, `onAiVisionProducer`)
+  + 6 UPDATE (`askInternalGrowthAssistant`, `agentTestCase{Run,Upsert,Delete}`, `simulateAgentMessage`,
+  `runTenantJob`) + 0 DELETE, **sin `--force`** (el prompt de failure policy de los dos triggers con
+  `retry:true` se respondió en modo interactivo `-i` — un solo `y` al prompt conocido; un prompt
+  inesperado habría abortado fail-closed). `onWebhookInbox` conservó su updateTime (2026-08-01) y las
+  106 funciones fuera del selector su hash exacto. Scheduler `10 * * * *` Asunción sin invoker público;
+  ejecución natural observada cerrando en silencio. Hosting/`.env`/Meta/IAM intactos (hashes verificados).
+- **Rollback ARMADO antes de desplegar**: worktree `30c1687` + tooling de HEAD (el build-deploy viejo
+  filtraba `.env` de otros entornos), artefacto construido con las 6 UPDATE presentes y las 3 CREATE
+  ausentes (la reversa no puede tocarlas; quedan inertes por flag/colecciones vacías). La cifra
+  "4 UPDATE" del plan v1 quedó corregida a 6.
+- **Smoke humano verificado** (simulador de Arfagi, 3er intento — los dos primeros los resolvió el
+  camino determinístico, correcto y gratis; el 2º por el interceptor de ocasión que matcheó la frase
+  sugerida): reserva `ventas-…` creada 15:21:30 → **liquidada** 15:21:33, est 1500 / real 3770,
+  `usage.aiTokensReserved` en 0, delta del mes conciliado a token exacto contra el único aiRequest,
+  cero mensajes externos/pedidos/jobs de visión; meta-review intacto (0 reservas, conexión activa,
+  3 productos). Un delta previo de +3.611 quedó atribuido a un cliente real por el webhook viejo
+  (contexto `whatsapp_sales_agent` — comportamiento esperado de Fase 1).
+- **Observación para el canary**: `estimacionDeTokens('texto_ventas')=1500` subestima el turno
+  consultivo real (~3.770 con catálogo en el prompt) — la contabilidad se reconcilia sola, pero bajo
+  concurrencia el gate admite más de lo ideal; calibrar la estimación es candidato del programa de
+  activación.
+- **Sigue pendiente**: Fase 2 (cuota del sales agent vía `onWebhookInbox`) BLOQUEADA hasta la
+  migración bicéfala de `automationMode` (arfagi `…7904` + meta-review `…5686`); Fase 3 = canary de
+  visión con proveedor real, programa aparte con aprobación separada. Flag de visión APAGADO en los 3
+  tenants.
