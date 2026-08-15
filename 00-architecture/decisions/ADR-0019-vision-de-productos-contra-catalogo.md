@@ -114,6 +114,12 @@ liberar.
 2. Busca con **`searchCatalog(tenantId, …)`** y se queda SOLO con los matches reales de la
    consulta (`splitByQueryMatch.pinned`): el relleno de sugerencias del buscador es correcto para
    el sales agent y letal para visión (presentaría cualquier producto como identificación — review).
+   **Hardening 2026-08-15 (EN REPO — NO DESPLEGADO):** sobre esos candidatos, la DECISIÓN la toma
+   `identificarProducto` (`catalog/matchIdentificacion.ts`): resultado estructurado
+   `matched|ambiguous|no_match` con umbral numérico + **evidencia estructural** (≥2 tokens exactos,
+   o 1 exacto + consulta íntegra de ≥2 tokens en el nombre) y **margen inequívoco** contra el 2º
+   candidato. El conteo, la posición en la lista y el precio JAMÁS identifican; empates ⇒
+   repreguntar. Cierra el defecto "candidato único débil ⇒ identificado por estar solo".
    Es el MISMO buscador del bot, con sus guards:
    `status ACTIVE`, stock trackStock-aware, deriva externa (`filtrarOfrecibles`), `profitMode`
    siempre false — más el filtro de calidad bloqueante. `stockPendingReview` nace `INACTIVE`

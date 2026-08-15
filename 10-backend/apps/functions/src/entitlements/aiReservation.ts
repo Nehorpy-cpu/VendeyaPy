@@ -46,6 +46,61 @@ export function estimacionDeTokens(op: EstimacionDeIa): number {
   return ESTIMACIONES[op];
 }
 
+// ---------------------------------------------------------------------------
+// Estimación conservadora por contexto (hito D — AI-PHASE2-MATCHER-AND-RESERVATION-HARDENING-1).
+// ---------------------------------------------------------------------------
+
+/** Cota conservadora chars→tokens (castellano ~3.5-4 chars/token; dividir por 3 sobreestima a propósito). */
+export const CHARS_POR_TOKEN_CONSERVADOR = 3;
+/** Re-entrada estimada del resultado de una tool al prompt (catálogo/promos serializados de vuelta al modelo). */
+export const TOKENS_RESULTADO_TOOL = 800;
+/** Techo duro: una estimación jamás reserva media cuota mensual (el plan pago más chico con IA es starter, 50k). */
+export const TECHO_ESTIMACION_TEXTO = 16_000;
+
+/**
+ * Estimación CONSERVADORA de un turno de texto, derivada del contexto REAL conocido antes de
+ * contactar al proveedor (system prompt + historial + tools + rondas del loop). Reemplaza en el
+ * sales agent la estática `estimacionDeTokens('texto_ventas')`, que quedó corta en producción
+ * (turno real: 3.770 tokens contra 1.500 reservados — el invariante del límite quedó expuesto).
+ *
+ * QUÉ GARANTIZA Y QUÉ NO (honesto, review adversarial MEDIO 2): cubre con margen el turno
+ * TÍPICO (0-1 rondas de tools; ~2.5-3× el turno real medido en producción) y agrega un colchón
+ * por ronda. NO es cota dura del peor caso multi-ronda: el gateway re-envía system+historial en
+ * CADA llamada (hasta 1+rondas) y los resultados previos re-entran acumulados — un turno
+ * patológico de 3-4 rondas con historial largo puede superar lo reservado. Ese residual NO rompe
+ * la contabilidad: la LIQUIDACIÓN cobra el uso real (misma semántica de siempre) y el residual
+ * de admisión queda acotado por el techo. Modelar el peor caso exacto reservaría 30k+ por turno
+ * y destruiría la concurrencia de los planes chicos — se elige el punto medio documentado.
+ *
+ * Por qué no tokenizer: predecir tokens exactos ata la reserva al tokenizer del proveedor
+ * (frágil entre versiones/modelos) y no hace falta — la LIQUIDACIÓN reconcilia con el uso real
+ * y el VENCIMIENTO drena las reservas huérfanas. Subestimar mucho rompe el invariante; sobre-
+ * reservar mucho rompe la concurrencia: este es el equilibrio, documentado.
+ *
+ * Piso y techo del clamp:
+ *  - piso = estimacionDeTokens('texto_ventas'): jamás MENOS seguro que la estática de hoy.
+ *  - techo = TECHO_ESTIMACION_TEXTO: una conversación patológica (contexto absurdo) no puede
+ *    retener media cuota mensual mientras dura el turno/lease.
+ *
+ * Pura y determinística (sin Date/random); entradas no-finitas o negativas se tratan como 0.
+ * `texto_interno` (asistente del panel) sigue con la estimación estática: fuera del alcance de
+ * este hito (contexto chico, sin catálogo re-entrando por tools).
+ */
+export function estimarTurnoDeTexto(p: {
+  charsSistema: number;
+  charsMensajes: number;
+  charsTools: number;
+  maxTokensSalida: number;
+  rondasDeTools: number;
+}): number {
+  const n = (v: number): number => (Number.isFinite(v) && v > 0 ? v : 0);
+  const entrada = Math.ceil((n(p.charsSistema) + n(p.charsMensajes) + n(p.charsTools)) / CHARS_POR_TOKEN_CONSERVADOR);
+  // Cada ronda del loop puede gastar una salida completa y re-entrar al prompt el resultado de la tool.
+  const porRondas = n(p.rondasDeTools) * (n(p.maxTokensSalida) + TOKENS_RESULTADO_TOOL);
+  const total = entrada + porRondas + n(p.maxTokensSalida);
+  return Math.min(TECHO_ESTIMACION_TEXTO, Math.max(estimacionDeTokens('texto_ventas'), Math.ceil(total)));
+}
+
 export const aiReservationPath = (tenantId: string, clave: string): string =>
   `${paths.tenant(tenantId)}/aiReservations/${clave}`;
 const aiReservationsColl = (tenantId: string): string => `${paths.tenant(tenantId)}/aiReservations`;
@@ -316,7 +371,7 @@ export async function reservarTurnoDeIa(
   opts: { context: string; actorUid?: string | null; nowMs?: number },
 ): Promise<ReservaDeIa> {
   const nowMs = opts.nowMs ?? Date.now();
-  const est = Math.max(1, Math.ceil(estimatedTokens));
+  let est = Math.max(1, Math.ceil(estimatedTokens));
   const claveSana = sanearClave(clave);
 
   // Gates previos, sin cambios de contrato: feature del plan + posture/trial.
@@ -332,6 +387,12 @@ export async function reservarTurnoDeIa(
     throw new HttpsError('failed-precondition', 'Tu prueba gratis de 7 días terminó. Activá un plan para seguir usando la plataforma.');
   }
   const limit = ent.limits.maxAiTokensPerMonth;
+  // Review adversarial (MEDIO 3): una estimación contextual (piso práctico del sales agent ~9.5k)
+  // por encima de un LÍMITE efectivo chico (>0, finito) dejaría al tenant SIN IA desde el mensaje
+  // uno ("antes podía, ahora nunca"). El clamp restaura el servicio sin romper la invariante de
+  // admisión (reservado ≤ límite): si el uso real supera lo reservado, la LIQUIDACIÓN cobra el
+  // real igual que siempre — el mismo residual reconciliable que existía con la estática 1500.
+  if (Number.isFinite(limit) && limit > 0 && est > limit) est = limit;
 
   let intento = await intentarReserva(tenantId, claveSana, est, opts.context, limit, nowMs);
   if (intento.resultado === 'sin_capacidad') {

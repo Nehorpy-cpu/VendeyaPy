@@ -12,12 +12,14 @@
  *  · la clave de facturación viaja desde el caller (wamid) y llega al openBudget.
  */
 import { describe, it, expect, vi } from 'vitest';
-import type { RunAgentResult } from './types.js';
+import type { AiMessage, RunAgentResult } from './types.js';
 
 vi.mock('../lib/logger.js', () => ({ logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() } }));
 
 import { runSalesAgent, type SalesAgentDeps } from './salesAgent.js';
-import type { ReservaDeIa } from '../entitlements/aiReservation.js';
+import { estimarTurnoDeTexto, type ReservaDeIa } from '../entitlements/aiReservation.js';
+import { buildSalesSystemPrompt } from './prompts.js';
+import { toolDefinitionsForContext } from './tools/registry.js';
 
 const AGENT = { agentName: 'Asesora', businessName: 'Perfumería Test', greetingMessage: 'hola', botEnabled: true, profitMode: false, industry: 'perfumeria' };
 
@@ -115,5 +117,67 @@ describe('ciclo de la reserva por resultado del gateway', () => {
     const { deps } = makeDeps(reserva);
     const out = await runSalesAgent({ tenantId: 't', agentConfig: AGENT, messages: [{ role: 'user', content: 'x' }] }, deps);
     expect(out.used).toBe(true); // la respuesta sale igual
+  });
+});
+
+describe('hito D: estimación derivada del contexto real (no la estática 1500)', () => {
+  /** Captura la estimación que el agente le pasa a openBudget (además del handle espiado). */
+  function depsConEstimacion(reserva: ReservaDeIa, over: Partial<SalesAgentDeps> = {}) {
+    const estimaciones: number[] = [];
+    const deps: SalesAgentDeps = {
+      openBudget: async (_t, _clave, est) => { estimaciones.push(est); return reserva; },
+      runAgent: async () => okResult(),
+      execTool: async () => ({ ok: true, result: {} }),
+      ...over,
+    };
+    return { deps, estimaciones };
+  }
+
+  it('contexto voluminoso ⇒ la reserva pide MÁS que la estática 1500 (turno real de producción: 3.770)', async () => {
+    const { reserva } = reservaEspia();
+    const { deps, estimaciones } = depsConEstimacion(reserva);
+    // Historial largo real: varios mensajes de cliente + respuestas previas (~24k chars de texto).
+    const mensajes: AiMessage[] = Array.from({ length: 12 }, (_, i) => ({
+      role: i % 2 === 0 ? 'user' : 'assistant',
+      content: `quiero un perfume dulce para regalo, que dure todo el día y proyecte fuerte ${'.'.repeat(2000)}`,
+    }));
+    const out = await runSalesAgent({ tenantId: 't', agentConfig: AGENT, messages: mensajes, billingKey: 'ventas-vol' }, deps);
+    expect(out.used).toBe(true);
+    expect(estimaciones).toHaveLength(1);
+    expect(estimaciones[0]).toBeGreaterThan(1500); // HOY: recibe exactamente 1500 (estática) — evidencia roja del hito
+    expect(estimaciones[0]).toBeLessThanOrEqual(16_000); // = TECHO_ESTIMACION_TEXTO (el valor exacto lo custodia aiReservation.test.ts)
+  });
+
+  it('contexto mínimo ⇒ exactamente lo que el estimador calcula para ese contexto (≥ piso 1500)', async () => {
+    // El piso literal (1500) es INALCANZABLE desde el sales agent: solo las rondas de tools ya
+    // aportan 4 × (700 + 800) = 6.000 tokens; el "contexto mínimo ⇒ exactamente el piso" del
+    // estimador puro lo custodia aiReservation.test.ts. Acá se custodia el CABLEADO exacto:
+    // openBudget recibe lo que estimarTurnoDeTexto devuelve para el system/tools/mensaje REALES
+    // del turno (700 = SALES_MAX_TOKENS; 4 = DEFAULT_MAX_TOOL_ITERS del gateway).
+    const esperado = estimarTurnoDeTexto({
+      charsSistema: buildSalesSystemPrompt({ agent: AGENT }).length,
+      charsMensajes: 'hola'.length,
+      charsTools: JSON.stringify(toolDefinitionsForContext('whatsapp_sales_agent')).length,
+      maxTokensSalida: 700,
+      rondasDeTools: 4,
+    });
+    const { reserva } = reservaEspia();
+    const { deps, estimaciones } = depsConEstimacion(reserva);
+    const out = await runSalesAgent({ tenantId: 't', agentConfig: AGENT, messages: [{ role: 'user', content: 'hola' }], billingKey: 'ventas-min' }, deps);
+    expect(out.used).toBe(true);
+    expect(estimaciones).toEqual([esperado]); // determinístico y derivado del contexto, no una constante suelta
+    expect(esperado).toBeGreaterThanOrEqual(1500); // jamás MENOS seguro que la estática de hoy
+  });
+
+  it('la estimación y la reserva ocurren ANTES de llamar al gateway (openBudget precede a runAgent)', async () => {
+    const orden: string[] = [];
+    const { reserva } = reservaEspia();
+    const { deps } = depsConEstimacion(reserva, {
+      openBudget: async () => { orden.push('openBudget'); return reserva; },
+      runAgent: async () => { orden.push('runAgent'); return okResult(); },
+    });
+    const out = await runSalesAgent({ tenantId: 't', agentConfig: AGENT, messages: [{ role: 'user', content: 'hola' }] }, deps);
+    expect(out.used).toBe(true);
+    expect(orden).toEqual(['openBudget', 'runAgent']); // jamás se contacta al proveedor sin reserva admitida
   });
 });

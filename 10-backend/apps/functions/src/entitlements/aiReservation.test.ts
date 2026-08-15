@@ -129,6 +129,10 @@ import {
   reservarTurnoDeIa,
   runAiReservationSweep,
   estimacionDeTokens,
+  estimarTurnoDeTexto,
+  CHARS_POR_TOKEN_CONSERVADOR,
+  TOKENS_RESULTADO_TOOL,
+  TECHO_ESTIMACION_TEXTO,
   AI_RESERVATION_LEASE_MS,
   UMBRALES_ALERTA_IA,
   aiReservationPath,
@@ -379,7 +383,12 @@ describe('contratos de compatibilidad del gate (caso 12 se completa en salesAgen
   });
 
   it('los bloqueos auditan entitlement.blocked, como el gate anterior', async () => {
+    // Con el clamp por límite (review MEDIO 3), pedir 500 con límite 100 y uso 0 ya NO rechaza
+    // (reserva 100). El bloqueo legítimo es por capacidad CONSUMIDA: se liquida el límite entero
+    // y el siguiente turno no cabe ni clampeado.
     entMock.limits = { maxAiTokensPerMonth: 100 };
+    const previa = await reservarTurnoDeIa(T, 'ventas-au0', 100, { context: 'whatsapp_sales_agent', nowMs: NOW });
+    await previa.liquidar({ inputTokens: 100, outputTokens: 0 }, 0.01);
     await expect(reservarTurnoDeIa(T, 'ventas-au', 500, { context: 'whatsapp_sales_agent', nowMs: NOW }))
       .rejects.toMatchObject({ code: 'resource-exhausted' });
     expect(auditorias.some((a) => a['action'] === 'entitlement.blocked')).toBe(true);
@@ -390,5 +399,76 @@ describe('contratos de compatibilidad del gate (caso 12 se completa en salesAgen
     expect(estimacionDeTokens('texto_interno')).toBe(1500);
     expect(estimacionDeTokens('imagen_vision')).toBeGreaterThan(1500);
     expect(UMBRALES_ALERTA_IA).toEqual([70, 85, 95, 100]);
+  });
+});
+
+describe('hito D: estimarTurnoDeTexto — cota conservadora derivada del contexto real', () => {
+  /** Turno típico del sales agent: prompt ~7k chars, historial ~2k, tools ~2.5k, salida 700, 4 rondas. */
+  const base = { charsSistema: 7_000, charsMensajes: 2_000, charsTools: 2_500, maxTokensSalida: 700, rondasDeTools: 4 };
+
+  it('contexto grande (30k chars de system+catálogo) ⇒ más que la estática 1500, jamás sobre el techo', () => {
+    const est = estimarTurnoDeTexto({ ...base, charsSistema: 24_000, charsMensajes: 4_000, charsTools: 2_000 });
+    expect(est).toBeGreaterThan(1500);
+    expect(est).toBeLessThanOrEqual(TECHO_ESTIMACION_TEXTO);
+    expect(TECHO_ESTIMACION_TEXTO).toBe(16_000); // contrato: nunca media cuota del plan pago más chico (starter 50k)
+  });
+
+  it('la fórmula es la documentada: entrada/3 + rondas×(salida+resultado_tool) + salida final (caso medio, sin clamps)', () => {
+    const entrada = Math.ceil((7_000 + 2_000 + 2_500) / CHARS_POR_TOKEN_CONSERVADOR);
+    expect(estimarTurnoDeTexto(base)).toBe(entrada + 4 * (700 + TOKENS_RESULTADO_TOOL) + 700);
+  });
+
+  it('contexto mínimo ⇒ exactamente el piso 1500: jamás MENOS seguro que la estática de hoy', () => {
+    expect(estimarTurnoDeTexto({ charsSistema: 0, charsMensajes: 0, charsTools: 0, maxTokensSalida: 0, rondasDeTools: 0 }))
+      .toBe(estimacionDeTokens('texto_ventas'));
+    // Con contexto chico la cuenta da menos que la estática (450/3 + 700 = 850) ⇒ se reserva la estática.
+    expect(estimarTurnoDeTexto({ charsSistema: 300, charsMensajes: 50, charsTools: 100, maxTokensSalida: 700, rondasDeTools: 0 })).toBe(1500);
+  });
+
+  it('monotónico: más chars jamás reduce la estimación', () => {
+    let previa = 0;
+    for (const chars of [0, 500, 5_000, 20_000, 100_000, 1_000_000]) {
+      const est = estimarTurnoDeTexto({ ...base, charsMensajes: chars });
+      expect(est).toBeGreaterThanOrEqual(previa);
+      previa = est;
+    }
+  });
+
+  it('techo respetado con entradas absurdas (1e9 chars): una conversación patológica no reserva media cuota', () => {
+    expect(estimarTurnoDeTexto({ charsSistema: 1e9, charsMensajes: 1e9, charsTools: 1e9, maxTokensSalida: 700, rondasDeTools: 4 }))
+      .toBe(TECHO_ESTIMACION_TEXTO);
+  });
+
+  it('determinístico: dos llamadas idénticas devuelven el mismo valor (sin Date/random)', () => {
+    expect(estimarTurnoDeTexto(base)).toBe(estimarTurnoDeTexto({ ...base }));
+  });
+
+  it('entradas no-finitas o negativas se tratan como 0: no rompen y caen al piso', () => {
+    expect(estimarTurnoDeTexto({ charsSistema: NaN, charsMensajes: -5_000, charsTools: Number.POSITIVE_INFINITY, maxTokensSalida: NaN, rondasDeTools: -3 }))
+      .toBe(1500);
+    // Un campo inválido no arrastra al resto: los válidos siguen sumando.
+    expect(estimarTurnoDeTexto({ charsSistema: 9_000, charsMensajes: NaN, charsTools: 0, maxTokensSalida: 700, rondasDeTools: 4 }))
+      .toBe(Math.ceil(9_000 / CHARS_POR_TOKEN_CONSERVADOR) + 4 * (700 + TOKENS_RESULTADO_TOOL) + 700);
+  });
+});
+
+describe('clamp por límite efectivo (review adversarial MEDIO 3: "antes podía, ahora nunca")', () => {
+  it('límite chico (5000) + estimación contextual grande (9500) ⇒ ADMITE reservando el límite, no rechaza', async () => {
+    entMock.limits = { maxAiTokensPerMonth: 5_000 };
+    const r = await reservarTurnoDeIa(T, 'ventas-clamp1', 9_500, { context: 'whatsapp_sales_agent', nowMs: NOW });
+    expect(r.cerrada).toBe(false);
+    expect(usageDe(T).aiTokensReserved).toBe(5_000);
+    expect(reservaDoc(T, 'ventas-clamp1')).toMatchObject({ status: 'reservada', estimatedTokens: 5_000 });
+    // La liquidación con uso real MAYOR que lo reservado sigue cobrando el real (residual reconciliable).
+    await r.liquidar({ inputTokens: 6_000, outputTokens: 200 }, 0.02);
+    expect(usageDe(T).aiTokensThisMonth).toBe(6_200);
+    expect(usageDe(T).aiTokensReserved).toBe(0);
+  });
+  it('con capacidad ya consumida el clamp NO furtivea: si ni el límite entero cabe, rechaza como siempre', async () => {
+    entMock.limits = { maxAiTokensPerMonth: 5_000 };
+    const previa = await reservarTurnoDeIa(T, 'ventas-clamp2', 4_000, { context: 'whatsapp_sales_agent', nowMs: NOW });
+    await previa.liquidar({ inputTokens: 4_000, outputTokens: 0 }, 0.01);
+    await expect(reservarTurnoDeIa(T, 'ventas-clamp3', 9_500, { context: 'whatsapp_sales_agent', nowMs: NOW }))
+      .rejects.toMatchObject({ code: 'resource-exhausted' });
   });
 });

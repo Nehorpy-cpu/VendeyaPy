@@ -17,6 +17,7 @@ import { Timestamp } from 'firebase-admin/firestore';
 import { z } from 'zod';
 import { db, paths } from '../lib/firebase.js';
 import { logger } from '../lib/logger.js';
+import { identificarProducto } from '../catalog/matchIdentificacion.js';
 import type { ReservaDeIa } from '../entitlements/aiReservation.js';
 
 /** Lease del job: con margen sobre el peor caso real del worker (descarga 10 MB + proveedor con
@@ -109,11 +110,15 @@ export interface DesenlaceVision {
   productos?: ProductoOfrecible[];
 }
 
-/** Los candidatos YA vienen curados por searchCatalog + guards; acá solo se decide la forma. */
-export function decidirDesenlace(candidatos: ProductoOfrecible[], _h: VisionHints): DesenlaceVision {
+/** Los candidatos YA vienen curados por searchCatalog + guards; acá se exige IDENTIFICACIÓN
+ *  real (matchIdentificacion, hito B+C): la identidad la da la evidencia de nombre contra la
+ *  consulta — un candidato único DÉBIL ya no se afirma por estar solo (fail-closed ⇒ sin_match). */
+export function decidirDesenlace(candidatos: ProductoOfrecible[], _h: VisionHints, consulta: string): DesenlaceVision {
   if (candidatos.length === 0) return { tipo: 'sin_match' };
-  if (candidatos.length === 1) return { tipo: 'unica', productos: candidatos };
-  return { tipo: 'multiple', productos: candidatos.slice(0, MAX_OPCIONES) };
+  const id = identificarProducto(consulta, candidatos);
+  if (id.tipo === 'matched') return { tipo: 'unica', productos: [id.producto] };
+  if (id.tipo === 'ambiguous') return { tipo: 'multiple', productos: id.productos.slice(0, MAX_OPCIONES) };
+  return { tipo: 'sin_match' };
 }
 
 const gs = (n: number): string => Math.round(n).toLocaleString('es-PY');
@@ -340,7 +345,7 @@ export async function procesarVisionJob(tenantId: string, jobId: string, deps: V
   const consulta = indicios ? construirConsulta(indicios) : null;
   let desenlace: DesenlaceVision;
   if (!indicios || !consulta) desenlace = { tipo: 'insuficiente' };
-  else desenlace = decidirDesenlace(await deps.buscar(tenantId, consulta), indicios);
+  else desenlace = decidirDesenlace(await deps.buscar(tenantId, consulta), indicios, consulta);
 
   // Envío ÚNICO: pendiente → en_vuelo (fenced) → enviar → terminal enviado (fenced).
   const enVuelo = await escribirConCerco(tenantId, jobId, claimId, { envio: 'en_vuelo', updatedAt: ts() });

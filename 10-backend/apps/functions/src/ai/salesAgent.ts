@@ -10,13 +10,19 @@
 import { randomUUID } from 'node:crypto';
 import type { AgentConfig } from '@vpw/shared';
 import { abrirPresupuestoDeIa } from '../entitlements/ai.js';
-import { estimacionDeTokens, type ReservaDeIa } from '../entitlements/aiReservation.js';
+import { estimarTurnoDeTexto, type ReservaDeIa } from '../entitlements/aiReservation.js';
 import { runAgent } from './gateway.js';
 import { buildSalesSystemPrompt } from './prompts.js';
 import { toolDefinitionsForContext, executeTool } from './tools/registry.js';
 import type { AiMessage, RunAgentInput, RunAgentResult, ToolExecResult } from './types.js';
 
 const SALES_MAX_TOKENS = 700;
+/**
+ * Rondas máximas del loop de tools del gateway (= DEFAULT_MAX_TOOL_ITERS en ai/gateway.ts, que no
+ * se exporta). Si el gateway cambia su tope hay que actualizar acá: la estimación de la reserva
+ * cuenta una salida + una re-entrada de resultado de tool por ronda.
+ */
+const RONDAS_MAX_DE_TOOLS = 4;
 /**
  * Tope de productos a recordar en el estado conversacional. Igual al límite del catálogo rule-based
  * (engine.ts catalogo `limit:3`) y al alcance de `ordinalIndex` (primero/segundo/tercero). Así "el
@@ -94,10 +100,31 @@ const defaultDeps: SalesAgentDeps = {
   execTool: (t, name, input) => executeTool('whatsapp_sales_agent', t, name, input),
 };
 
+/** Chars del contenido TEXTUAL de los mensajes (defensivo: si el content es de bloques, suman solo los `text`). */
+const charsDeMensajes = (messages: AiMessage[]): number =>
+  messages.reduce((total, m) => {
+    if (typeof m.content === 'string') return total + m.content.length;
+    if (!Array.isArray(m.content)) return total;
+    return total + m.content.reduce((t, b) => (b?.type === 'text' && typeof b.text === 'string' ? t + b.text.length : t), 0);
+  }, 0);
+
 export async function runSalesAgent(
   input: { tenantId: string; agentConfig: AgentConfig; messages: AiMessage[]; billingKey?: string | null },
   deps: SalesAgentDeps = defaultDeps,
 ): Promise<SalesAgentOutcome> {
+  // Hito D (AI-PHASE2-MATCHER-AND-RESERVATION-HARDENING-1): system y tools se construyen UNA vez,
+  // ANTES de abrir el presupuesto, para derivar la estimación del contexto REAL del turno (prompt +
+  // historial + tools + rondas) en vez de la estática 1500 que quedó corta en producción (3.770).
+  const system = buildSalesSystemPrompt({ agent: input.agentConfig });
+  const tools = toolDefinitionsForContext('whatsapp_sales_agent'); // solo buscar_productos / listar_promociones_activas
+  const estimacion = estimarTurnoDeTexto({
+    charsSistema: system.length,
+    charsMensajes: charsDeMensajes(input.messages),
+    charsTools: JSON.stringify(tools).length,
+    maxTokensSalida: SALES_MAX_TOKENS,
+    rondasDeTools: RONDAS_MAX_DE_TOOLS,
+  });
+
   // GATE (ADR-0018): feature aiAssistant + RESERVA transaccional del presupuesto. La clave
   // lógica viene del caller (`ventas-{wamid}`: los reintentos del webhook comparten reserva);
   // sin clave natural (simulador/dev) se genera una efímera. Si no pasa → fallback con razón
@@ -107,7 +134,7 @@ export async function runSalesAgent(
   let reserva: ReservaDeIa;
   try {
     const clave = input.billingKey ?? `ventas-${randomUUID()}`;
-    reserva = await deps.openBudget(input.tenantId, clave, estimacionDeTokens('texto_ventas'));
+    reserva = await deps.openBudget(input.tenantId, clave, estimacion);
   } catch (e) {
     const code = (e as { code?: string }).code;
     const reason: SalesAgentBlockReason =
@@ -129,9 +156,9 @@ export async function runSalesAgent(
   const result = await deps.runAgent({
     tenantId: input.tenantId,
     context: 'whatsapp_sales_agent',
-    system: buildSalesSystemPrompt({ agent: input.agentConfig }),
+    system, // el MISMO system/tools sobre el que se estimó la reserva (construidos una vez, arriba)
     messages: input.messages,
-    tools: toolDefinitionsForContext('whatsapp_sales_agent'), // solo buscar_productos / listar_promociones_activas
+    tools,
     maxTokens: SALES_MAX_TOKENS,
     executeTool: async (name, toolInput) => {
       usedTools.push(name);

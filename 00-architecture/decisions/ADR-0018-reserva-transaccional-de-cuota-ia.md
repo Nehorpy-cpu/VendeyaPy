@@ -137,6 +137,14 @@ tenant × período × umbral. Categoría nueva `ai_quota`, tipos
   `texto_ventas: 1500`, `texto_interno: 1500` (los `EST_TOKENS_PER_TURN` duplicados se
   mudan acá), `imagen_vision: 2600` — **declarada pero SIN consumidor**: visión/OCR queda
   para el programa siguiente; ningún modelo de visión se conecta acá.
+- **Hardening 2026-08-15 (`AI-PHASE2-MATCHER-AND-RESERVATION-HARDENING-1`, EN REPO — NO
+  DESPLEGADO):** el SALES AGENT reemplaza la estática por **`estimarTurnoDeTexto`** — estimación
+  conservadora derivada del contexto real (system+historial+tools por `chars/3` + colchón por
+  ronda de tools + salida), con piso 1500 y techo 16.000. El contrato es HONESTO: cubre el turno
+  típico con ~2.5-3× de margen; el peor caso multi-ronda puede superarla y lo reconcilia la
+  liquidación (semántica de siempre). `reservarTurnoDeIa` además CLAMPEA la estimación al límite
+  efectivo cuando este es finito y menor (un límite chico jamás deja al tenant sin IA por la
+  estimación sola — "antes podía, ahora nunca" queda vedado). `texto_interno` sigue estático.
 
 ### 7. Autorización y Rules
 

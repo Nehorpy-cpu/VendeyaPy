@@ -176,29 +176,39 @@ describe('indicios: saneo y consulta (casos 13, 22, 23)', () => {
 });
 
 describe('desenlaces contra el catálogo (casos 12, 14, 15, 16)', () => {
-  it('una coincidencia ⇒ única, con el producto DEL SERVIDOR (nombre y precio de Firestore)', () => {
-    const d = decidirDesenlace([producto('p1', 'Lattafa Asad', { price: 250_000 })], hints());
+  it('una coincidencia IDENTIFICADA por la consulta ⇒ única, con el producto DEL SERVIDOR (nombre y precio de Firestore)', () => {
+    const d = decidirDesenlace([producto('p1', 'Lattafa Asad', { price: 250_000 })], hints(), 'Lattafa Asad');
     expect(d.tipo).toBe('unica');
     const r = componerRespuestaVision(d);
     expect(r).toMatch(/Lattafa Asad/);
     expect(r).toMatch(/250\.000/);
   });
   it('varias ⇒ máximo pequeño de opciones y pregunta (caso 15)', () => {
-    const d = decidirDesenlace([producto('a', 'A'), producto('b', 'B'), producto('c', 'C'), producto('d', 'D')], hints());
+    const d = decidirDesenlace(
+      [producto('a', 'Lattafa Asad Rojo'), producto('b', 'Lattafa Asad Azul'), producto('c', 'Lattafa Asad Verde'), producto('d', 'Lattafa Asad Negro')],
+      hints(),
+      'Lattafa Asad',
+    );
     expect(d.tipo).toBe('multiple');
-    expect(d.productos!.length).toBeLessThanOrEqual(3);
+    expect(d.productos!.length).toBe(3);
     expect(componerRespuestaVision(d)).toMatch(/\?/);
   });
   it('cero coincidencias ⇒ honestidad, cero alucinación (caso 16)', () => {
-    const d = decidirDesenlace([], hints());
+    const d = decidirDesenlace([], hints(), 'Lattafa Asad');
     expect(d.tipo).toBe('sin_match');
     const r = componerRespuestaVision(d);
     expect(r).not.toMatch(/Lattafa|Asad/); // no repite lo que "vio" como si fuera oferta
   });
   it('los productos filtrados por guards NO llegan al desenlace: la lista ya viene curada (caso 14)', () => {
     // El worker busca con searchCatalog (status/stock/deriva) — decidirDesenlace jamás re-agrega.
-    const d = decidirDesenlace([], hints());
+    const d = decidirDesenlace([], hints(), 'Lattafa Asad');
     expect(d.tipo).toBe('sin_match');
+  });
+  it('candidato único DÉBIL (consulta sin relación con el nombre) ⇒ sin_match: estar solo JAMÁS identifica (hito B+C)', () => {
+    // El defecto que corrige el matcher de identificación: antes, 1 candidato ⇒ 'unica' por puro conteo.
+    const d = decidirDesenlace([producto('p9', 'Florero Cristal Andino')], hints(), 'Lattafa Asad');
+    expect(d.tipo).toBe('sin_match');
+    expect(componerRespuestaVision(d)).not.toMatch(/Florero/); // no se afirma lo que no se identificó
   });
 });
 
