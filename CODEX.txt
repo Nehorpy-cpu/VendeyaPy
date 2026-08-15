@@ -212,3 +212,13 @@ reconstrucción de memoria. Runbook checks: dual 20/20 + coexistence 51/51. RE-C
 EXITOSO: job succeeded+enviado, reserva liquidada 2507, espejo 0, respuesta entregada por …7904,
 sin_match honesto (calibración de matcher pendiente para la activación). Flag restaurado a
 AUSENTE; live se conserva. Fase 2 desbloqueada, pendiente de aprobación.
+
+### AI-PHASE2-MATCHER-AND-RESERVATION-HARDENING-1 — 2026-08-15 (EN REPO — NO DESPLEGADO)
+Matcher de identificación estructurado (matched/ambiguous/no_match, evidencia estructural +
+margen; conteo/posición/precio jamás identifican) reemplaza la decisión por conteo de visión.
+Reserva contextual del sales agent (estimarTurnoDeTexto: chars/3+rondas, piso 1500/techo 16k,
+clamp al límite efectivo) reemplaza la estática 1500 (real 3770). Causa raíz honesta del canary:
+el guard de deriva excluía al ARMAF (conflicto de precio pendiente del owner) — el matcher no
+era el único culpable. Review adversarial: 0 ALTO/3 MEDIO/1 BAJO, todos corregidos. Fase 2
+integrada y verificada por el trigger real (sección 7/7). Selector del release: 10 UPDATE +
+0 CREATE + 0 DELETE (onWebhookInbox + las 9 de Fase 1c).

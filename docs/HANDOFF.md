@@ -589,3 +589,32 @@ owner (20 min sin imagen) y se reencendió al confirmar — cero exposición a c
 `productVision` RESTAURADO a AUSENTE (los 3 tenants); `automationMode=live` SE CONSERVA en los
 dos números (programa cerrado en verde). **Fase 2 (deploy de `onWebhookInbox`) queda
 DESBLOQUEADA y pendiente SOLO de aprobación del owner.**
+
+## AI-PHASE2-MATCHER-AND-RESERVATION-HARDENING-1 — 2026-08-15 (EN REPO — NO DESPLEGADO)
+
+Los dos pendientes demostrados por producción, corregidos con test rojo primero + review
+adversarial fresco (0 ALTO, 3 MEDIO, 1 BAJO — TODOS corregidos):
+- **Matcher de identificación** (`catalog/matchIdentificacion.ts`, puro y multi-vertical):
+  `identificarProducto` ⇒ `matched|ambiguous|no_match` con umbral + **evidencia estructural**
+  (≥2 tokens exactos, o 1 exacto + consulta íntegra ≥2 tokens) + **margen inequívoco** vs el 2º.
+  `decidirDesenlace` de visión ya no identifica por conteo ("estar solo" jamás identifica; el
+  review probó 'odys'/'lattafa' ⇒ hoy no_match). Conteo/posición/precio jamás deciden; empates ⇒
+  repreguntar. NOTA HONESTA: el sin_match del canary ARMAF seguirá mientras el guard de deriva
+  excluya al producto (conflicto de precio local ₲250.000 vs feed — pendiente del owner).
+- **Reserva contextual del sales agent**: `estimarTurnoDeTexto` (chars/3 del system+historial+
+  tools + colchón por ronda + salida; piso 1500, techo 16k) reemplaza la estática que quedó corta
+  (1.500 vs 3.770 reales). Contrato honesto: cubre el turno típico ~2.5-3×; el peor caso
+  multi-ronda lo reconcilia la liquidación. `reservarTurnoDeIa` clampea al límite efectivo chico
+  (jamás "antes podía, ahora nunca"). `texto_interno` sigue estático. Piso práctico del agente
+  ~9.5k ⇒ starter 50k pasa de ~33 a ~5 turnos CONCURRENTES admisibles (degradación con gracia:
+  fallback honesto) — anotado para pricing.
+- **Integración Fase 2 verificada**: sección 7/7 nueva de `verify-ai-reservation.mjs` maneja el
+  TRIGGER real `onWebhookInbox` en emulador — determinístico ⇒ respuesta y CERO reservas; turno
+  de IA ⇒ UNA reserva `ventas-*` liquidada con uso real y espejo en 0; `automationMode` AUSENTE ⇒
+  `ignored` por el gate, sin respuesta ni reserva. (Fix de arnés: customerId con dígitos puros —
+  process.ts sanea `from`.)
+- **Selector mínimo del release (grafo compilado)**: **10 UPDATE + 0 CREATE + 0 DELETE** =
+  `onWebhookInbox` + las 9 de Fase 1c (todas alcanzan los módulos cambiados; `devMessage` fuera
+  por dev-only). Smoke previsto del release: mensaje consultivo real por WhatsApp ⇒ reserva
+  `ventas-{wamid}` liquidada; mensaje "hola" ⇒ cero reservas; imagen ⇒ job de visión (flag
+  mediante).
