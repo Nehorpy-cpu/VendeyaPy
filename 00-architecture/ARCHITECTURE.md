@@ -1034,7 +1034,7 @@ Los siguientes templates deben ser aprobados por Meta para cada tenant:
 - El sistema rastrea `usage.messagesThisMonth` por tenant y alerta al 80% del límite del plan
 - Los templates tienen tasa de aprobación de Meta de 24-48h, deben registrarse en la fase de onboarding
 
-#### 6.6.1 Cuota de IA: reserva transaccional + alertas (ADR-0018 — EN REPO, NO DESPLEGADO)
+#### 6.6.1 Cuota de IA: reserva transaccional + alertas (ADR-0018 — EN PROD: Fase 1 2026-08-15, Fase 2 —sales agent— 2026-08-16Z)
 
 Toda llamada facturable al modelo pasa por **`entitlements/aiReservation.ts`** (abstracción
 única para agente de ventas, asistente interno, simulador y la futura visión):
@@ -1058,7 +1058,7 @@ Toda llamada facturable al modelo pasa por **`entitlements/aiReservation.ts`** (
    (`allow read, write: if false`); `usage.aiTokensReserved` vive en el doc tenant ya
    protegido por la deny-list de `affectedKeys`.
 
-#### 6.6.2 Visión de productos contra el catálogo (ADR-0019 — EN REPO, NO DESPLEGADO, flag OFF)
+#### 6.6.2 Visión de productos contra el catálogo (ADR-0019 — EN PROD INERTE desde 2026-08-15, flag OFF en todos los tenants)
 
 Una imagen entrante elegible (stored, MIME imagen verificado, clasificación FINAL
 `generic_media` — el clasificador determinístico de ADR-0016 tiene precedencia absoluta y
@@ -1067,7 +1067,7 @@ Una imagen entrante elegible (stored, MIME imagen verificado, clasificación FIN
 `onAiVisionProducer` (trigger sobre la transición del inbox a `processed` — v2: liberar visión no
 exige tocar `onWebhookInbox`). El id del adjunto ya es determinístico ⇒ reintentos del webhook no
 duplican; re-envíos son hechos nuevos. Worker con claim transaccional + lease
-60 s + **fencing por claimId** (un zombi no aplica resultados) + envío único
+5 min + **fencing por claimId** (un zombi no aplica resultados) + envío único
 (`envio: pendiente→en_vuelo→enviado`; incierto ⇒ jamás re-enviar). Reserva `imagen_vision`
 (ADR-0018) antes del proveedor. La IA solo devuelve **indicios universales** validados por
 schema (texto visible, marca aparente, categoría, rasgos, confianza); el servidor busca con

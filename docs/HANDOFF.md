@@ -618,3 +618,32 @@ adversarial fresco (0 ALTO, 3 MEDIO, 1 BAJO — TODOS corregidos):
   por dev-only). Smoke previsto del release: mensaje consultivo real por WhatsApp ⇒ reserva
   `ventas-{wamid}` liquidada; mensaje "hola" ⇒ cero reservas; imagen ⇒ job de visión (flag
   mediante).
+
+## DEPLOY-AI-PHASE2-SALES-RESERVATION-1 — 2026-08-16Z (EN PROD — FASE 2 COMPLETA, SMOKES VERDES)
+
+Deploy mínimo del hardening desde **`6f75601`** con selector derivado del grafo compilado:
+**10 UPDATE + 0 CREATE + 0 DELETE** — orden: primero las 9 de soporte
+(`askInternalGrowthAssistant`, `agentTestCase{Run,Upsert,Delete}`, `simulateAgentMessage`,
+`runTenantJob`, `aiReservationMaintenance`, `onAiVisionJob`, `onAiVisionProducer`), verificadas
+ACTIVE con updateTime nuevo y cero efectos, y **`onWebhookInbox` al FINAL** (su update activa la
+reserva para el inbound real). `devMessage` alcanzada por el grafo pero EXCLUIDA a propósito
+(dev-only, prohibida): queda corriendo su artefacto viejo. Rollback ARMADO antes del deploy y
+conservado: worktrees `rollback-bdaffbe` (las 9) + `rollback-30c1687` (`onWebhookInbox`), ambos
+con allowlist de env limpia. Baseline productiva completa pre-deploy en el registro del programa.
+
+**Smokes controlados en arfagi, atribuidos por wamid y ventana (no por deltas):**
+- "hola" ⇒ processed por el webhook NUEVO, UNA respuesta, **CERO reserva para ese wamid**, cero
+  aiRequests en la ventana, espejo 0 — lo determinístico sigue costando cero.
+- Turno consultivo real ⇒ reserva `ventas-{wamid}` **creada con estimación contextual 9.775**
+  (dentro de piso 1500/techo 16k) → **liquidada con uso real 3.833**, conciliado A TOKEN EXACTO
+  con el ÚNICO aiRequest (contexto `whatsapp_sales_agent`), espejo de vuelta en 0, UNA sola
+  respuesta con waMessageId real. Cero visión, cero pedidos/pagos/carrito, meta-review y
+  credipower sin un byte de cambio (revisión de Meta en curso, preservada).
+
+Post-deploy: 118 functions (las 117 no seleccionadas con updateTime intacto),
+`automationMode='live'` conservado en `…7904` y `…5686`, visión AUSENTE ×3, `.env` hash
+idéntico, cero errores en logs. Con esto el TREN DE RELEASE de ADR-0018/0019 queda completo:
+cuota transaccional EN PROD para TODAS las superficies (sales agent incluido) y visión
+desplegada de punta a punta INERTE. **Deuda vigente antes de activar visión**: reconciliar el
+conflicto de precio de Odyssey (source-of-truth) — sin eso, el guard de deriva seguirá
+excluyendo al producto insignia de cualquier identificación.

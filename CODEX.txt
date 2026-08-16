@@ -222,3 +222,11 @@ el guard de deriva excluía al ARMAF (conflicto de precio pendiente del owner) �
 era el único culpable. Review adversarial: 0 ALTO/3 MEDIO/1 BAJO, todos corregidos. Fase 2
 integrada y verificada por el trigger real (sección 7/7). Selector del release: 10 UPDATE +
 0 CREATE + 0 DELETE (onWebhookInbox + las 9 de Fase 1c).
+
+### DEPLOY-AI-PHASE2-SALES-RESERVATION-1 — 2026-08-16Z (EN PROD)
+Fase 2 desplegada desde 6f75601: 10 UPDATE/0 CREATE/0 DELETE (9 soporte primero, onWebhookInbox
+al final; devMessage excluida a propósito). Rollback armado y conservado (bdaffbe + 30c1687).
+Smokes por wamid: "hola" determinístico sin reserva ni aiRequest; consultivo con reserva
+ventas-{wamid} est 9775 → liquidada real 3833, conciliación exacta, espejo 0, una respuesta.
+117 functions intactas, automationMode live ×2, visión AUSENTE ×3 (sigue apagada), meta-review y
+credipower preservados, logs limpios. Deuda pre-activación de visión: reconciliar precio Odyssey.

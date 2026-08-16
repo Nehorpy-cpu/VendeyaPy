@@ -120,6 +120,10 @@ liberar.
    o 1 exacto + consulta íntegra de ≥2 tokens en el nombre) y **margen inequívoco** contra el 2º
    candidato. El conteo, la posición en la lista y el precio JAMÁS identifican; empates ⇒
    repreguntar. Cierra el defecto "candidato único débil ⇒ identificado por estar solo".
+   **Desplegado 2026-08-16Z** dentro del worker/productor (release Fase 2, 10 UPDATE) — visión
+   sigue INERTE: `productVision.enabled` AUSENTE en los 3 tenants; antes de activar queda la
+   deuda del conflicto de precio Odyssey/source-of-truth (el guard de deriva excluye al producto
+   hasta que el owner lo reconcilie en el panel).
    Es el MISMO buscador del bot, con sus guards:
    `status ACTIVE`, stock trackStock-aware, deriva externa (`filtrarOfrecibles`), `profitMode`
    siempre false — más el filtro de calidad bloqueante. `stockPendingReview` nace `INACTIVE`
