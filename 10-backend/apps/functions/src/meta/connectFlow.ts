@@ -14,13 +14,14 @@ import { db, paths } from '../lib/firebase.js';
 import { getSecretStore } from '../lib/secretStore.js';
 import { logger } from '../lib/logger.js';
 import { recordAudit } from '../audit/audit.js';
-import { metaTokenSecretName } from './secretName.js';
+import { metaTokenSecretName, metaPendingTokenSecretName } from './secretName.js';
 import { META_REQUIRED_SCOPES } from './scopes.js';
 import { buildMetaAssets, writeDiscoveredAssets } from './discovery.js';
-import { PnidOcupadoError } from './pnidOwnership.js';
+import { PnidOcupadoError, WabaOcupadaError } from './pnidOwnership.js';
 import { verifyWhatsappChannel } from './preflight.js';
 import { resolveEntitlements } from '../entitlements/entitlements.js';
-import type { MetaGraphClient, MetaPhoneNumber } from './graphClient.js';
+import { createWabaSelectionNonce, consumeWabaSelectionNonce, type WabaSelectionOption } from './nonce.js';
+import type { MetaGraphClient, MetaPhoneNumber, DebugTokenResult } from './graphClient.js';
 
 // ---------------- Helpers PUROS (testeables) ----------------
 
@@ -79,12 +80,24 @@ export type ConnectFailReason =
   | 'no_phone_number'
   | 'phone_number_mismatch'
   | 'phone_number_collision'
+  /** ADR-0020 (G11): la cuenta de WhatsApp Business ya es de otro tenant. */
+  | 'waba_collision'
+  /** ADR-0020 (G2): el token autoriza varios WABAs — falta que el owner elija (estado, no error terminal). */
+  | 'waba_selection_required'
+  /** ADR-0020 (G2): selección vencida/replay/fuera de lista/pendiente ausente. El owner rehace el login. */
+  | 'seleccion_invalida'
   | 'persistencia_incompleta'
   | 'over_number_limit';
 
 export type ConnectResult =
   | { ok: true; status: 'active'; selectedPhoneNumberId: string; phoneNumber: string | null; assetsCount: number }
-  | { ok: false; reason: ConnectFailReason; status: MetaConnectionStatus };
+  | { ok: false; reason: Exclude<ConnectFailReason, 'waba_selection_required'>; status: MetaConnectionStatus }
+  /**
+   * SELECCIÓN PENDIENTE (G2): no es un fallo terminal — el token quedó en el secreto pendiente y
+   * `selectionId` + `wabas` son exactamente lo que el panel necesita para llamar a
+   * `completeMetaConnectWaba`. La conexión previa no se tocó.
+   */
+  | { ok: false; reason: 'waba_selection_required'; status: MetaConnectionStatus; selectionId: string; wabas: WabaSelectionOption[] };
 
 /**
  * UN CONNECT FALLIDO NO PUEDE APAGAR EL NÚMERO QUE ESTÁ VENDIENDO.
@@ -109,10 +122,22 @@ async function registrarFalloDeConexion(tenantId: string, motivo: string): Promi
   );
 }
 
-/** `tokenSecretRef` de la conexión actual (null si no hay conexión previa). */
-async function refDelSecretoPrevio(tenantId: string): Promise<string | null> {
-  const previo = (await db().doc(paths.metaConnection(tenantId, 'main')).get()).data() as MetaConnection | undefined;
-  return previo?.tokenSecretRef || null;
+/**
+ * Validación COMPARTIDA del token (debug_token + scopes): la usan el connect directo y el cierre
+ * de la selección pendiente — el token pendiente pudo vencer entre el login y la elección, y
+ * completar no puede saltarse lo que el camino directo exige. `null` = token utilizable.
+ */
+async function fallaDeValidacionDeToken(tenantId: string, dbg: DebugTokenResult): Promise<ConnectResult | null> {
+  if (!dbg.isValid) {
+    await registrarFalloDeConexion(tenantId, 'token inválido');
+    return { ok: false, reason: 'token_invalid', status: 'expired' };
+  }
+  const missing = missingScopes(dbg.scopes, META_REQUIRED_SCOPES);
+  if (missing.length) {
+    await registrarFalloDeConexion(tenantId, `faltan permisos: ${missing.join(', ')}`);
+    return { ok: false, reason: 'scopes_insuficientes', status: 'permission_missing' };
+  }
+  return null;
 }
 
 /**
@@ -210,15 +235,8 @@ export async function runMetaConnect(tenantId: string, input: ConnectInput, byUi
 
   // 2) Validación del token + scopes + WABA + expiración (debug_token con app access token).
   const dbg = await graph.debugToken(token);
-  if (!dbg.isValid) {
-    await registrarFalloDeConexion(tenantId, 'token inválido');
-    return { ok: false, reason: 'token_invalid', status: 'expired' };
-  }
-  const missing = missingScopes(dbg.scopes, META_REQUIRED_SCOPES);
-  if (missing.length) {
-    await registrarFalloDeConexion(tenantId, `faltan permisos: ${missing.join(', ')}`);
-    return { ok: false, reason: 'scopes_insuficientes', status: 'permission_missing' };
-  }
+  const fallaToken = await fallaDeValidacionDeToken(tenantId, dbg);
+  if (fallaToken) return fallaToken;
 
   // 3) WABA: el del input (sessionInfo del ES, o sea del navegador) contrastado contra los
   // granular_scopes del token; si el input no trae ninguno, el del token — PERO solo cuando el
@@ -227,6 +245,12 @@ export async function runMetaConnect(tenantId: string, input: ConnectInput, byUi
   // entero: la elección tiene que ser explícita (mismo criterio que `elegirWabaDeCoexistencia`).
   const wabaId = input.wabaId || (dbg.wabaIds.length === 1 ? dbg.wabaIds[0] : undefined);
   if (!wabaId) {
+    // ADR-0020 (G2): con varios autorizados no se puede pedir «reintentá» — el code ya se canjeó
+    // y reclamó. El estado pasa a SELECCIÓN PENDIENTE y el owner desambigua solo. Se exige uid
+    // porque el nonce de selección se ata a él; los callables siempre lo tienen.
+    if (dbg.wabaIds.length > 1 && byUid) {
+      return iniciarSeleccionDeWaba(tenantId, byUid, token, dbg, input, graph);
+    }
     await registrarFalloDeConexion(
       tenantId,
       dbg.wabaIds.length > 1 ? 'varias cuentas de WhatsApp Business autorizadas: falta la elección explícita' : 'sin WhatsApp Business Account',
@@ -238,6 +262,128 @@ export async function runMetaConnect(tenantId: string, input: ConnectInput, byUi
     await registrarFalloDeConexion(tenantId, 'la cuenta de WhatsApp Business pedida no está autorizada por el token');
     return { ok: false, reason: 'no_waba', status: 'error' };
   }
+
+  return finishMetaConnect(
+    tenantId,
+    { token, dbg, wabaId, phoneNumberId: input.phoneNumberId, businessId: input.businessId, businessName: input.businessName, wabaName: input.wabaName },
+    byUid,
+    graph,
+  );
+}
+
+/**
+ * ADR-0020 (G2) — arranca la SELECCIÓN PENDIENTE de WABA.
+ *
+ * El token queda en el secreto pendiente determinístico (`meta-token-pending-{tenant}`):
+ * sobrescribe cualquier intento anterior — a lo sumo UN huérfano por tenant, que el próximo
+ * intento pisa y el completar retira — y NUNCA es el secreto que resuelve credenciales. No se
+ * escribe `lastConnectError` ni se toca la conexión previa: una selección pendiente no es un
+ * intento fallido, es un paso a mitad de camino.
+ */
+async function iniciarSeleccionDeWaba(
+  tenantId: string,
+  uid: string,
+  token: string,
+  dbg: DebugTokenResult,
+  input: ConnectInput,
+  graph: MetaGraphClient,
+): Promise<ConnectResult> {
+  // Lista SANEADA para el panel: id + nombre legible. El nombre es best-effort (Graph puede no
+  // darlo) y degrada al id: un nombre ausente jamás bloquea la selección.
+  const wabas: WabaSelectionOption[] = [];
+  for (const id of dbg.wabaIds) {
+    let nombre: string | null = null;
+    try {
+      nombre = (await graph.getWabaName?.(id, token)) ?? null;
+    } catch {
+      nombre = null;
+    }
+    wabas.push({ id, name: (nombre ?? '').trim().slice(0, 120) || id });
+  }
+  const pendingSecretRef = await getSecretStore().set(metaPendingTokenSecretName(tenantId), token);
+  const selectionId = await createWabaSelectionNonce(tenantId, uid, {
+    pendingSecretRef,
+    wabas,
+    ...(input.businessId ? { businessId: input.businessId } : {}),
+    ...(input.businessName ? { businessName: input.businessName } : {}),
+  });
+  logger.info('Meta connect: selección de WABA pendiente', { tenantId, wabas: wabas.length });
+  return { ok: false, reason: 'waba_selection_required', status: 'not_connected', selectionId, wabas };
+}
+
+/**
+ * ADR-0020 (G2) — cierra la selección pendiente: consume el nonce (uso único, tenant+uid),
+ * RETIRA el secreto pendiente y completa el MISMO camino de conexión que el connect directo.
+ *
+ * Fail-closed: nonce vencido/replay, WABA fuera de la lista ofrecida o secreto pendiente ausente
+ * ⇒ `seleccion_invalida`. El owner rehace el login — el `code` original era de un solo uso igual,
+ * así que no existe un reintento más barato que ofrecer.
+ */
+export async function runCompleteMetaConnectWaba(
+  tenantId: string,
+  uid: string,
+  selectionId: string,
+  wabaId: string,
+  graph: MetaGraphClient,
+): Promise<ConnectResult> {
+  const invalida: ConnectResult = { ok: false, reason: 'seleccion_invalida', status: 'not_connected' };
+  const sel = await consumeWabaSelectionNonce(selectionId, { tenantId, uid });
+  if (!sel) return invalida;
+
+  // El secreto pendiente se lee y se RETIRA acá mismo: el nonce ya se quemó, así que este token
+  // no tiene otra oportunidad — dejarlo dormido solo fabricaría un huérfano con credencial viva.
+  // Si el retiro falla, el próximo intento lo sobrescribe (naming determinístico).
+  const token = await getSecretStore().get(sel.pendingSecretRef).catch(() => null);
+  try {
+    await getSecretStore().remove(sel.pendingSecretRef);
+  } catch {
+    logger.warn('Meta connect: no se pudo retirar el secreto pendiente (el próximo intento lo sobrescribe)', { tenantId });
+  }
+  if (!token) return invalida;
+
+  // Solo un WABA OFRECIDO en esta selección se puede completar: el input del panel no amplía nada.
+  const elegido = sel.wabas.find((w) => w.id === wabaId);
+  if (!elegido) {
+    logger.warn('Meta connect: el WABA elegido no estaba en la selección ofrecida', { tenantId });
+    return invalida;
+  }
+
+  // El token pendiente se REVALIDA: pudo vencer o perder permisos entre el login y la elección.
+  const dbg = await graph.debugToken(token);
+  const fallaToken = await fallaDeValidacionDeToken(tenantId, dbg);
+  if (fallaToken) return fallaToken;
+  if (!wabaAutorizado(wabaId, dbg.wabaIds)) {
+    await registrarFalloDeConexion(tenantId, 'la cuenta de WhatsApp Business pedida no está autorizada por el token');
+    return { ok: false, reason: 'no_waba', status: 'error' };
+  }
+
+  return finishMetaConnect(
+    tenantId,
+    { token, dbg, wabaId, businessId: sel.businessId, businessName: sel.businessName, wabaName: elegido.name !== wabaId ? elegido.name : undefined },
+    uid,
+    graph,
+  );
+}
+
+/** Lo que la fase final necesita: el token YA validado y el WABA YA elegido y autorizado. */
+interface FinishConnectInput {
+  token: string;
+  dbg: DebugTokenResult;
+  wabaId: string;
+  phoneNumberId?: string;
+  businessId?: string;
+  businessName?: string;
+  wabaName?: string;
+}
+
+/**
+ * FASE FINAL COMPARTIDA de la conexión (ADR-0020): números → gate del plan → secreto → discovery
+ * → conexión activa → subscribe → preflight → auditoría. La usan el connect directo
+ * (`runMetaConnect`) y el cierre de la selección pendiente (`runCompleteMetaConnectWaba`) para
+ * que «elegir después» no pueda divergir ni un paso del camino de siempre.
+ */
+async function finishMetaConnect(tenantId: string, input: FinishConnectInput, byUid: string | null, graph: MetaGraphClient): Promise<ConnectResult> {
+  const { token, dbg, wabaId } = input;
 
   // 4) Phone numbers del WABA → elegir el seleccionado.
   const phones = await graph.listWabaPhoneNumbers(wabaId, token);
@@ -265,7 +411,11 @@ export async function runMetaConnect(tenantId: string, input: ConnectInput, byUi
   // El VALOR previo se lee ANTES del set: con naming determinístico, el set pisa el documento, y
   // si algo falla después la única forma de devolverle la credencial al número que vende es tener
   // el valor en la mano (la referencia sola no alcanza — es la misma string).
-  const refPrevia = await refDelSecretoPrevio(tenantId);
+  const previo = (await db().doc(paths.metaConnection(tenantId, 'main')).get()).data() as MetaConnection | undefined;
+  const refPrevia = previo?.tokenSecretRef || null;
+  // ADR-0020 (G7): si había una conexión ACTIVA, esto es una RECONEXIÓN — mismo camino, otra
+  // entrada en la bitácora. Se decide ANTES de escribir: después ya no queda rastro del estado previo.
+  const esReconexion = previo?.status === 'active';
   const valorPrevio = refPrevia ? await getSecretStore().get(refPrevia).catch(() => null) : null;
   const tokenSecretRef = await getSecretStore().set(metaTokenSecretName(tenantId), token);
 
@@ -290,6 +440,12 @@ export async function runMetaConnect(tenantId: string, input: ConnectInput, byUi
       await registrarFalloDeConexion(tenantId, 'el número de WhatsApp ya está conectado en otra empresa');
       return { ok: false, reason: 'phone_number_collision', status: 'error' };
     }
+    // ADR-0020 (G11): el WABA ya es de otro tenant — mismo trato que la colisión de PNID.
+    if (e instanceof WabaOcupadaError) {
+      logger.warn('Meta connect: la cuenta de WhatsApp Business ya está conectada en otra empresa', { tenantId, conflictTenantId: e.conflictTenantId });
+      await registrarFalloDeConexion(tenantId, 'la cuenta de WhatsApp Business ya está conectada en otra empresa');
+      return { ok: false, reason: 'waba_collision', status: 'error' };
+    }
     logger.error('Meta connect: no se pudo persistir la conexión', e, { tenantId });
     await registrarFalloDeConexion(tenantId, 'no se pudo guardar la conexión');
     return { ok: false, reason: 'persistencia_incompleta', status: 'error' };
@@ -298,14 +454,14 @@ export async function runMetaConnect(tenantId: string, input: ConnectInput, byUi
   // 8) Suscribir la app a la WABA para recibir webhooks (best-effort).
   try {
     await graph.subscribeApp(wabaId, token);
-  } catch (e) {
+  } catch {
     logger.warn('Meta connect: subscribeApp falló (se continúa)', { tenantId });
   }
 
   // 9) Preflight: ajusta el estado final (active/expired/permission_missing/error).
   try {
     await verifyWhatsappChannel(tenantId, graph);
-  } catch (e) {
+  } catch {
     logger.warn('Meta connect: preflight falló (se continúa)', { tenantId });
   }
 
@@ -314,12 +470,13 @@ export async function runMetaConnect(tenantId: string, input: ConnectInput, byUi
   // El Embedded Signup era el ÚNICO camino de alta sin auditoría: el alta manual, el número
   // adicional y hasta la conexión demo dejaban rastro, y el camino REAL —por donde va a entrar el
   // número que atiende clientes— no. Metadata saneada: el PNID va enmascarado y el token no aparece.
+  // G7: reemplazar una conexión que ESTABA activa es `meta.reconnected` — mismo payload enmascarado.
   await recordAudit({
     tenantId,
-    action: 'meta.connected',
+    action: esReconexion ? 'meta.reconnected' : 'meta.connected',
     actorUid: byUid,
     targetType: 'meta',
-    summary: 'Conexión Meta creada (Embedded Signup)',
+    summary: esReconexion ? 'Conexión Meta reemplazada (Embedded Signup)' : 'Conexión Meta creada (Embedded Signup)',
     metadata: { source: 'embedded_signup', phoneNumberId: maskPhone(selectedPhoneNumberId), assets: assets.length },
   });
   return { ok: true, status: 'active', selectedPhoneNumberId, phoneNumber: phone?.displayPhoneNumber ?? null, assetsCount: assets.length };

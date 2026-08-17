@@ -30,11 +30,16 @@ const assets = await db.collection(`tenants/${T}/metaAssets`).get();
 const types = assets.docs.map((d) => d.data().assetType);
 check('3. Activos de Meta creados', assets.size >= 6 && types.includes('whatsapp_business_account') && types.includes('ad_account'), `assets=${assets.size}`);
 
-// 2. Desconectar
+// 2. Desconectar. Desde ADR-0017 los números de teléfono se MARCAN `disconnected` (historial de
+// ruteo, no se borran); el resto de los activos sí se elimina — misma corrección de arnés que
+// fase4b check 16 y WM1.9.
 await post('devMetaDisconnect');
 const c2 = await conn();
 const assets2 = await db.collection(`tenants/${T}/metaAssets`).get();
-check('4. Desconectar limpia (not_connected + sin activos)', c2?.status === 'not_connected' && assets2.size === 0);
+const restantes = assets2.docs.map((d) => d.data());
+const soloPhonesDesconectados = restantes.every((a) => a.assetType === 'whatsapp_phone_number' && a.status === 'disconnected');
+check('4. Desconectar limpia (not_connected + números marcados disconnected + resto de activos borrado)',
+  c2?.status === 'not_connected' && soloPhonesDesconectados);
 
 // 3. Reglas: vendedor no lee; dueña sí
 const signIn = async (email) => (await (await fetch(AUTH, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, password: 'test1234', returnSecureToken: true }) })).json()).idToken;

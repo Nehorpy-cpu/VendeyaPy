@@ -11,6 +11,7 @@ import { Timestamp } from 'firebase-admin/firestore';
 import type { MetaConnection } from '@vpw/shared';
 import { db, paths } from '../lib/firebase.js';
 import { ASSET_STATUS_DESCONECTADO } from './discovery.js';
+import { metaPendingTokenSecretName, metaTokenSecretRefFirestore } from './secretName.js';
 import { getSecretStore } from '../lib/secretStore.js';
 import { logger } from '../lib/logger.js';
 import { recordAudit } from '../audit/audit.js';
@@ -89,48 +90,71 @@ export async function connectMetaDemo(tenantId: string, byUid?: string | null): 
  *
  * El resto de los activos (WABA, página, catálogo, pixel…) se sigue borrando: no llevan permiso ni
  * estado de conversación, así que conservarlos solo dejaría basura.
+ *
+ * ADR-0020 (G12) — UNA TRANSACCIÓN, no tres escrituras sueltas. Antes esto era `set` de la
+ * conexión + borrado del secreto + batch de assets/índice: un fallo en el medio dejaba un
+ * `not_connected` que seguía ruteando (o un ruteo muerto con la conexión diciendo estar sana).
+ * Ahora las lecturas van primero y TODAS las escrituras (índice de main + marca de los números +
+ * borrado del resto + conexión) confirman juntas: el routing muere junto con el estado, o no
+ * muere nada. El retiro del secreto queda FUERA de la tx como etapa compensable POSTERIOR: si
+ * falla, la conexión ya quedó `not_connected` con ref vacía y el huérfano se retira en el
+ * reintento idempotente (el naming es determinístico) — nunca al revés.
+ *
+ * G6: la auditoría lleva el ACTOR propagado desde el callable.
  */
-export async function disconnectMeta(tenantId: string): Promise<void> {
+export async function disconnectMeta(tenantId: string, actorUid?: string | null): Promise<void> {
   const connRef = db().doc(paths.metaConnection(tenantId, 'main'));
-  const prevTokenRef = (await connRef.get()).data()?.tokenSecretRef as string | undefined;
-  await connRef.set(
-    { status: 'not_connected', tokenSecretRef: '', tokenType: '', scopes: [], lastVerifiedAt: null, updatedAt: Timestamp.now() },
-    { merge: true },
-  );
-  // Borra el secreto cifrado del tenant (evita huérfanos en `secrets`). No-op si la
-  // referencia no es de SecretStore (p.ej. la demo usa secret://demo/...).
-  if (prevTokenRef) {
-    await getSecretStore().remove(prevTokenRef).catch(() => logger.warn('disconnectMeta: no se pudo borrar el secreto referenciado', { tenantId }));
-  }
-  const assets = await db().collection(paths.metaAssets(tenantId)).get();
-  const idx = await db().collection(paths.metaExternalIndex()).where('tenantId', '==', tenantId).get();
-  const now = Timestamp.now();
-  const batch = db().batch();
-  // «Desconectar» es una operación sobre la conexión MAIN, no sobre el tenant entero. Los números
-  // de otras conexiones (`wa_{pnid}`, Coexistence/multi-número) tienen su propio ciclo de vida
-  // (`deactivateWhatsappNumber`) y NO se tocan: borrarles el ruteo acá dejaba mudo, con un solo
-  // click del panel, a un número que esta conexión ni administra — en `shadow` la observación
-  // moría en silencio, y después del cutover ese número es EL QUE VENDE. Mismo criterio
-  // `connectionId ?? 'main'` que usa la limpieza del discovery.
-  const esDeMain = (data: { connectionId?: unknown }): boolean => (data.connectionId ?? 'main') === 'main';
-  assets.docs.forEach((d) => {
-    const data = d.data() as { assetType?: unknown; connectionId?: unknown };
-    if (!esDeMain(data)) return;
-    if (data.assetType === 'whatsapp_phone_number') {
-      // MERGE a propósito: `automationMode` y `sessionKey` no se nombran, así que no se tocan.
-      // Escribirlos —aunque fuera con su valor actual— convertiría esto en una decisión sobre el
-      // permiso del número, y desconectar no es eso.
-      batch.set(d.ref, { status: ASSET_STATUS_DESCONECTADO, updatedAt: now }, { merge: true });
-      return;
-    }
-    batch.delete(d.ref);
+  let prevTokenRef = '';
+  await db().runTransaction(async (tx) => {
+    // TODAS las lecturas primero: Firestore rechaza una lectura posterior a la primera escritura.
+    const conn = await tx.get(connRef);
+    const assets = await tx.get(db().collection(paths.metaAssets(tenantId)));
+    const idx = await tx.get(db().collection(paths.metaExternalIndex()).where('tenantId', '==', tenantId));
+    prevTokenRef = (conn.data()?.tokenSecretRef as string | undefined) ?? '';
+    const now = Timestamp.now();
+    // «Desconectar» es una operación sobre la conexión MAIN, no sobre el tenant entero. Los números
+    // de otras conexiones (`wa_{pnid}`, Coexistence/multi-número) tienen su propio ciclo de vida
+    // (`deactivateWhatsappNumber`) y NO se tocan: borrarles el ruteo acá dejaba mudo, con un solo
+    // click del panel, a un número que esta conexión ni administra — en `shadow` la observación
+    // moría en silencio, y después del cutover ese número es EL QUE VENDE. Mismo criterio
+    // `connectionId ?? 'main'` que usa la limpieza del discovery.
+    const esDeMain = (data: { connectionId?: unknown }): boolean => (data.connectionId ?? 'main') === 'main';
+    assets.docs.forEach((d) => {
+      const data = d.data() as { assetType?: unknown; connectionId?: unknown };
+      if (!esDeMain(data)) return;
+      if (data.assetType === 'whatsapp_phone_number') {
+        // MERGE a propósito: `automationMode` y `sessionKey` no se nombran, así que no se tocan.
+        // Escribirlos —aunque fuera con su valor actual— convertiría esto en una decisión sobre el
+        // permiso del número, y desconectar no es eso.
+        tx.set(d.ref, { status: ASSET_STATUS_DESCONECTADO, updatedAt: now }, { merge: true });
+        return;
+      }
+      tx.delete(d.ref);
+    });
+    // El índice SÍ se borra — pero solo el de ESTA conexión: es su ruteo (y el reclamo `waba_…`
+    // de G11), y es lo que deja al número de main efectivamente callado.
+    idx.docs.forEach((d) => {
+      if (esDeMain(d.data() as { connectionId?: unknown })) tx.delete(d.ref);
+    });
+    tx.set(
+      connRef,
+      { status: 'not_connected', tokenSecretRef: '', tokenType: '', scopes: [], lastVerifiedAt: null, updatedAt: now },
+      { merge: true },
+    );
   });
-  // El índice SÍ se borra — pero solo el de ESTA conexión: es su ruteo, y es lo que deja al
-  // número de main efectivamente callado.
-  idx.docs.forEach((d) => {
-    if (esDeMain(d.data() as { connectionId?: unknown })) batch.delete(d.ref);
-  });
-  await batch.commit();
+  // Retiro del secreto DESPUÉS de la tx (compensable). Sin ref persistida (reintento tras un
+  // retiro fallido) se usa la referencia canónica del naming determinístico: `remove` ignora
+  // referencias de otro esquema (p. ej. la demo `secret://demo/...`), así que nunca borra ajeno.
+  const refARetirar = prevTokenRef || metaTokenSecretRefFirestore(tenantId);
+  await getSecretStore()
+    .remove(refARetirar)
+    .catch(() => logger.warn('disconnectMeta: no se pudo borrar el secreto referenciado (se retira en el próximo reintento)', { tenantId }));
+  // Review BAJO (ADR-0020 G2): una selección de WABA ABANDONADA deja el token pendiente cifrado
+  // sin referencia viva (el nonce venció). La desconexión es un cierre natural del ciclo: se
+  // retira también ese huérfano, idempotente — `remove` de un secreto inexistente es no-op.
+  await getSecretStore()
+    .remove(`secret://firestore/${metaPendingTokenSecretName(tenantId)}`)
+    .catch(() => logger.warn('disconnectMeta: no se pudo borrar el secreto pendiente huérfano (reintentable)', { tenantId }));
   logger.info('Conexión Meta desconectada', { tenantId });
-  await recordAudit({ tenantId, action: 'meta.disconnected', targetType: 'meta', summary: 'Conexión Meta desconectada' });
+  await recordAudit({ tenantId, action: 'meta.disconnected', actorUid: actorUid ?? null, targetType: 'meta', summary: 'Conexión Meta desconectada' });
 }

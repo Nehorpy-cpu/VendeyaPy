@@ -185,7 +185,9 @@ export { devMetaConnect, devMetaDisconnect } from './functions/meta/devMeta.js';
 
 // Conexión REAL de Meta por tenant (Fase 4B): callables autenticados (owner/admin) del
 // Embedded Signup — nonce + intercambio de code + discovery + preflight. No cablea frontend.
-export { startMetaConnect, connectMeta, verifyMetaChannel, selectMetaPhoneNumber, metaDisconnect } from './functions/meta/metaConnect.js';
+// META-ONBOARDING-SELF-SERVICE-1 (ADR-0020): completeMetaConnectWaba cierra la selección
+// pendiente cuando el token autoriza varios WABAs (G2).
+export { startMetaConnect, connectMeta, completeMetaConnectWaba, verifyMetaChannel, selectMetaPhoneNumber, metaDisconnect } from './functions/meta/metaConnect.js';
 // WM-1: alta MANUAL de WhatsApp por PLATFORM_ADMIN (reusa el mismo modelo; no toca Embedded Signup).
 // MULTI-NUMBER-1: números adicionales por empresa (agregar/desactivar, solo PLATFORM_ADMIN).
 export { adminSetManualWhatsappConnection, adminAddWhatsappNumber, adminDeactivateWhatsappNumber } from './functions/meta/manualWhatsappCallables.js';

@@ -53,6 +53,12 @@ export interface MetaGraphClient {
   getPhoneNumber(phoneNumberId: string, accessToken: string): Promise<MetaPhoneNumber | null>;
   subscribeApp(wabaId: string, accessToken: string): Promise<void>;
   /**
+   * Nombre legible de un WABA (ADR-0020, G2): SOLO para que el owner pueda distinguir entre
+   * varias cuentas en la selección pendiente. OPCIONAL a propósito — los fakes existentes no lo
+   * implementan y el flujo degrada al id: un nombre ausente jamás bloquea una conexión.
+   */
+  getWabaName?(wabaId: string, accessToken: string): Promise<string | null>;
+  /**
    * ADR-0017 §5 — PIDE los datos de la app del vendedor. Sin esta llamada NO llega un solo webhook
    * de `history` ni de `smb_app_state_sync`: el §4 daba por sentado que llegaban por estar
    * suscritos, y el contrato oficial verificado el 2026-08-04 dice que no.
@@ -159,6 +165,21 @@ export class HttpMetaGraphClient implements MetaGraphClient {
     });
   }
 
+  async getWabaName(wabaId: string, accessToken: string): Promise<string | null> {
+    // Best-effort: un fallo acá no puede tumbar la selección — el llamador degrada al id.
+    try {
+      const res = await axios.get(`${GRAPH}/${wabaId}`, {
+        params: { fields: 'id,name' },
+        headers: { Authorization: `Bearer ${accessToken}` },
+        timeout: 10_000,
+      });
+      const name = (res.data as { name?: unknown } | null)?.name;
+      return typeof name === 'string' && name.trim() ? name.trim() : null;
+    } catch {
+      return null;
+    }
+  }
+
   async requestSmbAppData(phoneNumberId: string, syncType: SmbAppDataSyncType, accessToken: string): Promise<SmbAppDataResult> {
     try {
       const res = await axios.post(
@@ -192,6 +213,8 @@ interface GraphFixture {
   phoneNumbers?: MetaPhoneNumber[];
   /** Coexistence: permite ejercitar el camino de fallo del disparo sin tocar Graph. */
   smbAppDataError?: string;
+  /** Selección de WABA (G2): nombres legibles por id, para el E2E del autoservicio. */
+  wabaNames?: Record<string, string>;
 }
 
 export class FixtureMetaGraphClient implements MetaGraphClient {
@@ -217,6 +240,9 @@ export class FixtureMetaGraphClient implements MetaGraphClient {
   }
   async subscribeApp(_wabaId: string, _accessToken: string): Promise<void> {
     /* no-op en fixture */
+  }
+  async getWabaName(wabaId: string, _accessToken: string): Promise<string | null> {
+    return this.fx.wabaNames?.[wabaId] ?? null;
   }
   async requestSmbAppData(_phoneNumberId: string, _syncType: SmbAppDataSyncType, _accessToken: string): Promise<SmbAppDataResult> {
     // El fixture NUNCA llama a graph.facebook.com: el disparo es irrepetible y no se ensaya contra

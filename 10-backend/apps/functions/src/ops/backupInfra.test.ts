@@ -22,10 +22,12 @@ const indexes = JSON.parse(readFileSync(join(RAIZ_BACKEND, 'firestore.indexes.js
 describe('políticas TTL — lo que un restore NO repone', () => {
   const declaradas = ttlDeclaradas(indexes);
 
-  it('encuentra las TRES políticas TTL reales del repo (si esto da 0, el manifiesto miente)', () => {
-    expect(declaradas.length).toBe(3);
+  it('encuentra las CUATRO políticas TTL reales del repo (si esto da 0, el manifiesto miente)', () => {
+    // ADR-0020 (G9) sumó la limpieza pasiva de los nonces de conexión (`metaOAuthStates.expiresAt`,
+    // sin PII) a las tres de Coexistence. Un restore tampoco repone esta: el manifiesto la enumera.
+    expect(declaradas.length).toBe(4);
     expect(declaradas.map((t: { coleccion: string }) => t.coleccion).sort()).toEqual([
-      'metaWebhookAppState', 'metaWebhookHistory', 'metaWebhookShadow',
+      'metaOAuthStates', 'metaWebhookAppState', 'metaWebhookHistory', 'metaWebhookShadow',
     ]);
   });
 

@@ -11,7 +11,7 @@ import type { MetaAssetType } from '@vpw/shared';
 import { declaredAutomationMode, isSessionKey, whatsappSessionKey } from '@vpw/shared';
 import { db, paths } from '../lib/firebase.js';
 import { logger } from '../lib/logger.js';
-import { assertPnidLibre } from './pnidOwnership.js';
+import { assertPnidLibre, assertWabaLibre, wabaIndexId } from './pnidOwnership.js';
 import type { MetaPhoneNumber } from './graphClient.js';
 
 // Mapeo asset → plataforma para el índice global (igual que connect.ts demo).
@@ -147,12 +147,17 @@ export async function writeDiscoveredAssets(tenantId: string, connectionId: stri
    */
   const esDeEstaConexion = (d: Record<string, unknown>): boolean => (d['connectionId'] ?? connectionId) === connectionId;
   const pnids = assets.filter((a) => a.assetType === 'whatsapp_phone_number').map((a) => a.externalId);
+  const wabaIds = assets.filter((a) => a.assetType === 'whatsapp_business_account').map((a) => a.externalId);
 
   await db().runTransaction(async (tx) => {
     // TODAS las lecturas primero: Firestore rechaza una lectura posterior a la primera escritura.
     const oldAssets = await tx.get(db().collection(paths.metaAssets(tenantId)));
     const oldIdx = await tx.get(db().collection(paths.metaExternalIndex()).where('tenantId', '==', tenantId));
     for (const pnid of pnids) await assertPnidLibre(tx, tenantId, pnid);
+    // ADR-0020 (G11): el WABA se reclama con el MISMO guard «libre o mío» y en la MISMA
+    // transacción que el PNID — dos tenants ya no pueden quedarse la misma cuenta con números
+    // distintos. Ausencia de entrada = libre (sin migración; ver ADR).
+    for (const wabaId of wabaIds) await assertWabaLibre(tx, tenantId, wabaId);
 
     // Borra los activos previos de esta conexión y sus entradas de índice (reconexión limpia).
     const previoAsset = new Map<string, Record<string, unknown>>();
@@ -211,6 +216,15 @@ export async function writeDiscoveredAssets(tenantId: string, connectionId: stri
         tx.set(db().doc(paths.metaExternalIndexEntry(id)), {
           id, tenantId, connectionId, assetType: a.assetType, platform, externalId: a.externalId, status: 'active', updatedAt: now,
           ...camposPreservados(previoIdx.get(id)),
+        });
+      }
+      // G11: el RECLAMO del WABA. No rutea inbounds (por eso no lleva `platform`): es la entrada
+      // de propiedad que `assertWabaLibre` mira. Entra en la limpieza normal de esta conexión
+      // (tenantId + connectionId), así que desconectar main también la libera.
+      if (a.assetType === 'whatsapp_business_account') {
+        const id = wabaIndexId(a.externalId);
+        tx.set(db().doc(paths.metaExternalIndexEntry(id)), {
+          id, tenantId, connectionId, assetType: a.assetType, externalId: a.externalId, status: 'active', updatedAt: now,
         });
       }
     }

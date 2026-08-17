@@ -230,3 +230,14 @@ Smokes por wamid: "hola" determinístico sin reserva ni aiRequest; consultivo co
 ventas-{wamid} est 9775 → liquidada real 3833, conciliación exacta, espejo 0, una respuesta.
 117 functions intactas, automationMode live ×2, visión AUSENTE ×3 (sigue apagada), meta-review y
 credipower preservados, logs limpios. Deuda pre-activación de visión: reconciliar precio Odyssey.
+
+### META-ONBOARDING-SELF-SERVICE-1 — 2026-08-17 (EN REPO — NO DESPLEGADO)
+ADR-0020: lifecycle owner-facing consolidado (11 gaps cerrados, cero sistema paralelo).
+Selección de WABA con estado pendiente + completeMetaConnectWaba; verify/disconnect por
+connectionId (incl. wa_* para el owner); disconnect main transaccional con secreto compensable
+(+ retiro del pendiente huérfano); guard WABA en el índice global (misma tx); rate-limit de
+nonces; TTL de metaOAuthStates; meta.verified/meta.reconnected con actor. Panel completo:
+selector WABA, confirmación fuerte, lastConnectError traducido, antigüedad de verificación,
+acciones por número, a11y. Rojo→verde por gap; fase4b 27/27 (sección AUTOSERVICIO) + 7
+regresiones verdes; review adversarial 1 MEDIO + 2 BAJO, todos corregidos. Deuda: scheduler de
+salud (G5). Deploy futuro estimado: 1 CREATE + updates meta-connect + indexes TTL + Hosting.

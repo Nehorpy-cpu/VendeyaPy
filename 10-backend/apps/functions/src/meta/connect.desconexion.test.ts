@@ -237,7 +237,8 @@ describe('disconnectMeta — el permiso del número sobrevive a la desconexión'
 
     expect(docs.get(connPath)?.['status']).toBe('not_connected');
     expect(docs.get(connPath)?.['tokenSecretRef']).toBe('');
-    expect(secretosBorrados).toEqual(['secret://tnt/meta-token']);
+    // ADR-0020 (review BAJO): el disconnect retira ADEMÁS el secreto pendiente huérfano (idempotente).
+    expect(secretosBorrados).toEqual(['secret://tnt/meta-token', 'secret://firestore/meta-token-pending-' + TENANT]);
   });
 });
 

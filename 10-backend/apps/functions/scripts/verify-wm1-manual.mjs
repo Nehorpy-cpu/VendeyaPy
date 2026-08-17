@@ -104,15 +104,18 @@ check('WM1.8 colisión de phone_number_id entre tenants → 400; índice intacto
   collide.status === 400 && /failed-precondition|asignado/i.test(collide.error?.message ?? '') && idxAfter?.tenantId === A,
   `status=${collide.status} idxTenant=${idxAfter?.tenantId}`);
 
-// 9) metaDisconnect limpia la conexión manual (conexión not_connected + assets/índice/secreto borrados).
+// 9) metaDisconnect limpia la conexión manual: conexión not_connected, índice y secreto borrados,
+//    y el número MARCADO `disconnected` (desde ADR-0017 los assets de teléfono se conservan como
+//    historial de ruteo — no se borran; misma corrección de arnés que el check 16 de fase4b).
 const disc = await callFn('metaDisconnect', { tenantId: A }, admin);
 const connD = (await db.doc(`tenants/${A}/metaConnections/main`).get()).data();
-const assetsLeft = (await db.collection(`tenants/${A}/metaAssets`).get()).size;
+const assetsDocs = (await db.collection(`tenants/${A}/metaAssets`).get()).docs.map((d) => d.data());
+const phonesDesconectados = assetsDocs.filter((a) => a.assetType === 'whatsapp_phone_number').every((a) => a.status === 'disconnected');
 const idxLeft = (await db.collection('metaExternalIndex').where('tenantId', '==', A).get()).size;
 const secLeft = (await db.doc(`secrets/${secName}`).get()).exists;
-check('WM1.9 metaDisconnect limpia la conexión manual (not_connected + assets/índice/secreto borrados)',
-  disc.status === 200 && connD?.status === 'not_connected' && assetsLeft === 0 && idxLeft === 0 && secLeft === false,
-  `discStatus=${connD?.status} assets=${assetsLeft} idx=${idxLeft} secret=${secLeft}`);
+check('WM1.9 metaDisconnect limpia la conexión manual (not_connected + números disconnected + índice/secreto borrados)',
+  disc.status === 200 && connD?.status === 'not_connected' && phonesDesconectados && idxLeft === 0 && secLeft === false,
+  `discStatus=${connD?.status} phonesDesc=${phonesDesconectados} idx=${idxLeft} secret=${secLeft}`);
 
 // --- Limpieza ---
 for (const t of [A, B]) {

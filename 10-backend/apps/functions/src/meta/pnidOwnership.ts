@@ -24,6 +24,14 @@ export function whatsappIndexId(phoneNumberId: string): string {
   return `whatsapp_${phoneNumberId}`;
 }
 
+/**
+ * Clave del índice global para un WABA (ADR-0020, G11). No rutea inbounds — es el RECLAMO de
+ * propiedad de la cuenta: dos tenants no pueden conectar el mismo WABA con números distintos.
+ */
+export function wabaIndexId(wabaId: string): string {
+  return `waba_${wabaId}`;
+}
+
 /** El PNID pedido ya es de otra empresa. Lleva el dueño para que el callable pueda explicarlo. */
 export class PnidOcupadoError extends Error {
   constructor(
@@ -32,6 +40,17 @@ export class PnidOcupadoError extends Error {
   ) {
     super('El número de WhatsApp ya está conectado en otra empresa.');
     this.name = 'PnidOcupadoError';
+  }
+}
+
+/** El WABA pedido ya es de otra empresa (G11). Mismo contrato que PnidOcupadoError. */
+export class WabaOcupadaError extends Error {
+  constructor(
+    readonly wabaId: string,
+    readonly conflictTenantId: string,
+  ) {
+    super('La cuenta de WhatsApp Business ya está conectada en otra empresa.');
+    this.name = 'WabaOcupadaError';
   }
 }
 
@@ -75,4 +94,16 @@ export async function assertPnidLibre(tx: Transaction, tenantId: string, phoneNu
   const ref = db().doc(paths.metaExternalIndexEntry(whatsappIndexId(phoneNumberId)));
   const dueno = duenoDeSnapshot(await tx.get(ref));
   if (!pnidEstaLibre(tenantId, dueno)) throw new PnidOcupadoError(phoneNumberId, dueno ?? '');
+}
+
+/**
+ * Guard AUTORITATIVO del WABA (ADR-0020, G11): misma regla «libre o mío» y mismo lugar — dentro
+ * de la transacción que escribe el índice. Ausencia de entrada = libre (sin migración: los WABAs
+ * ya conectados se reclaman en la próxima conexión/reconexión, documentado en el ADR). Una
+ * entrada corrupta sin `tenantId` es AJENA: fail-closed, igual que el PNID.
+ */
+export async function assertWabaLibre(tx: Transaction, tenantId: string, wabaId: string): Promise<void> {
+  const ref = db().doc(paths.metaExternalIndexEntry(wabaIndexId(wabaId)));
+  const dueno = duenoDeSnapshot(await tx.get(ref));
+  if (!pnidEstaLibre(tenantId, dueno)) throw new WabaOcupadaError(wabaId, dueno ?? '');
 }

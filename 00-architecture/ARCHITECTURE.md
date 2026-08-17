@@ -907,6 +907,18 @@ Los webhooks de WhatsApp, Bancard y Stripe llegan sin usuario autenticado. Se ve
 | Personal Pay | HMAC-SHA256 sobre el body |
 | Zimple | API key en header + timestamp |
 
+### 5.4.1 Onboarding Meta autoservicio (ADR-0020 — EN REPO, NO DESPLEGADO)
+
+El TENANT_OWNER conecta, verifica, reconecta y desconecta sus activos de WhatsApp Business solo,
+sin intervención técnica: Embedded Signup con nonce de uso único (tenant+uid+flujo, TTL con
+limpieza pasiva y rate-limit de emisión), intercambio del `code` 100% server-side, selección
+explícita de WABA cuando hay varios (estado pendiente + `completeMetaConnectWaba`), verificación
+y desconexión por `connectionId` (`main` transaccional / `wa_*` propio), guard de colisión
+cross-tenant a nivel PNID **y WABA** en el índice global, credenciales solo por SecretStore,
+auditoría con actor (`meta.connected|reconnected|verified|disconnected|number_deactivated`).
+Conectar JAMÁS activa la automatización (`automationMode` es un acto separado, ADR-0017).
+Desconectar de VendeYaPy no borra nada dentro de Meta. Detalle completo: ADR-0020.
+
 ### 5.5 Acceso de repartidores
 
 Los repartidores interactúan exclusivamente por WhatsApp. No tienen acceso al panel web. La identificación es por número de teléfono: al recibir un mensaje, el sistema verifica si el número existe en `deliveryPersons` de algún tenant.

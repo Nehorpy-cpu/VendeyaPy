@@ -80,6 +80,11 @@ export const AUDIT_ACTIONS = [
   'conversation.returned_to_bot',
   'meta.connected',
   'meta.connected_manual',
+  // META-ONBOARDING-SELF-SERVICE-1 (ADR-0020, G7): el lifecycle owner-facing completo deja rastro.
+  // `meta.verified` = quién verificó qué canal y con qué veredicto (razón saneada, sin tokens);
+  // `meta.reconnected` = un reemplazo sobre una conexión que ESTABA activa — no es un alta.
+  'meta.verified',
+  'meta.reconnected',
   'meta.disconnected',
   // META-CATALOG-LIVE-1: cada corrida de sync de catálogo (dry_run o apply) con su runId.
   'meta.catalog_sync',

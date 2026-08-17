@@ -18,9 +18,22 @@ import { isEmbeddedSignupConfigured, type MetaSignupFlow } from './metaEmbeddedS
 
 const API = process.env['NEXT_PUBLIC_API_BASE_URL'] ?? 'http://localhost:5001/demo-aiafg/us-central1';
 
-export async function getMetaConnection(tenantId: string): Promise<MetaConnection | null> {
+/**
+ * La conexión tal como la necesita el panel: el doc MÁS los campos ADITIVOS del contrato de
+ * ADR-0020 (G8) que `MetaConnection` todavía no declara. Un intento de conexión fallido NO pisa el
+ * estado de una conexión sana (contrato del backend), así que estos campos pueden convivir con
+ * `status: 'active'` — y hasta con un doc que SOLO los tiene (primer intento fallido): por eso son
+ * opcionales y la fecha se lee tolerante (`toMillis`).
+ */
+export type MetaConnectionView = MetaConnection & {
+  /** Razón SANEADA (enum del backend) del último intento de conexión fallido. Jamás texto de Graph. */
+  lastConnectError?: string | null;
+  lastConnectErrorAt?: unknown;
+};
+
+export async function getMetaConnection(tenantId: string): Promise<MetaConnectionView | null> {
   const snap = await getDoc(doc(firebaseDb(), 'tenants', tenantId, 'metaConnections', 'main'));
-  return snap.exists() ? (snap.data() as MetaConnection) : null;
+  return snap.exists() ? (snap.data() as MetaConnectionView) : null;
 }
 
 /**
@@ -129,6 +142,69 @@ export async function startMetaConnect(tenantId: string, mode: MetaSignupFlow = 
 export async function connectMeta(tenantId: string, input: MetaConnectInput): Promise<MetaConnectResult> {
   const call = httpsCallable<{ tenantId: string } & MetaConnectInput, MetaConnectResult>(firebaseFunctions(), 'connectMeta');
   const res = await call({ tenantId, ...input });
+  return res.data;
+}
+
+// ===== Selección de WABA (ADR-0020 · G2) =====
+// Con varios WABA autorizados y sin `wabaId`, el `code` YA se canjeó (single-flight): no se puede
+// pedir «reintentá». `connectMeta` rechaza failed-precondition con la lista SANEADA + un id de
+// selección de un solo uso; el owner elige y `completeMetaConnectWaba` cierra el MISMO camino.
+
+export interface WabaOption {
+  id: string;
+  name: string;
+}
+
+export interface WabaSelectionRequired {
+  selectionId: string;
+  wabas: WabaOption[];
+}
+
+/**
+ * Lee el rechazo `waba_selection_required` de `connectMeta`. Devuelve null ante cualquier otra
+ * cosa: código distinto, otra razón o details malformados (ahí manda `friendlyMetaError`).
+ * Sanea las entradas: sin id no hay opción; sin nombre, un rótulo genérico (el id NUNCA se
+ * muestra completo — la UI lo enmascara).
+ */
+export function readWabaSelectionRequired(e: unknown): WabaSelectionRequired | null {
+  const err = e as { code?: unknown; details?: unknown } | null;
+  if (!err || typeof err !== 'object' || err.code !== 'functions/failed-precondition') return null;
+  const d = err.details as { reason?: unknown; selectionId?: unknown; wabas?: unknown } | null;
+  if (!d || typeof d !== 'object' || d.reason !== 'waba_selection_required') return null;
+  if (typeof d.selectionId !== 'string' || d.selectionId.trim() === '') return null;
+  if (!Array.isArray(d.wabas)) return null;
+  const wabas: WabaOption[] = [];
+  for (const raw of d.wabas) {
+    const w = raw as { id?: unknown; name?: unknown } | null;
+    if (!w || typeof w !== 'object' || typeof w.id !== 'string' || w.id.trim() === '') continue;
+    const name = typeof w.name === 'string' && w.name.trim() !== '' ? w.name.trim() : 'Cuenta de WhatsApp Business';
+    wabas.push({ id: w.id.trim(), name });
+  }
+  return wabas.length > 0 ? { selectionId: d.selectionId, wabas } : null;
+}
+
+/**
+ * ¿La selección ya no sirve? `completeMetaConnectWaba` marca con `details.reason ===
+ * 'seleccion_invalida'` los TRES casos donde la selección murió de verdad (vencida, replay,
+ * wabaId fuera de la lista): solo ahí el camino honesto es rehacer el login de Meta. Cualquier
+ * otro failed-precondition (colisión de WABA, límite del plan, billing) conserva su mensaje
+ * accionable y NO debe disfrazarse de "venció" (review MEDIO: el disfraz creaba un loop sin
+ * salida — rehacer el login jamás arregla una suspensión de billing).
+ */
+export function wabaSelectionPerdida(e: unknown): boolean {
+  const err = e as { code?: unknown; details?: unknown; customData?: unknown } | null;
+  if (err?.code !== 'functions/failed-precondition') return false;
+  const det = (err.details ?? err.customData) as { reason?: unknown } | null | undefined;
+  return det?.reason === 'seleccion_invalida';
+}
+
+/** Cierra la conexión con el WABA elegido. Misma respuesta de éxito que `connectMeta`. */
+export async function completeMetaConnectWaba(tenantId: string, selectionId: string, wabaId: string): Promise<MetaConnectResult> {
+  const call = httpsCallable<{ tenantId: string; selectionId: string; wabaId: string }, MetaConnectResult>(
+    firebaseFunctions(),
+    'completeMetaConnectWaba',
+  );
+  const res = await call({ tenantId, selectionId, wabaId });
   return res.data;
 }
 
@@ -245,10 +321,14 @@ export async function coexistenceSyncStatus(tenantId: string, phoneNumberId: str
   return res.data;
 }
 
-/** Preflight bajo demanda: revalida token/número y actualiza el estado de la conexión. */
-export async function verifyMetaChannel(tenantId: string): Promise<MetaVerifyResult> {
-  const call = httpsCallable<{ tenantId: string }, MetaVerifyResult>(firebaseFunctions(), 'verifyMetaChannel');
-  const res = await call({ tenantId });
+/**
+ * Preflight bajo demanda: revalida token/número y actualiza el estado de la conexión.
+ * `connectionId` opcional (ADR-0020 · G4): `'main'` por default, o una conexión `wa_{pnid}` de
+ * Coexistence — SIEMPRE tomada de los assets que la página ya listó, jamás de un input libre.
+ */
+export async function verifyMetaChannel(tenantId: string, connectionId?: string): Promise<MetaVerifyResult> {
+  const call = httpsCallable<{ tenantId: string; connectionId?: string }, MetaVerifyResult>(firebaseFunctions(), 'verifyMetaChannel');
+  const res = await call(connectionId ? { tenantId, connectionId } : { tenantId });
   return res.data;
 }
 
@@ -259,11 +339,87 @@ export async function selectMetaPhoneNumber(tenantId: string, phoneNumberId: str
   return { phoneNumberId: res.data.phoneNumberId };
 }
 
-/** Desconexión REAL (callable): borra conexión/assets/índice/secreto. Distinta del demo disconnectMeta. */
-export async function metaDisconnect(tenantId: string): Promise<void> {
-  const call = httpsCallable<{ tenantId: string }, { ok: boolean }>(firebaseFunctions(), 'metaDisconnect');
-  await call({ tenantId });
+/**
+ * Desconexión REAL (callable): corta el ruteo/automatización en VendeYaPy. Distinta del demo
+ * disconnectMeta. `connectionId` opcional (ADR-0020 · G3): `'main'` por default, o `wa_{pnid}`
+ * para dar de baja un número Coexistence propio. NO elimina nada dentro de Meta (ni WABA, ni
+ * número, ni catálogo): se puede reconectar.
+ */
+export async function metaDisconnect(tenantId: string, connectionId?: string): Promise<void> {
+  const call = httpsCallable<{ tenantId: string; connectionId?: string }, { ok: boolean }>(firebaseFunctions(), 'metaDisconnect');
+  await call(connectionId ? { tenantId, connectionId } : { tenantId });
 }
+
+// ===== Verdad persistida legible (ADR-0020 · G8 + antigüedad de verificación) =====
+
+/**
+ * Razón saneada del backend → texto es-PY para el owner. Cubre el enum `ConnectFailReason` de
+ * `connectFlow.ts` (incluidos los nuevos de ADR-0020: `waba_collision`, `seleccion_invalida`,
+ * `waba_selection_required`). Una razón DESCONOCIDA cae al genérico honesto: el valor crudo
+ * JAMÁS se muestra (podría ser jerga interna o, peor, texto de Graph).
+ */
+const CONNECT_ERROR_TEXT: Record<string, string> = {
+  exchange_failed: 'No se pudo completar la autorización con Meta. Volvé a conectar desde el botón.',
+  token_invalid: 'Meta rechazó la credencial obtenida. Volvé a conectar tu cuenta.',
+  scopes_insuficientes: 'Faltaron permisos al autorizar. Reconectá aceptando todos los permisos de WhatsApp.',
+  no_waba: 'Tu cuenta de Meta no tiene una cuenta de WhatsApp Business disponible para conectar.',
+  waba_no_autorizado: 'La cuenta de WhatsApp Business elegida no está autorizada por el login que hiciste. Volvé a conectar y elegí una autorizada.',
+  no_phone_number: 'La cuenta de WhatsApp Business no tiene ningún número para conectar.',
+  phone_number_mismatch: 'El número elegido no pertenece a la cuenta de WhatsApp Business autorizada.',
+  phone_number_collision: 'Ese número de WhatsApp ya está conectado en otra empresa.',
+  waba_collision: 'Esa cuenta de WhatsApp Business ya está conectada en otra empresa.',
+  persistencia_incompleta: 'No pudimos guardar la conexión. Probá conectar de nuevo.',
+  over_number_limit: 'Tu plan no permite conectar tantos números de WhatsApp.',
+  waba_selection_required: 'Quedó pendiente elegir la cuenta de WhatsApp Business. Volvé a conectar y elegila.',
+  seleccion_invalida: 'La elección de cuenta venció o ya se usó. Rehacé el login de Meta.',
+};
+
+/**
+ * Lo que `registrarFalloDeConexion` PERSISTE HOY son frases (saneadas, es-PY) y no códigos: este
+ * alias las lleva al mismo mapa. Si el backend migra a códigos, ya están cubiertos arriba y este
+ * bloque queda inerte. La frase de scopes es dinámica («faltan permisos: …») y se resuelve por
+ * prefijo en `textoDeConnectError`.
+ */
+const CONNECT_ERROR_ALIAS: Record<string, string> = {
+  'no se pudo intercambiar el code': 'exchange_failed',
+  'token inválido': 'token_invalid',
+  'varias cuentas de WhatsApp Business autorizadas: falta la elección explícita': 'waba_selection_required',
+  'sin WhatsApp Business Account': 'no_waba',
+  'la cuenta de WhatsApp Business pedida no está autorizada por el token': 'waba_no_autorizado',
+  'el número pedido no pertenece a esa cuenta': 'phone_number_mismatch',
+  'sin phone_number_id': 'no_phone_number',
+  'el número de WhatsApp ya está conectado en otra empresa': 'phone_number_collision',
+  'no se pudo guardar la conexión': 'persistencia_incompleta',
+};
+
+const CONNECT_ERROR_GENERICO = 'El último intento de conexión no se pudo completar. Probá conectar de nuevo.';
+
+/** Texto es-PY para una razón persistida en `lastConnectError`. Nunca devuelve la cruda. */
+export function textoDeConnectError(reason: unknown): string {
+  if (typeof reason !== 'string' || reason.trim() === '') return CONNECT_ERROR_GENERICO;
+  const limpio = reason.trim();
+  const clave = CONNECT_ERROR_ALIAS[limpio] ?? (limpio.startsWith('faltan permisos') ? 'scopes_insuficientes' : limpio);
+  return CONNECT_ERROR_TEXT[clave] ?? CONNECT_ERROR_GENERICO;
+}
+
+/**
+ * Antigüedad legible («hace 3 horas») para `lastVerifiedAt` y compañía. Pura y con `nowMs`
+ * inyectable para testear sin relojes falsos. Granularidad gruesa a propósito: al owner le
+ * importa «hoy / hace días», no los segundos.
+ */
+export function formatHace(thenMs: number, nowMs: number = Date.now()): string {
+  const diff = Math.max(0, nowMs - thenMs);
+  const min = Math.floor(diff / 60_000);
+  if (min < 1) return 'hace un momento';
+  if (min < 60) return min === 1 ? 'hace 1 minuto' : `hace ${min} minutos`;
+  const horas = Math.floor(min / 60);
+  if (horas < 24) return horas === 1 ? 'hace 1 hora' : `hace ${horas} horas`;
+  const dias = Math.floor(horas / 24);
+  return dias === 1 ? 'hace 1 día' : `hace ${dias} días`;
+}
+
+/** A partir de cuántos ms sin verificar la UI sugiere «Revisar conexión» (7 días · deuda G5). */
+export const VERIFICACION_VIEJA_MS = 7 * 86_400_000;
 
 /** Mapea errores de los callables de Meta a mensajes claros (el backend ya manda mensajes amables). */
 export function friendlyMetaError(e: unknown): string {

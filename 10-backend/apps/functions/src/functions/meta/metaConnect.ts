@@ -1,12 +1,18 @@
 /**
- * functions/meta/metaConnect.ts — Callables de conexión REAL de Meta (Fase 4B)
- * ===========================================================================
+ * functions/meta/metaConnect.ts — Callables de conexión REAL de Meta (Fase 4B · ADR-0020)
+ * =======================================================================================
  * Flujo Embedded Signup (sin endpoint público de redirect):
- *   startMetaConnect → emite un nonce de un solo uso (TTL corto, atado a tenant+uid).
+ *   startMetaConnect → emite un nonce de un solo uso (TTL corto, atado a tenant+uid; con freno
+ *     de emisión por tenant — G10).
  *   connectMeta → consume el nonce, intercambia el code, valida, descubre assets y conecta.
- *   verifyMetaChannel → preflight (revalida token/número y actualiza estado).
+ *     Con VARIOS WABAs y sin elección ⇒ `failed-precondition` con
+ *     `{ reason: 'waba_selection_required', selectionId, wabas }` (G2).
+ *   completeMetaConnectWaba → cierra la selección pendiente con el WABA elegido (G2).
+ *   verifyMetaChannel → preflight de `main` o de una conexión `wa_{pnid}` (G4); audita
+ *     `meta.verified` con actor (G7).
  *   selectMetaPhoneNumber → elige el phone_number_id activo para el envío.
- *   metaDisconnect → desconecta y borra assets/índice/secreto.
+ *   metaDisconnect → desconecta `main` (transaccional — G12) o da de baja una conexión
+ *     `wa_{pnid}` propia (G3). Nada se borra dentro de Meta.
  *
  * Autorización ESTRICTA (meta/authz.ts): solo PLATFORM_ADMIN (con tenant) o TENANT_OWNER
  * de su empresa. TENANT_MANAGER/VIEWER/SELLER: denegado. Nunca se loguean code ni tokens.
@@ -22,13 +28,15 @@ import {
   parseMetaConnectMode,
   type MetaConnectMode,
 } from '../../meta/nonce.js';
-import { runMetaConnect, type ConnectFailReason } from '../../meta/connectFlow.js';
-import { verifyWhatsappChannel } from '../../meta/preflight.js';
+import { runMetaConnect, runCompleteMetaConnectWaba, type ConnectFailReason } from '../../meta/connectFlow.js';
+import { verifyWhatsappChannel, type PreflightResult } from '../../meta/preflight.js';
 import { selectTenantPhoneNumber } from '../../meta/discovery.js';
 import { disconnectMeta } from '../../meta/connect.js';
-import { getMetaGraphClient } from '../../meta/graphClient.js';
+import { disconnectWhatsappNumberConnection } from '../../meta/multiNumber.js';
+import { getMetaGraphClient, type MetaGraphClient } from '../../meta/graphClient.js';
 import { META_APP_SECRET } from '../../meta/metaSecrets.js';
 import { assertWhatsappNumbersEntitled } from '../../entitlements/entitlements.js';
+import { recordAudit } from '../../audit/audit.js';
 import { logger } from '../../lib/logger.js';
 
 interface Authorized {
@@ -44,7 +52,8 @@ function authorize(req: CallableRequest<unknown>, requestedTenantId?: string): A
   return { tenantId: result.tenantId, uid: req.auth.uid };
 }
 
-const CONNECT_FAIL_MESSAGE: Record<ConnectFailReason, string> = {
+/** Exportado para test: los motivos son enum y el usuario SIEMPRE recibe un mensaje saneado. */
+export const CONNECT_FAIL_MESSAGE: Record<ConnectFailReason, string> = {
   exchange_failed: 'No se pudo validar la autorización de Meta. Reintentá el proceso.',
   token_invalid: 'El token de Meta no es válido. Reconectá la cuenta.',
   scopes_insuficientes: 'Faltan permisos de WhatsApp. Aceptá todos los permisos al conectar.',
@@ -52,6 +61,11 @@ const CONNECT_FAIL_MESSAGE: Record<ConnectFailReason, string> = {
   no_phone_number: 'No se encontró un número de WhatsApp en tu cuenta.',
   phone_number_mismatch: 'El número que elegiste no pertenece a esa cuenta de WhatsApp Business. Reiniciá el proceso y elegí un número de la lista.',
   phone_number_collision: 'Ese número de WhatsApp ya está conectado en otra empresa. Desconectalo de la otra cuenta antes de conectarlo acá.',
+  // ADR-0020 (G11): mismo trato que la colisión de número, a nivel cuenta.
+  waba_collision: 'Esa cuenta de WhatsApp Business ya está conectada en otra empresa. Desconectala de la otra cuenta antes de conectarla acá.',
+  // ADR-0020 (G2): no es un fallo terminal — el detalle del error lleva selectionId + wabas.
+  waba_selection_required: 'Tu autorización de Meta incluye varias cuentas de WhatsApp Business. Elegí cuál conectar para continuar.',
+  seleccion_invalida: 'La selección de cuenta venció o no es válida. Reiniciá el proceso desde el botón de conectar.',
   persistencia_incompleta: 'No se pudo guardar la conexión. Tu conexión anterior quedó intacta: reintentá el proceso.',
   over_number_limit: 'Tu plan no alcanza para todos los números de WhatsApp de esta cuenta. Actualizá tu plan o conectá una cuenta con menos números.',
 };
@@ -166,16 +180,102 @@ export const connectMeta = onCall<{
     graph,
   );
   if (!result.ok) {
+    // ADR-0020 (G2): la selección pendiente NO es un fallo terminal. El `details` lleva
+    // exactamente lo que el panel necesita para llamar a `completeMetaConnectWaba`:
+    // `{ reason: 'waba_selection_required', selectionId, wabas: [{id,name}] }`. Nada del token.
+    if (result.reason === 'waba_selection_required') {
+      logger.info('Meta connect: selección de WABA requerida', { tenantId, wabas: result.wabas.length });
+      throw new HttpsError('failed-precondition', CONNECT_FAIL_MESSAGE.waba_selection_required, {
+        reason: 'waba_selection_required',
+        selectionId: result.selectionId,
+        wabas: result.wabas,
+      });
+    }
     logger.warn('Meta connect: falló', { tenantId, mode, reason: result.reason, status: result.status });
     throw new HttpsError('failed-precondition', CONNECT_FAIL_MESSAGE[result.reason]);
   }
   return { ok: true, mode, status: result.status, phoneNumberId: result.selectedPhoneNumberId, phoneNumber: result.phoneNumber, assets: result.assetsCount };
 });
 
-export const verifyMetaChannel = onCall<{ tenantId?: string }>({ region: 'us-central1', secrets: [META_APP_SECRET] }, async (req) => {
-  const { tenantId } = authorize(req, req.data?.tenantId);
+/**
+ * ADR-0020 (G2) — Cierra la SELECCIÓN PENDIENTE de WABA. Mismo RBAC estricto que el resto de la
+ * superficie. Consume el nonce de selección (uso único, tenant+uid del caller), valida que el
+ * WABA elegido esté entre los OFRECIDOS, retira el secreto pendiente y completa el MISMO camino
+ * de conexión que `connectMeta`. Cualquier problema con la selección ⇒ `failed-precondition`
+ * saneado (el owner rehace el login: el code original era de un solo uso igual).
+ */
+export const completeMetaConnectWaba = onCall<{ tenantId?: string; selectionId?: string; wabaId?: string }>(
+  { region: 'us-central1', secrets: [META_APP_SECRET] },
+  async (req) => {
+    const { tenantId, uid } = authorize(req, req.data?.tenantId);
+    const selectionId = typeof req.data?.selectionId === 'string' ? req.data.selectionId.trim() : '';
+    const wabaId = typeof req.data?.wabaId === 'string' ? req.data.wabaId.trim() : '';
+    if (!selectionId) throw new HttpsError('invalid-argument', 'Falta selectionId.');
+    if (!wabaId) throw new HttpsError('invalid-argument', 'Falta wabaId.');
+
+    // Mismo gate del plan que `connectMeta`: completar es conectar.
+    await assertWhatsappNumbersEntitled(tenantId, { actorUid: uid });
+
+    const graph = await getMetaGraphClient();
+    const result = await runCompleteMetaConnectWaba(tenantId, uid, selectionId, wabaId, graph);
+    if (!result.ok) {
+      logger.warn('Meta connect: completar la selección de WABA falló', { tenantId, reason: result.reason });
+      // Review MEDIO: el detalle lleva la razón ENUM (saneada) para que la UI distinga la
+      // selección realmente MUERTA (`seleccion_invalida` ⇒ rehacer login) de fallos que
+      // conservan su propio mensaje accionable (colisión, límite de plan, persistencia).
+      throw new HttpsError('failed-precondition', CONNECT_FAIL_MESSAGE[result.reason], { reason: result.reason });
+    }
+    return { ok: true, mode: 'standard', status: result.status, phoneNumberId: result.selectedPhoneNumberId, phoneNumber: result.phoneNumber, assets: result.assetsCount };
+  },
+);
+
+/**
+ * ADR-0020 (G4) — Qué conexiones puede nombrar el panel: `main` o `wa_{pnid}` (dígitos, como los
+ * ids de Meta). AUSENTE (o vacío) ⇒ `main`, que es lo que mandan los llamadores de siempre.
+ * Cualquier otra cosa ⇒ `null`: degradar a `main` en silencio sería operar sobre OTRO canal del
+ * que el usuario nombró. PURA y exportada para test.
+ */
+export function parseMetaConnectionId(raw: unknown): string | null {
+  if (raw === undefined || raw === null) return 'main';
+  if (typeof raw !== 'string') return null;
+  const valor = raw.trim();
+  if (!valor) return 'main';
+  return /^(main|wa_\d+)$/.test(valor) ? valor : null;
+}
+
+/**
+ * ADR-0020 (G4+G7) — Verifica el canal pedido y deja rastro. Para `wa_{pnid}` el PNID se DERIVA
+ * del id de la conexión (el asset de un adicional es `selected: false`, el fallback de preflight
+ * no le sirve). No altera routing, token, modo, WABA ni PNID: preflight solo escribe el veredicto
+ * (`status`/`lastVerifiedAt`/razón) sobre ESA conexión. Audita `meta.verified` con actor +
+ * connectionId + razón saneada (enum de preflight, nunca texto crudo de Graph).
+ */
+export async function verificarCanalConAuditoria(
+  tenantId: string,
+  actorUid: string,
+  connectionId: string,
+  graph: MetaGraphClient,
+): Promise<PreflightResult> {
+  const target = connectionId === 'main' ? {} : { connectionId, phoneNumberId: connectionId.slice('wa_'.length) };
+  const result = await verifyWhatsappChannel(tenantId, graph, target);
+  await recordAudit({
+    tenantId,
+    action: 'meta.verified',
+    actorUid,
+    targetType: 'meta',
+    targetId: connectionId,
+    summary: `Canal de WhatsApp verificado (${result.ready ? 'operativo' : 'con problemas'})`,
+    metadata: { connectionId, reason: result.reason, status: result.status, ready: result.ready },
+  });
+  return result;
+}
+
+export const verifyMetaChannel = onCall<{ tenantId?: string; connectionId?: string }>({ region: 'us-central1', secrets: [META_APP_SECRET] }, async (req) => {
+  const { tenantId, uid } = authorize(req, req.data?.tenantId);
+  const connectionId = parseMetaConnectionId(req.data?.connectionId);
+  if (!connectionId) throw new HttpsError('invalid-argument', 'Identificador de conexión inválido.');
   const graph = await getMetaGraphClient();
-  const result = await verifyWhatsappChannel(tenantId, graph);
+  const result = await verificarCanalConAuditoria(tenantId, uid, connectionId, graph);
   return { ok: true, ...result };
 });
 
@@ -253,8 +353,25 @@ export const selectMetaPhoneNumber = onCall<{ tenantId?: string; phoneNumberId?:
   return { ok: true, phoneNumberId };
 });
 
-export const metaDisconnect = onCall<{ tenantId?: string }>({ region: 'us-central1' }, async (req) => {
-  const { tenantId } = authorize(req, req.data?.tenantId);
-  await disconnectMeta(tenantId);
-  return { ok: true };
+/**
+ * ADR-0020 (G3+G6+G12) — Desconecta `main` (comportamiento de siempre, ahora transaccional y con
+ * actor en la auditoría) o da de baja una conexión `wa_{pnid}` PROPIA (antes solo PLATFORM_ADMIN
+ * vía `adminDeactivateWhatsappNumber`). Jamás toca `main` desde el camino `wa_` ni borra nada
+ * dentro de Meta — ni WABA, ni número, ni catálogo; el copy de la UI lo dice.
+ */
+export const metaDisconnect = onCall<{ tenantId?: string; connectionId?: string }>({ region: 'us-central1' }, async (req) => {
+  const { tenantId, uid } = authorize(req, req.data?.tenantId);
+  const connectionId = parseMetaConnectionId(req.data?.connectionId);
+  if (!connectionId) throw new HttpsError('invalid-argument', 'Identificador de conexión inválido.');
+  if (connectionId === 'main') {
+    await disconnectMeta(tenantId, uid);
+    return { ok: true, connectionId };
+  }
+  const result = await disconnectWhatsappNumberConnection(tenantId, connectionId, uid);
+  if (!result.ok) {
+    if (result.reason === 'not_found') throw new HttpsError('not-found', 'Ese número no existe en la empresa.');
+    // `is_default` / `is_main`: el principal no se baja por acá — se desconecta la conexión principal.
+    throw new HttpsError('failed-precondition', 'Ese número es el principal de la empresa: desconectá la conexión principal en su lugar.');
+  }
+  return { ok: true, connectionId };
 });

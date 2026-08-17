@@ -23,6 +23,7 @@ import { db, paths } from '../lib/firebase.js';
 import { getSecretStore } from '../lib/secretStore.js';
 import { metaNumberTokenSecretName } from './secretName.js';
 import { logger } from '../lib/logger.js';
+import { recordAudit } from '../audit/audit.js';
 import type { MetaGraphClient } from './graphClient.js';
 import type { ManualWhatsappInput } from './manualConnect.js';
 import { assertPnidLibre, duenoActualDePnid, PnidOcupadoError, whatsappIndexId } from './pnidOwnership.js';
@@ -300,4 +301,36 @@ export async function deactivateWhatsappNumber(tenantId: string, phoneNumberId: 
   }
   logger.info('Número adicional de WhatsApp desactivado', { tenantId, connectionId, phoneNumberId });
   return { ok: true };
+}
+
+/**
+ * ADR-0020 (G3) — Baja OWNER-FACING de una conexión `wa_{pnid}` (`metaDisconnect` con
+ * `connectionId`). REUTILIZA `deactivateWhatsappNumber` tal cual: asset `inactive` con el permiso
+ * revocado, SU entrada de índice borrada (deja de rutear), SU conexión a `not_connected` y SU
+ * secreto retirado — el mismo orden compensable de siempre (el secreto al final; si falla, la
+ * conexión ya no rutea y el retiro se reintenta). JAMÁS toca `main` (guards `is_default`/`is_main`)
+ * ni números de otro tenant (el asset se lee tenant-scoped). NADA se borra dentro de Meta.
+ *
+ * La auditoría va acá y no en el callable para que cualquier superficie que dé de baja por
+ * conexión deje el mismo rastro: `meta.number_deactivated` con el actor.
+ */
+export async function disconnectWhatsappNumberConnection(
+  tenantId: string,
+  connectionId: string,
+  actorUid: string | null,
+): Promise<DeactivateResult> {
+  const phoneNumberId = connectionId.startsWith('wa_') ? connectionId.slice(3) : '';
+  if (!phoneNumberId) return { ok: false, reason: 'not_found' };
+  const result = await deactivateWhatsappNumber(tenantId, phoneNumberId);
+  if (!result.ok) return result;
+  await recordAudit({
+    tenantId,
+    action: 'meta.number_deactivated',
+    actorUid,
+    targetType: 'meta',
+    targetId: phoneNumberId,
+    summary: 'Número de WhatsApp desconectado por su empresa (historial intacto; nada se borra en Meta)',
+    metadata: { phoneNumberId, connectionId },
+  });
+  return result;
 }

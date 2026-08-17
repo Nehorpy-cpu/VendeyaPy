@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import type { MetaConnectionStatus, MetaAssetType, WhatsappSendMode, WhatsappAutomationMode } from '@vpw/shared';
@@ -18,15 +18,23 @@ import {
   isDemoIntegrationsAllowed,
   startMetaConnect,
   connectMeta,
+  completeMetaConnectWaba,
+  readWabaSelectionRequired,
+  wabaSelectionPerdida,
   coexistenceStart,
   coexistenceConnect,
   verifyMetaChannel,
   selectMetaPhoneNumber,
   metaDisconnect,
   friendlyMetaError,
+  textoDeConnectError,
+  formatHace,
+  VERIFICACION_VIEJA_MS,
   type MetaConnectResult,
   type CoexistenceConnectResult,
+  type WabaSelectionRequired,
 } from '@/lib/integrations';
+import { toMillis } from '@/lib/trial';
 import { launchEmbeddedSignup, preloadFacebookSdk, MetaSignupError, type MetaSignupFlow, type EmbeddedSignupResult } from '@/lib/metaEmbeddedSignup';
 import { getChannelConfig, setWhatsappSendMode, friendlyChannelError } from '@/lib/channels';
 import { getAgentConfig } from '@/lib/agent-config';
@@ -35,6 +43,8 @@ import { SectionHeader, EmptyState, ConfirmModal, StatusBadge, type BadgeTone } 
 import { WhatsappAssistedActivation } from '@/components/integrations/WhatsappAssistedActivation';
 import { CoexistenceOnboardingCard } from '@/components/integrations/CoexistenceOnboardingCard';
 import { CoexistenceHistoryCard } from '@/components/integrations/CoexistenceHistoryCard';
+import { WabaSelectionModal } from '@/components/integrations/WabaSelectionModal';
+import { MetaDisconnectModal } from '@/components/integrations/MetaDisconnectModal';
 
 const STATUS: Record<MetaConnectionStatus, { label: string; cls: string }> = {
   not_connected: { label: 'Sin conectar', cls: 'bg-ink-50 text-ink-600' },
@@ -58,6 +68,12 @@ const STATUS_HINT: Partial<Record<MetaConnectionStatus, string>> = {
   revoked: 'Se revocó el acceso. Reconectá para volver a habilitar Meta.',
 };
 const RECONNECT_STATES: MetaConnectionStatus[] = ['permission_missing', 'expired', 'error', 'revoked', 'connected_limited'];
+/**
+ * Estados en los que el último intento de conexión fallido (`lastConnectError`, ADR-0020 · G8) se
+ * muestra. Una conexión `active` sana NO carga con un error viejo: un connect fallido no degrada lo
+ * que funciona (contrato del backend), así que mostrarlo ahí confundiría más de lo que informa.
+ */
+const ESTADOS_CON_ERROR_VISIBLE: MetaConnectionStatus[] = ['not_connected', 'connected_limited', 'permission_missing', 'error', 'expired', 'revoked'];
 
 const ASSET: Record<MetaAssetType, string> = {
   business: '🏢 Negocio',
@@ -136,6 +152,18 @@ export default function IntegrationsPage() {
   const [feedback, setFeedback] = useState<Feedback | null>(null);
   const [showLiveModal, setShowLiveModal] = useState(false);
   const [sdkListo, setSdkListo] = useState(false);
+  // Selección de WABA pendiente (ADR-0020 · G2): la lista saneada que devolvió connectMeta.
+  const [wabaSel, setWabaSel] = useState<WabaSelectionRequired | null>(null);
+  // La selección venció/replay en el backend: solo queda rehacer el login de Meta.
+  const [wabaSelVencida, setWabaSelVencida] = useState(false);
+  // Desconexión con confirmación fuerte: `main` (connectionId undefined) o un número `wa_*`.
+  const [desconectando, setDesconectando] = useState<{ connectionId?: string; numberName: string | null } | null>(null);
+  /**
+   * Candado ANTI doble-disparo de los modales de confirmación. `isPending` de la mutación llega
+   * por re-render y puede correr detrás de un segundo click en la misma vuelta; el ref es
+   * sincrónico. Se libera en el onSettled de la mutación correspondiente.
+   */
+  const accionEnCursoRef = useRef(false);
 
   /**
    * PRECARGA DEL SDK. El popup del Embedded Signup tiene que abrirse DENTRO del gesto del usuario:
@@ -174,6 +202,28 @@ export default function IntegrationsPage() {
    * la entrada de índice del número que HOY está vendiendo. Los callables `coexistence*` dejan al
    * número real en su propia conexión `wa_{pnid}` y a `main` intacto.
    */
+  /**
+   * Cierre de la selección de WABA (G2): consume el selectionId + el wabaId elegido y termina el
+   * MISMO camino que `connectMeta`. Declarada ANTES de `connectRealMut` porque su `onError` la
+   * resetea al abrir un selector nuevo.
+   */
+  const completeWabaMut = useMutation({
+    mutationFn: ({ selectionId, wabaId }: { selectionId: string; wabaId: string }) => completeMetaConnectWaba(tenantId!, selectionId, wabaId),
+    onSuccess: (r) => {
+      setWabaSel(null);
+      setWabaSelVencida(false);
+      invalidate();
+      // Mismo manejo de éxito que la conexión estándar.
+      setFeedback({ kind: 'ok', msg: r.status === 'active' ? '¡Meta conectado! Ya podés recibir mensajes de WhatsApp.' : `Conexión: ${STATUS[r.status]?.label ?? r.status}.` });
+    },
+    onError: (e) => {
+      // Vencido/replay/wabaId inválido ⇒ el modal pasa al estado «rehacé el login de Meta».
+      // Cualquier otro error queda visible DENTRO del modal (recuperable, se puede reintentar).
+      if (wabaSelectionPerdida(e)) setWabaSelVencida(true);
+    },
+    onSettled: () => { accionEnCursoRef.current = false; },
+  });
+
   const connectRealMut = useMutation({
     mutationFn: async ({ flow, signup }: { flow: MetaSignupFlow; signup: Promise<EmbeddedSignupResult> }): Promise<ConexionRealOk> => {
       if (flow === 'coexistence') {
@@ -202,6 +252,17 @@ export default function IntegrationsPage() {
       setFeedback({ kind: 'ok', msg: status === 'active' ? '¡Meta conectado! Ya podés recibir mensajes de WhatsApp.' : `Conexión: ${STATUS[status]?.label ?? status}.` });
     },
     onError: (e) => {
+      // Varias cuentas de WhatsApp Business autorizadas (G2): no es un error del dueño — se abre
+      // el selector para que desambigüe. El `code` ya fue canjeado: la elección cierra por
+      // `completeMetaConnectWaba`, no por otro intento.
+      const sel = readWabaSelectionRequired(e);
+      if (sel) {
+        completeWabaMut.reset();
+        accionEnCursoRef.current = false;
+        setWabaSel(sel);
+        setWabaSelVencida(false);
+        return;
+      }
       // Cancelar el popup NO es un error fatal; que el navegador lo bloquee, tampoco, pero se
       // explica distinto: decirle «cancelaste» a alguien que no canceló lo manda a buscar un
       // problema que no existe.
@@ -222,15 +283,36 @@ export default function IntegrationsPage() {
     onSuccess: (r) => { invalidate(); setFeedback({ kind: r.ready ? 'ok' : 'info', msg: r.ready ? 'Conexión verificada: todo en orden.' : `Estado: ${STATUS[r.status]?.label ?? r.status}.` }); },
     onError: (e) => setFeedback({ kind: 'error', msg: friendlyMetaError(e) }),
   });
+  // Verificación POR NÚMERO Coexistence (G4): mismo preflight, sobre la conexión `wa_{pnid}` del
+  // asset ya listado. No altera routing, token, modo ni WABA (contrato de `verifyMetaChannel`).
+  const verifyNumMut = useMutation({
+    mutationFn: (connectionId: string) => verifyMetaChannel(tenantId!, connectionId),
+    onSuccess: (r) => {
+      invalidate();
+      setFeedback(r.ready ? { kind: 'ok', msg: 'Número verificado: todo en orden.' } : { kind: 'info', msg: `Estado del número: ${STATUS[r.status]?.label ?? r.status}.` });
+    },
+    onError: (e) => setFeedback({ kind: 'error', msg: friendlyMetaError(e) }),
+  });
   const selectMut = useMutation({
     mutationFn: (phoneNumberId: string) => selectMetaPhoneNumber(tenantId!, phoneNumberId),
     onSuccess: () => { invalidate(); setFeedback({ kind: 'ok', msg: 'Número de WhatsApp actualizado.' }); },
     onError: (e) => setFeedback({ kind: 'error', msg: friendlyMetaError(e) }),
   });
+  // Desconexión (G3): `main` (connectionId undefined) o un número `wa_*`. SIEMPRE detrás de la
+  // confirmación fuerte del modal; el error se muestra ahí (el modal queda abierto, reintentable).
   const disconnectMut = useMutation({
-    mutationFn: () => (configured ? metaDisconnect(tenantId!) : disconnectMeta(tenantId!)),
-    onSuccess: () => { invalidate(); setFeedback(null); },
-    onError: (e) => setFeedback({ kind: 'error', msg: friendlyMetaError(e) }),
+    mutationFn: (connectionId?: string) => (configured ? metaDisconnect(tenantId!, connectionId) : disconnectMeta(tenantId!)),
+    onSuccess: (_r, connectionId) => {
+      invalidate();
+      setDesconectando(null);
+      setFeedback({
+        kind: 'info',
+        msg: connectionId
+          ? 'Número desconectado de VendeYaPy. Dentro de Meta no se eliminó nada; podés reconectarlo cuando quieras.'
+          : 'Meta quedó desconectado de VendeYaPy. Dentro de Meta no se eliminó nada; podés reconectar cuando quieras.',
+      });
+    },
+    onSettled: () => { accionEnCursoRef.current = false; },
   });
   // Cambio de modo de envío de WhatsApp (W-2). 'live' lo valida el backend (Meta resoluble).
   const setModeMut = useMutation({
@@ -248,13 +330,28 @@ export default function IntegrationsPage() {
   const procMut = useMutation({ mutationFn: () => processConversions(tenantId!), onSuccess: () => qc.invalidateQueries({ queryKey: ['conversionEvents', tenantId] }) });
 
   const conn = connQ.data ?? null;
-  const connected = !!conn && conn.status !== 'not_connected';
-  const status = STATUS[conn?.status ?? 'not_connected'];
-  const hint = conn ? STATUS_HINT[conn.status] : undefined;
-  const needsReconnect = connected && configured && RECONNECT_STATES.includes(conn!.status);
+  /**
+   * Estado SANEADO: un doc puede existir con SOLO `lastConnectError` (primer intento de conexión
+   * fallido: el backend lo crea por merge sin status). Leerlo crudo rompía la card entera; acá un
+   * status ausente/desconocido se lee como `not_connected`, que es lo que ese doc ES.
+   */
+  const statusKey: MetaConnectionStatus = conn && typeof conn.status === 'string' && conn.status in STATUS ? conn.status : 'not_connected';
+  const connected = !!conn && statusKey !== 'not_connected';
+  const status = STATUS[statusKey];
+  const hint = conn ? STATUS_HINT[statusKey] : undefined;
+  const needsReconnect = connected && configured && RECONNECT_STATES.includes(statusKey);
+  const scopes = conn?.scopes ?? [];
+  // Antigüedad de la última verificación (G5 mitigado en UI): verdad persistida, legible.
+  const lastVerifMs = toMillis(conn?.lastVerifiedAt ?? null);
+  const verifVieja = connected && lastVerifMs !== null && Date.now() - lastVerifMs > VERIFICACION_VIEJA_MS;
+  // Último intento de conexión fallido (G8): razón TRADUCIDA + fecha, solo en estados con problema.
+  const ultimoConnectError = conn?.lastConnectError && ESTADOS_CON_ERROR_VISIBLE.includes(statusKey) ? conn.lastConnectError : null;
+  const ultimoConnectErrorMs = ultimoConnectError ? toMillis(conn?.lastConnectErrorAt ?? null) : null;
   const assets = useMemo(() => (assetsQ.data ?? []).slice().sort((a, b) => a.assetType.localeCompare(b.assetType)), [assetsQ.data]);
   const phoneAssets = useMemo(() => assets.filter((a) => a.assetType === 'whatsapp_phone_number'), [assets]);
-  const busy = connectRealMut.isPending || connectDemoMut.isPending || verifyMut.isPending || selectMut.isPending || disconnectMut.isPending || setModeMut.isPending;
+  const busy =
+    connectRealMut.isPending || connectDemoMut.isPending || completeWabaMut.isPending || verifyMut.isPending ||
+    verifyNumMut.isPending || selectMut.isPending || disconnectMut.isPending || setModeMut.isPending;
   const connecting = connectRealMut.isPending || connectDemoMut.isPending;
 
   // Estado de "respuestas reales" (W-2).
@@ -271,6 +368,8 @@ export default function IntegrationsPage() {
   const canGoLive = metaActive && !!selectedPhone;
   const msgItem = usageQ.data?.items.find((i) => i.metric === 'messages') ?? null;
   const fmtNum = (n: number) => n.toLocaleString('es-PY');
+  const fmtFecha = (ms: number) =>
+    new Date(ms).toLocaleString('es-PY', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
 
   if (companyLoading) return <div className="text-sm text-ink-400">Cargando…</div>;
   // Guard de rol EN LA RUTA (el sidebar ya la restringe, pero una URL pegada no pasa por el sidebar).
@@ -300,6 +399,26 @@ export default function IntegrationsPage() {
   const onConnect = () => {
     if (configured) { conectarReal('standard'); return; }
     if (demoAllowed) connectDemoMut.mutate(); // demo solo en local/emulador
+  };
+
+  /** Abre la confirmación fuerte de desconexión, limpiando cualquier error de un intento previo. */
+  const abrirDesconexion = (objetivo: { connectionId?: string; numberName: string | null }) => {
+    disconnectMut.reset();
+    setDesconectando(objetivo);
+  };
+
+  /** Confirmación del selector de WABA, con candado sincrónico contra el doble click. */
+  const confirmarWaba = (wabaId: string) => {
+    if (!wabaSel || accionEnCursoRef.current) return;
+    accionEnCursoRef.current = true;
+    completeWabaMut.mutate({ selectionId: wabaSel.selectionId, wabaId });
+  };
+
+  /** Confirmación (ya tipeada) de la desconexión, con el mismo candado sincrónico. */
+  const confirmarDesconexion = () => {
+    if (!desconectando || accionEnCursoRef.current) return;
+    accionEnCursoRef.current = true;
+    disconnectMut.mutate(desconectando.connectionId);
   };
 
   return (
@@ -333,8 +452,14 @@ export default function IntegrationsPage() {
               <span className="text-lg font-semibold text-ink-900">Conexión</span>
               <span className={'rounded-full px-2.5 py-0.5 text-xs font-semibold ' + status.cls}>{status.label}</span>
             </div>
-            {connected && <div className="mt-1 text-sm text-ink-500">{conn!.metaBusinessName} · {conn!.scopes.length} permisos</div>}
+            {connected && <div className="mt-1 text-sm text-ink-500">{conn!.metaBusinessName} · {scopes.length} permisos</div>}
             {connected && hint && <div className="mt-1 text-xs text-ink-500">{hint}</div>}
+            {/* Antigüedad de la última verificación (ADR-0020): verdad persistida, no una promesa. */}
+            {connected && configured && (
+              <div className="mt-1 text-xs text-ink-500">
+                Última verificación: {lastVerifMs !== null ? formatHace(lastVerifMs) : 'todavía no se hizo'}.
+              </div>
+            )}
             {connected && (
               <div className="mt-1 text-xs text-ink-500">
                 Que la conexión sea válida no autoriza al bot a contestar: eso lo decide el permiso de cada número.
@@ -359,18 +484,33 @@ export default function IntegrationsPage() {
               </button>
             )}
             {connected && (configured || demoAllowed) && (
-              <button onClick={() => disconnectMut.mutate()} disabled={busy} className={btnSecondary}>
+              <button onClick={() => abrirDesconexion({ numberName: null })} disabled={busy} className={btnSecondary}>
                 {disconnectMut.isPending ? 'Desconectando…' : 'Desconectar'}
               </button>
             )}
           </div>
         </div>
+        {/* El último intento de conexión fallido (G8): razón TRADUCIDA (jamás cruda) + fecha. */}
+        {ultimoConnectError && (
+          <div className="mt-3 rounded-xl bg-coral-50 px-4 py-2.5 text-xs text-coral-700">
+            <span className="font-semibold">
+              Último intento de conexión fallido{ultimoConnectErrorMs !== null ? ` · ${fmtFecha(ultimoConnectErrorMs)}` : ''}.
+            </span>{' '}
+            {textoDeConnectError(ultimoConnectError)}
+          </div>
+        )}
+        {/* Más de 7 días sin verificar: aviso sobrio (la verificación programada es deuda G5). */}
+        {verifVieja && (
+          <div className="mt-3 rounded-xl bg-amber-50 px-4 py-2.5 text-xs text-amber-800">
+            La conexión no se verifica desde {formatHace(lastVerifMs!)}. Usá «Revisar conexión» para confirmar que sigue todo en orden.
+          </div>
+        )}
         {(configured || coexistenceConfigured) && !sdkListo && (
           <p className="mt-3 text-xs text-ink-400">Preparando la conexión con Meta… si el botón no responde, esperá unos segundos y probá de nuevo.</p>
         )}
         {connected && (
           <div className="mt-3 flex flex-wrap gap-1.5">
-            {conn!.scopes.map((s) => <span key={s} className="rounded bg-ink-50 px-2 py-0.5 text-[10px] text-ink-500">{s}</span>)}
+            {scopes.map((s) => <span key={s} className="rounded bg-ink-50 px-2 py-0.5 text-[10px] text-ink-500">{s}</span>)}
           </div>
         )}
       </div>
@@ -383,14 +523,41 @@ export default function IntegrationsPage() {
         onConfirm={() => conectarReal('coexistence')}
       />
 
-      {/* El flujo humano del historial (ADR-0017 §5), UNO por número de Coexistence conectado.
-          El PNID sale de los assets del tenant que esta página ya listó — jamás de un input — y
-          el backend lo re-verifica contra la conexión `wa_{pnid}` propia. */}
+      {/* UN bloque por número de Coexistence conectado: acciones propias (ADR-0020 · G3/G4) + el
+          flujo humano del historial (ADR-0017 §5). El PNID y el connectionId salen de los assets
+          del tenant que esta página ya listó — jamás de un input — y el backend los re-verifica
+          contra la conexión `wa_{pnid}` propia. */}
       {(assetsQ.data ?? [])
         .filter((a) => a.assetType === 'whatsapp_phone_number' && (a.connectionId ?? '').startsWith('wa_'))
-        .map((a) => (
-          <CoexistenceHistoryCard key={a.externalId} tenantId={tenantId!} phoneNumberId={a.externalId} canOperate={canOperate} />
-        ))}
+        .map((a) => {
+          const ui = automationUi(a.automationMode);
+          return (
+            <div key={a.externalId} className="space-y-5">
+              <div className={card}>
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-lg font-semibold text-ink-900">📱 {a.name}</span>
+                      <StatusBadge tone={ui.tone}>{ui.label}</StatusBadge>
+                    </div>
+                    <p className="mt-1 text-xs text-ink-500">
+                      Número conectado con su propia conexión (Coexistence). Verificarlo no cambia nada; desconectarlo corta su ruteo en VendeYaPy.
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <button onClick={() => verifyNumMut.mutate(a.connectionId)} disabled={busy} className={btnSecondary}>
+                      {verifyNumMut.isPending && verifyNumMut.variables === a.connectionId ? 'Verificando…' : 'Verificar'}
+                    </button>
+                    <button onClick={() => abrirDesconexion({ connectionId: a.connectionId, numberName: a.name })} disabled={busy} className={btnSecondary}>
+                      Desconectar número
+                    </button>
+                  </div>
+                </div>
+              </div>
+              <CoexistenceHistoryCard tenantId={tenantId!} phoneNumberId={a.externalId} canOperate={canOperate} />
+            </div>
+          );
+        })}
 
       {/* Activación asistida de WhatsApp (WM-2): cuando el Embedded Signup no está configurado, el owner
           pide ayuda al equipo. No activa 'live' (eso sigue siendo exclusivo de channelConfigUpdate). */}
@@ -533,6 +700,42 @@ export default function IntegrationsPage() {
           </div>
           <p className="mt-2 text-xs text-ink-400">Manda las ventas y conversiones directo a Meta (sin depender de cookies del navegador), para que los anuncios optimicen mejor y midan las ventas reales.</p>
         </div>
+      )}
+
+      {/* Selector de WABA (G2): el owner desambigua cuando el token autoriza varias cuentas. */}
+      {wabaSel && (
+        <WabaSelectionModal
+          wabas={wabaSel.wabas}
+          pending={completeWabaMut.isPending}
+          expired={wabaSelVencida}
+          error={!wabaSelVencida && completeWabaMut.isError ? friendlyMetaError(completeWabaMut.error) : null}
+          onConfirm={confirmarWaba}
+          onCancel={() => {
+            setWabaSel(null);
+            setWabaSelVencida(false);
+            completeWabaMut.reset();
+            setFeedback({ kind: 'info', msg: 'No se conectó ninguna cuenta. Para conectar, volvé a empezar desde el botón.' });
+          }}
+          onRetryLogin={() => {
+            // El relanzamiento corre EN el gesto del click: `conectarReal` abre el popup
+            // sincrónicamente (mismo contrato que el botón original).
+            setWabaSel(null);
+            setWabaSelVencida(false);
+            completeWabaMut.reset();
+            conectarReal('standard');
+          }}
+        />
+      )}
+
+      {/* Confirmación FUERTE de desconexión (main o un número wa_*): exige tipear DESCONECTAR. */}
+      {desconectando && (
+        <MetaDisconnectModal
+          numberName={desconectando.numberName}
+          pending={disconnectMut.isPending}
+          error={disconnectMut.isError ? friendlyMetaError(disconnectMut.error) : null}
+          onConfirm={confirmarDesconexion}
+          onCancel={() => { if (!disconnectMut.isPending) setDesconectando(null); }}
+        />
       )}
 
       {/* Modal de confirmación para activar respuestas reales (W-2) */}

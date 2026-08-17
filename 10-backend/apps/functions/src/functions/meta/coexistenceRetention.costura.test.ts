@@ -32,10 +32,17 @@ const RAIZ = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..
 const SRC = join(RAIZ, 'apps', 'functions', 'src');
 
 /**
- * Colecciones con `expiresAt` que NO barre este job, con su motivo. Vacía a propósito: agregar una
- * entrada acá es una decisión explícita y revisable, no un olvido silencioso.
+ * Colecciones con `expiresAt` que NO barre este job, con su motivo. Agregar una entrada acá es
+ * una decisión explícita y revisable, no un olvido silencioso.
  */
-const FUERA_DEL_BARRIDO: Readonly<Record<string, string>> = Object.freeze({});
+const FUERA_DEL_BARRIDO: Readonly<Record<string, string>> = Object.freeze({
+  // ADR-0020 (G9): nonces de conexión, hashes de codes, selecciones de WABA pendientes y
+  // contadores de rate. CERO PII de clientes (a diferencia del archivo de Coexistence), y la
+  // decisión del ADR es limpieza PASIVA por TTL, sin sumar código de barrido: un nonce vencido es
+  // inerte por diseño (uso único + expiresAtMs verificado en el consumo), así que su borrado
+  // tardío no expone nada — solo ocupa espacio hasta que la política lo alcanza.
+  metaOAuthStates: 'ADR-0020 G9 — TTL pasivo declarado en firestore.indexes.json; sin PII de clientes',
+});
 
 function archivosTs(dir: string, acc: string[] = []): string[] {
   for (const entrada of readdirSync(dir)) {
@@ -83,8 +90,10 @@ describe('costura de retención: nadie declara una colección con TTL fuera del 
   it('el barrido y la política TTL declaran EXACTAMENTE el mismo conjunto', () => {
     // Las dos direcciones importan: una colección barrida sin `ttl:true` depende de que el job
     // corra siempre; una con `ttl:true` fuera del barrido depende de que alguien haya desplegado
-    // los índices — y el borrado por TTL de Firestore ni siquiera es inmediato.
-    expect([...conPoliticaTtl].sort()).toEqual([...COEXISTENCE_RETENTION_COLLECTIONS].sort());
+    // los índices — y el borrado por TTL de Firestore ni siquiera es inmediato. Las excepciones
+    // de FUERA_DEL_BARRIDO (TTL pasivo deliberado, sin PII) se descuentan con su motivo a la vista.
+    const soloBarridas = conPoliticaTtl.filter((c) => !(c in FUERA_DEL_BARRIDO));
+    expect([...soloBarridas].sort()).toEqual([...COEXISTENCE_RETENTION_COLLECTIONS].sort());
   });
 
   it('cada colección barrida tiene su regla EXPLÍCITA cerrada en firestore.rules', () => {

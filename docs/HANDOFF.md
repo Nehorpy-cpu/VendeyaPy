@@ -647,3 +647,38 @@ cuota transaccional EN PROD para TODAS las superficies (sales agent incluido) y 
 desplegada de punta a punta INERTE. **Deuda vigente antes de activar visión**: reconciliar el
 conflicto de precio de Odyssey (source-of-truth) — sin eso, el guard de deriva seguirá
 excluyendo al producto insignia de cualquier identificación.
+
+## META-ONBOARDING-SELF-SERVICE-1 — 2026-08-17 (EN REPO — NO DESPLEGADO)
+
+**ADR-0020**: onboarding Meta autoservicio — el ciclo owner-facing existente (Embedded Signup +
+nonce + code server-side + SecretStore + discovery transaccional) se CONSOLIDÓ cerrando los 11
+gaps del mapa (sin sistema paralelo). Backend: selección de WABA con estado PENDIENTE (secreto
+determinístico + nonce `waba_selection` + callable NUEVA `completeMetaConnectWaba`; el error
+`waba_selection_required` lleva la lista saneada), verify/disconnect por `connectionId`
+(`main`/`wa_*` — el owner ya da de baja sus números de Coexistence), desconexión de `main`
+TRANSACCIONAL (índice+assets+conexión en una tx; secreto después, compensable — y retira también
+el pendiente huérfano), guard de colisión a nivel WABA (`metaExternalIndex/waba_{id}`, misma tx,
+ausencia=libre con ventana documentada), rate-limit de emisión de nonces (10/10min por tenant),
+TTL de `metaOAuthStates` (fieldOverride), auditoría con actor + acciones `meta.verified`/
+`meta.reconnected`. Panel: selector de WABA accesible, confirmación fuerte tipeando DESCONECTAR
+(aclara que NADA se borra dentro de Meta), `lastConnectError` traducido (jamás crudo),
+antigüedad de verificación con aviso >7 días, acciones por número, RBAC fijado por tests.
+
+**Verificación**: rojo→verde por gap (backend 46 rojos → meta 92 archivos/1604 tests; web 17
+rojos → 521/521); batería completa typecheck/lint/build/tests/diff-check en 0; E2E fase4b-meta
+**27/27** con la sección AUTOSERVICIO nueva (viaje completo: 2 WABAs → selección → conexión →
+verify main+wa_ → reconexión inválida conserva la anterior → válida ⇒ `meta.reconnected` →
+disconnect wa_ → disconnect main transaccional) + regresiones coexistence 51/51, dual 20/20,
+multi-number, fase4-whatsapp, cutover, wm1-manual y d1 en verde (dos arneses desactualizados
+corregidos: WM1.9 y el check 11/16 de fase4b — semántica ADR-0017 vigente). **Review
+adversarial**: 1 MEDIO (el modal disfrazaba todo failed-precondition de "venció" — ahora solo
+`details.reason='seleccion_invalida'` pide rehacer login y el resto conserva su mensaje) + 2
+BAJO (pendiente huérfano ahora se retira también al desconectar; ventana de reclamo de WABA
+documentada en el ADR con nota operativa: reconectar tenants existentes tras el deploy) — TODOS
+corregidos.
+
+**Deuda explícita (ADR-0020)**: G5 verificación periódica programada (scheduler) diferida.
+**Superficie estimada del futuro deploy**: 1 CREATE (`completeMetaConnectWaba`) + UPDATE de la
+familia meta-connect + `firestore:indexes` (TTL nuevo) + Hosting (panel) — selector exacto lo
+emitirá release-audit en su programa; **el frontend de Meta Review NO se toca mientras la
+revisión siga en curso**.

@@ -345,7 +345,13 @@
     "",
     "Tampoco necesita índices compuestos: se lee siempre por id (empresa + phone_number_id), nunca",
     "por consulta. Los adjuntos del historial (`eventType: history_media`) van a `metaWebhookHistory`,",
-    "que ya está declarada arriba: entran a la MISMA política de retención sin declaración nueva."
+    "que ya está declarada arriba: entran a la MISMA política de retención sin declaración nueva.",
+    "",
+    "`metaOAuthStates` (ADR-0020, G9): nonces de conexión, registro de codes usados, selecciones de",
+    "WABA pendientes y contadores de rate — todos con `expiresAt`. Sin TTL crecían sin límite: cada",
+    "flujo abandonado dejaba su documento para siempre. Mismo paso operativo bloqueante que las",
+    "colecciones de arriba: se aplica con `firebase deploy --only firestore:indexes` (NUNCA --force)",
+    "y hay que verificar en consola que la política quedó ACTIVE."
   ],
   "fieldOverrides": [
     {
@@ -388,6 +394,25 @@
     },
     {
       "collectionGroup": "metaWebhookShadow",
+      "fieldPath": "expiresAt",
+      "ttl": true,
+      "indexes": [
+        {
+          "order": "ASCENDING",
+          "queryScope": "COLLECTION"
+        },
+        {
+          "order": "DESCENDING",
+          "queryScope": "COLLECTION"
+        },
+        {
+          "arrayConfig": "CONTAINS",
+          "queryScope": "COLLECTION"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "metaOAuthStates",
       "fieldPath": "expiresAt",
       "ttl": true,
       "indexes": [

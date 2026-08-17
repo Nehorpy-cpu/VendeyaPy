@@ -333,7 +333,7 @@ describe('MEDIO — el alta REAL también deja auditoría', () => {
 });
 
 describe('C6 — el WABA del flujo estándar también se elige EXPLÍCITO (release-safety del cierre final)', () => {
-  it('varios WABAs autorizados y ningún pedido ⇒ rechaza en vez de adivinar el primero', async () => {
+  it('varios WABAs autorizados y ningún pedido ⇒ NO adivina el primero: queda en selección pendiente', async () => {
     sembrarConexionQueVende();
 
     const r = await runMetaConnect(
@@ -345,10 +345,15 @@ describe('C6 — el WABA del flujo estándar también se elige EXPLÍCITO (relea
 
     // «El primero de la lista» puede ser el WABA de OTRO cliente del Tech Provider: conectar main
     // contra esa cuenta redirigiría el negocio entero. La elección tiene que ser explícita.
+    // ADR-0020 (G2): el code ya se canjeó y reclamó, así que el rechazo terminal (`no_waba`) se
+    // reemplaza por la SELECCIÓN PENDIENTE — mismo invariante (acá no se conecta nada), pero el
+    // owner puede desambiguar sin otro login. El detalle vive en connectFlow.seleccionWaba.test.ts.
     expect(r.ok).toBe(false);
-    expect((r as { reason?: string }).reason).toBe('no_waba');
+    expect((r as { reason?: string }).reason).toBe('waba_selection_required');
+    expect(h.escribirAssets).not.toHaveBeenCalled();
     // Y la conexión que vende quedó intacta.
     expect((h.docs.get(CONN) as { status?: string })['status']).toBe('active');
+    expect((h.docs.get(CONN) as { tokenSecretRef?: string })['tokenSecretRef']).toBe(REF_PREVIA);
   });
 
   it('CERO REGRESIÓN: un solo WABA autorizado sin pedido sigue conectando', async () => {
