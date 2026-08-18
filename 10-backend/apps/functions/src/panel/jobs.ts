@@ -9,6 +9,7 @@ import type { PlanFeatures } from '@vpw/shared';
 import { syncMetaAdsDemo } from '../meta/ads.js';
 import { computeAttribution } from '../meta/attribution.js';
 import { runCatalogSync } from '../meta/catalog.js';
+import { requireCatalogRelationship } from '../meta/catalogAuthority.js';
 import { generateFollowUpTasks } from '../followups/generate.js';
 import { generateAgentAudits } from '../audits/generate.js';
 import { computeTrackingAttribution } from '../tracking/tracking.js';
@@ -41,9 +42,19 @@ const JOBS: Record<PanelJobAction, (tenantId: string, actor?: PanelJobActor, arg
   // catalogSyncApply escribe SOLO si la config del tenant está en mode 'live' (fail-closed).
   // META-CATALOG-PREVIEW-BINDING-1: el apply además EXIGE la evidencia del preview aprobado
   // ({previewRunId, planHash}); el núcleo la valida, replanifica y solo encola si coincide.
-  catalogSync: (t, actor) => runCatalogSync(t, { mode: 'dry_run', actor }),
-  catalogSyncApply: (t, actor, args) =>
-    runCatalogSync(t, { mode: 'apply', actor, preview: { runId: args?.['previewRunId'], planHash: args?.['planHash'] } }),
+  // ADR-0022 §4 (decisión B2-server): `mirror` bloquea ESCRITURAS, no lecturas — el dry-run
+  // es un diagnóstico read-only y queda permitido bajo mirror (restaura el diagnóstico legacy
+  // de arfagi); publicar (`catalogSyncApply`) exige `managed`. Con `none` no hay acción Meta.
+  // La carrera residual (transición de autoridad DURANTE un apply de hasta 300 s) la cierra el
+  // encolado: `enqueueCatalogPlan` re-deriva la relación dentro de su transacción (review A2).
+  catalogSync: async (t, actor) => {
+    await requireCatalogRelationship(t, 'mirror', 'managed');
+    return runCatalogSync(t, { mode: 'dry_run', actor });
+  },
+  catalogSyncApply: async (t, actor, args) => {
+    await requireCatalogRelationship(t, 'managed');
+    return runCatalogSync(t, { mode: 'apply', actor, preview: { runId: args?.['previewRunId'], planHash: args?.['planHash'] } });
+  },
   generateFollowups: (t) => generateFollowUpTasks(t),
   generateAudits: (t) => generateAgentAudits(t),
   computeTracking: (t) => computeTrackingAttribution(t),

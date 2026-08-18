@@ -92,6 +92,14 @@ export const metaCatalogVerificationRun = onCall<{ tenantId?: string; runId?: st
     const runId = String(req.data?.runId ?? '').trim();
     if (runId && !RUN_ID_RE.test(runId)) throw new HttpsError('invalid-argument', 'runId inválido.');
 
+    // (ADR-0022 §4, hallazgo OW-20m/20o) Acá NO hay gate de relación A PROPÓSITO: el gate por
+    // relación vive DENTRO de `catalogVerificationEligibility` (skip `relationship_none`), que
+    // corta con el mismo failed-precondition PERO después de cerrar el aviso «no podemos
+    // verificar tu catálogo». Un gate en el callable, delante de la corrida, dejaba ese aviso
+    // HUÉRFANO para siempre al retirar la declaración externa o al borrar `catalogSync` entero
+    // — la misma familia de bug que el sweep del outbox: la relación bloquea ACCIONES hacia
+    // Meta, jamás la limpieza local. `mirror`/`managed` corren igual que siempre.
+
     let res;
     try {
       res = await runCatalogVerificationForTenant({

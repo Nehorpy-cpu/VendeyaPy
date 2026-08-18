@@ -109,6 +109,7 @@ describe('buildCatalogOwnershipStatus — contrato del panel', () => {
   it('la respuesta no arrastra campos internos del producto ni del tenant', () => {
     const r = buildCatalogOwnershipStatus(externaValida());
     expect(Object.keys(r).sort()).toEqual([
+      'authority', // ADR-0022: bloque ADITIVO — todo lo demás quedó idéntico
       'configMode',
       'declared',
       'detectedSources',
@@ -119,6 +120,51 @@ describe('buildCatalogOwnershipStatus — contrato del panel', () => {
       'ok',
       'ownership',
     ]);
+  });
+});
+
+/**
+ * ADR-0022 §5 — bloque `authority` ADITIVO: `{authority, relationship, declared, reasons,
+ * staleness}` es EXACTAMENTE el shape que consume el selector del panel. Nada de lo anterior
+ * cambia de forma ni de valor.
+ */
+describe('buildCatalogOwnershipStatus — bloque authority (ADR-0022, aditivo)', () => {
+  it('arfagi-like ⇒ external + mirror, con la frescura juntada aparte', () => {
+    const r = buildCatalogOwnershipStatus(externaValida(), { metaVerifiedAt: 123, lastImportFinishedAt: 456 });
+    expect(r.authority).toEqual({
+      authority: 'external',
+      relationship: 'mirror',
+      declared: false,
+      reasons: [],
+      botCatalog: 'local_mirror',
+      staleness: { metaVerifiedAt: 123, lastSourceCheckAt: 1_700_000_100_000, lastImportFinishedAt: 456 },
+    });
+  });
+
+  it('sin staleness juntada ⇒ nulls honestos («nunca»), jamás un verde inventado', () => {
+    const r = buildCatalogOwnershipStatus(externaValida());
+    expect(r.authority.staleness.metaVerifiedAt).toBeNull();
+    expect(r.authority.staleness.lastImportFinishedAt).toBeNull();
+    expect(r.authority.staleness.lastSourceCheckAt).toBe(1_700_000_100_000);
+  });
+
+  it('credipower (sin config) ⇒ vendeyapy + none; relationship declarado ⇒ declared:true', () => {
+    expect(buildCatalogOwnershipStatus(undefined).authority).toMatchObject({
+      authority: 'vendeyapy',
+      relationship: 'none',
+      declared: false,
+    });
+    expect(buildCatalogOwnershipStatus({ relationship: 'none' }).authority).toMatchObject({
+      relationship: 'none',
+      declared: true,
+    });
+  });
+
+  it('los campos preexistentes NO cambian de valor con el bloque nuevo presente', () => {
+    const conBloque = buildCatalogOwnershipStatus(externaValida(), { metaVerifiedAt: 1 });
+    const { authority: _a, ...resto } = conBloque;
+    const { authority: _b, ...restoSin } = buildCatalogOwnershipStatus(externaValida());
+    expect(resto).toEqual(restoSin);
   });
 });
 

@@ -35,6 +35,7 @@ import {
   runMaintenancePages,
   type MetaCatalogMaintenanceRunDoc,
 } from '../../meta/catalogMaintenance.js';
+import { requireCatalogRelationship } from '../../meta/catalogAuthority.js';
 import { refreshCatalogQualityNotification } from '../../products/qualityNotification.js';
 import { loadCatalogProfile } from './catalogReconcileCallables.js';
 
@@ -111,6 +112,10 @@ export const metaCatalogMaintenanceRun = onCall<{
   if (resumeRunId && !/^[A-Za-z0-9_-]{1,64}$/.test(resumeRunId)) {
     throw new HttpsError('invalid-argument', 'runId inválido.');
   }
+
+  // ADR-0022 §4: el mantenimiento es una acción del ciclo Meta (backfill de locks/quality del
+  // espejo) — mirror/managed; `none` bloquea. La lectura de estado (Status) NO se gatea.
+  await requireCatalogRelationship(tenantId, 'mirror', 'managed');
 
   // ---- Crear o reanudar la corrida (tenant-scoped SIEMPRE) ----
   const now = Timestamp.now();

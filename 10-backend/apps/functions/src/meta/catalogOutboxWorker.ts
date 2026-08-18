@@ -39,6 +39,7 @@ import {
   type MetaRemoteCatalogItem,
 } from './catalogClient.js';
 import type { CatalogBatchRequest } from './catalogOutbound.js';
+import { deriveCatalogAuthority } from './catalogAuthority.js';
 import { effectiveMode, type EffectiveOwnership } from './catalogOwnership.js';
 import { assertPatchOwned, ownershipFingerprint } from './catalogOwnershipGates.js';
 import { alertarFuenteDelCatalogo, checkCatalogSources } from './catalogSourceGate.js';
@@ -293,6 +294,11 @@ export interface EnqueueResult {
   awaitingReview: number;
   /** Productos cuyo request no cumple el contrato: quedan fuera, sin arrastrar a los demás. */
   blocked: number;
+  /**
+   * (ADR-0022 §4, review A2) Entradas descartadas porque la RELACIÓN dejó de ser `managed`
+   * entre el gate del apply y el encolado (transición de autoridad en el medio): cero jobs.
+   */
+  relationshipBlocked: number;
   /** false si el estado visible de algún producto no se pudo persistir (los jobs SÍ existen). */
   statePersisted: boolean;
 }
@@ -320,6 +326,7 @@ export async function enqueueCatalogPlan(
   let deduplicated = 0;
   let awaitingReview = 0;
   let blocked = 0;
+  let relationshipBlocked = 0;
 
   // ═══ TECHO DE PROPIEDAD (ADR-0015 §7) ═══
   // Sin un solo campo propio no existe patch posible, así que tampoco existe job. Es la
@@ -333,7 +340,7 @@ export async function enqueueCatalogPlan(
         tenantId, runId, model: cfg.ownership.model, degraded: cfg.ownership.degraded, descartadas: entries.length,
       });
     }
-    return { queued: 0, deduplicated: 0, awaitingReview: 0, blocked: entries.length, statePersisted: true };
+    return { queued: 0, deduplicated: 0, awaitingReview: 0, blocked: entries.length, relationshipBlocked: 0, statePersisted: true };
   }
 
   for (const e of entries) {
@@ -371,6 +378,17 @@ export async function enqueueCatalogPlan(
      * mirando el trabajo ACTIVO resuelve el doble click sin borrar nada.
      */
     const r = await db().runTransaction(async (tx) => {
+      // (ADR-0022 §4, review A2) RELACIÓN RE-DERIVADA CON DATOS FRESCOS, DENTRO de la
+      // transacción — misma filosofía que la re-validación de propiedad del ADR-0015 §7 que
+      // vive más abajo. El gate de `catalogSyncApply` corre al ARRANQUE de un job de hasta
+      // 300 s: una transición de autoridad en el medio (managed → mirror/none) dejaría jobs
+      // encolados bajo un modo que ya no escribe — exactamente los zombis del hallazgo A1.
+      const cfgFresca = (await tx.get(db().doc(`tenants/${tenantId}/config/meta`))).data() as
+        | { catalogSync?: unknown }
+        | undefined;
+      if (deriveCatalogAuthority(cfgFresca?.catalogSync).relationship !== 'managed') {
+        return { r: 'relacion' as const, awaitingReview: false };
+      }
       const intentRef = db().doc(paths.metaCatalogOutboxIntent(tenantId, intentKey));
       const intent = (await tx.get(intentRef)).data() as MetaCatalogOutboxIntent | undefined;
       const activo = intent?.activeJobId
@@ -442,6 +460,10 @@ export async function enqueueCatalogPlan(
     if (r.r === 'duplicado') {
       deduplicated++;
       if (r.awaitingReview) awaitingReview++;
+    } else if (r.r === 'relacion') {
+      // La relación dejó de ser `managed` mientras el apply corría: se descarta SIN proyectar
+      // error en el producto (no es culpa suya — el tenant cambió de modo) y se reporta aparte.
+      relationshipBlocked++;
     } else if (r.r === 'error') {
       // Un fallo de infraestructura NO es una deduplicación: contarlo como tal habría
       // reportado "ya estaba encolado" para trabajo que no existe en ninguna parte.
@@ -453,10 +475,15 @@ export async function enqueueCatalogPlan(
     }
   }
 
+  if (relationshipBlocked) {
+    logger.warn('Outbox de catálogo: la relación con Meta dejó de ser managed durante el apply; nada se encoló', {
+      tenantId, runId, descartadas: relationshipBlocked,
+    });
+  }
   // El estado visible de cada producto se escribe DENTRO de la transacción que crea su job:
   // no queda ningún commit diferido que pueda fallar en silencio. Un fallo por producto ya se
   // contó como `blocked` y se reporta en el run.
-  return { queued, deduplicated, awaitingReview, blocked, statePersisted: true };
+  return { queued, deduplicated, awaitingReview, blocked, relationshipBlocked, statePersisted: true };
 }
 
 // ---------------------------------------------------------------------------
@@ -536,7 +563,7 @@ export interface DrainResult {
   /** Jobs excluidos del lote porque la propiedad cambió o dejó de cubrir su patch. */
   ownershipBlocked?: number;
   /** Motivo por el que no se envió nada (si aplica). */
-  skipped?: OutboxReason | 'nothing_queued' | 'client_unavailable';
+  skipped?: OutboxReason | 'nothing_queued' | 'client_unavailable' | 'relationship_not_managed';
 }
 
 /**
@@ -1268,7 +1295,7 @@ export interface OutboxMaintenanceResult {
 export async function runCatalogOutboxForTenant(
   tenantId: string,
   publicView: PublicViewFn,
-  opts: { graciaMs?: number } = {},
+  opts: { graciaMs?: number; skipDrain?: boolean } = {},
 ): Promise<OutboxMaintenanceResult> {
   const vacio: OutboxMaintenanceResult = {
     tenantId,
@@ -1286,8 +1313,15 @@ export async function runCatalogOutboxForTenant(
   if (!isFeatureEnabled(ent.features, 'marketingAutomation')) {
     return { ...vacio, drain: { ...vacio.drain, skipped: 'config_disabled' } };
   }
+  // (ADR-0022 §4, review A1) El gate por RELACIÓN cubre SOLO el drenaje — la única fase que
+  // ESCRIBE en Meta. El sweep (normaliza leases vencidos y envejece ambiguos: puro Firestore)
+  // y la confirmación (solo LEE el catálogo para cerrar `submitted` con evidencia) corren
+  // SIEMPRE: saltearlos dejaba jobs no-terminales ZOMBIS bajo mirror/none que nadie podía
+  // mover y que bloqueaban (`outbox_not_terminal`) el REGRESO a managed — un deadlock.
   const sweep = await sweepCatalogOutbox(tenantId);
-  const drain = await drainCatalogOutbox(tenantId, publicView);
+  const drain = opts.skipDrain
+    ? { ...vacio.drain, skipped: 'relationship_not_managed' as const }
+    : await drainCatalogOutbox(tenantId, publicView);
   const reconcile = await reconcileCatalogOutbox(tenantId, { graciaMs: opts.graciaMs });
   return { tenantId, drain, reconcile, sweep };
 }

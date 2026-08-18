@@ -12,7 +12,7 @@
  * TENANT_OWNER/TENANT_MANAGER (solo su empresa). Vendedor/lector: denegado.
  */
 import { onCall, HttpsError, type CallableRequest } from 'firebase-functions/v2/https';
-import { resolvePanelAuth } from '../../panel/auth.js';
+import { resolveOwnerAuth, resolvePanelAuth } from '../../panel/auth.js';
 import { isPanelJobAction, runPanelJob, PANEL_JOB_ACTIONS, JOB_REQUIREMENTS } from '../../panel/jobs.js';
 import { assertFeatureEnabled, assertWithinLimit, meterUsage } from '../../entitlements/entitlements.js';
 import { handleMessage } from '../../conversation/engine.js';
@@ -23,6 +23,20 @@ import { logger } from '../../lib/logger.js';
 function authorizeTenant(req: CallableRequest<unknown>, requestedTenantId?: string): string {
   if (!req.auth) throw new HttpsError('unauthenticated', 'Iniciá sesión para continuar.');
   const result = resolvePanelAuth(req.auth.token as { role?: string; tenantId?: string }, requestedTenantId);
+  if (!result.ok) throw new HttpsError(result.code, result.message);
+  return result.tenantId;
+}
+
+/**
+ * (ADR-0022 §4, asimetría corregida) `catalogSyncApply` PUBLICA hacia Meta: exige
+ * TENANT_OWNER / PLATFORM_ADMIN también en el backend, alineado con `metaCatalogSetSyncEnabled`.
+ * Antes la UI lo escondía pero el backend se lo permitía a MANAGER. El preview (`catalogSync`)
+ * sigue siendo manager+: es un dry-run sin escrituras.
+ */
+function authorizeJob(req: CallableRequest<unknown>, action: string, requestedTenantId?: string): string {
+  if (action !== 'catalogSyncApply') return authorizeTenant(req, requestedTenantId);
+  if (!req.auth) throw new HttpsError('unauthenticated', 'Iniciá sesión para continuar.');
+  const result = resolveOwnerAuth(req.auth.token as { role?: string; tenantId?: string }, requestedTenantId);
   if (!result.ok) throw new HttpsError(result.code, result.message);
   return result.tenantId;
 }
@@ -52,7 +66,7 @@ export const runTenantJob = onCall<{ action?: string; tenantId?: string; args?: 
     if (!action || !isPanelJobAction(action)) {
       throw new HttpsError('invalid-argument', `Acción inválida. Válidas: ${PANEL_JOB_ACTIONS.join(', ')}.`);
     }
-    const tenantId = authorizeTenant(req, req.data?.tenantId);
+    const tenantId = authorizeJob(req, action, req.data?.tenantId);
     // Entitlements (Fase 5A): feature premium + cuota antes de correr; metering después.
     const jobReq = JOB_REQUIREMENTS[action];
     if (jobReq.feature) await assertFeatureEnabled(tenantId, jobReq.feature, { actorUid: req.auth?.uid });

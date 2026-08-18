@@ -60,6 +60,12 @@ export interface VerificacionResumen {
   /** Sin nada que verificar (nadie declaró gobierno externo): es el estado normal, no un problema. */
   saltadas: number;
   /**
+   * (ADR-0022 §4) Salteadas porque la relación declarada con Meta es `none` (opt-out explícito
+   * del owner). Contador PROPIO a propósito: mezclarlo con `saltadas` escondería la diferencia
+   * entre «no hay nada configurado» y «alguien decidió apagar la relación».
+   */
+  relacionNone: number;
+  /**
    * Guard ACTIVO y verificación estructuralmente imposible (config contradictoria). Cuenta
    * APARTE de `saltadas` a propósito: contar esto como una salteada silenciosa es justo lo que
    * hizo invisible el apagado permanente de la venta automática.
@@ -71,7 +77,7 @@ export interface VerificacionResumen {
 export async function runMetaCatalogVerificationMaintenance(): Promise<VerificacionResumen> {
   // Igual que el outbox: SOLO empresas vivas. Una suspendida o dada de baja no gasta llamadas.
   const tenants = await db().collection('tenants').select('status', 'deletedAt').get();
-  const resumen: VerificacionResumen = { tenants: 0, corridas: 0, completadas: 0, saltadas: 0, bloqueadas: 0, errores: 0 };
+  const resumen: VerificacionResumen = { tenants: 0, corridas: 0, completadas: 0, saltadas: 0, relacionNone: 0, bloqueadas: 0, errores: 0 };
 
   for (const t of tenants.docs) {
     const d = t.data() as { status?: string; deletedAt?: unknown };
@@ -111,6 +117,12 @@ export async function runMetaCatalogVerificationMaintenance(): Promise<Verificac
             e,
             { tenantId: t.id, motivo: e.reason },
           );
+          continue;
+        }
+        // (ADR-0022 §4) Opt-out explícito por relación: contador propio, y el barrido sigue
+        // con el próximo tenant (el aislamiento por tenant no se toca).
+        if (e.skipReason === 'relationship_none') {
+          resumen.relacionNone++;
           continue;
         }
         resumen.saltadas++;

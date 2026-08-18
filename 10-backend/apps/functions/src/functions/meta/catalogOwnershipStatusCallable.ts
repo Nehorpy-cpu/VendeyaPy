@@ -30,9 +30,10 @@
  *    metadata saneada (ADR-0015 §4). `fingerprint` ya es una huella no secreta por contrato.
  */
 import { onCall, HttpsError, type CallableRequest } from 'firebase-functions/v2/https';
-import type { CatalogExternalSourceView, CatalogOwnershipView, MetaCatalogSyncMode, WritableField } from '@vpw/shared';
+import type { CatalogAuthorityStatus, CatalogExternalSourceView, CatalogOwnershipView, MetaCatalogSyncMode, WritableField } from '@vpw/shared';
 import { resolvePanelAuth } from '../../panel/auth.js';
-import { db } from '../../lib/firebase.js';
+import { db, paths } from '../../lib/firebase.js';
+import { buildCatalogAuthorityStatus } from '../../meta/catalogAuthority.js';
 import { effectiveMode } from '../../meta/catalogOwnership.js';
 import { externalSourceView, ownershipView } from '../../meta/catalogOwnershipMigration.js';
 import { declaredExternalGovernance, normalizeCatalogSyncConfig } from '../../meta/catalogSyncConfig.js';
@@ -79,13 +80,26 @@ export interface CatalogOwnershipStatusResponse {
   lastSourceCheckAt: number | null;
   /** false ⇒ no existe patch posible: el loop diario es inalcanzable por construcción. */
   hasWritableFields: boolean;
+  /**
+   * (ADR-0022, ADITIVO) Autoridad + relación DERIVADAS del contrato tipado, con la frescura de
+   * la evidencia remota (§5). Es EXACTAMENTE el shape que consume el selector del panel:
+   * `{authority, relationship, declared, reasons, staleness}`. Nada de lo anterior cambia.
+   */
+  authority: CatalogAuthorityStatus;
+}
+
+/** Frescura remota que el callable JUNTA con lecturas aparte (ms epoch, null ⇒ nunca). */
+export interface CatalogOwnershipStalenessInput {
+  metaVerifiedAt?: number | null;
+  lastImportFinishedAt?: number | null;
 }
 
 /**
  * Arma la respuesta a partir del campo `catalogSync` CRUDO del documento de config. PURA —
- * exportada para testearla sin Firebase ni el envoltorio del callable.
+ * exportada para testearla sin Firebase ni el envoltorio del callable. `staleness` es opcional
+ * y ADITIVO: quien no la junta (tests previos) recibe la autoridad con frescura vacía.
  */
-export function buildCatalogOwnershipStatus(rawCatalogSync: unknown): CatalogOwnershipStatusResponse {
+export function buildCatalogOwnershipStatus(rawCatalogSync: unknown, staleness?: CatalogOwnershipStalenessInput): CatalogOwnershipStatusResponse {
   // El MISMO normalizador que usan los gates: si el panel leyera por otro camino podría
   // mostrar verde sobre una propiedad que el servidor degrada (o al revés).
   const cfg = normalizeCatalogSyncConfig(rawCatalogSync);
@@ -97,6 +111,7 @@ export function buildCatalogOwnershipStatus(rawCatalogSync: unknown): CatalogOwn
   // se mezclara con `ownership`, un `enabled:false` volvería a apagar la honestidad junto con la
   // escritura, y con `enabled:true` los dos ejes coinciden, así que nadie ve una respuesta rara.
   const declarado = declaredExternalGovernance(rawCatalogSync);
+  const lastSourceCheckAt = aMillis(ownRaw && typeof ownRaw === 'object' ? ownRaw.lastSourceCheckAt : null);
   return {
     ok: true,
     enabled: cfg.enabled,
@@ -105,8 +120,16 @@ export function buildCatalogOwnershipStatus(rawCatalogSync: unknown): CatalogOwn
     ownership: ownershipView(cfg.ownership),
     declared: { externalFields: declarado.fields, externalSource: externalSourceView(declarado.source) },
     detectedSources: [],
-    lastSourceCheckAt: aMillis(ownRaw && typeof ownRaw === 'object' ? ownRaw.lastSourceCheckAt : null),
+    lastSourceCheckAt,
     hasWritableFields: cfg.ownership.writable.length > 0,
+    // ADR-0022: derivación PURA sobre el MISMO crudo + frescura juntada aparte. `lastSourceCheckAt`
+    // se repite adentro a propósito — el panel consume el bloque `authority` completo y no debe
+    // tener que pescar el resto de la respuesta.
+    authority: buildCatalogAuthorityStatus(rawCatalogSync, {
+      metaVerifiedAt: staleness?.metaVerifiedAt ?? null,
+      lastSourceCheckAt,
+      lastImportFinishedAt: staleness?.lastImportFinishedAt ?? null,
+    }),
   };
 }
 
@@ -121,5 +144,39 @@ function authorizeManager(req: CallableRequest<unknown>, requestedTenantId?: str
 export const metaCatalogOwnershipStatus = onCall<{ tenantId?: string }>({ region: REGION }, async (req) => {
   const tenantId = authorizeManager(req, req.data?.tenantId);
   const snap = await db().doc(`tenants/${tenantId}/config/meta`).get();
-  return buildCatalogOwnershipStatus((snap.data() as { catalogSync?: unknown } | undefined)?.catalogSync);
+
+  // Frescura de la evidencia remota (ADR-0022 §5) — lecturas ACOTADAS del propio tenant, cero
+  // llamadas a Meta. Best-effort: si algo falla, la tarjeta muestra la autoridad sin frescura
+  // (null = «nunca» honesto), jamás rompe la lectura de estado.
+  let metaVerifiedAt: number | null = null;
+  let lastImportFinishedAt: number | null = null;
+  try {
+    // Última corrida de verificación TERMINADA con éxito. `orderBy(finishedAt)` es índice
+    // automático de campo único y excluye a las corridas en curso (finishedAt: null).
+    const runs = await db()
+      .collection(paths.metaCatalogVerificationRuns(tenantId))
+      .orderBy('finishedAt', 'desc')
+      .limit(5)
+      .get();
+    const completada = runs.docs.find((d) => (d.data() as { status?: string }).status === 'completed');
+    metaVerifiedAt = ((completada?.data() as { finishedAt?: { toMillis?: () => number } } | undefined)?.finishedAt?.toMillis?.()) ?? null;
+
+    const state = (await db().doc(paths.metaCatalogImportState(tenantId)).get()).data() as
+      | { activeRunId?: string | null; lastRunId?: string | null }
+      | undefined;
+    const importRunId = state?.lastRunId ?? state?.activeRunId ?? null;
+    if (importRunId) {
+      const run = (await db().doc(paths.metaCatalogImportRun(tenantId, importRunId)).get()).data() as
+        | { finishedAt?: { toMillis?: () => number } | null }
+        | undefined;
+      lastImportFinishedAt = run?.finishedAt?.toMillis?.() ?? null;
+    }
+  } catch {
+    // sin frescura: la respuesta sigue siendo honesta (null = nunca verificado)
+  }
+
+  return buildCatalogOwnershipStatus((snap.data() as { catalogSync?: unknown } | undefined)?.catalogSync, {
+    metaVerifiedAt,
+    lastImportFinishedAt,
+  });
 });

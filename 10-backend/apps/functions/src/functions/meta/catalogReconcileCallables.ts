@@ -24,6 +24,7 @@ import { assertWithinLimit } from '../../entitlements/entitlements.js';
 import { db, paths } from '../../lib/firebase.js';
 import { recordAudit } from '../../audit/audit.js';
 import { logger } from '../../lib/logger.js';
+import { requireCatalogRelationship } from '../../meta/catalogAuthority.js';
 import { normalizeCatalogSyncConfig, type MetaCatalogSyncConfig } from '../../meta/catalogSyncConfig.js';
 import { getMetaCatalogClientForTenant, MetaCatalogApiError } from '../../meta/catalogClient.js';
 import { outboundId } from '../../meta/catalogOutbound.js';
@@ -111,6 +112,10 @@ export const metaCatalogReconcilePlan = onCall<{ tenantId?: string; offset?: num
   { region: 'us-central1', timeoutSeconds: 300 },
   async (req) => {
     const tenantId = authorizeOwner(req, req.data?.tenantId);
+    // ADR-0022 §4: leer/alimentar el espejo exige relación `mirror` o `managed` (`none` ⇒ nada
+    // de Meta). Los tenants legacy sin `relationship` declarado derivan su relación de la
+    // propiedad (arfagi ⇒ mirror) y conservan el comportamiento de hoy.
+    await requireCatalogRelationship(tenantId, 'mirror', 'managed');
     const catalogId = await requireCatalogId(tenantId);
     // Política del tenant cargada UNA vez por invocación y propagada a análisis + ranking.
     const policy = effectiveCatalogPolicy(await loadCatalogProfile(tenantId));
@@ -182,6 +187,8 @@ export const metaCatalogConfirmMapping = onCall<{ tenantId?: string; productId?:
     const retailerId = String(req.data?.retailerId ?? '').trim();
     if (!productId || !retailerId) throw new HttpsError('invalid-argument', 'Faltan productId y retailerId.');
 
+    // ADR-0022 §4: vincular identidades alimenta el espejo — mirror/managed; `none` bloquea.
+    await requireCatalogRelationship(tenantId, 'mirror', 'managed');
     const catalogId = await requireCatalogId(tenantId);
 
     // Releer el producto local (dentro del tenant SIEMPRE).
@@ -292,6 +299,8 @@ export const metaCatalogImportItems = onCall<{ tenantId?: string; retailerIds?: 
     const catSnap = await db().doc(paths.category(tenantId, categoryId)).get();
     if (!catSnap.exists) throw new HttpsError('invalid-argument', 'La categoría indicada no existe en esta empresa.');
 
+    // ADR-0022 §4: importar alimenta el espejo local — mirror/managed; `none` bloquea.
+    await requireCatalogRelationship(tenantId, 'mirror', 'managed');
     const catalogId = await requireCatalogId(tenantId);
     const profile = await loadCatalogProfile(tenantId);
     const policy = effectiveCatalogPolicy(profile);
@@ -464,6 +473,14 @@ export const metaCatalogSetSyncEnabled = onCall<{ tenantId?: string; productId?:
           : 'Los campos públicos de este catálogo los publica una fuente externa (el feed de la tienda). Este sistema no escribe ninguno, así que habilitar la sincronización del producto no cambiaría nada en Meta: los datos se corrigen en el origen del feed.',
       };
     }
+    // ADR-0022 §4: ENCENDER el opt-in promete escritura hacia Meta ⇒ solo con relación
+    // `managed`. Apagar (arriba) SIEMPRE se puede: es el lado seguro y no consulta relación.
+    // ORDEN deliberado, DESPUÉS del gate de propiedad: para un tenant espejo (external_managed
+    // o nivel 2) `writable` es siempre vacío y la respuesta amable de arriba —con el motivo de
+    // PROPIEDAD y a dónde corregir— es más útil que un failed-precondition genérico. Este gate
+    // solo agrega valor en el caso que la propiedad NO frena: `relationship:'none'` declarado
+    // sobre una propiedad escribible.
+    await requireCatalogRelationship(tenantId, 'managed');
     const catalogId = cfg.catalogId;
     const policy = effectiveCatalogPolicy(await loadCatalogProfile(tenantId));
     const remote = await readRemote(tenantId, catalogId, policy.stopwords);

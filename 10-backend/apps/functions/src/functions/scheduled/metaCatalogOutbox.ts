@@ -21,6 +21,7 @@ import { onSchedule } from 'firebase-functions/v2/scheduler';
 import { db } from '../../lib/firebase.js';
 import { logger } from '../../lib/logger.js';
 import { localPublicView } from '../../meta/catalog.js';
+import { deriveCatalogAuthority } from '../../meta/catalogAuthority.js';
 import { runCatalogOutboxForTenant } from '../../meta/catalogOutboxWorker.js';
 
 export async function runMetaCatalogOutboxMaintenance(): Promise<void> {
@@ -31,7 +32,21 @@ export async function runMetaCatalogOutboxMaintenance(): Promise<void> {
     const d = t.data() as { status?: string; deletedAt?: unknown };
     if (d.status !== 'ACTIVE' || d.deletedAt) continue;
     try {
-      const r = await runCatalogOutboxForTenant(t.id, localPublicView);
+      // (ADR-0022 §4, review A1) Gate por RELACIÓN, POR TENANT, y SOLO sobre el DRENAJE (la
+      // única fase que escribe en Meta). El sweep y la confirmación corren SIEMPRE: saltear
+      // el mantenimiento entero dejaba jobs no-terminales ZOMBIS bajo mirror/none (un
+      // `processing` con lease vencida no lo normalizaba nadie) que además bloqueaban el
+      // REGRESO a managed vía `outbox_not_terminal` — un deadlock sin salida. La derivación
+      // legacy conserva el comportamiento: un tenant `vendeyapy_managed` con la sync
+      // configurada deriva `managed` y sigue drenando exactamente como hoy. El gate vive
+      // DENTRO del try: un doc de config corrupto cuenta como error de ESE tenant y jamás
+      // corta el barrido de los demás.
+      const cfg = await db().doc(`tenants/${t.id}/config/meta`).get();
+      const relacion = deriveCatalogAuthority((cfg.data() as { catalogSync?: unknown } | undefined)?.catalogSync).relationship;
+      if (relacion !== 'managed') {
+        logger.debug('Outbox de catálogo: drenaje salteado por relación (sweep y confirmación corren igual)', { tenantId: t.id, relacion });
+      }
+      const r = await runCatalogOutboxForTenant(t.id, localPublicView, { skipDrain: relacion !== 'managed' });
       if (r.drain.claimed || r.reconcile.checked || r.sweep.normalized || r.sweep.aged) {
         logger.info('Outbox de catálogo: mantenimiento', {
           tenantId: t.id,

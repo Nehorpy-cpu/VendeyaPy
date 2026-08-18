@@ -3,7 +3,14 @@
 import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import type { Product, Category, ProductAiFicha } from '@vpw/shared';
 import { aiFichaQuality, composeAiNotesFromFicha, composeDescriptionFromFicha, AI_FICHA_LEVEL_LABEL } from '@vpw/shared';
-import type { ProductInput } from '@/lib/catalog';
+import type { CatalogOwnershipStatus, ProductInput } from '@/lib/catalog';
+import {
+  camposGobernadosCambiados,
+  camposGobernadosPorFuente,
+  nombreFuentePublicadora,
+} from '@/lib/catalogAuthority';
+import { etiquetaCampo, type CampoPublico } from '@/lib/catalogOwnership';
+import { ConfirmModal } from '@/components/ui';
 
 const GENDERS = ['Femenino', 'Masculino', 'Unisex'] as const;
 const STATUSES: Array<{ value: Product['status']; label: string }> = [
@@ -49,6 +56,12 @@ interface Props {
   /** Prioridad de venta (Modo Ganancia) — también en productFinancials. */
   initialPriority: number | null;
   categories: Category[];
+  /**
+   * Propiedad del catálogo (ADR-0015/ADR-0022): con una fuente externa gobernando campos
+   * públicos, esos campos avisan quién los controla y editar uno exige confirmación
+   * explícita (el cambio queda local, no se publica). null/ausente = sin gobierno externo.
+   */
+  ownership?: CatalogOwnershipStatus | null;
   onCancel: () => void;
   onSubmit: (input: ProductInput) => void;
   saving: boolean;
@@ -56,9 +69,30 @@ interface Props {
   error?: string | null;
 }
 
-export function ProductForm({ initial, initialCost, initialPriority, categories, onCancel, onSubmit, saving, error }: Props) {
+export function ProductForm({ initial, initialCost, initialPriority, categories, ownership = null, onCancel, onSubmit, saving, error }: Props) {
   const uid = useId();
   const id = (k: string) => `${uid}-${k}`;
+  // --- Campos públicos gobernados por la fuente externa (ADR-0022 §4, edición honesta) ---
+  const gobernados = useMemo(() => camposGobernadosPorFuente(ownership), [ownership]);
+  const fuente = nombreFuentePublicadora(ownership) || 'tu propio sistema';
+  const gob = (c: CampoPublico) => gobernados.includes(c);
+  /**
+   * Mitigación del fail-open (hallazgo B3): con `ownership === null` (la consulta de
+   * propiedad está cargando o falló) los avisos específicos no existen — `gobernados` queda
+   * vacío. Si el producto YA tiene identidad remota, se avisa genérico en vez de callar;
+   * la confirmación específica no se puede exigir sin saber quién gobierna qué, pero el
+   * guard del server sigue bloqueando el envío y la venta igual (fail-closed real).
+   */
+  const propiedadIlegible =
+    ownership == null && !!initial && (initial.metaRetailerId != null || initial.syncToMeta === true);
+  /** Confirmación pendiente: qué campos gobernados cambió este guardado, y el input listo. */
+  const [confirmGobernado, setConfirmGobernado] = useState<{ etiquetas: string[]; input: ProductInput } | null>(null);
+  const avisoGobernado = (campo: CampoPublico) =>
+    gob(campo) ? (
+      <p className="mt-1 text-xs text-amber-700">
+        Este dato lo publica {fuente}: se corrige allá. Lo que edites acá queda local y no se publica.
+      </p>
+    ) : null;
   const pf = initial?.perfume ?? null;
   // `brand` neutral (campo nuevo del programa): si el producto viejo solo tiene la marca
   // adentro de `perfume`, se precarga de ahí — un solo campo "Marca" para cualquier rubro.
@@ -124,12 +158,14 @@ export function ProductForm({ initial, initialCost, initialPriority, categories,
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       // Escape cierra igual que "Cancelar" (no durante el guardado: sería mentir el estado).
-      if (e.key === 'Escape' && !saving) onCancel();
+      // Con la confirmación de campo gobernado abierta, Escape la cierra a ELLA (su propio
+      // handler), no al formulario entero de abajo.
+      if (e.key === 'Escape' && !saving && !confirmGobernado) onCancel();
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [saving]);
+  }, [saving, confirmGobernado]);
 
   const buildFicha = (): ProductAiFicha => ({
     ...(f.cuandoRecomendar.trim() ? { cuandoRecomendar: f.cuandoRecomendar.trim() } : {}),
@@ -217,6 +253,14 @@ export function ProductForm({ initial, initialCost, initialPriority, categories,
       } : null,
       aiFicha: Object.keys(ficha).length ? ficha : null,
     };
+    // ADR-0022 §4 (caso Odyssey): editar un campo que publica otra fuente JAMÁS se guarda en
+    // silencio — se confirma explicando que el cambio queda local y puede marcar deriva.
+    // Un producto NUEVO todavía no existe publicado: no hay deriva posible que confirmar.
+    const cambiados = initial ? camposGobernadosCambiados(initial, input, gobernados) : [];
+    if (cambiados.length > 0) {
+      setConfirmGobernado({ etiquetas: [...new Set(cambiados.map(etiquetaCampo))], input });
+      return;
+    }
     onSubmit(input);
   };
 
@@ -246,13 +290,30 @@ export function ProductForm({ initial, initialCost, initialPriority, categories,
               Datos públicos <span className="font-normal text-ink-500">(pueden ir a Meta y a tus clientes)</span>
             </legend>
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+              {/* Aviso de gobierno externo (ADR-0022): quién controla estos datos y dónde se
+                  corrigen — ANTES de editar, no como sorpresa al guardar. */}
+              {gobernados.length > 0 && (
+                <p role="status" className="sm:col-span-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                  <strong>{[...new Set(gobernados.map(etiquetaCampo))].join(', ')}</strong>: estos datos publicados los
+                  controla {fuente} y se corrigen allá. Lo que edites acá queda local, no se publica, y si difiere de lo
+                  publicado puede bloquear la venta automática hasta que coincidan.
+                </p>
+              )}
+              {propiedadIlegible && (
+                <p role="status" className="sm:col-span-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                  No pudimos verificar quién administra el catálogo publicado. Este producto existe en Meta: si lo
+                  publica otro sistema, lo que edites acá puede quedar solo local y no publicarse.
+                </p>
+              )}
               <div className="sm:col-span-2">
                 <label className={lbl} htmlFor={id('name')}>Nombre *</label>
                 <input id={id('name')} ref={nameRef} className={field} required value={f.name} onChange={(e) => set('name', e.target.value)} />
+                {avisoGobernado('title')}
               </div>
               <div>
                 <label className={lbl} htmlFor={id('brand')}>Marca</label>
                 <input id={id('brand')} className={field} value={f.brand} onChange={(e) => set('brand', e.target.value)} placeholder="Meta la exige para publicar" />
+                {avisoGobernado('brand')}
               </div>
               <div>
                 <label className={lbl} htmlFor={id('categoryId')}>Categoría</label>
@@ -269,10 +330,12 @@ export function ProductForm({ initial, initialCost, initialPriority, categories,
                 {!f.categoryId && (
                   <p className="mt-1 text-xs text-ink-500">Sin categoría no se puede publicar en Meta ni ordenar el catálogo.</p>
                 )}
+                {avisoGobernado('category')}
               </div>
               <div>
                 <label className={lbl} htmlFor={id('price')}>Precio de venta (₲) *</label>
                 <input id={id('price')} className={field} type="number" min={0} inputMode="numeric" required value={f.price} onChange={(e) => set('price', Number(e.target.value))} />
+                {avisoGobernado('price')}
               </div>
               <div>
                 <label className={lbl} htmlFor={id('compareAtPrice')}>Precio anterior (₲, tachado)</label>
@@ -286,6 +349,7 @@ export function ProductForm({ initial, initialCost, initialPriority, categories,
               <div className="sm:col-span-2">
                 <label className={lbl} htmlFor={id('images')}>Imágenes (una URL https por línea; la primera es la principal)</label>
                 <textarea id={id('images')} className={field} rows={2} value={f.imagesText} onChange={(e) => set('imagesText', e.target.value)} placeholder={'https://…\nhttps://…'} />
+                {avisoGobernado('image')}
               </div>
               <div className="sm:col-span-2">
                 <label className={lbl} htmlFor={id('productUrl')}>Enlace al producto (URL)</label>
@@ -298,10 +362,12 @@ export function ProductForm({ initial, initialCost, initialPriority, categories,
                   placeholder="https://tutienda.com/producto"
                 />
                 <p className="mt-1 text-xs text-ink-500">Meta lo exige para publicar el producto en el catálogo.</p>
+                {avisoGobernado('url')}
               </div>
               <div className="sm:col-span-2">
                 <label className={lbl} htmlFor={id('description')}>Descripción</label>
                 <textarea id={id('description')} className={field} rows={2} value={f.description} onChange={(e) => set('description', e.target.value)} />
+                {avisoGobernado('description')}
               </div>
             </div>
           </fieldset>
@@ -333,6 +399,12 @@ export function ProductForm({ initial, initialCost, initialPriority, categories,
               <div>
                 <label className={lbl} htmlFor={id('stock')}>Stock</label>
                 <input id={id('stock')} className={field} type="number" min={0} inputMode="numeric" value={f.stock} onChange={(e) => set('stock', Number(e.target.value))} />
+                {/* El stock es interno, pero la DISPONIBILIDAD publicada sale de él. */}
+                {(gob('inventory') || gob('availability')) && (
+                  <p className="mt-1 text-xs text-amber-700">
+                    La disponibilidad publicada la controla {fuente}: tu stock de acá queda local y no se publica.
+                  </p>
+                )}
               </div>
               <div>
                 <label className={lbl} htmlFor={id('lowStockThreshold')}>Aviso de stock bajo (unidades)</label>
@@ -509,6 +581,30 @@ export function ProductForm({ initial, initialCost, initialPriority, categories,
           </button>
         </div>
       </form>
+
+      {/* Confirmación de edición de campo gobernado (ADR-0022 §4). FUERA del <form>: los
+          botones del modal no deben disparar el submit del formulario de abajo. */}
+      {confirmGobernado && (
+        <ConfirmModal
+          title="Este dato lo controla otra fuente"
+          confirmLabel="Guardar igual (queda local)"
+          cancelLabel="Volver"
+          danger
+          onCancel={() => setConfirmGobernado(null)}
+          onConfirm={() => {
+            const input = confirmGobernado.input;
+            setConfirmGobernado(null);
+            onSubmit(input);
+          }}
+        >
+          <p>
+            {confirmGobernado.etiquetas.join(', ')}: {confirmGobernado.etiquetas.length === 1 ? 'este dato lo' : 'estos datos los'}{' '}
+            controla {fuente}. Tu cambio queda local, <strong>no se publica</strong>, y puede marcar una diferencia con
+            lo publicado que bloquee la venta automática hasta que coincidan.
+          </p>
+          <p className="mt-2">Para cambiar lo publicado, corregilo en {fuente}.</p>
+        </ConfirmModal>
+      )}
     </div>
   );
 }

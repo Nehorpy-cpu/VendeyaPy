@@ -265,6 +265,15 @@ export {
 // bloqueo quedaba fail-OPEN. No llama a Graph, no escribe nada y jamás devuelve URLs ni tokens.
 export { metaCatalogOwnershipStatus } from './functions/meta/catalogOwnershipStatusCallable.js';
 
+// Autoridad de catálogo AUTOSERVICIO (CATALOG-AUTHORITY-SELF-SERVICE-1, ADR-0022): transición
+// de modo preview→apply (owner-only) que declara `catalogSync.relationship` con evidencia real
+// (TTL 10 min, uso único, mismo actor, precondición fresca). El apply escribe con update mask
+// estricto y JAMÁS toca enabled/mode/catalogId, borra datos, crea jobs ni activa live.
+export {
+  metaCatalogAuthorityPreview,
+  metaCatalogAuthorityApply,
+} from './functions/meta/catalogAuthorityCallables.js';
+
 // Reconciliación PERIÓDICA del estado actual (ADR-0015 §6): barrido paginado del catálogo
 // remoto (SOLO GET) que actualiza metaSyncState/metaVerifiedAt/metaDrift de los productos
 // mapeados — importados y vinculados manualmente. Nunca escribe en Meta ni borra nada.

@@ -323,7 +323,8 @@ async function aplicar(token, data = {}) {
   const p = await preview(token, data);
   if (!p?.planHash) return { res: null, preview: p };
   const r = await call('runTenantJob', token, { action: 'catalogSyncApply', ...data, args: { previewRunId: p.runId, planHash: p.planHash } });
-  return { res: r.result?.result ?? null, err: r.err, preview: p };
+  // `errMsg` viaja también: los checks del gate de relación (ADR-0022) asertan el mensaje.
+  return { res: r.result?.result ?? null, err: r.err, errMsg: r.errMsg, preview: p };
 }
 const entradaDe = (plan, productId) => (plan?.entries ?? []).find((e) => e.productId === productId) ?? null;
 
@@ -339,9 +340,13 @@ const entradaDe = (plan, productId) => (plan?.entries ?? []).find((e) => e.produ
     `degraded=${p?.ownership?.degraded} reasons=${JSON.stringify(p?.ownership?.reasons)}`);
   check('OW-1b. el modo EFECTIVO cae a dry_run aunque el documento diga live (el techo manda)',
     p?.configMode === 'live' && p?.effectiveMode === 'dry_run', `config=${p?.configMode} efectivo=${p?.effectiveMode}`);
-  const { res } = await aplicar(owner);
-  check('OW-1c. el apply queda BLOQUEADO con el motivo de propiedad (no con "está en dry_run")',
-    res?.status === 'apply_blocked' && res?.reason === 'ownership_not_live', `status=${res?.status} reason=${res?.reason}`);
+  // (ADR-0022 §4) La propiedad degradada deriva relación `mirror` y publicar quedó detrás del
+  // gate de relación: el apply se RECHAZA explícito (failed-precondition con el motivo de
+  // espejo) ANTES de correr — más cerrado que el `apply_blocked` histórico. El espíritu es el
+  // mismo y OW-1d lo sigue probando con datos: cero jobs, cero escrituras.
+  const { res, err, errMsg } = await aplicar(owner);
+  check('OW-1c. el apply queda RECHAZADO por el gate de relación (espejo: escribir hacia Meta está bloqueado)',
+    res === null && err === 'FAILED_PRECONDITION' && /espejo/i.test(String(errMsg ?? '')), `err=${err} msg=${String(errMsg ?? '').slice(0, 70)}`);
   check('OW-1d. ningún job encolado y CERO escrituras hacia Meta', (await jobsOf()).length === 0 && (await writesSnap()).empty);
   // Sin ownership NO hay patch posible: el plan no propone una sola acción accionable.
   const accionables = (p?.entries ?? []).filter((e) => ['create', 'update', 'disable'].includes(e.action));
@@ -410,10 +415,13 @@ const entradaDe = (plan, productId) => (plan?.entries ?? []).find((e) => e.produ
   check('OW-3c. Odyssey (precio divergente) queda BLOQUEADO por propiedad, con la nota de fuente externa',
     odyssey?.action === 'blocked' && (odyssey?.blockedReasons ?? []).includes('externally_owned') && odyssey?.note === 'campos_gobernados_por_fuente_externa',
     `action=${odyssey?.action} nota=${odyssey?.note}`);
-  const { res } = await aplicar(owner);
-  check('OW-3d. el apply no pasa del techo de propiedad: CERO jobs encolados con mode:live',
-    res?.status === 'apply_blocked' && res?.reason === 'ownership_not_live' && (await jobsOf()).length === 0 && (await writesSnap()).empty,
-    `status=${res?.status} jobs=${(await jobsOf()).length}`);
+  // (ADR-0022 §4) external_managed deriva `mirror`: el gate de relación rechaza el apply
+  // ANTES del techo de propiedad (que sigue ahí abajo, intacto). Igual de duro: cero jobs y
+  // cero escrituras con la config en live.
+  const { res, err } = await aplicar(owner);
+  check('OW-3d. el apply no pasa (gate de relación mirror): CERO jobs encolados con mode:live',
+    res === null && err === 'FAILED_PRECONDITION' && (await jobsOf()).length === 0 && (await writesSnap()).empty,
+    `err=${err} jobs=${(await jobsOf()).length}`);
   const r = await drain(T);
   check('OW-3e. el drenaje del outbox ni siquiera lee la cola (ownership_not_writable)',
     r?.drain?.skipped === 'ownership_not_writable' && (r?.drain?.claimed ?? 0) === 0, `skipped=${r?.drain?.skipped}`);
@@ -633,16 +641,23 @@ const waitHold = async (p) => {
   await wipeWrites();
   await setCfg(T, { ...CFG_LEGACY, mode: 'live', ownership: OWN_EXTERNA });
   const ciclo = async () => {
-    const { res } = await aplicar(owner);
+    const { res, err } = await aplicar(owner);
     const r = await drain(T);
-    return { apply: res?.status ?? null, jobs: (await jobsOf()).length, envios: (await idsEnviados()).length, drain: r?.drain?.skipped ?? null };
+    return { apply: res?.status ?? null, err: err ?? null, jobs: (await jobsOf()).length, envios: (await idsEnviados()).length, drain: r?.drain?.skipped ?? null };
   };
   const c1 = await ciclo();
   // El feed "revierte" de madrugada: el remoto vuelve a decir lo que decía.
   await setFixture(ITEMS_BASE(), { dataSources: [feedCrudo()], feedCount: 1, pagesPerList: 1 });
   const c2 = await ciclo();
+  // (ADR-0022 §4) La FORMA del bloqueo del apply cambió (gate de relación `mirror` ⇒
+  // failed-precondition en vez del `apply_blocked` amable); la SUSTANCIA es la misma y se
+  // sigue exigiendo entera: cero jobs, cero envíos, y el drenaje sin leer la cola. La
+  // reconciliación/verificación del ciclo diario de arfagi siguen corriendo bajo mirror
+  // (OW-7..10 y OW-17h lo prueban en este mismo script).
   check('OW-12. dos ciclos completos con el remoto revertido ⇒ CERO jobs y CERO escrituras (el loop diario es inalcanzable)',
-    c1.jobs === 0 && c2.jobs === 0 && c1.envios === 0 && c2.envios === 0 && c1.apply === 'apply_blocked' && c2.apply === 'apply_blocked',
+    c1.jobs === 0 && c2.jobs === 0 && c1.envios === 0 && c2.envios === 0 &&
+    c1.apply === null && c1.err === 'FAILED_PRECONDITION' && c2.apply === null && c2.err === 'FAILED_PRECONDITION' &&
+    c1.drain === 'ownership_not_writable' && c2.drain === 'ownership_not_writable',
     `c1=${JSON.stringify(c1)} c2=${JSON.stringify(c2)}`);
 }
 
@@ -958,11 +973,13 @@ const [C_BOT, C_CHECKOUT, C_SANO] = CLIENTES;
     r?.status === 'completed' && odyFinal?.metaSyncState === 'drifted_external' && (odyFinal?.metaDrift?.fields ?? []).includes('price') &&
     odyFinal?.metaDrift?.owner === 'external',
     `state=${odyFinal?.metaSyncState} campos=${JSON.stringify(odyFinal?.metaDrift?.fields)}`);
-  const { res: applyCatalogo } = await aplicar(owner);
-  check('OW-17i. y el catálogo ya no puede escribirse: apply bloqueado, cero jobs, cero POST a Meta',
-    applyCatalogo?.status === 'apply_blocked' && applyCatalogo?.reason === 'ownership_not_live' &&
+  // (ADR-0022 §4) Tras la migración a external_managed la relación deriva `mirror`: el apply
+  // se rechaza en el gate de relación. Igual de cerrado que antes: cero jobs, cero POST.
+  const { res: applyCatalogo, err: errApplyCat } = await aplicar(owner);
+  check('OW-17i. y el catálogo ya no puede escribirse: apply rechazado (mirror), cero jobs, cero POST a Meta',
+    applyCatalogo === null && errApplyCat === 'FAILED_PRECONDITION' &&
     (await jobsOf()).length === 0 && (await writesSnap()).empty,
-    `status=${applyCatalogo?.status}`);
+    `err=${errApplyCat}`);
   check('OW-17j. el run de migración quedó AUDITADO y su doc cerrado al cliente',
     (await db.collection(`tenants/${T}/auditLogs`).where('action', '==', 'meta.catalog_ownership_migration_run').get()).size >= 3 &&
     (await restGet(`tenants/${T}/metaCatalogOwnershipRuns/${apply?.runId}`, owner)) === 403);

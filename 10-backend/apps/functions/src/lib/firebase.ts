@@ -153,6 +153,13 @@ export const paths = {
    */
   metaCatalogOwnershipRuns: (tenantId: string) => `tenants/${tenantId}/metaCatalogOwnershipRuns`,
   metaCatalogOwnershipRun: (tenantId: string, runId: string) => `tenants/${tenantId}/metaCatalogOwnershipRuns/${runId}`,
+  /**
+   * Runs de TRANSICIÓN de autoridad de catálogo (ADR-0022 §3): preview→apply owner-facing que
+   * declara `catalogSync.relationship` (y la propiedad si cambia el modelo). Admin-SDK-only;
+   * jamás contiene tokens, URLs firmadas ni PII — solo el plan saneado y su evidencia.
+   */
+  metaCatalogAuthorityRuns: (tenantId: string) => `tenants/${tenantId}/metaCatalogAuthorityRuns`,
+  metaCatalogAuthorityRun: (tenantId: string, runId: string) => `tenants/${tenantId}/metaCatalogAuthorityRuns/${runId}`,
   trackingSources: (tenantId: string) => `tenants/${tenantId}/trackingSources`,
   trackingSource: (tenantId: string, id: string) => `tenants/${tenantId}/trackingSources/${id}`,
   businessEvents: (tenantId: string) => `tenants/${tenantId}/businessEvents`,

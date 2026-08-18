@@ -49,6 +49,7 @@ import {
   IMPORT_RUN_LEASE_MS,
   type MetaCatalogImportRunDoc,
 } from '../../meta/catalogImport.js';
+import { requireCatalogRelationship } from '../../meta/catalogAuthority.js';
 import { refreshCatalogQualityNotification } from '../../products/qualityNotification.js';
 import { loadCatalogProfile, requireCatalogId } from './catalogReconcileCallables.js';
 
@@ -126,6 +127,10 @@ export const metaCatalogImportRun = onCall<{ tenantId?: string; resume?: boolean
       if (!catSnap.exists) throw new HttpsError('invalid-argument', 'La categoría indicada no existe en esta empresa.');
     }
 
+    // ADR-0022 §4: el run paginado alimenta el espejo — mirror/managed; `none` bloquea. Las
+    // lecturas de estado (metaCatalogImportStatus/QualitySummary) NO se gatean: el panel
+    // necesita mostrar el estado aunque la relación bloquee las acciones.
+    await requireCatalogRelationship(tenantId, 'mirror', 'managed');
     const catalogId = await requireCatalogId(tenantId);
     // La config se lee UNA vez acá: se usa para FIJAR la política a un run NUEVO (y como
     // fallback para docs previos al campo `profile`). Un run existente usa LA DEL RUN.

@@ -740,3 +740,54 @@ callables de adjuntos/receipt-gate (cerrojo saliente) + Hosting (panel). **Sin �
 compuestos nuevos, sin cambios de Rules, sin TTL nuevos.** Deudas ADR-0021: polling (no
 realtime), filtros client-side sobre ventana de 100, IG/Messenger solo lectura, GC de
 salientes fallidos.
+
+## CATALOG-AUTHORITY-SELF-SERVICE-1 — 2026-08-18 (EN REPO — NO DESPLEGADO)
+
+**ADR-0022**: autoridad de catálogo autoservicio SOBRE la base desplegada de ADR-0015 (nada se
+renombra; `sourceOfTruth` sigue muerto). Eje declarado nuevo `catalogSync.relationship`
+(`none|mirror|managed`) + contrato derivado puro `deriveCatalogAuthority` (`authority`
+vendeyapy|meta|external desde `ownership.model`+`external.kind`; invariante `botCatalog:
+local_mirror`). Combinaciones: A vendeyapy+none (local-sin-Meta — por fin expresable),
+B vendeyapy+managed (rieles vigentes), C meta+mirror, D external+mirror (arfagi);
+external+managed inválido. Derivación legacy determinística sin backfills (sin config ⇒ A;
+arfagi ⇒ D; credipower intocado; `mode` NO participa — `enabled+off` = managed con envío
+apagado). **Transición**: `metaCatalogAuthorityPreview/Apply` (OWNER/ADMIN; planHash+TTL 10
+min+uso único+actor, patrón real de meta/catalog.ts; `concurrent_change` por huella canónica de
+TODO catalogSync; update mask estricto — solo `relationship` y, si cambia el modelo,
+`ownership` re-normalizado; jamás enabled/mode/catalogId/productos/jobs/live/opt-ins; audit
+`meta.catalog_authority_changed`; runs en `metaCatalogAuthorityRuns` sin secretos). **Gating
+por relación** en todos los callables Meta de catálogo (none ⇒ nada Meta; mirror ⇒
+import/reconcile/verify sí + dry-run `catalogSync` read-only sí, escrituras no; managed ⇒
+rieles vigentes; lecturas de estado sin gate) + schedulers por tenant con aislamiento; RBAC
+corregido: `catalogSyncApply` OWNER-only también en backend (antes MANAGER podía). **Panel**:
+selector «Quién administra tu catálogo» (4 opciones comprensibles, preview visual con bloqueos
+traducidos y links a requisitos, confirmación fuerte tipeando CAMBIAR para salir de managed,
+frescura del espejo solo en mirror, honestidad del conector externo sin botón falso, roles §6),
+gating de acciones espejo, edición consciente de campos gobernados (incluye `status`→
+disponibilidad) con confirmación explícita y aviso genérico si el ownership no cargó.
+
+**Review adversarial**: 1 ALTO (jobs de outbox no-terminales bajo mirror/none quedaban zombis
+irrecuperables — scheduler salteaba hasta el sweep — y bloqueaban el REGRESO a managed:
+deadlock) + 1 MEDIO (carrera catalogSyncApply↔authorityApply que encolaba jobs bajo none) + 6
+BAJO — **TODOS corregidos**: gate del scheduler solo al drain (sweep/confirmación siempre),
+discard des-gateado (cancelación local), re-derivación de relación DENTRO de la tx de encolado
++ re-check de sync-run en el apply, opt-out de verificación solo sin fuente comercial, re-check
+de conexión en apply, dry-run bajo mirror, detección de `status` gobernado, textos honestos.
+
+**Verificación (exit codes reales)**: batería completa typecheck/lint/build/test/diff-check en
+0 (functions: suites de catálogo 38 archivos / 1052 tests; web 695/695). E2E NUEVO
+`verify-catalog-authority` **23/23** en emulador limpio (derivación local-sin-Meta con BOT
+respondiendo sin Meta, clasificación legacy, preview→apply con update-mask asertado por valor,
+replay/mismatch/concurrent, gates none/mirror con kind exacto, dry-run mirror permitido, dos
+tenants en modos distintos simultáneos, cero deletes/jobs, credipower jamás tocado, runs sin
+secretos) + regresiones: verify-meta-catalog **194/194** (3 checks superseded honestos con
+aserciones MÁS fuertes + 2 preservados vía fixes de derivación/orden), ownership-model,
+catalog-onboarding, fase4b-meta y conversations-inbox en verde.
+
+**Deploy futuro estimado**: 2 CREATE (`metaCatalogAuthorityPreview/Apply`) + UPDATE de la
+familia metaCatalog\* (gates), `runTenantJob` (RBAC+gate), schedulers de outbox/verificación,
+`metaCatalogOwnershipStatus` (bloque authority) + Hosting (panel). **Sin índices compuestos
+nuevos, sin cambios de Rules** (los runs caen en el default deny; match explícito queda
+cosmético). **Deudas → programa del conector externo**: selector de `catalogId`, conector
+directo URL CSV/JSON, TTL/limpieza de runs de autoridad, match explícito de rules, doc para
+tenants locales con productos legacy sin quality (re-guardar recalcula).

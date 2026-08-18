@@ -59,6 +59,7 @@ import {
   outboundPrice,
   outboundTitle,
 } from './catalogOutbound.js';
+import { deriveCatalogAuthority } from './catalogAuthority.js';
 import { normalizeCatalogOwnership, WRITABLE_FIELDS, type EffectiveOwnership, type WritableField } from './catalogOwnership.js';
 import { declaredCatalogId, declaredExternalGovernance, normalizeCatalogSyncConfig } from './catalogSyncConfig.js';
 import { effectiveMetaSyncState, verificationTtlMs, VERIFICATION_MAX_TTL_MS } from './catalogVerificationState.js';
@@ -1073,7 +1074,9 @@ export function verificationProgressRegression(
  * fail-closed sigue exactamente igual que antes de ADR-0015.
  */
 export class CatalogVerificationUnavailableError extends Error {
-  constructor(message: string) {
+  /** `skipReason` (ADR-0022): el scheduler cuenta cada motivo por separado — un skip por
+   *  relación declarada `none` no puede confundirse con un tenant sin config. */
+  constructor(message: string, readonly skipReason?: CatalogVerificationSkipReason) {
     super(message);
     this.name = 'CatalogVerificationUnavailableError';
   }
@@ -1108,7 +1111,14 @@ export type CatalogVerificationSkipReason =
    * inerte: nada bloquea la venta y no hay evidencia que refrescar. Incluye la declaración
    * puramente cosmética (el feed publica título/imagen), que tampoco activa el guard.
    */
-  | 'no_external_governance';
+  | 'no_external_governance'
+  /**
+   * (ADR-0022 §4) La relación declarada con Meta es `none`: el tenant decidió no tener NINGUNA
+   * acción de catálogo contra Meta, verificación incluida. Solo aparece con una declaración
+   * EXPLÍCITA (`catalogSync.relationship: 'none'`): los tenants legacy derivan su relación de
+   * la propiedad y conservan el comportamiento de hoy (arfagi = mirror ⇒ sigue verificando).
+   */
+  | 'relationship_none';
 
 /**
  * ¿Se puede (y se debe) reconciliar este tenant hoy? PURA: entra el `catalogSync` CRUDO, sale la
@@ -1155,10 +1165,28 @@ const esObjeto = (x: unknown): x is Record<string, unknown> => typeof x === 'obj
  * el tenant como "salteado" y no decir nada.
  */
 export function catalogVerificationEligibility(rawCatalogSync: unknown): CatalogVerificationEligibility {
+  // (ADR-0022 §4) Gate por RELACIÓN, solo donde convierte un 'run' en skip: exige una
+  // declaración EXPLÍCITA y HONRADA de `none` (`relationship: 'none'` que la derivación
+  // efectivamente respeta). Un `none` meramente DERIVADO (p. ej. hybrid con la sync apagada)
+  // NO saltea: para ese tenant el guard puede seguir activo y esta corrida es lo único que
+  // refresca su evidencia — saltearla reintroduciría el apagado silencioso del hallazgo B1.
+  //
+  // (review B1) Y NI SIQUIERA la declaración honrada alcanza si una fuente externa RECONOCIDA
+  // gobierna un campo COMERCIAL: con el guard activo, honrar el opt-out apagaría el único
+  // refresco de su evidencia ⇒ stale a las 24 h y venta apagada en silencio (el estado solo es
+  // alcanzable sembrándolo a mano — la transición bloquea hybrid→A con `external_conflict` —
+  // pero la elegibilidad no puede depender de que nadie lo siembre). Con gobierno externo
+  // puramente cosmético el guard está inerte y el opt-out sí se honra.
+  const relacion = deriveCatalogAuthority(rawCatalogSync);
+  const guardComercial = declaredExternalGovernance(rawCatalogSync).fields.some((f) => COMMERCIAL_FIELDS.includes(f));
+  const optOutExplicito = relacion.relationship === 'none' && relacion.declared && !guardComercial;
   const cfg = normalizeCatalogSyncConfig(rawCatalogSync);
   // Camino de siempre: nuestra sync está encendida ⇒ hay catálogo y hay propiedad efectiva
   // (aunque esté degradada por nivel 2: leer y diagnosticar se puede, escribir no).
-  if (cfg.enabled && cfg.catalogId) return { can: 'run', via: 'sync_enabled', catalogId: cfg.catalogId, ownership: cfg.ownership };
+  if (cfg.enabled && cfg.catalogId) {
+    if (optOutExplicito) return { can: 'skip', reason: 'relationship_none' };
+    return { can: 'run', via: 'sync_enabled', catalogId: cfg.catalogId, ownership: cfg.ownership };
+  }
 
   // Nuestro interruptor está apagado. Eso decide si ESCRIBIMOS, no si podemos MIRAR.
   const gobierno = declaredExternalGovernance(rawCatalogSync);
@@ -1181,6 +1209,10 @@ export function catalogVerificationEligibility(rawCatalogSync: unknown): Catalog
 
   const catalogId = declaredCatalogId(rawCatalogSync);
   if (!catalogId) return { can: 'blocked', reason: 'external_without_catalog', externalFields: [...gobierno.fields] };
+
+  // (ADR-0022 §4) Mismo gate sobre el camino de gobierno externo: solo el opt-out EXPLÍCITO
+  // (`relationship: 'none'` honrado) apaga el refresco; el estado normal acá deriva `mirror`.
+  if (optOutExplicito) return { can: 'skip', reason: 'relationship_none' };
 
   // La propiedad se normaliza del MISMO campo `ownership` que ya miró `declaredExternalGovernance`
   // (una sola derivación). Se usa solo para clasificar de quién es cada divergencia: esta corrida
@@ -1421,7 +1453,12 @@ export async function runCatalogVerificationForTenant(opts: CatalogVerificationR
     // `null` cuando no hay nada que cerrar—. Sigue sin gastar una sola llamada contra Meta, que es
     // lo que el fail-closed de nivel 1 promete.
     await alertarVerificacionImposible(tenantId, null);
-    throw new CatalogVerificationUnavailableError('La sincronización de catálogo no está configurada para esta empresa.');
+    throw new CatalogVerificationUnavailableError(
+      elegible.reason === 'relationship_none'
+        ? 'La relación del catálogo con Meta está declarada como «ninguna»: no hay nada que verificar contra Meta para esta empresa.'
+        : 'La sincronización de catálogo no está configurada para esta empresa.',
+      elegible.reason,
+    );
   }
   // Se puede verificar ⇒ si quedó un aviso de "no podemos verificar" abierto, se cierra.
   await alertarVerificacionImposible(tenantId, null);

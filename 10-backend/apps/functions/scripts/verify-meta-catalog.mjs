@@ -174,19 +174,37 @@ const ownerBoutique = await signIn('owner@boutique.com');
 }
 
 // ═══ B. Config fail-closed ═══
+// (ADR-0022 §4) Un tenant SIN config deriva relación `none` y el ciclo Meta entero queda
+// detrás del gate de relación: `catalogSync` ya no llega al run (que respondía `disabled`)
+// sino que se RECHAZA explícito con failed-precondition. El espíritu del check es el mismo
+// —fail-closed sin tocar Meta y sin dejar run docs— demostrado ahora por el rechazo + cero
+// escrituras (y el check 6 sigue exigiendo cero run docs).
 {
-  const { result } = await call('runTenantJob', owner, { action: 'catalogSync', tenantId: T });
-  check('3. Sin config ⇒ disabled (fail-closed), sin tocar Meta', result?.result?.status === 'disabled', `status=${result?.result?.status}`);
+  const { err, errMsg } = await call('runTenantJob', owner, { action: 'catalogSync', tenantId: T });
+  check(
+    '3. Sin config ⇒ relación none: gate authority_relationship_blocked (fail-closed), sin tocar Meta',
+    err === 'FAILED_PRECONDITION' && /no tiene relación con Meta/.test(errMsg ?? '') && (await writesSnap()).empty,
+    `err=${err}`,
+  );
 }
 // (ADR-0015) `sourceOfTruth` quedó LEGACY y ya no apaga nada: la autoridad de escritura es
 // `ownership`, que se verifica en su propia sección (B2). Este slot conserva un caso
 // fail-closed de FORMA igual de duro y que tampoco puede dejar run docs: un `enabled` truthy
-// que no es booleano jamás habilita la sincronización.
+// que no es booleano jamás habilita la sincronización — (ADR-0022 §1) tampoco cuenta como
+// `enabled` para la derivación, así que la relación queda `none` y el gate rechaza antes
+// de que exista corrida alguna.
 await setConfig({ ...VALID_CFG, enabled: 'true' });
 {
-  const { result } = await call('runTenantJob', owner, { action: 'catalogSync' });
-  check('4. enabled truthy NO booleano ⇒ disabled (fail-closed de forma)', result?.result?.status === 'disabled');
+  const { err, errMsg } = await call('runTenantJob', owner, { action: 'catalogSync' });
+  check(
+    '4. enabled truthy NO booleano ⇒ relación none: gate rechaza (fail-closed de forma)',
+    err === 'FAILED_PRECONDITION' && /no tiene relación con Meta/.test(errMsg ?? '') && (await writesSnap()).empty,
+    `err=${err}`,
+  );
 }
+// (ADR-0022 §1) `mode:'off'` con `enabled:true` es un tenant `managed` CON EL ENVÍO APAGADO:
+// el modo es el interruptor de EJECUCIÓN (nivel 1), no la relación. El gate lo deja pasar y
+// el contrato fail-closed histórico del run se conserva intacto: `disabled`, cero run docs.
 await setConfig({ ...VALID_CFG, mode: 'off' });
 {
   const { result } = await call('runTenantJob', owner, { action: 'catalogSync' });
@@ -951,9 +969,16 @@ await wipe(`${FIXTURE}/writes`);
 
 // ═══ G. Aislamiento de tenant ═══
 {
-  const { result } = await call('runTenantJob', ownerBoutique, { action: 'catalogSync', tenantId: T });
-  // resolvePanelAuth ignora el tenantId ajeno para OWNER: corre sobre SU tenant (sin config ⇒ disabled).
-  check('41. OWNER de otro tenant no puede correr la sync de perfumería', result?.result?.status === 'disabled');
+  const { err, errMsg } = await call('runTenantJob', ownerBoutique, { action: 'catalogSync', tenantId: T });
+  // resolvePanelAuth ignora el tenantId ajeno para OWNER: la acción resuelve sobre SU tenant.
+  // (ADR-0022 §4) Ese tenant no tiene config ⇒ relación `none` ⇒ el gate la RECHAZA explícito
+  // (antes el run corría sobre boutique y respondía `disabled`). Perfumería sigue intocada:
+  // los checks 42/43 lo prueban con los datos, igual que siempre.
+  check(
+    '41. OWNER de otro tenant no puede correr la sync de perfumería (gate de relación sobre SU tenant)',
+    err === 'FAILED_PRECONDITION' && /no tiene relación con Meta/.test(errMsg ?? ''),
+    `err=${err}`,
+  );
   const x = await productOf('MCE2E-X') ?? (await db.doc(`tenants/${T2}/products/MCE2E-X`).get()).data();
   check('42. productos del otro tenant intactos (sin meta*)', x?.metaSyncStatus === undefined);
   check('43. cero runs en el tenant sin config (análogo credipower)', (await db.collection(`tenants/${T2}/metaCatalogSyncRuns`).get()).empty);

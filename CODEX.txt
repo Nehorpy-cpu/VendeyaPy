@@ -254,3 +254,17 @@ accesibles, adjuntos, borradores, info con teléfono enmascarado y ~perfil). RED
 en 0; E2E nuevo 42/42 + 5 regresiones verdes; visual 3 viewports con 3 hallazgos vivos
 corregidos; review adversarial 0 ALTO, 1 MEDIO + 6 BAJO todos corregidos, P1-P3 en ADR. Deploy
 futuro: 11 CREATE + updates webhook/manualMessage/adjuntos + Hosting; sin índices/Rules/TTL.
+
+### CATALOG-AUTHORITY-SELF-SERVICE-1 — 2026-08-18 (EN REPO — NO DESPLEGADO)
+ADR-0022 sobre ADR-0015: eje declarado catalogSync.relationship (none|mirror|managed) +
+derivación pura de autoridad (vendeyapy|meta|external; bot siempre local_mirror; legacy sin
+backfills: arfagi⇒external+mirror, sin-config⇒vendeyapy+none, mode no participa). Transición
+preview→apply con planHash/TTL/uso único/huella concurrent_change y update mask estricto
+(jamás enabled/mode/catalogId/live/opt-ins/deletes); gating por relación en todos los callables
+Meta + schedulers (drain-only) + RBAC catalogSyncApply owner-only; panel selector honesto con
+confirmación fuerte, frescura y edición consciente de campos gobernados. Review adversarial:
+1 ALTO (zombis outbox + deadlock de regreso) + 1 MEDIO (carrera de encolado) + 6 BAJO — todos
+corregidos (sweep/discard siempre, re-derivación en tx de encolado). Batería en 0; E2E nuevo
+23/23 + meta-catalog 194/194 + 4 regresiones verdes. Deploy futuro: 2 CREATE + updates
+metaCatalog*/runTenantJob/schedulers + Hosting; sin índices/Rules. Deudas al conector: catalogId
+selector, URL directa, TTL de runs.

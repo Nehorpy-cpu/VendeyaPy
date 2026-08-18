@@ -25,6 +25,7 @@
 import { useId, useMemo, useState } from 'react';
 import type { Product } from '@vpw/shared';
 import { normalizarDerivaProducto, type CatalogOwnershipStatus, type ProductoDerivaView } from '@/lib/catalog';
+import { motivoBloqueoPorRelacion, nombreFuentePublicadora } from '@/lib/catalogAuthority';
 import { ESTADO_META_INFO, ESTADO_SIN_VERIFICAR, etiquetaMotivo } from '@/lib/catalogOwnership';
 import { MetaDriftDetail } from '@/components/MetaDriftDetail';
 import { StatusBadge } from '@/components/ui';
@@ -100,6 +101,11 @@ export function motivoSinCamposPropios(
       ? 'Estamos verificando quién administra el catálogo.'
       : 'No pudimos verificar quién administra el catálogo.';
   }
+  // ADR-0022 §4: la relación declarada manda ANTES que la propiedad por campos. Con `none`
+  // o `mirror` no existe escritura hacia Meta aunque la propiedad diga que hay campos
+  // propios (combinación incoherente ⇒ fail-closed con el motivo de la relación).
+  const porRelacion = motivoBloqueoPorRelacion(own.autoridad, nombreFuentePublicadora(own));
+  if (porRelacion) return porRelacion;
   if (!own.configurado || own.propios.length > 0) return '';
   // ADR-0015 §8: el interruptor apagado se nombra ANTES que la degradación de la propiedad. Con
   // la sync apagada el backend degrada la propiedad porque ni la mira, así que caer en la rama de

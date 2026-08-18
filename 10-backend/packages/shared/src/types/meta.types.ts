@@ -595,3 +595,125 @@ export interface MetaCatalogVerificationRunSummary {
   finishedAtMs: number | null;
   lastError: string | null;
 }
+
+// ---------------------------------------------------------------------------
+// Autoridad de catálogo autoservicio (ADR-0022) — contrato DERIVADO tipado
+// ---------------------------------------------------------------------------
+
+/**
+ * QUIÉN administra el catálogo (eje derivado de `catalogSync.ownership`, ADR-0015):
+ *  · 'vendeyapy' ⟺ `vendeyapy_managed` (o `hybrid`, avanzado);
+ *  · 'meta'      ⟺ `external_managed` con `external.kind = 'commerce_manager'`;
+ *  · 'external'  ⟺ `external_managed` con `kind = 'meta_feed' | 'other_api'`.
+ */
+export const CATALOG_AUTHORITIES = ['vendeyapy', 'meta', 'external'] as const;
+export type CatalogAuthority = (typeof CATALOG_AUTHORITIES)[number];
+
+/**
+ * RELACIÓN declarada del tenant con Meta (`catalogSync.relationship`, eje NUEVO):
+ *  · 'none'    — local puro: ninguna acción de catálogo contra Meta;
+ *  · 'mirror'  — Meta/fuente externa alimenta el espejo local (import/reconcile/verify);
+ *                CERO escrituras hacia Meta;
+ *  · 'managed' — VendeYaPy publica (rails vigentes: preview→apply, outbox, dry_run/live).
+ */
+export const CATALOG_RELATIONSHIPS = ['none', 'mirror', 'managed'] as const;
+export type CatalogRelationship = (typeof CATALOG_RELATIONSHIPS)[number];
+
+/** Por qué la derivación degradó (o corrigió) lo declarado. Vocabulario CERRADO. */
+export const CATALOG_AUTHORITY_REASONS = [
+  /**
+   * `enabled` no es `true`: `managed` es inalcanzable hoy. `mode` NO participa de la
+   * derivación (es el interruptor de EJECUCIÓN, nivel 1): un tenant con `mode:'off'` y
+   * `enabled:true` sigue siendo `managed` con el envío apagado. Como ADVERTENCIA del preview
+   * de transición, `sync_disabled` sí cubre también `mode` fuera de dry_run/live.
+   */
+  'sync_disabled',
+  /** No hay `catalogId` válido declarado: no existe catálogo remoto que mirar/escribir. */
+  'catalog_id_missing',
+  /** La propiedad no deja ningún campo escribible: no existe patch posible. */
+  'no_writable_fields',
+  /** Propiedad degradada por el fail-closed de nivel 2 (ADR-0015). */
+  'ownership_degraded',
+  /** `relationship` declarado fuera del vocabulario: se ignora (manda el derivado). */
+  'relationship_invalid',
+  /** `relationship` declarado incoherente con la propiedad: manda el derivado (fail-closed). */
+  'relationship_conflict',
+] as const;
+export type CatalogAuthorityReason = (typeof CATALOG_AUTHORITY_REASONS)[number];
+
+/**
+ * Contrato derivado tipado (ADR-0022 §1). Sale de `deriveCatalogAuthority(raw)` — derivación
+ * PURA y determinística sobre el campo `catalogSync` CRUDO: cero I/O, cero escrituras.
+ */
+export interface CatalogAuthorityDerived {
+  authority: CatalogAuthority;
+  relationship: CatalogRelationship;
+  /** true ⟺ hay `relationship` declarado explícito Y coincide con el efectivo. */
+  declared: boolean;
+  /** Por qué se degradó, si se degradó (vacío en los estados sanos). */
+  reasons: CatalogAuthorityReason[];
+  /** INVARIANTE: el bot solo consume el catálogo local de Firestore. */
+  botCatalog: 'local_mirror';
+}
+
+/** Frescura de la evidencia remota (ADR-0022 §5). Milisegundos epoch; ausente ⇒ nunca. */
+export interface CatalogAuthorityStaleness {
+  /** Última verificación REAL contra Meta (corrida de reconciliación completada). */
+  metaVerifiedAt?: number | null;
+  /** Última verificación de fuentes externas (ownership.lastSourceCheckAt). */
+  lastSourceCheckAt?: number | null;
+  /** Fin del último run de importación paginada. */
+  lastImportFinishedAt?: number | null;
+}
+
+/** Bloque `authority` que suma `metaCatalogOwnershipStatus` (aditivo — el panel lo consume). */
+export interface CatalogAuthorityStatus extends CatalogAuthorityDerived {
+  staleness: CatalogAuthorityStaleness;
+}
+
+/** Combinación objetivo de una transición (§2: solo A/B/C/D son válidas). */
+export interface CatalogAuthorityTarget {
+  authority: CatalogAuthority;
+  relationship: CatalogRelationship;
+}
+
+/** Ids CERRADOS de los bloqueos del preview de transición (ADR-0022 §3, fail-closed). */
+export const CATALOG_AUTHORITY_BLOCKERS = [
+  /** La combinación objetivo no es A/B/C/D (p. ej. external+managed). */
+  'invalid_target',
+  /** La propiedad vigente no permite el destino (trae `reasons` de detalle). */
+  'ownership_incompatible',
+  /** Una fuente externa RECONOCIDA gobierna los campos: no se puede reclamar autoridad propia. */
+  'external_conflict',
+  /** Outbox con jobs NO terminales (trae `count`): no se cambia de modo con envíos en vuelo. */
+  'outbox_not_terminal',
+  /** Importación paginada en curso (claim activo). */
+  'import_run_in_flight',
+  /** Preview de sync vigente sin consumir (evidencia `mcs_*` viva). */
+  'sync_run_in_flight',
+  /** No hay conexión Meta utilizable (`metaConnections/main` sin token). */
+  'connection_missing',
+  /** El destino exige un `catalogId` válido y no hay (deuda del selector — se siembra a mano). */
+  'catalog_id_missing',
+  /** Locks/mappings con invariantes rotas (cross-tenant o dos locks del mismo producto). */
+  'mapping_ambiguous',
+] as const;
+export type CatalogAuthorityBlocker = (typeof CATALOG_AUTHORITY_BLOCKERS)[number];
+
+/** Bloqueo con su detalle (SANEADO: ids y conteos, jamás tokens/URLs/PII). */
+export interface CatalogAuthorityBlock {
+  id: CatalogAuthorityBlocker;
+  /** Solo `ownership_incompatible`: motivos de detalle (nivel 2 de ADR-0015 o incompatibilidad). */
+  reasons?: string[];
+  /** Solo `outbox_not_terminal`: cuántos jobs siguen vivos. */
+  count?: number;
+}
+
+/** Advertencias del preview (no bloquean, pero el owner tiene que verlas). */
+export const CATALOG_AUTHORITY_WARNINGS = [
+  /** El destino ya es el estado vigente: el apply solo DECLARA la relación. */
+  'already_in_target',
+  /** El interruptor de sync está apagado: `managed` queda declarado pero inerte hasta encender. */
+  'sync_disabled',
+] as const;
+export type CatalogAuthorityWarning = (typeof CATALOG_AUTHORITY_WARNINGS)[number];

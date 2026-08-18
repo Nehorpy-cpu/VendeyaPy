@@ -30,6 +30,7 @@ import { logger } from '../../lib/logger.js';
 import { recordAudit } from '../../audit/audit.js';
 import { assertFeatureEnabled } from '../../entitlements/entitlements.js';
 import { resolveOwnerAuth } from '../../panel/auth.js';
+import { requireCatalogRelationship } from '../../meta/catalogAuthority.js';
 import { normalizeCatalogSyncConfig } from '../../meta/catalogSyncConfig.js';
 import { getMetaCatalogClientForTenant, MetaCatalogApiError, type MetaRemoteCatalogItem } from '../../meta/catalogClient.js';
 import { catalogHold } from '../../meta/catalogTestHooks.js';
@@ -147,6 +148,13 @@ export const metaCatalogOutboxReconcile = onCall<{ tenantId?: string; jobId?: st
   async (req) => {
     const tenantId = authorizeOwner(req, req.data?.tenantId);
     const job = await jobDeTenant(tenantId, String(req.data?.jobId ?? ''));
+    // ADR-0022 §4: mutar el outbox (puede re-encolar un envío) exige relación `managed`. La
+    // transición a mirror/none exige outbox terminal, así que acá no quedan jobs vivos que
+    // rescatar. El listado (metaCatalogOutboxIncidents) NO se gatea: es lectura de estado.
+    // ORDEN deliberado: el gate va DESPUÉS de resolver el job — un owner ajeno sondeando un
+    // job que no es suyo recibe el `not-found` de SIEMPRE (contrato de aislamiento), no una
+    // precondición sobre la relación de SU tenant; y el gate sigue delante de toda decisión.
+    await requireCatalogRelationship(tenantId, 'managed');
     if (isTerminalOutboxStatus(job.status)) {
       // Un job terminal es EVIDENCIA: no se reabre ni se reescribe. Si hace falta repetir el
       // cambio, el camino es una confirmación nueva desde el catálogo (que crea otro ciclo).
@@ -303,6 +311,11 @@ export const metaCatalogOutboxDiscard = onCall<{ tenantId?: string; jobId?: stri
   async (req) => {
     const tenantId = authorizeOwner(req, req.data?.tenantId);
     const job = await jobDeTenant(tenantId, String(req.data?.jobId ?? ''));
+    // (ADR-0022 §4, review A1) El descarte NO se gatea por relación A PROPÓSITO: es una
+    // CANCELACIÓN LOCAL (jamás escribe en Meta) y es la única salida humana de un job legacy
+    // no-terminal bajo mirror/none — gatearlo lo volvía zombi y bloqueaba el regreso a
+    // managed (`outbox_not_terminal`) para siempre. Reconcile sí exige `managed`: puede
+    // RE-ENCOLAR un envío.
     const motivo = String(req.data?.reason ?? '').trim().slice(0, 300);
     if (!motivo) throw new HttpsError('invalid-argument', 'Escribí por qué se descarta este envío (queda registrado).');
 

@@ -122,6 +122,10 @@ export const AUDIT_ACTIONS = [
   // ADR-0015 §6: cada invocación de la reconciliación periódica del estado actual (solo
   // lee Meta y actualiza metaSyncState/metaDrift; jamás escribe en Meta ni borra nada).
   'meta.catalog_verification_run',
+  // ADR-0022 §3: apply de una transición de autoridad de catálogo (quién administra / relación
+  // con Meta). Queda {antes, después, actor, runId}: sin esta entrada no habría constancia de
+  // quién cambió el modo. Volver atrás = nuevo preview→apply (cero restauraciones ciegas).
+  'meta.catalog_authority_changed',
   'whatsapp.activation_requested',
   'whatsapp.activation_completed',
   'whatsapp.activation_cancelled',

@@ -34,6 +34,7 @@ import { MetaReconciliation } from '@/components/MetaReconciliation';
 import { OutboxIncidents } from '@/components/OutboxIncidents';
 import { CatalogQualityCenter } from '@/components/CatalogQualityCenter';
 import { CatalogOwnershipCard } from '@/components/CatalogOwnershipCard';
+import { CatalogAuthoritySelector } from '@/components/catalog/CatalogAuthoritySelector';
 import { MetaCatalogImport } from '@/components/MetaCatalogImport';
 import { ProductMetaCell, motivoSinCamposPropios } from '@/components/ProductMetaCell';
 import { ConfirmModal } from '@/components/ui';
@@ -139,7 +140,23 @@ export default function CatalogPage() {
   });
   const ownership = ownershipQ.data ?? null;
   const ownershipCargando = ownershipQ.isLoading;
+  // `motivoSinCamposPropios` ya incorpora el gate por relación (ADR-0022 §4): con `mirror`
+  // el motivo nombra a la fuente que publica; con `none` dice que el catálogo es solo del bot.
   const motivoBloqueoEnvio = motivoSinCamposPropios(ownership, { cargando: ownershipCargando });
+  /**
+   * ADR-0022 §4: con relación `none` las acciones Meta (importar, reconciliar, outbox,
+   * previsualizar/enviar) directamente NO SE OFRECEN — el server las rechaza igual
+   * (`authority_relationship_blocked`); la UI espeja sin engaño y la sección «Quién
+   * administra tu catálogo» explica el modo. Sin el contrato nuevo (autoridad null) no se
+   * oculta nada: manda el comportamiento vigente de ADR-0015.
+   *
+   * DECISIÓN (review B2): `mirror` bloquea ESCRITURAS, no lecturas — el backend permite
+   * `catalogSync` (dry-run/preview, read-only) bajo mirror y reserva `catalogSyncApply`
+   * para `managed`. Por eso «Previsualizar cambios» SÍ se muestra con mirror (diagnóstico,
+   * comportamiento legacy de arfagi) y el ENVÍO queda bloqueado con el motivo que nombra a
+   * la fuente publicadora (vía motivoBloqueoEnvio).
+   */
+  const accionesMetaVisibles = ownership?.autoridad?.relacion !== 'none';
 
   const saveMut = useMutation({
     mutationFn: (input: ProductInput) => upsertProduct(tenantId!, input),
@@ -320,9 +337,12 @@ export default function CatalogPage() {
           <p className="mt-1 text-sm text-ink-500">Tus productos, precios y stock. El bot ofrece lo que esté activo acá.</p>
         </div>
         <div className="flex gap-2">
-          <button onClick={() => syncMut.mutate(false)} disabled={syncMut.isPending} className="inline-flex items-center gap-1.5 rounded-lg border border-ink-200 px-3 py-2 text-sm font-medium text-ink-700 transition-colors hover:bg-ink-50 disabled:opacity-50">
-            {syncMut.isPending ? 'Previsualizando…' : 'Previsualizar cambios'}
-          </button>
+          {/* Con relación `none` la previsualización ni se ofrece: no hay nada que leer de Meta. */}
+          {accionesMetaVisibles && (
+            <button onClick={() => syncMut.mutate(false)} disabled={syncMut.isPending} className="inline-flex items-center gap-1.5 rounded-lg border border-ink-200 px-3 py-2 text-sm font-medium text-ink-700 transition-colors hover:bg-ink-50 disabled:opacity-50">
+              {syncMut.isPending ? 'Previsualizando…' : 'Previsualizar cambios'}
+            </button>
+          )}
           <button onClick={() => setEditing(null)} className="rounded-lg bg-mint-600 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-mint-700">
             + Nuevo producto
           </button>
@@ -330,7 +350,7 @@ export default function CatalogPage() {
       </div>
 
       {/* Solo el dueño puede resolver un envío trabado (el backend lo restringe igual). */}
-      {puedeReconciliar && <OutboxIncidents tenantId={tenantId} />}
+      {puedeReconciliar && accionesMetaVisibles && <OutboxIncidents tenantId={tenantId} />}
 
       {/* Resultado de calidad del último guardado (contrato nuevo de productUpsert):
           alert si quedaron bloqueantes, status si fue informativo. */}
@@ -389,6 +409,10 @@ export default function CatalogPage() {
           lo demás — con el catálogo gobernado afuera, "enviar a Meta" no es una opción. */}
       <CatalogOwnershipCard tenantId={tenantId} products={activeProducts} />
 
+      {/* Quién administra el catálogo y su relación con Meta (ADR-0022): el selector
+          autoservicio vive al lado de la tarjeta de propiedad, que es su contexto. */}
+      <CatalogAuthoritySelector tenantId={tenantId} />
+
       {/* Centro de calidad: agregado server-side + detalle de observaciones por producto. */}
       <CatalogQualityCenter
         tenantId={tenantId}
@@ -399,10 +423,11 @@ export default function CatalogPage() {
         }}
       />
 
-      {/* Importación paginada del catálogo de Meta (solo dueño; el componente se auto-oculta). */}
-      <MetaCatalogImport tenantId={tenantId} categories={categoriesQ.data ?? []} />
+      {/* Importación paginada del catálogo de Meta (solo dueño; el componente se auto-oculta).
+          Con relación `none` no hay espejo que alimentar: no se ofrecen importar ni reconciliar. */}
+      {accionesMetaVisibles && <MetaCatalogImport tenantId={tenantId} categories={categoriesQ.data ?? []} />}
 
-      <MetaReconciliation tenantId={tenantId} categories={categoriesQ.data ?? []} />
+      {accionesMetaVisibles && <MetaReconciliation tenantId={tenantId} categories={categoriesQ.data ?? []} />}
 
       {(syncMut.isError || syncRun) && (
         <div role="status" aria-live="polite" className="rounded-2xl border border-ink-100 bg-white p-4 shadow-soft">
@@ -855,6 +880,7 @@ export default function CatalogPage() {
           initialCost={editing ? (finMap[editing.id]?.costPrice ?? null) : null}
           initialPriority={editing ? (finMap[editing.id]?.priorityScore ?? null) : null}
           categories={categoriesQ.data ?? []}
+          ownership={ownership}
           onCancel={() => setEditing(undefined)}
           onSubmit={(input) => saveMut.mutate(input)}
           saving={saveMut.isPending}

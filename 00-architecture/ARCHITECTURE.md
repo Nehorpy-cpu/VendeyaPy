@@ -1055,6 +1055,26 @@ La pantalla `/conversations` del panel es una bandeja tipo WhatsApp Business con
   MANAGER/OWNER/PLATFORM_ADMIN eliminan lógico, asignan y vinculan; VIEWER sin módulo.
 - Sin índices compuestos nuevos ni cambios de Rules; polling conservado (deuda documentada).
 
+### 6.4.2 Autoridad de catálogo autoservicio (ADR-0022 — EN REPO, NO DESPLEGADO)
+
+Cada empresa declara quién administra su catálogo, sobre la base desplegada de ADR-0015
+(`catalogSync.ownership`). Eje nuevo declarado: `catalogSync.relationship: 'none'|'mirror'|
+'managed'`; contrato derivado `deriveCatalogAuthority` (puro, cero escrituras) con
+`authority: vendeyapy|meta|external` mapeado desde `ownership.model` + `external.kind`.
+Combinaciones válidas: A `vendeyapy+none` (local-sin-Meta; el bot vende del catálogo local),
+B `vendeyapy+managed` (rieles vigentes de publicación), C `meta+mirror` y D `external+mirror`
+(modelo arfagi; VendeYaPy jamás escribe en Meta). Derivación legacy determinística sin backfills
+(sin config ⇒ A; arfagi ⇒ D; `mode` no participa — es interruptor de ejecución). Transición por
+`metaCatalogAuthorityPreview/Apply` (OWNER/PLATFORM_ADMIN; planHash + TTL 10 min + uso único +
+`concurrent_change` por huella de config; update mask estricto: solo `relationship` y, si cambia
+el modelo, `ownership` normalizado; jamás toca enabled/mode/catalogId/productos/jobs ni activa
+live/opt-ins). Gating por relación en todos los callables de catálogo Meta y en los schedulers
+(por tenant, drain-only; sweep/reconcile/discard siempre disponibles); `catalogSyncApply` ahora
+OWNER-only también en el backend. El bot conserva el invariante `local_mirror`: solo Firestore.
+Panel: selector «Quién administra tu catálogo» con preview visual, confirmación fuerte,
+frescura del espejo y honestidad sobre el conector externo (sin botón falso). Deudas: selector
+de `catalogId` y conector directo de URL ⇒ programa siguiente.
+
 ### 6.5 Templates de notificación (HSM)
 
 Los siguientes templates deben ser aprobados por Meta para cada tenant:

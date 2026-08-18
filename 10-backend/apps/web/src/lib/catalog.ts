@@ -34,6 +34,7 @@ import {
   type EstadoMeta,
   type ModeloPropiedad,
 } from './catalogOwnership';
+import { normalizarAutoridad, type CatalogAuthorityView } from './catalogAuthority';
 
 const productsCol = (tenantId: string) => collection(firebaseDb(), 'tenants', tenantId, 'products');
 const categoriesCol = (tenantId: string) =>
@@ -747,6 +748,12 @@ export interface CatalogOwnershipStatus {
   motivos: string[];
   /** Cuándo se leyó por última vez el catálogo publicado (null = nunca). */
   verificadoEn: Date | null;
+  /**
+   * Eje `authority` (ADR-0022): quién administra el catálogo y su relación con Meta.
+   * null = el backend todavía no expone el contrato nuevo ⇒ el panel conserva el
+   * comportamiento vigente (ningún gating nuevo se activa a ciegas).
+   */
+  autoridad: CatalogAuthorityView | null;
 }
 
 export type CatalogSyncMode = 'off' | 'dry_run' | 'live';
@@ -942,6 +949,7 @@ export function normalizarOwnershipStatus(raw: unknown): CatalogOwnershipStatus 
     verificadoEn: aFecha(
       top.lastSourceCheckAtMs ?? top.lastSourceCheckAt ?? own.lastSourceCheckAt ?? top.lastVerifiedAt ?? top.verifiedAt,
     ),
+    autoridad: normalizarAutoridad(top.authority),
   };
 }
 
@@ -953,7 +961,8 @@ export function normalizarOwnershipStatus(raw: unknown): CatalogOwnershipStatus 
  *   { ok, enabled, configMode, effectiveMode, lastSourceCheckAt,
  *     ownership: EffectiveOwnership,               // PERMISO: {model, writable[], external[], externalSource, modeCeiling, degraded, reasons[]}
  *     declared: { externalFields[], externalSource }, // REALIDAD: gobierno externo declarado, SIN el gate de sync
- *     detectedSources: MetaCatalogDetectedSource[] } // vista SANEADA de @vpw/shared
+ *     detectedSources: MetaCatalogDetectedSource[],  // vista SANEADA de @vpw/shared
+ *     authority: { authority, relationship, declared, reasons[], staleness } } // ADR-0022 (opcional)
  * `normalizarOwnershipStatus` tolera además la config anidada (`config:{mode,enabled}`), la
  * propiedad plana y la declaración externa en `ownership.external` como objeto.
  *
