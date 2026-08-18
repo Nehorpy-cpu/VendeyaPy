@@ -1,6 +1,6 @@
 # ESTADO — VendeYaPy
 
-> **Última actualización: 2026-08-18.**
+> **Última actualización: 2026-08-18** (corregido el mismo día: feed 403, congelamiento de Hosting y deudas sistémicas verificadas contra el repo).
 > Este archivo describe el **presente**, no la historia. La historia vive en `BITACORA.md`.
 > Se reescribe, no se acumula. Máximo una página.
 > `⚠️ verificar` = dato derivado de la bitácora, no leído de producción en la última sesión.
@@ -13,7 +13,8 @@
   API, Anthropic Claude, pnpm workspaces.
 - **Producción:** `vpw-prod-dd6ff` · panel en `https://vendeyapy.com`.
 - **Tenants:** `arfagi` (real, activo) · `credipower` (diferido e intocable) ·
-  `meta-review` (número …5686, de revisión de Meta).
+  `meta-review` (número …5686) — **App Review de Meta EN CURSO: entorno CONGELADO**, no tocar
+  Hosting ni nada que Meta esté revisando.
 
 ## Producción hoy
 
@@ -52,12 +53,17 @@ Reconciliación 04:30 y 16:30 America/Asuncion contra TTL de 24 h, solo lectura.
 
 ## Bloqueantes abiertos
 
-1. **Precio de Odyssey en el origen del feed — PRIORIDAD 0, fuera de este repo.**
-   El feed publica ₲130.000, el precio autoritativo local es ₲250.000. Mientras diverja,
-   Odyssey queda `drifted_external` y el guard **no cierra venta automática** de ese producto.
-   La corrección va en el sistema que genera el CSV, no en Meta ni en este repo. Tras la
-   publicación siguiente (03:23-03:24), la reconciliación de las 04:30 debe devolverlo a
-   `verified` — esa es la prueba final de que el modelo de propiedad funciona.
+1. **FEED ROTO (HTTP 403) en el origen de arfagi — PRIORIDAD 0, fuera de este repo.**
+   **Diagnóstico corregido el 2026-08-18** (antes se registraba como simple divergencia de
+   precio): `api.arfagi.com` devuelve **HTTP 403 desde ≤2026-08-14** y el último run del feed en
+   Meta cerró con **0 items / 1 error**. No es una diferencia de precio: **el feed no publica
+   nada**. Odyssey (`ARM-744646-5202`) tiene precio local **₲190.000** (intención comercial
+   declarada del owner) contra **₲130.000 obsoleto en Meta**; el guard lo mantiene
+   `drifted_external` y **no cierra venta automática** — fail-closed correcto.
+   **Acción del owner, fuera de este repo:** arreglar credenciales/URL del feed en su plataforma.
+   Recién después: corrida del feed → verificación de la reconciliación → y solo entonces el gate
+   de activación de visión. **Mientras el feed 403ee, esperar la reconciliación de las 04:30 es
+   esperar algo que no puede ocurrir.**
 2. **Fase 3 sin evidencia.** Todas las pruebas end-to-end salieron de números del owner.
    Falta el ciclo completo con un número **externo**: inbound real → bot → carrito → orden →
    comprobante visible en el panel → logs limpios.
@@ -86,6 +92,22 @@ Reconciliación 04:30 y 16:30 America/Asuncion contra TTL de 24 h, solo lectura.
 | CONVERSATIONS-WHATSAPP-UX-1 (ADR-0021) | 2026-08-18 | 11 CREATE + updates webhook/manualMessage/adjuntos + Hosting; sin índices/Rules/TTL |
 | CATALOG-AUTHORITY-SELF-SERVICE-1 (ADR-0022) | 2026-08-18 | 2 CREATE + updates metaCatalog*/runTenantJob/schedulers + Hosting; sin índices/Rules |
 
+> **⛔ HOSTING CONGELADO — App Review de Meta EN CURSO.** El tenant `meta-review` (número …5686)
+> está bajo revisión de Meta y su entorno **no se toca**: no desplegar Hosting ni nada que Meta
+> esté revisando mientras dure. Los tres programas de arriba piden Hosting: **ese tramo está
+> bloqueado por un gate externo**, no por el código.
+>
+> **⚠️ Deuda de release acumulada.** Los tres suman ~**14 funciones CREATE** + updates que se
+> pisan entre sí (ADR-0021 toca `metaWebhook`/`onWebhookInbox`; ADR-0022 toca los mismos
+> schedulers). El selector de rollback es *el mismo menos las CREATE*: con 14 CREATE quedarían 14
+> funciones que el rollback por selector **no puede revertir**. Calcular la superficie exacta con
+> `apps/functions/scripts/release-audit.mjs` **antes** de cualquier programa de deploy.
+>
+> **🐞 `release-audit.mjs:77` tiene `COMMIT_BASE_DESPLEGADO = '30c1687'`, desactualizado por dos
+> deploys** (el último desplegado es `6f75601`). Corrido con el default calcula el diff desde
+> antes del tren ADR-0018/0019 y devuelve un selector inflado con funciones ya desplegadas.
+> Pasar `--base` explícito o corregir la constante.
+
 ## Deudas menores conocidas
 
 - La campana no lleva `targetUid`: un rol SELLER puro no la ve. Hoy sin impacto (el vendedor
@@ -101,6 +123,13 @@ Reconciliación 04:30 y 16:30 America/Asuncion contra TTL de 24 h, solo lectura.
   1 sin marca.
 - Pedidos: 15 históricos, 14 CANCELLED y 1 PAID anterior a los releases de julio. Cero pagos
   nuevos. Ningún pedido pendiente de verificación.
+- **Los `.test.ts` NO se typechequean** (verificado 2026-08-18): `apps/functions/tsconfig.json`
+  los excluye y `vitest.config.ts` no activa `typecheck`. O sea que `pnpm -r typecheck` en 0
+  **no cubre los archivos de test**. Preexistente y sistémico: al leer un reporte, tenerlo en
+  cuenta antes de dar por cubierta esa pata.
+- **Cero CI** (verificado 2026-08-18): `.github/` solo tiene `pull_request_template.md`. La
+  batería completa y las 6 suites E2E (~30-35 min) son manuales; nada impide que una sesión
+  declare verde sin correr. Por eso el repo exige exit codes reales en los reportes.
 
 ## Backlog (solo a pedido del owner)
 
