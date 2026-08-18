@@ -15,16 +15,9 @@
 import type { Message, Order } from '@vpw/shared';
 import type { Role } from '@/lib/auth-context';
 import type { PanelAttachment } from '@/lib/attachments';
+import { deliveryTick, hhmm } from '@/lib/conversationsUi';
 import { MessageAttachments } from '@/components/attachments/MessageAttachments';
-
-function hhmm(ts: unknown): string {
-  try {
-    const d = (ts as { toDate?: () => Date } | null)?.toDate?.();
-    return d ? d.toLocaleTimeString('es-PY', { hour: '2-digit', minute: '2-digit' }) : '';
-  } catch {
-    return '';
-  }
-}
+import { cn } from '@/lib/cn';
 
 export interface MessageBubbleProps {
   m: Message;
@@ -70,6 +63,8 @@ export function MessageBubble({
   // Único origen de verdad del adjunto. `hasAttachments` es solo un denormalizado para listar:
   // si viniera en true sin ids, no hay nada que resolver y no se dibuja nada.
   const ids = m.attachmentIds ?? [];
+  // null en entrantes, históricos sin estado y salientes retenidos por mock.
+  const tick = deliveryTick(m);
 
   return (
     <div className={mine ? 'text-right' : 'text-left'}>
@@ -96,6 +91,32 @@ export function MessageBubble({
       )}
       <div className="mt-0.5 text-[10px] text-ink-400">
         {hhmm(m.createdAt)}
+        {/* ADR-0021 §1: tick de entrega SOLO en salientes con estado del proveedor. Nunca solo
+            color: el aria-label + title dicen el estado con palabras («Leído», «Entregado»…). */}
+        {tick && (
+          <span
+            role="img"
+            aria-label={tick.label}
+            title={tick.label}
+            className={cn(
+              'ml-1 font-semibold tracking-tighter',
+              // B6: «leído» lleva además una señal NO cromática (subrayado) — mismo glifo ✓✓
+              // que «entregado», y el color solo no alcanza para un daltónico sin hover.
+              tick.failed
+                ? 'text-coral-600'
+                : tick.accent
+                  ? 'text-sky-600 underline decoration-2 underline-offset-2'
+                  : 'text-ink-400',
+            )}
+          >
+            {tick.glyph}
+          </span>
+        )}
+        {tick?.failed && (
+          <span className="ml-1 text-coral-600">
+            {m.deliveryError?.detail?.trim() || 'No se pudo entregar'}
+          </span>
+        )}
         {m.author === 'seller' && m.viaMock && (
           <span title="Modo prueba: no salió a WhatsApp"> · retenido (prueba)</span>
         )}

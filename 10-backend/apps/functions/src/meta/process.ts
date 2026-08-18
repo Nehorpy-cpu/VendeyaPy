@@ -13,14 +13,20 @@
 import { randomUUID } from 'node:crypto';
 import { Timestamp } from 'firebase-admin/firestore';
 import type { WebhookInboxEvent, MetaExternalIndexEntry, MessageChannel, WebhookEventKind } from '@vpw/shared';
-import { permiteAutomatizacion, persisteEntrante, readWebhookEventKind } from '@vpw/shared';
+import { permiteAutomatizacion, persisteEntrante, readWebhookEventKind, sanitizeAttachmentCaption } from '@vpw/shared';
 import { db, paths } from '../lib/firebase.js';
 import { handleMessage } from '../conversation/engine.js';
 import { botSilenciadoEnChat, evaluarSilencioPreEnvio, EXIGE_SILENCIO_LIBRE, type OutboundDiferido } from '../conversation/silencio.js';
 import { appendMessage } from '../conversation/messages.js';
+import { aplicarReciboDeEntrega } from '../conversation/deliveryStatus.js';
 import { procesarUbicacionEntrante, coberturaVigente } from '../conversation/coverage.js';
 import { coverageHold } from '../conversation/coverageTestHooks.js';
-import { attachmentFromInboxPayload, unsupportedFromInboxPayload } from './parseWebhook.js';
+import {
+  attachmentFromInboxPayload,
+  unsupportedFromInboxPayload,
+  deliveryStatusesFromInboxPayload,
+  type NormalizedDeliveryStatus,
+} from './parseWebhook.js';
 import { resolveAutomationMode, canalSinGate, type CanalAutomatizacion, type OrigenAutomatizacion } from './automationMode.js';
 import { consumirEcho, registrarObservacion } from './echoConsumer.js';
 import { ingestInboundAttachment, recordUnsupportedInbound, recordAttachmentIngestDisabled } from './attachmentIngest.js';
@@ -277,6 +283,40 @@ function desenlaceDelEnvio(r: SendResult | LocationRequestResult): {
   return { registrar: !confirmado, waMessageId: null, viaMock: false, outcome };
 }
 
+/**
+ * ADR-0021 §1 — aplica los RECIBOS DE ENTREGA que trajo un evento del inbox.
+ *
+ * Camino DETERMINÍSTICO: cero motor, cero IA, cero metering — cada recibo solo puede avanzar el
+ * `deliveryStatus` de una burbuja saliente YA persistida (y con monotonía: nunca retrocede).
+ * Errores atrapados POR RECIBO: un recibo malo no tumba el lote ni afecta el procesamiento de
+ * mensajes — perder un tick es cosmético y recuperable; perder un turno del cliente no.
+ */
+async function aplicarRecibosDelEvento(tenantId: string, recibos: NormalizedDeliveryStatus[]): Promise<void> {
+  for (const recibo of recibos) {
+    try {
+      await aplicarReciboDeEntrega(db(), tenantId, recibo);
+    } catch (e) {
+      logger.warn('Recibo de entrega NO aplicado; el resto del lote sigue', {
+        tenantId,
+        status: recibo.status,
+        error: e instanceof Error ? e.name : 'desconocido',
+      });
+    }
+  }
+}
+
+/**
+ * ADR-0021 §2 — `profileName` que el productor dejó en el payload del mensaje (ya saneado por el
+ * parser). Se RE-SANEA acá con el mismo criterio defensivo que `attachmentFromInboxPayload`: el
+ * documento del inbox no se cree.
+ */
+function profileNameDelPayload(payload: unknown): string | null {
+  const crudo = (payload as { profileName?: unknown } | null | undefined)?.profileName;
+  if (typeof crudo !== 'string') return null;
+  const limpio = sanitizeAttachmentCaption(crudo).slice(0, 128).trim();
+  return limpio !== '' ? limpio : null;
+}
+
 interface EntregaAutomaticaArgs {
   tenantId: string;
   customerId: string;
@@ -456,7 +496,21 @@ export async function processWebhookEvent(eventId: string): Promise<void> {
     const noSoportado = ev.platform === 'whatsapp' ? unsupportedFromInboxPayload(ev.payload) : null;
     // COVERAGE-1B: ubicación nativa (solo WhatsApp; el parser ya validó rangos/strings).
     const esUbicacion = ev.platform === 'whatsapp' && typeof payload?.location?.latitude === 'number' && typeof payload?.location?.longitude === 'number';
+    // ADR-0021 §1: recibos de entrega (`value.statuses`) que el productor escribió en el inbox.
+    // El contrato del productor los escribe como evento PROPIO (sin `from`); si viajaran junto a
+    // un mensaje, se aplican al final del camino feliz, DESPUÉS de procesar el mensaje.
+    const recibos = ev.platform === 'whatsapp' && tenantId ? deliveryStatusesFromInboxPayload(ev.payload) : [];
     if (!tenantId || !payload?.from || (!payload?.text && !adjunto && !noSoportado && !esUbicacion)) {
+      // ADR-0021 §1: evento SOLO-recibos. No es un payload inválido — es el recibo del proveedor
+      // sobre mensajes NUESTROS: se aplica por el camino determinístico (cero IA, cero metering,
+      // sin gates de automatización: un recibo no dispara ninguna respuesta, solo avanza ticks de
+      // burbujas ya persistidas) y el evento cierra `processed`.
+      if (tenantId && recibos.length > 0) {
+        await aplicarRecibosDelEvento(tenantId, recibos);
+        await ref.update({ processingStatus: 'processed', tenantId, processedAt: Timestamp.now() });
+        logger.info('Webhook procesado (recibos de entrega)', { eventId, tenantId, recibos: recibos.length });
+        return;
+      }
       // PRIVACIDAD: la ubicación exacta jamás queda retenida en el inbox, ni en los ignorados.
       await ref.update({ processingStatus: 'ignored', errorMessage: !tenantId ? 'empresa no resuelta' : 'payload sin from/contenido', processedAt: Timestamp.now(), ...(esUbicacion ? { 'payload.location': null } : {}) });
       return;
@@ -558,6 +612,28 @@ export async function processWebhookEvent(eventId: string): Promise<void> {
       await ref.update({ processingStatus: 'ignored', tenantId, errorMessage: `empresa ${gate.reason}`, processedAt: Timestamp.now(), ...(esUbicacion ? { 'payload.location': null } : {}) });
       logger.info('Inbound bloqueado por gate de empresa', { tenantId, reason: gate.reason });
       return;
+    }
+
+    // ADR-0021 §2 — PERFIL HONESTO: el nombre de perfil de WhatsApp del cliente
+    // (`contacts[].profile.name` del webhook) se persiste como `Customer.profileName`, SEPARADO
+    // de `name` (dato CRM confirmado, que jamás se pisa) y SOLO si cambió — cero escrituras en el
+    // camino repetido. Corre DESPUÉS de los gates a propósito: en `shadow`/`inactive` no se toca
+    // el doc del cliente (publicaría en la bandeja una conversación de un número en observación).
+    // Y errores atrapados: un dato cosmético no puede costar el turno del mensaje.
+    const profileName = profileNameDelPayload(ev.payload);
+    if (profileName) {
+      try {
+        const clienteRef = db().doc(paths.customer(tenantId, customerId));
+        const vigente = ((await clienteRef.get()).data() as { profileName?: unknown } | undefined)?.profileName;
+        if (vigente !== profileName) {
+          await clienteRef.set({ id: customerId, tenantId, profileName, updatedAt: Timestamp.now() }, { merge: true });
+        }
+      } catch (e) {
+        logger.warn('No se pudo actualizar el profileName del cliente', {
+          tenantId,
+          error: e instanceof Error ? e.name : 'desconocido',
+        });
+      }
     }
 
     // COVERAGE-1B: ubicación nativa → camino propio (JAMÁS pasa por el bot/IA). El handler
@@ -890,6 +966,11 @@ export async function processWebhookEvent(eventId: string): Promise<void> {
         { merge: true },
       );
     }
+
+    // ADR-0021 §1: recibos que viajaron JUNTO a un mensaje (lote combinado del proveedor) se
+    // aplican acá, DESPUÉS de procesar el mensaje. Cada recibo atrapa sus errores: jamás afectan
+    // el turno ya procesado ni el cierre del evento.
+    if (recibos.length > 0) await aplicarRecibosDelEvento(tenantId, recibos);
 
     // PRIVACIDAD: con los bytes YA en nuestro Storage, el mediaId del inbox no sirve para nada y
     // es un puntero al archivo del cliente: se anula. Si la ingesta NO terminó almacenada, se

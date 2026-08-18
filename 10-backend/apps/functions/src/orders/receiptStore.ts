@@ -138,6 +138,8 @@ export function toReceiptAttachmentFacts(attachment: Attachment): ReceiptGateAtt
     mimeVerified: attachment.mime?.verified ?? null,
     bytes: attachment.bytes ?? null,
     purgedAtMs: toMillisOrNull(attachment.purgedAt),
+    // ADR-0021 §5: solo 'out' explícito viaja como saliente; docs históricos (todos entrantes) ⇒ 'in'.
+    direction: attachment.direction === 'out' ? 'out' : 'in',
   };
 }
 

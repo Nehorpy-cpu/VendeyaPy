@@ -209,6 +209,9 @@ export function planWebhookWrites(
       messageId: m.messageId,
       timestamp: m.timestamp,
       ...(m.adReferral ? { adReferral: m.adReferral } : {}),
+      // ADR-0021 §2: nombre de perfil de WhatsApp del cliente (ya saneado por el parser).
+      // process.ts lo persiste como `Customer.profileName` — jamás pisa `name` (dato CRM).
+      ...(m.profileName ? { profileName: m.profileName } : {}),
       // ADR-0016: adjunto genérico (imagen o PDF) ya saneado por el parser. El mediaId viaja
       // porque la descarga ocurre en el trigger; process.ts lo anula una vez guardado el archivo.
       ...(m.attachment ? { attachment: m.attachment } : {}),
@@ -225,6 +228,34 @@ export function planWebhookWrites(
       docId: docId || null,
       kind: 'message',
       event: { ...baseEvent({ id: docId, platform: m.platform, kind: 'message', eventType: 'messages', externalId: m.externalId, payload, nowMs, ttlMs: TTL_MS }), automationEligible: true },
+    });
+  }
+
+  // ADR-0021 §1 — RECIBOS DE ENTREGA. Van DESPUÉS de los mensajes del lote (Meta puede batchear
+  // ambos en un POST; el orden del plan conserva el natural) y al MISMO inbox: su consumidor es
+  // el camino determinístico de `process.ts` (cero motor, cero IA, cero metering).
+  //
+  // UN DOCUMENTO POR RECIBO, no por lote: la clave de idempotencia natural es (wamid, estado) —
+  // la transición existe una sola vez y una redelivery de Meta trae exactamente la misma — y un
+  // lote agrupado no tiene clave estable. Aunque un duplicado se colara igual, `aplicarRecibo-
+  // DeEntrega` es monotónico: reprocesarlo es un no-op.
+  //
+  // PAYLOAD NAMESPACEADO (`payload.statuses`, sin `payload.from`): mismo fail-safe pasivo que el
+  // echo — el guard de `process.ts` exige `from` para tratar algo como mensaje del cliente, así
+  // que aunque el gate de contenido cambiara, un recibo jamás abriría una conversación.
+  for (const s of parsed.deliveryStatuses) {
+    const docId = inboxDocId('whatsapp', `status_${s.status}_${s.waMessageId}`);
+    writes.push({
+      collection: paths.metaWebhookInbox(),
+      docId: docId || null,
+      // `kind: 'message'` es el CANAL (`field: "messages"`), no el contenido: process rutea por
+      // este kind y adentro decide por la forma namespaceada. `automationEligible: false` deja
+      // legible en el documento que esto jamás debió disparar negocio.
+      kind: 'message',
+      event: {
+        ...baseEvent({ id: docId, platform: 'whatsapp', kind: 'message', eventType: 'statuses', externalId: s.receivedVia, payload: { statuses: [s] }, nowMs, ttlMs: TTL_MS }),
+        automationEligible: false,
+      },
     });
   }
 
@@ -595,6 +626,8 @@ export const metaWebhook = onRequest({ region: 'us-central1', cors: false }, asy
     }
     const resumen = {
       written, ...dups, ignored: parsed.ignored,
+      // ADR-0021 §1: cuántos recibos de entrega trajo el lote (antes se descartaban en silencio).
+      deliveryStatuses: parsed.deliveryStatuses.length,
       echoes: parsed.echoes.length,
       historyChunks: parsed.historyChunks.length,
       historyMedia: parsed.historyMedia.length,

@@ -77,12 +77,33 @@ export type LocationRequestResult =
   | { ok: true; id?: string; viaMock?: boolean }
   | { ok: false; reason: 'unsupported_channel' | 'send_error' | 'channel_blocked' };
 
+/**
+ * ADR-0021 §5 — media SALIENTE por id de media ya subido a Meta (`POST /{pnid}/media`, ver
+ * `meta/mediaClient.ts#uploadWhatsappMedia`). El caption llega SANEADO por el caller (contrato
+ * ADR-0016) y el filename es el saneado decorativo del documento: acá no se valida contenido,
+ * solo se entrega — la validación de bytes/MIME es responsabilidad del camino de adjuntos.
+ */
+export interface OutboundImageMedia {
+  mediaId: string;
+  caption?: string;
+}
+
+export interface OutboundDocumentMedia {
+  mediaId: string;
+  filename: string;
+  caption?: string;
+}
+
 export interface WhatsAppClient {
   /** SHIPPING-CHAT-3B: metadata no sensible del transporte (ver WhatsappTransportInfo). */
   readonly transportInfo: WhatsappTransportInfo;
   sendText(to: string, text: string, ctx?: SendContext): Promise<SendResult>;
   /** COVERAGE-1B: interactive `location_request_message` (botón nativo "Enviar ubicación"). */
   sendLocationRequest(to: string, bodyText: string, ctx?: SendContext): Promise<LocationRequestResult>;
+  /** ADR-0021 §5: imagen saliente por media id. Mismos outcomes y contexto que sendText. */
+  sendImage(to: string, media: OutboundImageMedia, ctx?: SendContext): Promise<SendResult>;
+  /** ADR-0021 §5: documento saliente por media id. Mismos outcomes y contexto que sendText. */
+  sendDocument(to: string, media: OutboundDocumentMedia, ctx?: SendContext): Promise<SendResult>;
 }
 
 /**
@@ -120,6 +141,34 @@ export function buildCloudApiTextBody(to: string, text: string) {
     to,
     type: 'text',
     text: { preview_url: false, body: text },
+  };
+}
+
+/**
+ * ADR-0021 §5 — Bodies de media saliente por ID de media (puros → testeables). El caption solo
+ * viaja si existe: un `caption: undefined` serializado igual termina como campo basura en Graph.
+ */
+export function buildCloudApiImageBody(to: string, media: OutboundImageMedia) {
+  return {
+    messaging_product: 'whatsapp',
+    recipient_type: 'individual',
+    to,
+    type: 'image',
+    image: { id: media.mediaId, ...(media.caption ? { caption: media.caption } : {}) },
+  };
+}
+
+export function buildCloudApiDocumentBody(to: string, media: OutboundDocumentMedia) {
+  return {
+    messaging_product: 'whatsapp',
+    recipient_type: 'individual',
+    to,
+    type: 'document',
+    document: {
+      id: media.mediaId,
+      filename: media.filename,
+      ...(media.caption ? { caption: media.caption } : {}),
+    },
   };
 }
 
@@ -222,6 +271,47 @@ export class MockWhatsAppClient implements WhatsAppClient {
     return { ok: true, outcome: 'mock', viaMock: true, id: `mock-${simpleHash(`${to}|${text}`)}` };
   }
 
+  /**
+   * ADR-0021 §5 — media en mock: no se llama a Meta (tampoco hubo subida: el caller la saltea
+   * cuando el transporte no es live). Id determinístico por (to, tipo, mediaId), igual criterio
+   * que sendText. El caption NO se loguea (texto del negocio hacia el cliente).
+   */
+  protected async mockMediaSend(
+    kind: 'image' | 'document',
+    to: string,
+    mediaId: string,
+    ctx?: SendContext,
+  ): Promise<SendResult> {
+    logger.info('WhatsApp (mock): media NO enviado a Meta', {
+      tenantId: ctx?.tenantId,
+      channel: ctx?.channel,
+      kind,
+      to: maskPhone(to),
+      mode: this.resolution?.mode,
+      reason: this.resolution?.reason,
+    });
+    await this.escribirTraza(ctx, {
+      to,
+      kind,
+      channel: ctx?.channel ?? null,
+      phoneNumberId: this.resolution?.phoneNumberId ?? null,
+      mode: this.resolution?.mode ?? null,
+      tokenPresent: !!this.resolution?.tokenPresent,
+      reason: this.resolution?.reason ?? null,
+      viaMock: true,
+      blocked: false,
+    });
+    return { ok: true, outcome: 'mock', viaMock: true, id: `mock-${simpleHash(`${to}|${kind}|${mediaId}`)}` };
+  }
+
+  async sendImage(to: string, media: OutboundImageMedia, ctx?: SendContext): Promise<SendResult> {
+    return this.mockMediaSend('image', to, media.mediaId, ctx);
+  }
+
+  async sendDocument(to: string, media: OutboundDocumentMedia, ctx?: SendContext): Promise<SendResult> {
+    return this.mockMediaSend('document', to, media.mediaId, ctx);
+  }
+
   /** Mock del location_request_message: no llama a Meta; traza inspeccionable en emulador. */
   async sendLocationRequest(to: string, bodyText: string, ctx?: SendContext): Promise<LocationRequestResult> {
     // Fixture SOLO-emulador para testear el fallback textual (mismo patrón que aiTestFixtures).
@@ -288,6 +378,44 @@ export class CloudAPIClient implements WhatsAppClient {
       });
       return result;
     }
+  }
+
+  /**
+   * ADR-0021 §5 — POST /messages compartido por los tipos de media. Misma clasificación tipada
+   * que sendText (accepted solo con wamid real; 4xx ⇒ rejected saneado; resto ⇒ unknown) y el
+   * mismo criterio de logs: teléfono enmascarado, jamás payload crudo ni caption.
+   */
+  private async postMediaMessage(
+    body: Record<string, unknown>,
+    to: string,
+    etiqueta: 'imagen' | 'documento',
+    ctx?: SendContext,
+  ): Promise<SendResult> {
+    try {
+      const url = `https://graph.facebook.com/${GRAPH_VERSION}/${this.phoneNumberId}/messages`;
+      const res = await axios.post(url, body, {
+        headers: { Authorization: `Bearer ${this.accessToken}`, 'Content-Type': 'application/json' },
+        timeout: 10_000,
+      });
+      return sendResultFromCloudResponse(res.data?.messages?.[0]?.id);
+    } catch (e) {
+      const result = classifyCloudSendError(e);
+      logger.error(`WhatsApp Cloud API: error al enviar ${etiqueta}`, e, {
+        tenantId: ctx?.tenantId,
+        to: maskPhone(to),
+        outcome: result.outcome,
+        providerCode: result.outcome === 'rejected' ? result.providerCode : null,
+      });
+      return result;
+    }
+  }
+
+  async sendImage(to: string, media: OutboundImageMedia, ctx?: SendContext): Promise<SendResult> {
+    return this.postMediaMessage(buildCloudApiImageBody(to, media), to, 'imagen', ctx);
+  }
+
+  async sendDocument(to: string, media: OutboundDocumentMedia, ctx?: SendContext): Promise<SendResult> {
+    return this.postMediaMessage(buildCloudApiDocumentBody(to, media), to, 'documento', ctx);
   }
 
   /** COVERAGE-1B: interactive location_request_message por la Cloud API (Graph actual). */
@@ -465,6 +593,17 @@ export class BlockedChannelClient extends MockWhatsAppClient {
 
   override async sendText(to: string, _text: string, ctx?: SendContext): Promise<SendResult> {
     await this.trazaDeBloqueo(to, ctx);
+    return { ok: false, outcome: 'blocked', reason: this.motivo };
+  }
+
+  /** ADR-0021 §5: un canal sin permiso tampoco manda media — mismo `blocked` que sendText. */
+  override async sendImage(to: string, _media: OutboundImageMedia, ctx?: SendContext): Promise<SendResult> {
+    await this.trazaDeBloqueo(to, ctx, 'image');
+    return { ok: false, outcome: 'blocked', reason: this.motivo };
+  }
+
+  override async sendDocument(to: string, _media: OutboundDocumentMedia, ctx?: SendContext): Promise<SendResult> {
+    await this.trazaDeBloqueo(to, ctx, 'document');
     return { ok: false, outcome: 'blocked', reason: this.motivo };
   }
 

@@ -1026,6 +1026,35 @@ AWAITING_PAYMENT ─────── pago expirado ─────────
 CHECKOUT_DONE ──────────────► IDLE (próximo mensaje)
 ```
 
+### 6.4.1 Bandeja de conversaciones profesional (ADR-0021 — EN REPO, NO DESPLEGADO)
+
+La pantalla `/conversations` del panel es una bandeja tipo WhatsApp Business con identidad propia
+(tres paneles en desktop, list-or-chat en mobile). Capacidades y contratos (detalle en ADR-0021):
+
+- **Estados de entrega** (solo salientes): `Message.deliveryStatus` (`pending → sent → delivered →
+  read`; `failed` terminal solo antes de `delivered`), alimentado EXCLUSIVAMENTE por los
+  `value.statuses` del webhook — nunca se infiere «leído». El productor (`webhookHttp`) persiste
+  un doc de inbox por recibo (`status_{estado}_{wamid}`, idempotente); `aplicarReciboDeEntrega`
+  correlaciona por `waMessageId` con transición monotónica transaccional. Cero costo de cuota IA.
+- **Perfil honesto**: `Customer.profileName` capturado de `contacts[].profile.name`; la Cloud API
+  no entrega foto del consumidor ⇒ avatar de iniciales siempre; teléfono enmascarado en el panel.
+- **Ciclo de vida reversible**: `conversation.archived` (un entrante o un envío manual desarchivan)
+  y `conversation.softDeleted` (bloquea envíos fail-closed hasta restaurar). JAMÁS borra
+  mensajes/adjuntos/audits. Callables `conversationArchive/Unarchive/SoftDelete/Restore`.
+- **Vínculo a cliente**: `Customer.linkedClientId` → ficha canónica del MISMO tenant (`crm_<id>`);
+  sin cadenas ni cross-tenant; `customerSearch` paginada (límite 20) por prefijo de nombre y
+  teléfono. `conversationAssign` valida membresía staff del tenant; `conversationMarkRead` al abrir.
+- **Media saliente**: `conversationSendAttachment` (imagen jpeg/png/webp ≤5 MB, PDF ≤7 MB, base64)
+  — magic bytes verificados server-side, upload a Meta por media id (`POST /{pnid}/media`),
+  idempotencia por `operationId` (`outboundOps`, reserva `create()` + compensación), caption en el
+  doc de adjunto (nunca al historial ⇒ nunca a IA), adjunto saliente JAMÁS clasificable como
+  comprobante (nace `generic_media` + guard `attachment_outbound` en el receipt-gate). Texto y
+  media comparten UN solo guard de routing (`resolverEnvioManual`: canal fail-closed, takeover,
+  gate de cotización, PNID exacto de `receivedVia`).
+- **Matriz de permisos** (server manda; ADR-0021 §7): SELLER archiva y envía con takeover; solo
+  MANAGER/OWNER/PLATFORM_ADMIN eliminan lógico, asignan y vinculan; VIEWER sin módulo.
+- Sin índices compuestos nuevos ni cambios de Rules; polling conservado (deuda documentada).
+
 ### 6.5 Templates de notificación (HSM)
 
 Los siguientes templates deben ser aprobados por Meta para cada tenant:

@@ -377,3 +377,122 @@ export async function downloadWhatsappAttachment(
 // archivo entrante baja por `downloadWhatsappAttachment` y se guarda como adjunto (ADR-0016 §1),
 // con rutas sin extensión. Se eliminan en vez de dejarlos "por si acaso": un wrapper sin consumidor
 // es una segunda puerta de descarga que nadie mantiene y que se salta los límites por tenant.
+
+// ---------------------------------------------------------------------------
+// Subida de media a Meta (ADR-0021 §5 — envío manual de imagen/archivo)
+// ---------------------------------------------------------------------------
+
+/** Cubre el POST multipart completo (headers + cuerpo). Mismo orden de magnitud que la descarga. */
+export const MEDIA_UPLOAD_TIMEOUT_MS = 30_000;
+
+export interface WhatsappMediaUploadOptions {
+  phoneNumberId: string;
+  /** Token del TENANT (resuelto por el caller). NUNCA se loguea ni viaja en errores. */
+  accessToken: string;
+  buffer: Buffer;
+  /** MIME que el caller YA verificó por magic bytes. Acá se re-verifica igual (fail-closed). */
+  mimeType: string;
+  /** Nombre decorativo del multipart (ya saneado por el caller). */
+  filename?: string | null;
+  /** Tope de bytes. Default `MAX_MEDIA_BYTES`. */
+  maxBytes?: number;
+  timeoutMs?: number;
+  fetchImpl?: FetchLike;
+}
+
+/**
+ * Resultado del upload, alineado con la semántica de envío (SHIPPING-CHAT-3B):
+ *  - 'rejected' = NO llegó nada a Meta o Meta lo negó con 4xx — reintento SEGURO.
+ *  - 'unknown'  = 5xx/timeout/red/respuesta ilegible. A diferencia de un MENSAJE, una subida
+ *    ambigua tampoco alcanzó al cliente (el envío es un segundo POST separado), así que el
+ *    caller puede compensar y reintentar sin riesgo de duplicar mensajes.
+ */
+export type WhatsappMediaUploadResult =
+  | { ok: true; mediaId: string }
+  | { ok: false; outcome: 'rejected' | 'unknown'; detail: string };
+
+const uploadFail = (outcome: 'rejected' | 'unknown', detail: string): WhatsappMediaUploadResult => ({
+  ok: false,
+  outcome,
+  detail: sanitizeAttachmentError(detail),
+});
+
+/**
+ * POST `/{pnid}/media` multipart (FormData/Blob NATIVOS de Node 20 — cero dependencias nuevas).
+ *
+ * Reglas:
+ *  - MIME re-verificado por magic bytes ANTES de tocar la red: aunque el caller ya validó, esta
+ *    función es una puerta de salida de bytes hacia Meta y no confía en su caller (fail-closed).
+ *  - SIN reintentos: es una ESCRITURA (mismo criterio que la descarga solo reintenta lecturas).
+ *    Reintentar la subida es decisión del caller, que tiene la reserva de idempotencia.
+ *  - Timeout duro con AbortController (cubre headers + cuerpo).
+ *  - Errores SANEADOS: jamás el token, jamás la URL, jamás payload crudo de Graph. En una
+ *    excepción se conserva solo `e.name` (el message puede citar la URL con el token).
+ */
+export async function uploadWhatsappMedia(
+  opts: WhatsappMediaUploadOptions,
+): Promise<WhatsappMediaUploadResult> {
+  const maxBytes = opts.maxBytes && opts.maxBytes > 0 ? opts.maxBytes : MAX_MEDIA_BYTES;
+  const doFetch = opts.fetchImpl ?? (globalThis.fetch as FetchLike);
+
+  if (!Buffer.isBuffer(opts.buffer) || opts.buffer.length === 0) {
+    return uploadFail('rejected', 'archivo vacío');
+  }
+  if (opts.buffer.length > maxBytes) {
+    return uploadFail('rejected', 'el archivo supera el máximo permitido');
+  }
+  const declared = normalizeMimeType(opts.mimeType);
+  const sniffed = sniffAttachmentMime(opts.buffer.subarray(0, ATTACHMENT_SNIFF_MIN_BYTES));
+  if (!sniffed || !declared || !declaredMimeMatchesVerified(declared, sniffed)) {
+    return uploadFail('rejected', 'el tipo declarado no coincide con el contenido');
+  }
+
+  const form = new FormData();
+  form.append('messaging_product', 'whatsapp');
+  form.append('type', sniffed);
+  // El filename del multipart es decorativo (ya saneado por el caller); nunca arma rutas.
+  form.append('file', new Blob([new Uint8Array(opts.buffer)], { type: sniffed }), opts.filename || 'archivo');
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), opts.timeoutMs ?? MEDIA_UPLOAD_TIMEOUT_MS);
+  try {
+    const res = await doFetch(
+      `https://graph.facebook.com/${GRAPH_VERSION}/${encodeURIComponent(opts.phoneNumberId)}/media`,
+      {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${opts.accessToken}` },
+        body: form,
+        signal: controller.signal,
+      },
+    );
+    if (!res.ok) {
+      // Cuerpo de error descartado explícitamente (mismo criterio que fetchRead).
+      try {
+        await (res.body as ReadableStream<Uint8Array> | null)?.cancel?.();
+      } catch {
+        /* ya estaba cerrado */
+      }
+      const esRechazo = res.status >= 400 && res.status < 500;
+      logger.warn('mediaClient: la subida del media falló', { status: res.status, outcome: esRechazo ? 'rejected' : 'unknown' });
+      return uploadFail(esRechazo ? 'rejected' : 'unknown', `subida status ${res.status}`);
+    }
+    let json: { id?: unknown };
+    try {
+      json = (await res.json()) as { id?: unknown };
+    } catch {
+      return uploadFail('unknown', 'respuesta de subida ilegible');
+    }
+    const id = json.id;
+    if (typeof id === 'string' && id.trim().length > 0) return { ok: true, mediaId: id };
+    // 2xx sin id: NO se inventa un media id (mismo criterio que sendResultFromCloudResponse).
+    return uploadFail('unknown', 'respuesta de subida sin id de media');
+  } catch (e) {
+    // Timeout (abort) y errores de red. Solo `e.name`: el message podría citar la URL con token.
+    logger.warn('mediaClient: la subida del media se interrumpió', {
+      error: e instanceof Error ? e.name : 'desconocido',
+    });
+    return uploadFail('unknown', e instanceof Error ? e.name : 'subida interrumpida');
+  } finally {
+    clearTimeout(timer);
+  }
+}

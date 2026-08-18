@@ -10,6 +10,7 @@
 import { createContext, useContext, useEffect, useState } from 'react';
 import { onIdTokenChanged, signOut as fbSignOut, type User } from 'firebase/auth';
 import { firebaseAuth } from './firebase';
+import { limpiarBorradores } from './conversationsUi';
 
 export type Role =
   | 'PLATFORM_ADMIN'
@@ -62,6 +63,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const signOut = async () => {
+    // B5 (ADR-0021): los borradores del chat son texto de negocio — se borran TODOS al cerrar
+    // sesión para que no queden legibles en una máquina compartida. Es el único punto de logout:
+    // el «Salir» del header y el del RegistrationGate llaman a este signOut.
+    limpiarBorradores();
     await fbSignOut(firebaseAuth());
   };
 

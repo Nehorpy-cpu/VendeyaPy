@@ -10,6 +10,39 @@
 import type { SessionState, MessageChannel } from '../enums.js';
 import type { Timestamp } from './common.types.js';
 
+/**
+ * ADR-0021: estado de entrega de un mensaje SALIENTE, alimentado EXCLUSIVAMENTE por los
+ * `value.statuses` del webhook de Meta. Nunca se infiere (si el destinatario desactivó los
+ * recibos de lectura, el estado se queda honesto en 'delivered'). Los entrantes no tienen estado.
+ */
+export type MessageDeliveryStatus = 'pending' | 'sent' | 'delivered' | 'read' | 'failed';
+
+/**
+ * ADR-0021: orden monotónico de los estados de entrega. Un evento con rango menor o igual al
+ * actual es un no-op (idempotencia; los recibos repetidos o tardíos nunca retroceden el estado).
+ * 'failed' es terminal y solo aplica si el mensaje aún no alcanzó 'delivered'.
+ */
+export const DELIVERY_STATUS_RANK: Record<Exclude<MessageDeliveryStatus, 'failed'>, number> = {
+  pending: 0,
+  sent: 1,
+  delivered: 2,
+  read: 3,
+};
+
+/** ADR-0021: timestamps del proveedor por estado alcanzado (no del servidor). */
+export interface MessageDeliveryAt {
+  sent?: Timestamp;
+  delivered?: Timestamp;
+  read?: Timestamp;
+  failed?: Timestamp;
+}
+
+/** ADR-0021: detalle sanitizado de una falla reportada por el proveedor (sin payload crudo). */
+export interface MessageDeliveryError {
+  code?: string;
+  detail?: string;
+}
+
 /** 'in' = lo escribió el cliente; 'out' = se lo enviamos nosotros (bot o vendedor). */
 export type MessageDirection = 'in' | 'out';
 
@@ -47,6 +80,12 @@ export interface Message {
    * el texto del mensaje (`📷 Imagen recibida` era falsificable escribiéndolo a mano).
    */
   hasAttachments?: boolean;
+  /** ADR-0021: estado de entrega (solo salientes). Ausente en mensajes históricos y entrantes. */
+  deliveryStatus?: MessageDeliveryStatus;
+  /** ADR-0021: timestamps del proveedor por estado alcanzado. */
+  deliveryAt?: MessageDeliveryAt;
+  /** ADR-0021: falla sanitizada reportada por el proveedor. */
+  deliveryError?: MessageDeliveryError | null;
 }
 
 /**
@@ -65,4 +104,23 @@ export interface CustomerConversationMeta {
   unreadForSeller: number;
   /** Canal de la conversación (omnicanal, D2). */
   channel?: MessageChannel;
+  /**
+   * MULTI-NUMBER (formalizado en ADR-0021): phone_number_id del número del negocio por el que
+   * habló el cliente por última vez. Ya se escribía (`conversation/messages.ts`) — estaba fuera
+   * del contrato y el panel lo leía con un doble cast.
+   */
+  receivedVia?: string | null;
+  /** ADR-0021: conversación archivada (reversible; un entrante nuevo la desarchiva). */
+  archived?: boolean;
+  archivedAt?: Timestamp | null;
+  /** uid del staff que archivó. */
+  archivedBy?: string | null;
+  /**
+   * ADR-0021: eliminación LÓGICA reversible. Jamás borra mensajes, auditorías ni adjuntos;
+   * solo oculta la conversación de la bandeja hasta restaurarla.
+   */
+  softDeleted?: boolean;
+  softDeletedAt?: Timestamp | null;
+  /** uid del staff que eliminó lógicamente. */
+  softDeletedBy?: string | null;
 }

@@ -101,6 +101,13 @@ export function mensajeDeMotivo(reason: ReceiptStoreDenyReason): { code: 'not-fo
           'La marcación de comprobantes no está habilitada para tu empresa. Pedile al responsable ' +
           'de la cuenta que la active. Desmarcar comprobantes sigue disponible.',
       };
+    case 'attachment_outbound':
+      // ADR-0021 §5: el archivo lo mandó el propio equipo desde el panel. No es un error del
+      // vendedor ni algo que se arregle reintentando: un saliente jamás es evidencia de pago.
+      return {
+        code: 'failed-precondition',
+        message: 'Ese archivo lo envió tu equipo: un adjunto saliente no puede marcarse como comprobante.',
+      };
     case 'attachment_not_found':
     case 'tenant_mismatch':
       return { code: 'not-found', message: 'El archivo no existe en esta empresa.' };

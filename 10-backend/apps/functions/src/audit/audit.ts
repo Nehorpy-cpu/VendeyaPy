@@ -77,7 +77,23 @@ export const AUDIT_ACTIONS = [
   'coverage.quote_job_cancelled',
   'chat.released',
   'conversation.manual_message_sent',
+  // ADR-0021 §5: envío HUMANO de imagen/archivo desde el panel (actor, conversación, adjunto,
+  // kind y viaMock en metadata; jamás el nombre del archivo ni el caption — texto libre).
+  'conversation.attachment_sent',
   'conversation.returned_to_bot',
+  // ADR-0021 §3/§4/§7 — bandeja profesional. Ciclo de vida REVERSIBLE (jamás delete físico),
+  // asignación manual de vendedor y vínculo conversación↔ficha. Solo acciones EFECTIVAS: un
+  // no-op idempotente (archivar lo ya archivado) no genera entrada. Marcar leído NO se audita
+  // (evento de lectura de bandeja, no acción de negocio).
+  'conversation.archived',
+  'conversation.unarchived',
+  'conversation.soft_deleted',
+  'conversation.restored',
+  'conversation.assigned',
+  'conversation.unassigned',
+  'conversation.client_linked',
+  'conversation.client_unlinked',
+  'conversation.client_created',
   'meta.connected',
   'meta.connected_manual',
   // META-ONBOARDING-SELF-SERVICE-1 (ADR-0020, G7): el lifecycle owner-facing completo deja rastro.

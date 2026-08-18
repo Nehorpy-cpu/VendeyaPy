@@ -22,7 +22,7 @@ import { coverageActivationOf, shippingQuotePolicyOf, blocksManualShippingSend, 
 import { db, paths } from '../lib/firebase.js';
 import { logger } from '../lib/logger.js';
 import { appendMessage, type AppendMessageInput } from './messages.js';
-import { getWhatsAppClient, type WhatsAppClient } from '../messaging/whatsappClient.js';
+import { getWhatsAppClient, type SendResult, type WhatsAppClient } from '../messaging/whatsappClient.js';
 import { canalDePlataformaNoWhatsapp, resolverCanalDePnid } from './canal.js';
 
 /** Tope de la Cloud API para texto (Meta rechaza >4096; validamos antes de gastar el request). */
@@ -88,6 +88,13 @@ export interface ManualMessageDeps {
   resolverCanal: (tenantId: string, receivedVia: string | null) => Promise<string>;
   getClient: (tenantId: string, phoneNumberId: string | null) => Promise<WhatsAppClient>;
   append: (tenantId: string, customerId: string, input: AppendMessageInput) => Promise<Message>;
+  /**
+   * ADR-0021 §3: limpiar `archived/archivedAt/archivedBy` cuando un envío manual AUTORIZADO sale
+   * sobre una conversación archivada (misma semántica que el desarchivado por entrante de
+   * messages.ts). OPCIONAL a propósito: su ausencia solo omite el desarchivado —jamás abre ni
+   * cierra el envío—, así los tests existentes (fixtures sin flags) no cambian de comportamiento.
+   */
+  desarchivarConversacion?: (tenantId: string, customerId: string) => Promise<void>;
 }
 
 /** Estados del puntero con cobertura ACTIVA para el gate (approved requiere mirar el resume). */
@@ -138,23 +145,79 @@ export const defaultManualMessageDeps: ManualMessageDeps = {
   getClient: (t, pnid) => getWhatsAppClient(t, undefined, pnid, 'humano'),
   resolverCanal: resolverCanalDePnid,
   append: appendMessage,
+  // Merge de hoja: solo la terna de archivado — nunca toca softDeleted ni el resto del resumen.
+  desarchivarConversacion: async (t, c) => {
+    await db()
+      .doc(paths.customer(t, c))
+      .set({ conversation: { archived: false, archivedAt: null, archivedBy: null } }, { merge: true });
+  },
 };
 
-export async function sendManualMessage(
-  input: ManualMessageInput,
-  sender: ManualMessageSender,
-  deps: ManualMessageDeps = defaultManualMessageDeps,
-): Promise<ManualMessageResult> {
-  const text = (input.text ?? '').trim();
-  if (!text) throw new HttpsError('invalid-argument', 'Escribí un mensaje antes de enviar.');
-  if (text.length > MANUAL_MESSAGE_MAX_CHARS) {
-    throw new HttpsError('invalid-argument', `El mensaje es demasiado largo (máx. ${MANUAL_MESSAGE_MAX_CHARS} caracteres).`);
-  }
+/**
+ * ADR-0021 §5 — GUARD COMPARTIDO DEL ENVÍO MANUAL (un solo camino de routing)
+ * ===========================================================================
+ * Texto y media salen por EXACTAMENTE la misma secuencia: cliente existe → dispatcher por canal
+ * fail-closed → sessionKey por `receivedVia` → takeover/override → gate de cotización → cliente
+ * de WhatsApp por el PNID de la conversación con origen 'humano'. Antes esta secuencia vivía
+ * dentro de `sendManualMessage`; se extrae para que el envío de adjuntos no pueda tener una
+ * versión propia (dos guards divergen, y el laxo es el que filtra).
+ *
+ * `textoParaGate` es el texto VISIBLE que va a salir hacia el cliente: el cuerpo del mensaje en
+ * texto, el CAPTION en un adjunto. El gate de cotización lo evalúa igual en ambos — si no, el
+ * caption sería la puerta trasera exacta que el gate existe para cerrar.
+ */
+export type EnvioManualGuardDeps = Pick<
+  ManualMessageDeps,
+  'getCustomer' | 'getGateContext' | 'resolverCanal' | 'getClient' | 'desarchivarConversacion'
+>;
 
+export interface EnvioManualGuardInput {
+  tenantId: string;
+  customerId: string;
+  /** Texto visible que saldría (mensaje o caption). Puede ser '' (adjunto sin caption). */
+  textoParaGate: string;
+}
+
+export interface EnvioManualResuelto {
+  customer: Customer;
+  /** PNID que RECIBIÓ la conversación (null = principal / conversación legacy). */
+  phoneNumberId: string | null;
+  /** Destino del envío (whatsappPhone || customerId). */
+  to: string;
+  client: WhatsAppClient;
+}
+
+export async function resolverEnvioManual(
+  input: EnvioManualGuardInput,
+  sender: ManualMessageSender,
+  deps: EnvioManualGuardDeps,
+  /** Prefijo de los logs (permite distinguir texto de adjuntos sin duplicar el guard). */
+  contexto = 'Mensaje manual',
+): Promise<EnvioManualResuelto> {
   const customer = await deps.getCustomer(input.tenantId, input.customerId);
   if (!customer) throw new HttpsError('not-found', 'Esa conversación no existe.');
 
-  const conv = (customer as { conversation?: { humanTakeover?: boolean; receivedVia?: string | null; channel?: string | null } }).conversation;
+  const conv = (customer as {
+    conversation?: {
+      humanTakeover?: boolean;
+      receivedVia?: string | null;
+      channel?: string | null;
+      archived?: boolean;
+      softDeleted?: boolean;
+    };
+  }).conversation;
+  /**
+   * ADR-0021 §3 — una conversación con eliminación LÓGICA no acepta envíos manuales (texto NI
+   * adjuntos: este guard es el único camino). Se exige restaurar primero: escribirle a un chat
+   * "eliminado" lo resucitaría en silencio y el vendedor no sabría que estaba descartado.
+   */
+  if (conv?.softDeleted === true) {
+    throw new HttpsError(
+      'failed-precondition',
+      'Esta conversación está eliminada. Restaurala desde la bandeja antes de enviar mensajes.',
+      { kind: 'conversation_deleted' },
+    );
+  }
   /**
    * DISPATCHER POR CANAL (H2 / ADR-0017 §2) — el transporte se decide ANTES que cualquier otra
    * cosa. `getWhatsAppClient` es el único sender implementado: para una conversación de
@@ -167,7 +230,7 @@ export async function sendManualMessage(
   const canalPlataforma = canalDePlataformaNoWhatsapp(conv?.channel);
   if (canalPlataforma !== null) {
     // La plataforma no es PII (es 'instagram'/'messenger'); el teléfono va enmascarado como siempre.
-    logger.warn('Mensaje manual: la conversación es de otra plataforma y no hay sender implementado', {
+    logger.warn(`${contexto}: la conversación es de otra plataforma y no hay sender implementado`, {
       tenantId: input.tenantId,
       customerId: maskPhone(input.customerId),
       channel: conv?.channel ?? null,
@@ -213,7 +276,7 @@ export async function sendManualMessage(
     (ptr.status === 'awaiting_location' ||
       ptr.status === 'pending_coverage_review' ||
       (ptr.status === 'coverage_approved' && gate.resumeDone !== true));
-  if (gateActivo && blocksManualShippingSend(text, gate.shippingQuote!)) {
+  if (gateActivo && blocksManualShippingSend(input.textoParaGate, gate.shippingQuote!)) {
     throw new HttpsError(
       'failed-precondition',
       'El mensaje contiene un costo de envío: usá "Informar costo de envío" para enviarlo y aprobar la cobertura.',
@@ -226,47 +289,90 @@ export async function sendManualMessage(
   const phoneNumberId = conv?.receivedVia ?? null;
   const client = await deps.getClient(input.tenantId, phoneNumberId);
   const to = customer.whatsappPhone || input.customerId;
+
+  /**
+   * ADR-0021 §3 — el envío manual AUTORIZADO desarchiva (comportamiento WhatsApp, simétrico al
+   * desarchivado por entrante de messages.ts). Corre al FINAL del guard a propósito: un rechazo
+   * previo (canal no soportado, takeover faltante, gate de cotización) NO debe desarchivar nada.
+   * Se desarchiva ANTES del transporte: si Meta después rechaza, la conversación queda visible en
+   * la bandeja donde el vendedor ya está actuando — el estado honesto, no un efecto a revertir.
+   */
+  if (conv?.archived === true) {
+    await deps.desarchivarConversacion?.(input.tenantId, input.customerId);
+  }
+  return { customer, phoneNumberId, to, client };
+}
+
+/**
+ * Mapeo COMPARTIDO de un envío `!ok` a su HttpsError (ADR-0021 §5). Devuelve —no lanza— para
+ * que el camino de adjuntos pueda COMPENSAR (liberar su reserva, marcar el adjunto) antes de
+ * propagar exactamente el mismo error que el texto. Semántica intacta de SHIPPING-CHAT-3B-HARDEN:
+ *  - blocked: NO-ENVÍO confirmado (cero HTTP) ⇒ failed-precondition accionable, sin burbuja.
+ *  - rejected ≠ unknown: el rechazo confirmado admite reintento; el desconocido NO (el mensaje
+ *    PUDO salir y un reintento ciego lo duplicaría al cliente).
+ * Nunca loguea texto/teléfono/PNID completos.
+ */
+export function errorDeEnvioManualNoOk(
+  res: Extract<SendResult, { ok: false }>,
+  ctx: { tenantId: string; customerId: string; contexto?: string },
+): HttpsError {
+  const etiqueta = ctx.contexto ?? 'Mensaje manual';
+  if (res.outcome === 'blocked') {
+    logger.warn(`${etiqueta}: el canal no tiene permiso para enviar (ADR-0017)`, {
+      tenantId: ctx.tenantId,
+      customerId: maskPhone(ctx.customerId),
+      reason: res.reason,
+    });
+    return new HttpsError(
+      'failed-precondition',
+      'Ese número todavía no tiene habilitado el envío de mensajes. El mensaje NO se envió: pedí que se active el número antes de volver a intentar.',
+      { kind: 'whatsapp_channel_blocked' },
+    );
+  }
+  if (res.outcome === 'rejected') {
+    logger.warn(`${etiqueta}: WhatsApp rechazó el envío (confirmado)`, {
+      tenantId: ctx.tenantId,
+      customerId: maskPhone(ctx.customerId),
+      outcome: res.outcome,
+      providerCode: res.providerCode,
+    });
+    return new HttpsError('unavailable', 'WhatsApp no aceptó el mensaje. Probá de nuevo en un momento.', {
+      kind: 'whatsapp_send_rejected',
+    });
+  }
+  logger.warn(`${etiqueta}: resultado de envío desconocido`, {
+    tenantId: ctx.tenantId,
+    customerId: maskPhone(ctx.customerId),
+    outcome: res.outcome,
+  });
+  return new HttpsError('unavailable', 'No pudimos confirmar si el mensaje salió. Revisá el chat de WhatsApp antes de reenviarlo.', {
+    kind: 'whatsapp_send_unknown',
+  });
+}
+
+export async function sendManualMessage(
+  input: ManualMessageInput,
+  sender: ManualMessageSender,
+  deps: ManualMessageDeps = defaultManualMessageDeps,
+): Promise<ManualMessageResult> {
+  const text = (input.text ?? '').trim();
+  if (!text) throw new HttpsError('invalid-argument', 'Escribí un mensaje antes de enviar.');
+  if (text.length > MANUAL_MESSAGE_MAX_CHARS) {
+    throw new HttpsError('invalid-argument', `El mensaje es demasiado largo (máx. ${MANUAL_MESSAGE_MAX_CHARS} caracteres).`);
+  }
+
+  // Guard compartido (ADR-0021 §5): canal → sessionKey → takeover/override → gate → PNID exacto.
+  const { phoneNumberId, to, client } = await resolverEnvioManual(
+    { tenantId: input.tenantId, customerId: input.customerId, textoParaGate: text },
+    sender,
+    deps,
+  );
+
   const res = await client.sendText(to, text, { tenantId: input.tenantId, channel: 'whatsapp' });
   if (!res.ok) {
-    // ADR-0017 §1: el canal NO tiene permiso para hablar. NADA salió (cero HTTP hacia Meta), así
-    // que no se persiste burbuja ni se le contesta éxito al vendedor: antes esto devolvía ok y el
-    // panel mostraba el mensaje como enviado mientras el cliente no recibía nada. El texto del
-    // error dice qué hacer —es un permiso, no una falla de red— y no nombra el número.
-    if (res.outcome === 'blocked') {
-      logger.warn('Mensaje manual: el canal no tiene permiso para enviar (ADR-0017)', {
-        tenantId: input.tenantId,
-        customerId: maskPhone(input.customerId),
-        reason: res.reason,
-      });
-      throw new HttpsError(
-        'failed-precondition',
-        'Ese número todavía no tiene habilitado el envío de mensajes. El mensaje NO se envió: pedí que se active el número antes de volver a intentar.',
-        { kind: 'whatsapp_channel_blocked' },
-      );
-    }
-    // SHIPPING-CHAT-3B-HARDEN: rejected ≠ unknown. Un RECHAZO CONFIRMADO (4xx de Meta) admite
-    // reintento; un resultado DESCONOCIDO (timeout/5xx/2xx sin wamid) NO — el mensaje PUDO haber
-    // salido y un reintento ciego lo duplicaría al cliente. En ninguno se persiste el mensaje
-    // (el historial no miente) ni se loguea texto/teléfono/PNID completos.
-    if (res.outcome === 'rejected') {
-      logger.warn('Mensaje manual: WhatsApp rechazó el envío (confirmado)', {
-        tenantId: input.tenantId,
-        customerId: maskPhone(input.customerId),
-        outcome: res.outcome,
-        providerCode: res.providerCode,
-      });
-      throw new HttpsError('unavailable', 'WhatsApp no aceptó el mensaje. Probá de nuevo en un momento.', {
-        kind: 'whatsapp_send_rejected',
-      });
-    }
-    logger.warn('Mensaje manual: resultado de envío desconocido', {
-      tenantId: input.tenantId,
-      customerId: maskPhone(input.customerId),
-      outcome: res.outcome,
-    });
-    throw new HttpsError('unavailable', 'No pudimos confirmar si el mensaje salió. Revisá el chat de WhatsApp antes de reenviarlo.', {
-      kind: 'whatsapp_send_unknown',
-    });
+    // ADR-0017 §1 / SHIPPING-CHAT-3B-HARDEN: en ningún caso se persiste burbuja (el historial no
+    // miente). El mapeo del error vive en `errorDeEnvioManualNoOk`, compartido con los adjuntos.
+    throw errorDeEnvioManualNoOk(res, { tenantId: input.tenantId, customerId: input.customerId });
   }
 
   // Persistir DESPUÉS del envío OK (mock también persiste: el historial es la verdad del panel).

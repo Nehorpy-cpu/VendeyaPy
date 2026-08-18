@@ -89,6 +89,7 @@ const adjunto: PanelAttachment = {
   attachmentId: A1,
   customerId: CLIENTE,
   class: 'image',
+  direction: 'in', // ADR-0021: un comprobante es siempre ENTRANTE
   ingestState: 'stored',
   classification: { value: 'payment_receipt_linked', source: 'human', confidence: 1, by: 'uid_1', at: ts(2) },
   caption: '',

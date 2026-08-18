@@ -682,3 +682,61 @@ corregidos.
 familia meta-connect + `firestore:indexes` (TTL nuevo) + Hosting (panel) — selector exacto lo
 emitirá release-audit en su programa; **el frontend de Meta Review NO se toca mientras la
 revisión siga en curso**.
+
+## CONVERSATIONS-WHATSAPP-UX-1 — 2026-08-18 (EN REPO — NO DESPLEGADO)
+
+**ADR-0021**: la pantalla `/conversations` pasó a bandeja profesional tipo WhatsApp Business con
+identidad propia, reutilizando primitivas (cero sistema paralelo). **Backend**: (1) recibos del
+proveedor — los `value.statuses` que se DESCARTABAN (`parseWebhook.ts:495`) ahora fluyen por el
+camino real (productor `webhookHttp` escribe un doc de inbox POR recibo, clave idempotente
+`status_{estado}_{wamid}`; `aplicarReciboDeEntrega` correlaciona por `waMessageId` y aplica
+transición monotónica transaccional `pending<sent<delivered<read`, `failed` terminal solo antes
+de delivered; jamás se infiere «leído»; cero costo de cuota IA — §7 de verify-ai-reservation
+respetado); `profileName` de `contacts[]` capturado sin pisar `name` CRM; salientes reales nacen
+`deliveryStatus:'pending'` (viaMock/system sin estado); un entrante desarchiva. (2) Media
+saliente — `WhatsAppClient` gana `sendImage`/`sendDocument` (3 implementaciones),
+`uploadWhatsappMedia` (POST /{pnid}/media multipart nativo Node 20), callable
+`conversationSendAttachment` (imagen jpeg/png/webp ≤5 MB, PDF ≤7 MB, base64; tope pre-decode;
+magic bytes verificados; SVG/HTML/ZIP/EXE rechazados; filename saneado; caption en el DOC de
+adjunto — jamás al historial ⇒ jamás a IA; idempotencia `outboundOps` con reserva transaccional
++ lease 5 min + replay coherente `operation_mismatch`; compensación sin delete físico). Texto y
+media comparten UN guard (`resolverEnvioManual`: canal fail-closed, takeover/override, gate de
+cotización — evaluado también sobre el caption —, PNID exacto). Saliente JAMÁS comprobante:
+doble cerrojo (nace `generic_media` + `attachment_outbound` en receipt-gate). (3) Ciclo de vida
+y vínculo — 10 callables nuevos (`conversationArchive/Unarchive/SoftDelete/Restore/Assign/
+MarkRead/LinkClient/UnlinkClient/CreateClient`, `customerSearch`) con matriz §7 re-verificada en
+el núcleo, transaccionales e idempotentes, 9 acciones de audit nuevas; vínculo sin cadenas EN
+AMBAS DIRECCIONES ni sobre eliminadas; softDelete reversible que bloquea envíos y jamás borra
+nada físico; búsqueda server-side paginada (≤20, cursor opaco validado). **Panel**: page
+reescrita en 10 componentes (lista con buscador + 7 filtros, historial con separadores
+Hoy/Ayer/fecha, ticks accesibles ✓/✓✓/✓✓-subrayado+color/error con aria-labels, paginación
+hacia atrás con scroll estable, botón «ir al más reciente», compositor con emojis propios +
+adjuntos con preview/progreso/reintento + borradores por conversación limpiados en logout,
+panel de info con avatar iniciales, `~nombre` de perfil no confirmado, teléfono ENMASCARADO,
+vínculo y asignación), MANAGER ve el módulo (fix roles.ts), estados completos y a11y
+(ModalShell/focus trap/Escape/aria-live).
+
+**Verificación**: RED-first en todo; batería completa typecheck/lint/build/tests/diff-check en
+0 (functions 3302+ tests, web 632/632); E2E NUEVO `verify-conversations-inbox` **42/42** en
+emuladores limpios (perfil, paginación, takeover+no-leídos+markRead, texto+imagen+PDF con
+idempotencia, hostiles MIME/SVG/oversize sin efectos, recibos reales sent→delivered→read con
+tardíos/failed/desconocidos ignorados, vínculo, búsqueda, asignación, archivado/desarchivado
+automático, softDelete que bloquea y restaura, cross-tenant, regreso del bot) + regresiones:
+human-handoff 11/11, handoff2 8/8, attachments 98/98, shipping-quote-saga 81/81,
+ai-reservation 14/14. **Visual en navegador real** (emuladores sembrados, panel Next dev):
+desktop 1600, laptop 1280 y móvil 375 verificados estructuralmente (list-or-chat, volver,
+sin overflow, info panel, teléfono enmascarado); 3 hallazgos vivos corregidos (keys duplicadas
+entre hermanos que acumulaban 41 historiales montados; «marcar comprobante» ofrecido sobre
+salientes con textos de «archivo del cliente»; plural del badge). **Review adversarial**:
+**0 ALTO**; 1 MEDIO (cadena inversa del vínculo) + 6 BAJO (lease de reserva, replay
+incoherente, vínculo sobre eliminada, markRead creaba docs fantasma, borradores tras logout,
+ticks solo-color) — **TODOS corregidos**; P1 (lote de statuses — mitigado por firma del
+webhook), P2 (bytes de Storage tras compensación — sin GC) y P3 (nombre de perfil ambiguo —
+mitigado con `~`) documentados en el ADR.
+
+**Deploy futuro estimado**: 11 CREATE (los callables nuevos) + UPDATE de `metaWebhook`/
+`onWebhookInbox` (recibos+perfil), `conversationSendManualMessage` (guard compartido),
+callables de adjuntos/receipt-gate (cerrojo saliente) + Hosting (panel). **Sin índices
+compuestos nuevos, sin cambios de Rules, sin TTL nuevos.** Deudas ADR-0021: polling (no
+realtime), filtros client-side sobre ventana de 100, IG/Messenger solo lectura, GC de
+salientes fallidos.

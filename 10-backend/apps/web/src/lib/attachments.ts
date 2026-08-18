@@ -60,6 +60,10 @@ export type PanelAttachment = Pick<
   | 'attachmentId'
   | 'customerId'
   | 'class'
+  // ADR-0021 §5: los adjuntos SALIENTES existen desde el envío manual del panel. La UI necesita
+  // la dirección para no ofrecer «comprobante» sobre algo que envió el propio equipo y para que
+  // los textos no digan «del cliente». Docs históricos sin el campo ⇒ 'in' (todos eran entrantes).
+  | 'direction'
   | 'ingestState'
   | 'caption'
   | 'filename'
@@ -88,6 +92,8 @@ export function toPanelAttachment(raw: unknown): PanelAttachment | null {
     attachmentId: d.attachmentId,
     customerId: typeof d.customerId === 'string' ? d.customerId : '',
     class: d.class ?? 'unknown',
+    // Ausente ⇒ 'in': antes del ADR-0021 solo existían adjuntos entrantes.
+    direction: d.direction === 'out' ? 'out' : 'in',
     ingestState: d.ingestState ?? 'received',
     classification: c
       ? {
@@ -259,10 +265,18 @@ export function attachmentTypeLabel(a: PanelAttachment): string {
   return 'Tipo sin verificar';
 }
 
-/** Nombre visible. `filename` ya viene saneado; si no hay, se usa un rótulo genérico por clase. */
+/**
+ * Nombre visible. `filename` ya viene saneado; si no hay, el rótulo genérico dice la VERDAD de la
+ * dirección: un adjunto que envió el equipo jamás se describe como «del cliente» (ADR-0021 §5).
+ */
 export function attachmentDisplayName(a: PanelAttachment): string {
   const f = a.filename?.trim();
   if (f) return f;
+  if (a.direction === 'out') {
+    if (a.class === 'image') return 'Imagen enviada al cliente';
+    if (a.class === 'document') return 'Documento enviado al cliente';
+    return 'Archivo enviado al cliente';
+  }
   if (a.class === 'image') return 'Imagen del cliente';
   if (a.class === 'document') return 'Documento del cliente';
   return 'Archivo del cliente';
@@ -279,7 +293,13 @@ export function formatAttachmentSize(bytes: number | null | undefined): string {
 /** Texto alternativo del visor y del thumbnail. El caption viene saneado por el servidor. */
 export function attachmentAltText(a: PanelAttachment): string {
   const base =
-    a.class === 'image' ? 'Imagen enviada por el cliente' : 'Documento enviado por el cliente';
+    a.direction === 'out'
+      ? a.class === 'image'
+        ? 'Imagen enviada al cliente'
+        : 'Documento enviado al cliente'
+      : a.class === 'image'
+        ? 'Imagen enviada por el cliente'
+        : 'Documento enviado por el cliente';
   const cap = a.caption?.trim();
   return cap ? `${base}: ${cap}` : base;
 }
@@ -300,7 +320,16 @@ export const CLASSIFICATION_LABEL: Record<AttachmentClassification, string> = {
   rejected: 'Archivo rechazado',
 };
 
-export function classificationLabel(v: AttachmentClassification | undefined): string {
+/**
+ * Rótulo de la clasificación. Para un adjunto SALIENTE «generic_media» no puede decir «Archivo
+ * del cliente»: lo mandó el equipo (ADR-0021 §5). El resto de estados no aplica a salientes
+ * (nunca se clasifican como comprobante), así que no necesitan variante.
+ */
+export function classificationLabel(
+  v: AttachmentClassification | undefined,
+  direction?: PanelAttachment['direction'],
+): string {
+  if (direction === 'out' && v === 'generic_media') return 'Archivo enviado por tu equipo';
   return (v && CLASSIFICATION_LABEL[v]) || CLASSIFICATION_LABEL.unclassified;
 }
 
@@ -323,6 +352,9 @@ export function puedeClasificarComprobantes(role: Role | null | undefined): bool
  */
 export function puedeMarcarComprobante(a: PanelAttachment, role: Role | null | undefined): boolean {
   if (!puedeClasificarComprobantes(role)) return false;
+  // ADR-0021 §5: el adjunto SALIENTE nunca se clasifica como comprobante (el receipt-gate solo
+  // considera entrantes). El server ya lo rechaza (`attachment_outbound`); ofrecerlo es mentir.
+  if (a.direction === 'out') return false;
   if (!isAttachmentStored(a.ingestState)) return false; // sin bytes guardados no hay comprobante
   const from = a.classification?.value;
   if (!from) return false;

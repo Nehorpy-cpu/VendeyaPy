@@ -101,6 +101,13 @@ export async function appendMessage(
   if (input.waMessageId) extra['waMessageId'] = input.waMessageId;
   if (input.viaMock) extra['viaMock'] = true;
   if (input.origin) extra['origin'] = input.origin;
+  // ADR-0021 §1: la burbuja saliente ACEPTADA por un proveedor real nace 'pending' («enviando»).
+  // Todo avance posterior proviene EXCLUSIVAMENTE de los `value.statuses` del webhook. Los
+  // viaMock NO llevan estado (nada salió a ningún proveedor) y los 'system' tampoco (son eventos
+  // internos del panel). Los entrantes jamás tienen estado de entrega.
+  if (input.direction === 'out' && (input.author === 'bot' || input.author === 'seller') && input.viaMock !== true) {
+    extra['deliveryStatus'] = 'pending';
+  }
   const doc = Object.keys(extra).length ? { ...msg, ...extra } : msg;
 
   if (input.docId) {
@@ -134,8 +141,11 @@ export async function appendMessage(
   // forma de saber si este mensaje sigue siendo el último. Queda una ventana residual si dos
   // resúmenes se leen/escriben exactamente intercalados (cerrarla del todo exige transacción).
   const customerRef = db().doc(paths.customer(tenantId, customerId));
-  const prevAt = ((await customerRef.get()).data() as { conversation?: { lastMessageAt?: { toMillis?: () => number } } } | undefined)
-    ?.conversation?.lastMessageAt;
+  // La MISMA lectura trae `archived` (ADR-0021 §3): el desarchivado no paga un round-trip extra.
+  const prevConv = ((await customerRef.get()).data() as
+    | { conversation?: { lastMessageAt?: { toMillis?: () => number }; archived?: unknown } }
+    | undefined)?.conversation;
+  const prevAt = prevConv?.lastMessageAt;
   // EMPATE (>=): gana la operación que termina última — es el comportamiento vigente para los
   // pares in/out agrupados con el MISMO reloj (`input.now` compartido): el out se escribe segundo
   // y debe quedar como último mensaje del resumen. Un resumen sin `lastMessageAt` legible
@@ -158,6 +168,16 @@ export async function appendMessage(
   // "Sin leer" para el vendedor: solo cuando el bot no está atendiendo (handoff/bot off).
   if (input.countUnread) {
     conv['unreadForSeller'] = FieldValue.increment(1);
+  }
+  // ADR-0021 §3 — DESARCHIVADO AUTOMÁTICO (comportamiento WhatsApp): la vuelta del cliente
+  // desarchiva en la MISMA actualización del resumen. No es «última actividad» —aplica aunque
+  // este mensaje llegue viejo para el guard monotónico: el hecho es que el cliente volvió a
+  // escribir— y NUNCA toca `softDeleted`: la eliminación lógica solo se revierte explícitamente
+  // desde el panel.
+  if (input.direction === 'in' && prevConv?.archived === true) {
+    conv['archived'] = false;
+    conv['archivedAt'] = null;
+    conv['archivedBy'] = null;
   }
 
   /**

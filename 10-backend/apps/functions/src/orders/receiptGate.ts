@@ -213,6 +213,12 @@ export interface ReceiptGateAttachmentFacts {
    * sería mentira y se podría vincular como comprobante algo que ya no se puede abrir.
    */
   purgedAtMs: number | null;
+  /**
+   * ADR-0021 §5: dirección del adjunto. OPCIONAL a propósito — los adjuntos históricos son todos
+   * entrantes y sus facts no la llevaban; solo el envío manual del panel produce `'out'`, y un
+   * saliente JAMÁS puede volverse comprobante (lo mandó el propio equipo).
+   */
+  direction?: 'in' | 'out';
 }
 
 /** Pedido candidato, ya cargado. `linkedAttachmentIds` da la idempotencia `(orderId, attachmentId)`. */
@@ -500,6 +506,8 @@ export type ReceiptMarkDenyReason =
    * en OFF, porque apagar una función no puede dejar atrapada una decisión humana ya tomada.
    */
   | 'receipt_gate_disabled'
+  /** ADR-0021 §5: adjunto SALIENTE (lo mandó el equipo) — jamás puede ser comprobante de pago. */
+  | 'attachment_outbound'
   | 'tenant_mismatch'
   | 'attachment_not_stored'
   | 'attachment_purged'
@@ -579,6 +587,11 @@ export function decideMarkAsReceipt(input: ReceiptMarkInput): ReceiptMarkDecisio
   const { tenantId, attachment, order } = input;
 
   if (attachment.tenantId !== tenantId) return { ok: false, reason: 'tenant_mismatch' };
+  // ADR-0021 §5: un adjunto SALIENTE comparte customerId con los entrantes (misma conversación),
+  // así que sin este guard una imagen que mandó el PROPIO equipo podía marcarse como comprobante
+  // del cliente. La dirección es un hecho del documento, no una clasificación: se corta acá,
+  // antes de cualquier otra regla.
+  if (attachment.direction === 'out') return { ok: false, reason: 'attachment_outbound' };
   // El pedido tiene que ser DEL MISMO cliente que mandó el archivo: vincular el comprobante de
   // una persona al pedido de otra es exactamente la confusión que hay que impedir.
   if (order.customerId !== attachment.customerId) return { ok: false, reason: 'order_customer_mismatch' };

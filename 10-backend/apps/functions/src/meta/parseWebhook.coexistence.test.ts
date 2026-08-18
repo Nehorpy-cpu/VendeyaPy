@@ -261,8 +261,10 @@ describe('despachador por change.field — campo desconocido y no regresión', (
     expect(r.echoes).toHaveLength(0);
     expect(r.historyChunks).toHaveLength(0);
     expect(r.unknownFields).toHaveLength(0);
-    // wa-status: el recibo de entrega sigue contando como ignorado.
-    expect(parseMetaWebhookPayload(load('wa-status.json')).ignored).toBe(1);
+    // wa-status (ADR-0021): el recibo de entrega ya no se ignora — sale como evento tipado.
+    const status = parseMetaWebhookPayload(load('wa-status.json'));
+    expect(status.ignored).toBe(0);
+    expect(status.deliveryStatuses).toHaveLength(1);
   });
 
   it('el ruteo es por `field`, NO por la forma del payload', () => {

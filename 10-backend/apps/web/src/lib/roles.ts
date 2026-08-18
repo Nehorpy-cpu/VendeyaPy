@@ -42,7 +42,8 @@ export const MODULES: NavModule[] = [
   { key: 'onboarding', label: 'Primeros pasos', href: '/onboarding', icon: '🚀', section: 'inicio', roles: ['PLATFORM_ADMIN', 'TENANT_OWNER'] },
   { key: 'decisions', label: 'Acciones de hoy', href: '/decisions', icon: '🧭', section: 'inicio', roles: ['PLATFORM_ADMIN', 'TENANT_OWNER', 'TENANT_MANAGER'] },
   // ── VENTAS ──
-  { key: 'conversations', label: 'Conversaciones', href: '/conversations', icon: '💬', section: 'ventas', roles: ['PLATFORM_ADMIN', 'TENANT_OWNER', 'SELLER'] },
+  // ADR-0021 §7: TENANT_MANAGER tenía permisos por rules y callables pero no veía el módulo.
+  { key: 'conversations', label: 'Conversaciones', href: '/conversations', icon: '💬', section: 'ventas', roles: ['PLATFORM_ADMIN', 'TENANT_OWNER', 'TENANT_MANAGER', 'SELLER'] },
   { key: 'orders', label: 'Pedidos', href: '/orders', icon: '🧾', section: 'ventas', roles: ['PLATFORM_ADMIN', 'TENANT_OWNER', 'SELLER'] },
   { key: 'customers', label: 'Clientes', href: '/customers', icon: '👥', section: 'ventas', roles: ['PLATFORM_ADMIN', 'TENANT_OWNER', 'SELLER'] },
   { key: 'followups', label: 'Seguimientos', href: '/followups', icon: '📌', section: 'ventas', roles: ['PLATFORM_ADMIN', 'TENANT_OWNER', 'TENANT_MANAGER', 'SELLER'] },

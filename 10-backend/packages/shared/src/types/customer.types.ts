@@ -35,6 +35,18 @@ export interface Customer {
   customerScore?: number | null;
   /** De qué anuncio/campaña vino (atribución, D5). */
   attribution?: Attribution;
+  /**
+   * ADR-0021: nombre de perfil de WhatsApp reportado por el webhook (`contacts[].profile.name`).
+   * Es dato del proveedor, NO dato CRM confirmado (`name`). Prioridad de display:
+   * name || profileName || teléfono.
+   */
+  profileName?: string | null;
+  /**
+   * ADR-0021: vínculo a la ficha canónica de cliente (otro doc de `customers` del MISMO tenant,
+   * p. ej. `crm_<autoid>` o el doc de otro número de la misma persona). Sin cadenas: la ficha
+   * destino no puede estar a su vez vinculada.
+   */
+  linkedClientId?: string | null;
   createdAt: Timestamp;
   updatedAt: Timestamp;
 }

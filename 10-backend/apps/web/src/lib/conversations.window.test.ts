@@ -7,9 +7,11 @@
  */
 import { describe, it, expect, vi } from 'vitest';
 
-const { getDocsMock, orderByMock } = vi.hoisted(() => ({
+const { getDocsMock, orderByMock, startAfterMock, queryMock } = vi.hoisted(() => ({
   getDocsMock: vi.fn(),
   orderByMock: vi.fn((field: string, dir: string) => ({ field, dir })),
+  startAfterMock: vi.fn((cursor: unknown) => ({ startAfter: cursor })),
+  queryMock: vi.fn((_col: unknown, ...clauses: unknown[]) => ({ clauses })),
 }));
 
 vi.mock('firebase/firestore', () => ({
@@ -17,9 +19,10 @@ vi.mock('firebase/firestore', () => ({
   doc: vi.fn(),
   getDoc: vi.fn(),
   getDocs: getDocsMock,
-  query: vi.fn((_col: unknown, ...clauses: unknown[]) => ({ clauses })),
+  query: queryMock,
   orderBy: orderByMock,
   limit: vi.fn((n: number) => ({ limit: n })),
+  startAfter: startAfterMock,
 }));
 vi.mock('firebase/functions', () => ({ httpsCallable: vi.fn() }));
 vi.mock('./firebase', () => ({ firebaseDb: () => ({}), firebaseFunctions: () => ({}) }));
@@ -44,5 +47,41 @@ describe('getMessages (ventana de los ÚLTIMOS mensajes)', () => {
     });
     const msgs = await getMessages('arfagi', 'c1');
     expect(msgs.map((m) => (m as { text: string }).text)).toEqual(['m1-viejo', 'm2', 'm3-nuevo']);
+  });
+
+  it('sin cursor NO agrega startAfter (la ventana viva no cambia de forma)', async () => {
+    getDocsMock.mockResolvedValueOnce({ docs: [] });
+    startAfterMock.mockClear();
+    await getMessages('arfagi', 'c1');
+    expect(startAfterMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('getMessages con cursor (ADR-0021 — paginación hacia atrás)', () => {
+  it('mantiene desc + startAfter(cursor) + reverse: la página anterior llega cronológica', async () => {
+    // Página anterior en desc: Firestore entrega el más nuevo (de los viejos) primero.
+    getDocsMock.mockResolvedValueOnce({
+      docs: [
+        { data: () => ({ id: 'b', text: 'viejo-2' }) },
+        { data: () => ({ id: 'a', text: 'viejo-1' }) },
+      ],
+    });
+    orderByMock.mockClear();
+    startAfterMock.mockClear();
+    queryMock.mockClear();
+
+    const cursor = { seconds: 100 }; // createdAt del mensaje más viejo ya cargado
+    const msgs = await getMessages('arfagi', 'c1', 50, cursor);
+
+    expect(orderByMock).toHaveBeenCalledWith('createdAt', 'desc');
+    expect(startAfterMock).toHaveBeenCalledWith(cursor);
+    // El orden de cláusulas importa: orderBy → startAfter → limit (cursor sobre el MISMO orden).
+    const clauses = (queryMock.mock.calls[0] as unknown[]).slice(1);
+    expect(clauses).toEqual([
+      { field: 'createdAt', dir: 'desc' },
+      { startAfter: cursor },
+      { limit: 50 },
+    ]);
+    expect(msgs.map((m) => (m as { text: string }).text)).toEqual(['viejo-1', 'viejo-2']);
   });
 });

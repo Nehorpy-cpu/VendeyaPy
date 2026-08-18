@@ -276,3 +276,51 @@ describe('Candidato a comprobante — sugerencia, no comprobante', () => {
     expect(document.body.textContent ?? '').not.toContain(URL_FIRMADA);
   });
 });
+
+describe('Adjunto SALIENTE (ADR-0021 §5) — la UI distingue la dirección', () => {
+  // El adjunto que el PANEL le envió al cliente: jamás es un comprobante y los textos no pueden
+  // decir «del cliente». Los docs salientes traen `direction: 'out'`.
+  const saliente = att({
+    direction: 'out',
+    author: 'seller',
+    classification: { value: 'generic_media', source: 'rule', confidence: 1, by: null, at: ts(5) },
+  });
+
+  beforeEach(() => {
+    getAttachmentViewUrl.mockReset();
+    markAttachmentAsReceipt.mockReset();
+    getAttachmentViewUrl.mockResolvedValue({ url: URL_FIRMADA, expiresAt: 1 });
+  });
+
+  it('NUNCA ofrece «Marcar como comprobante» aunque haya un pedido admisible', async () => {
+    renderAdjuntos({ byId: new Map([[ID, saliente]]), orders: [order('ord_uno')], role: 'TENANT_OWNER' });
+    await screen.findByRole('img'); // thumbnail listo: el bloque de acciones ya se decidió
+    expect(screen.queryByRole('button', { name: /marcar como comprobante/i })).not.toBeInTheDocument();
+  });
+
+  it('el alt de la imagen dice que fue ENVIADA AL cliente, no recibida', async () => {
+    renderAdjuntos({ byId: new Map([[ID, saliente]]) });
+    expect(await screen.findByAltText(/imagen enviada al cliente/i)).toBeInTheDocument();
+    expect(screen.queryByAltText(/por el cliente/i)).not.toBeInTheDocument();
+  });
+
+  it('la línea de clasificación no lo describe como «Archivo del cliente»', async () => {
+    renderAdjuntos({ byId: new Map([[ID, saliente]]), role: 'TENANT_OWNER' });
+    await screen.findByRole('img');
+    expect(screen.queryByText(/archivo del cliente/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/enviado por tu equipo/i)).toBeInTheDocument();
+  });
+
+  it('un documento saliente sin filename tampoco dice «del cliente»', () => {
+    const pdfOut = att({
+      direction: 'out',
+      author: 'seller',
+      class: 'document',
+      filename: null,
+      mime: { declared: 'application/pdf', verified: 'application/pdf' },
+    });
+    renderAdjuntos({ byId: new Map([[ID, pdfOut]]) });
+    expect(screen.queryByText(/documento del cliente/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/documento enviado al cliente/i)).toBeInTheDocument();
+  });
+});

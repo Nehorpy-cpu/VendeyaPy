@@ -158,6 +158,28 @@ export { chatTakeover, chatRelease } from './functions/conversation/chatHandoff.
 // Respuesta HUMANA del vendedor por WhatsApp desde el panel (HUMAN-HANDOFF-1).
 export { conversationSendManualMessage } from './functions/conversation/manualMessage.js';
 
+// Envío HUMANO de imagen/archivo desde el panel (ADR-0021 §5): guard compartido con el texto,
+// idempotencia por operationId y adjunto ADR-0016 saliente (jamás comprobante).
+export { conversationSendAttachment } from './functions/conversation/sendAttachment.js';
+
+// Bandeja profesional (ADR-0021 §3/§4/§7): ciclo de vida reversible (archivar / eliminación
+// lógica), marcado de leído por apertura, asignación manual de vendedor, vínculo
+// conversación↔ficha de cliente y búsqueda server-side para el modal de vínculo.
+export {
+  conversationArchive,
+  conversationUnarchive,
+  conversationSoftDelete,
+  conversationRestore,
+  conversationMarkRead,
+} from './functions/conversation/lifecycle.js';
+export { conversationAssign } from './functions/conversation/assign.js';
+export {
+  conversationLinkClient,
+  conversationUnlinkClient,
+  conversationCreateClient,
+} from './functions/conversation/linkClient.js';
+export { customerSearch } from './functions/conversation/customerSearch.js';
+
 // Agregados para dashboards baratos (P7): trigger por pedido + recálculo manual.
 export { onOrderWriteStats } from './functions/stats/onOrderWriteStats.js';
 export { devRecomputeStats } from './functions/stats/devRecomputeStats.js';

@@ -344,7 +344,7 @@ export function AttachmentCandidateActions({
         <div>
           <dt className="inline font-semibold">Clasificación:</dt>{' '}
           <dd className="inline">
-            {classificationLabel(attachment.classification?.value)} — la puso{' '}
+            {classificationLabel(attachment.classification?.value, attachment.direction)} — la puso{' '}
             {autorClasificacion(attachment)}
             {fechaCorta(attachment.classification?.at)
               ? ` el ${fechaCorta(attachment.classification?.at)}`

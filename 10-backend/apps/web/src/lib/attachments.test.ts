@@ -104,6 +104,9 @@ describe('proyección al panel: la ruta de Storage NO sale de Firestore', () => 
     'classification',
     'createdAt',
     'customerId',
+    // ADR-0021 §5: la UI necesita la dirección para no ofrecer «comprobante» sobre un adjunto
+    // SALIENTE y para que los textos no digan «del cliente». No es dato interno del servidor.
+    'direction',
     'filename',
     'ingestState',
     'lastError',
@@ -286,5 +289,43 @@ describe('índice y auditoría', () => {
     expect(classificationLabel('payment_receipt_candidate')).toBe('Posible comprobante');
     expect(classificationLabel('payment_receipt_linked')).toBe('Comprobante vinculado');
     expect(classificationLabel(undefined)).toBe('Sin clasificar');
+  });
+});
+
+describe('Dirección del adjunto (ADR-0021 §5) — salientes honestos', () => {
+  it('doc histórico SIN direction ⇒ se proyecta como entrante (compatibilidad)', () => {
+    const crudo = { ...att() } as unknown as Record<string, unknown>;
+    delete crudo.direction;
+    expect(toPanelAttachment(crudo)?.direction).toBe('in');
+  });
+
+  it('doc saliente conserva direction out en la proyección', () => {
+    expect(toPanelAttachment(att({ direction: 'out' }))?.direction).toBe('out');
+  });
+
+  it('un adjunto SALIENTE jamás se puede marcar como comprobante (el server lo rechazaría)', () => {
+    const out = toPanelAttachment(att({ direction: 'out', author: 'seller' }))!;
+    expect(puedeMarcarComprobante(out, 'TENANT_OWNER')).toBe(false);
+    // El mismo adjunto entrante SÍ se podría (control del test: el bloqueo es por dirección).
+    const inn = toPanelAttachment(att())!;
+    expect(puedeMarcarComprobante(inn, 'TENANT_OWNER')).toBe(true);
+  });
+
+  it('los textos de un saliente dicen «al cliente», nunca «del/por el cliente»', () => {
+    const img = toPanelAttachment(att({ direction: 'out' }))!;
+    expect(attachmentAltText(img)).toBe('Imagen enviada al cliente');
+    expect(attachmentDisplayName(img)).toBe('Imagen enviada al cliente');
+    const doc = toPanelAttachment(
+      att({ direction: 'out', class: 'document', mime: { declared: 'application/pdf', verified: 'application/pdf' } }),
+    )!;
+    expect(attachmentAltText(doc)).toBe('Documento enviado al cliente');
+    expect(attachmentDisplayName(doc)).toBe('Documento enviado al cliente');
+  });
+
+  it('classificationLabel con direction out: generic_media es «enviado por tu equipo»', () => {
+    expect(classificationLabel('generic_media', 'out')).toBe('Archivo enviado por tu equipo');
+    // Entrantes y llamadas de un solo argumento no cambian (compatibilidad con el resto del panel).
+    expect(classificationLabel('generic_media', 'in')).toBe('Archivo del cliente');
+    expect(classificationLabel('generic_media')).toBe('Archivo del cliente');
   });
 });

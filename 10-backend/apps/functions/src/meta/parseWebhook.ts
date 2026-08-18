@@ -38,7 +38,8 @@
  *     auditoría de ruido y, sobre todo, para no esconder los errores que sí son fallas.
  */
 
-import { sanitizeAttachmentCaption, sanitizeAttachmentFilename, normalizeMimeType } from '@vpw/shared';
+import { sanitizeAttachmentCaption, sanitizeAttachmentFilename, sanitizeAttachmentError, normalizeMimeType } from '@vpw/shared';
+import type { MessageDeliveryError } from '@vpw/shared';
 
 export type InboundPlatform = 'whatsapp' | 'instagram' | 'messenger';
 
@@ -104,6 +105,12 @@ export interface NormalizedInbound {
   messageId: string; // WA: messages[].id (wamid) · IG/Messenger: message.mid → idempotencia
   timestamp: number | null; // WA: segundos (string) · IG/Messenger: ms (number)
   adReferral: MetaAdReferral | null;
+  /**
+   * ADR-0021 §2: `value.contacts[].profile.name` asociado a ESTE mensaje por `wa_id`. Es el
+   * nombre de perfil que el CLIENTE eligió en WhatsApp — dato del proveedor, saneado y acotado,
+   * jamás dato CRM confirmado (`Customer.name`). Ausente si Meta no mandó el contacto.
+   */
+  profileName?: string;
   /**
    * Presente SOLO en mensajes con archivo (imagen o documento). `text` queda '' AUNQUE haya
    * caption: el caption viaja en el adjunto y NO se envía a la IA (ADR-0016 §9).
@@ -338,9 +345,50 @@ export interface NormalizedUnknownField {
   itemCount: number | null;
 }
 
+// ---------------------------------------------------------------------------
+// ADR-0021 §1 — RECIBOS DE ENTREGA (`value.statuses`)
+// ---------------------------------------------------------------------------
+
+/**
+ * Estados de entrega que declara el contrato oficial de Meta para `value.statuses[]`. Vocabulario
+ * CERRADO: un estado que este despliegue no conoce se descarta contado como ignorado — degradarlo
+ * a uno conocido sería avanzar ticks del panel por un valor que no se entiende.
+ */
+export const DELIVERY_RECEIPT_STATUSES = ['sent', 'delivered', 'read', 'failed'] as const;
+export type DeliveryReceiptStatus = (typeof DELIVERY_RECEIPT_STATUSES)[number];
+
+/**
+ * RECIBO DE ENTREGA normalizado — el avance de estado de un mensaje SALIENTE nuestro, reportado
+ * por el proveedor. Hasta ADR-0021 se descartaban enteros (sumaban a `ignored`) y la burbuja del
+ * panel no podía mostrar ticks honestos.
+ *
+ * `recipientId` es el wa_id del CLIENTE al que le mandamos el mensaje: de ahí se deriva el
+ * `customerId` (misma sanitización a dígitos que `process.ts`) para buscar la burbuja por wamid.
+ * El `error` de un `failed` viaja SANEADO (code + title/message acotados) — el payload crudo del
+ * error (`error_data`, `details`) NO se transporta: puede arrastrar contenido y termina en logs.
+ */
+export interface NormalizedDeliveryStatus {
+  /** `statuses[].id` — wamid del mensaje SALIENTE al que refiere el recibo. */
+  waMessageId: string;
+  status: DeliveryReceiptStatus;
+  /** `statuses[].timestamp` en segundos (reloj DEL PROVEEDOR). null si no vino o es basura. */
+  timestampSeconds: number | null;
+  /** `statuses[].recipient_id` — wa_id del cliente destinatario. */
+  recipientId: string;
+  /** `metadata.phone_number_id` — por qué número del negocio salió el mensaje ('' si no vino). */
+  receivedVia: string;
+  /** Solo en `failed` (si Meta lo mandó): `errors[0]` sanitizado, sin payload crudo. */
+  error?: MessageDeliveryError;
+}
+
 export interface ParseResult {
   messages: NormalizedInbound[];
   ignored: number;
+  /**
+   * ADR-0021 §1: recibos de entrega del cambio `messages`. Lista aditiva como las de
+   * Coexistence: quien solo lee `messages`/`ignored` sigue funcionando igual que antes.
+   */
+  deliveryStatuses: NormalizedDeliveryStatus[];
   /**
    * Los cuatro campos de Coexistence salen por listas SEPARADAS y no por `messages`. Son aditivos:
    * quien solo lee `messages`/`ignored` sigue funcionando igual que antes.
@@ -489,13 +537,85 @@ function waErrors(raw: Any, out: NormalizedWebhookError[]): void {
   }
 }
 
-/** Cuerpo HISTÓRICO del parser: un cambio con `field === 'messages'` (mensajes vivos + statuses). */
-function waMessagesChange(value: Any, externalId: string, out: NormalizedInbound[], errores: NormalizedWebhookError[]): number {
+/** ¿Es uno de los cuatro estados del contrato? Fail-closed de vocabulario (ver el const). */
+const esEstadoDeEntrega = (v: string | null): v is DeliveryReceiptStatus =>
+  v !== null && (DELIVERY_RECEIPT_STATUSES as readonly string[]).includes(v);
+
+/**
+ * `statuses[].errors[0]` → error SANEADO. Se transportan SOLO `code` y `title` (con fallback a
+ * `message`, que algunos códigos traen en lugar del title), pasados por `sanitizeAttachmentError`:
+ * corta control chars, URLs firmadas y corridas largas de dígitos (teléfonos/wamids). El
+ * `error_data`/`details` crudo JAMÁS viaja — puede arrastrar contenido del mensaje.
+ */
+function waStatusError(s: Any): MessageDeliveryError | null {
+  const e0 = Array.isArray(s?.errors) ? s.errors[0] : null;
+  if (!e0 || typeof e0 !== 'object') return null;
+  const code = toNum(e0?.code);
+  const detail = sanitizeAttachmentError(str(e0?.title) ?? str(e0?.message) ?? '', ERROR_TITLE_MAX);
+  if (code === null && detail === '') return null;
+  return { ...(code !== null ? { code: String(code) } : {}), ...(detail !== '' ? { detail } : {}) };
+}
+
+/**
+ * ADR-0021 §1: los RECIBOS DE ENTREGA dejan de descartarse. Sin wamid o sin `recipient_id` no hay
+ * a qué aplicarlos (se descartan contados), y un estado desconocido también — nunca se degrada.
+ */
+function waStatuses(value: Any, externalId: string, out: NormalizedDeliveryStatus[]): number {
   let ignored = 0;
-  if (Array.isArray(value?.statuses)) ignored += value.statuses.length; // recibos de entrega
+  const items = Array.isArray(value?.statuses) ? value.statuses : [];
+  for (const s of items) {
+    const waMessageId = str(s?.id);
+    const recipientId = str(s?.recipient_id);
+    const status = str(s?.status);
+    if (waMessageId === null || recipientId === null || !esEstadoDeEntrega(status)) {
+      ignored++;
+      continue;
+    }
+    const error = waStatusError(s);
+    out.push({
+      waMessageId,
+      status,
+      timestampSeconds: toNum(s?.timestamp),
+      recipientId,
+      receivedVia: externalId,
+      ...(error ? { error } : {}),
+    });
+  }
+  return ignored;
+}
+
+/**
+ * ADR-0021 §2: `value.contacts[]` → mapa wa_id → nombre de perfil SANEADO. Es dato del proveedor
+ * (lo eligió el cliente en su WhatsApp): se acota y se limpia igual que cualquier texto no
+ * confiable, y solo sirve para asociarlo al mensaje entrante de ESE wa_id.
+ */
+function waContactNames(value: Any): Map<string, string> {
+  const nombres = new Map<string, string>();
+  const contacts = Array.isArray(value?.contacts) ? value.contacts : [];
+  for (const c of contacts) {
+    const waId = str(c?.wa_id);
+    const nombre = label(c?.profile?.name, CONTACT_NAME_MAX);
+    if (waId !== null && nombre !== null) nombres.set(waId, nombre);
+  }
+  return nombres;
+}
+
+/** Cuerpo HISTÓRICO del parser: un cambio con `field === 'messages'` (mensajes vivos + statuses). */
+function waMessagesChange(
+  value: Any,
+  externalId: string,
+  out: NormalizedInbound[],
+  errores: NormalizedWebhookError[],
+  recibos: NormalizedDeliveryStatus[],
+): number {
+  let ignored = 0;
+  // ADR-0021 §1: los recibos de entrega ya NO suman a `ignored` — alimentan los ticks del panel.
+  ignored += waStatuses(value, externalId, recibos);
   // Errores a nivel del CAMBIO: hasta acá eran completamente invisibles. Ahí es donde llega el
   // `131060` esperado tras el onboarding, y también cualquier falla real del canal.
   waErrors(value?.errors, errores);
+  // ADR-0021 §2: el nombre de perfil del contacto, para asociarlo al mensaje por `wa_id`.
+  const perfiles = waContactNames(value);
   const messages = Array.isArray(value?.messages) ? value.messages : [];
   for (const msg of messages) {
     // Errores del MENSAJE (típicamente `type: 'unsupported'`). Mismo criterio: se exponen
@@ -522,6 +642,8 @@ function waMessagesChange(value: Any, externalId: string, out: NormalizedInbound
       messageId: str(msg?.id) ?? '',
       timestamp: toNum(msg?.timestamp),
       adReferral: waReferral(msg?.referral),
+      // ADR-0021 §2: SOLO si el contacto matchea el `from` de ESTE mensaje. No se adivina.
+      ...(perfiles.has(from) ? { profileName: perfiles.get(from)! } : {}),
       ...(attachment ? { attachment } : {}),
       ...(unsupported ? { unsupported } : {}),
       ...(location ? { location } : {}),
@@ -829,7 +951,7 @@ function parseWhatsApp(entries: Any[], result: ParseResult): number {
       const field = str(change?.field) ?? 'messages';
       switch (field) {
         case 'messages':
-          ignored += waMessagesChange(value, externalId, result.messages, result.messageErrors);
+          ignored += waMessagesChange(value, externalId, result.messages, result.messageErrors, result.deliveryStatuses);
           break;
         case 'smb_message_echoes':
           ignored += waEchoesChange(value, externalId, result.echoes);
@@ -915,6 +1037,41 @@ export function attachmentFromInboxPayload(payload: unknown): InboundAttachment 
   };
 }
 
+/**
+ * ADR-0021 §1 — RECIBOS a partir del payload YA PERSISTIDO en el inbox (`payload.statuses[]`).
+ *
+ * Mismo criterio que `attachmentFromInboxPayload`: el documento del inbox no se cree — cada evento
+ * se RE-VALIDA (wamid, recipient y estado del vocabulario cerrado; lo inválido se descarta sin
+ * lanzar) y el error se re-sanea. Es puro ⇒ testeable sin E/S. No existe forma legacy: hasta
+ * ADR-0021 los recibos se descartaban en el parser y nunca llegaron a persistirse.
+ */
+export function deliveryStatusesFromInboxPayload(payload: unknown): NormalizedDeliveryStatus[] {
+  const items = (payload as Any)?.statuses;
+  if (!Array.isArray(items)) return [];
+  const out: NormalizedDeliveryStatus[] = [];
+  for (const s of items as Any[]) {
+    const waMessageId = str(s?.waMessageId);
+    const recipientId = str(s?.recipientId);
+    const status = str(s?.status);
+    if (waMessageId === null || recipientId === null || !esEstadoDeEntrega(status)) continue;
+    const code = str(s?.error?.code);
+    const detail = sanitizeAttachmentError(str(s?.error?.detail) ?? '', ERROR_TITLE_MAX);
+    const error: MessageDeliveryError | null =
+      code !== null || detail !== ''
+        ? { ...(code !== null ? { code } : {}), ...(detail !== '' ? { detail } : {}) }
+        : null;
+    out.push({
+      waMessageId,
+      status,
+      timestampSeconds: toNum(s?.timestampSeconds),
+      recipientId,
+      receivedVia: str(s?.receivedVia) ?? '',
+      ...(error ? { error } : {}),
+    });
+  }
+  return out;
+}
+
 /** Tipo no soportado a partir del payload del inbox (no existe forma legacy: antes se perdían). */
 export function unsupportedFromInboxPayload(payload: unknown): InboundUnsupported | null {
   const kind = (payload as Any)?.unsupported?.kind;
@@ -927,6 +1084,7 @@ export function unsupportedFromInboxPayload(payload: unknown): InboundUnsupporte
 const emptyResult = (): ParseResult => ({
   messages: [],
   ignored: 0,
+  deliveryStatuses: [],
   echoes: [],
   historyChunks: [],
   historyMedia: [],
