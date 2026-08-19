@@ -104,9 +104,12 @@ documentadas en flujos no ejercitados). Selectores literales de deploy y rollbac
 > **7 mensajes el 12-08 (mié 09 h)** + 2 el 15-08, **5 remitentes distintos**, 3 en los últimos
 > 7 días, 0 en 48 h — compatible con revisores probando; el backend no distingue revisor de
 > prueba del owner (limitación declarada). **El gate NO es solo Hosting**: el Tramo 1
-> redespliega `metaWebhook`/`onWebhookInbox` (el camino del revisor) ⇒ **NO-GO hasta que el
-> owner confirme el estado en el App Dashboard** (pasos exactos y ventana recomendada —
-> domingo 05:00–07:30 ASU, cero tráfico histórico — en `release-plan-tres-programas.md` §10).
+> redespliega `metaWebhook`/`onWebhookInbox` (el camino del revisor).
+> **CONFIRMADO POR EL OWNER EN EL DASHBOARD (2026-08-19): «Revisión en curso»** — 4 solicitudes
+> (`whatsapp_business_messaging/management`, `catalog_management`, `public_profile`), plazo
+> típico 20 días, fecha de envío no visible ⇒ **NO-GO FIRME para el Tramo 1** hasta
+> «Aprobado»/«Rechazado». Al destrabarse: re-correr `review-window-audit.mjs` + ventana
+> domingo 05:00–07:30 ASU (`release-plan-tres-programas.md` §10.4-10.6).
 >
 > **Deuda de release: superficie ya calculada y verificada** — ver
 > `docs/release-plan-tres-programas.md` (RELEASE-AUDIT-TRES-PROGRAMAS-1). Nota clave: los tres

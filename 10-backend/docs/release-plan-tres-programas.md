@@ -282,3 +282,17 @@ revisión terminó. Condición para el GO del Tramo 1:
    riesgo, no una garantía.)
 4. En cualquier caso: re-correr `scripts/review-window-audit.mjs` el día del deploy (¿hubo
    inbound nuevo en …686 en las últimas 48 h?) como último check de la ventana.
+
+### 10.6 Confirmación del owner (2026-08-19) — «Revisión en curso» ⇒ NO-GO firme
+
+El owner verificó el App Dashboard (§10.3) el 2026-08-19: estado **«Revisión en curso»**
+(«la mayoría de las solicitudes se revisan en un plazo de 20 días»), con CUATRO solicitudes
+nuevas listadas: `whatsapp_business_messaging`, `whatsapp_business_management`,
+`catalog_management`, `public_profile`. Captura en poder del owner.
+
+**Decisión: NO-GO para el Tramo 1 mientras la revisión siga abierta** (regla §10.5 caso 3).
+El GO se rehabilita cuando el dashboard diga «Aprobado» o «Rechazado»; en ese momento:
+re-correr `scripts/review-window-audit.mjs` (¿inbound nuevo en …686 en 48 h?) y desplegar en
+la ventana de §10.4 (domingo 05:00–07:30 ASU). La fecha de envío de la solicitud no es visible
+en la captura ⇒ el plazo de 20 días no se puede anclar: revisar el dashboard ante cada mail de
+Meta o semanalmente.
