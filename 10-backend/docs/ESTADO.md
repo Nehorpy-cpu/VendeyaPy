@@ -78,11 +78,19 @@ Reconciliación 04:30 y 16:30 America/Asuncion contra TTL de 24 h, solo lectura.
    RELEASE-SECURITY-AND-RUNBOOK-HARDEN-1 subieron `.env.vpw-staging` al bucket de fuentes de
    prod. La fuga es interna (bucket no público, valores distintos por entorno), pero quedan
    109 versiones vivas construidas con ese `.env`, no borradas.
-6. **`releaseToBot` destruye el estado de checkout (ALTO, sin programa asignado).**
-   El botón "devolver al asistente" escribe `state: 'IDLE'` incondicionalmente y borra el
-   `AWAITING_PAYMENT`; desde ahí el receipt gate deniega con `no_explicit_payment_context`.
-   Reproducido en producción. Contraste que acota el arreglo: la liberación automática de
-   cobertura (`coverageResume.liberarSesionGuardado`) está bien hecha y no toca `state`.
+6. **`releaseToBot` destruye el checkout — ARREGLADO EN REPO desde `4af6607` (2026-08-04),
+   NO DESPLEGADO (verificado 2026-08-19).** Prod tiene `chatRelease` con `updateTime`
+   2026-07-31T11:23Z (GCF v2, dato directo) < fecha del fix ⇒ el defecto SIGUE VIVO en
+   producción hasta el release (`functions:chatRelease` ya está en el Paso 1 del plan).
+   El fix (`ESTADOS_QUE_SOBREVIVEN_A_LIBERAR` = SELECTING_PAYMENT + AWAITING_PAYMENT, 6 tests
+   en `handoff.release.test.ts`) fue re-verificado el 2026-08-19: el set de DOS es COMPLETO —
+   `Session.cart` no se toca al liberar y «carrito»/«pagar» son reglas globales previas a la
+   máquina de estados (el cliente conserva su carrito desde IDLE); `CHECKOUT_DONE` no tiene
+   lectores y transiciona solo a IDLE; los estados de navegación se reinician a propósito.
+   **⚠️ ADVERTENCIA OPERATIVA (vigente hasta el deploy, aplica a la prueba de Fase 3):**
+   durante una venta real NO usar «devolver al asistente» si el cliente está por pagar o ya
+   recibió los datos bancarios — el `chatRelease` desplegado todavía degrada la sesión a IDLE
+   y el comprobante rebota en el receipt gate.
 
 ## En repo, sin desplegar
 

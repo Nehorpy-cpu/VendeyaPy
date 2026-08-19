@@ -160,7 +160,7 @@ todo junto. **La decisión es del programa de deploy, no de este plan.**
 - **Tramo 1 (sin gate de Meta): Pasos 0–3** — todo el backend.
 - **Tramo 2 (bloqueado por App Review): Hosting** — 48 archivos de panel entre los tres
   programas (6 de ADR-0020, 31 de ADR-0021, 11 de ADR-0022), con el procedimiento del runbook
-  §5 (env temporal de 9 claves + verificación de chunks) cuando Meta libere el gate.
+  §5 (env temporal de 14 claves — la lista de 9 era INCOMPLETA, corregida por PRE-RELEASE-HOSTING-KEYS-1 — + verificación de chunks que incluye la PRESENCIA de los config_id de Meta) cuando Meta libere el gate.
 
 ## 7. Gates externos y qué necesita cada uno
 
@@ -189,7 +189,7 @@ NO se ejecuta desde este plan.
 
 ## 9. Lo que este plan NO valida
 
-- El build/env de Hosting (Tramo 2): el procedimiento §5 con las 9 claves se verifica recién en
+- El build/env de Hosting (Tramo 2): el procedimiento §5 con las 14 claves (lista corregida) se verifica recién en
   su deploy.
 - El comportamiento runtime post-deploy: los smokes (recibos reales, adjunto saliente, cambio de
   autoridad en dry-run) pertenecen al programa de deploy con su gate.

@@ -42,6 +42,38 @@ Reglas de escritura:
 
 ## 2026-08
 
+### PRE-RELEASE-HOSTING-KEYS-AND-HANDOFF-STATE-1 — 2026-08-19 (DOCS + VERIFICACIÓN — CERO DEPLOY)
+
+**(A) Claves de Hosting corregidas — el defecto habría dejado el panel sin conexión de Meta.**
+HANDOFF §5 decía «9 claves obligatorias»; la plantilla real tiene 13 y el código usa una 14ª
+(`NEXT_PUBLIC_META_COEXISTENCE_CONFIG_ID`, solo en `.env.example`). Verificado en CÓDIGO (no
+en comentarios): sin `META_APP_ID`/`META_CONFIG_ID`, `readConfig` ⇒ null
+(`metaEmbeddedSignup.ts:129-135`) e Integraciones queda en «Meta no configurada» sin OAuth
+real (matiz vs el enunciado del programa: en build de PROD no cae a devMetaConnect — el modo
+demo es por entorno, `integrations.ts:90`; la consecuencia es la misma: nadie conecta su
+número); Coexistence jamás cae al config estándar (:127). Corregido: HANDOFF §5 (lista de 14
+con consecuencia por clave + smoke ampliado que verifica la PRESENCIA de los config_id en los
+chunks), `.env.production.example` (+COEXISTENCE con comentario), plan §6/§9 (dos menciones).
+Cero valores reales al repo.
+
+**(B) Set de estados del release: COMPLETO con dos — cero código tocado.** Evidencia por
+estado: `Session.cart` (session.types.ts:84) NO se toca al liberar y «carrito»/«pagar» son
+reglas del pipeline global previas a la máquina (engine.ts:335-336,458) ⇒ CART solo pierde
+posición conversacional (el reinicio de navegación documentado como buscado, handoff.ts:322);
+`CHECKOUT_DONE` sin lectores (solo lo escribe confirmPayment.ts:71) y auto-transiciona a IDLE;
+GREETING/BROWSING/VIEWING_PRODUCT = navegación (lastShownSkus sobrevive y la selección es
+regla global); IDLE es el destino. Ampliar el set sería crecer el guard sin pérdida
+demostrable (§2.3 del programa). Callers: chatRelease y devReleaseChat; nadie depende de IDLE.
+
+**(C) Verdad del estado, con dato directo:** `chatRelease` en prod `updateTime`
+2026-07-31T11:23Z < fix `4af6607` (2026-08-04) ⇒ fix EN REPO — NO DESPLEGADO; bloqueante de
+ESTADO reescrito con la advertencia operativa para Fase 3 (no «devolver al asistente» durante
+un pago hasta el deploy).
+
+**Verificación:** typecheck/lint/build/test/diff-check con exit codes reales;
+`git diff --stat -- 10-backend/apps/web/src` VACÍO (§2.4: panel sin cambios). E2E de handoff
+no corridos: cero código de handoff tocado.
+
 ### APP-REVIEW-STATUS-AND-DEPLOY-WINDOW-1 — 2026-08-19 (READ-ONLY — CERO MUTACIÓN)
 
 Evidencia para el GO/NO-GO del Tramo 1, en `release-plan-tres-programas.md` §10 (nueva).
