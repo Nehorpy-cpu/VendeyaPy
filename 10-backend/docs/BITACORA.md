@@ -42,6 +42,23 @@ Reglas de escritura:
 
 ## 2026-08
 
+### APP-REVIEW-STATUS-AND-DEPLOY-WINDOW-1 — 2026-08-19 (READ-ONLY — CERO MUTACIÓN)
+
+Evidencia para el GO/NO-GO del Tramo 1, en `release-plan-tres-programas.md` §10 (nueva).
+Script nuevo `scripts/review-window-audit.mjs` (read-only, field mask — el texto de los
+mensajes ni viaja; teléfonos enmascarados). **meta-review …686**: último inbound 15-08 ≈11:48
+ASU (~4 días); ráfaga de 7 mensajes el 12-08 (mié 09 h) con 5 remitentes distintos — compatible
+con revisores, no probatorio (el backend no distingue revisor de owner; limitación declarada);
+3 en 7 días, 0 en 48 h ⇒ **no se puede declarar la revisión terminada**. **arfagi …904**: 57
+inbound/30 d, todo 08:00–17:59 (+2 a las 22 h), **domingo con CERO mensajes en el mes** ⇒
+ventana recomendada **domingo 05:00–07:30 ASU** (post verificación 04:30, pre tráfico/trials).
+Graph API: NO expone el estado del App Review (dashboard-only); **cero llamadas a Meta, ni
+GET**. Corrección al plan: el gate de App Review no es solo Hosting — el Tramo 1 redespliega
+`metaWebhook`/`onWebhookInbox` (camino del revisor). **Recomendación: NO-GO hoy; GO
+condicionado a la verificación del owner en el dashboard (§10.3) + ventana §10.4 + re-corrida
+del script el día del deploy.** Verificación: typecheck/lint/build/diff-check en 0; E2E no
+corresponde (programa de solo lectura y análisis).
+
 ### RELEASE-AUDIT-TRES-PROGRAMAS-1 — 2026-08-18 (READ-ONLY — CERO DEPLOY EJECUTADO)
 
 Plan de release exacto y verificado de los tres programas EN REPO, en

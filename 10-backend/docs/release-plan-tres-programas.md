@@ -198,3 +198,87 @@ NO se ejecuta desde este plan.
 - El costo/latencia del redeploy total (118 funciones re-desplegadas: cold starts + 429 con
   reintentos automáticos — previsto pero no medido acá).
 - Los tests del propio `release-audit` (no existen — ver §2).
+
+## 10. Ventana de deploy y estado de la App Review (APP-REVIEW-STATUS-AND-DEPLOY-WINDOW-1, 2026-08-19)
+
+> Este programa corrige un límite del §7: el gate de App Review NO bloquea solo Hosting — el
+> Tramo 1 redespliega `metaWebhook`/`onWebhookInbox`, el camino de los mensajes de los
+> revisores al número …686. Un revisor que escriba durante la ventana de redeploy (cold starts
+> + reintentos por 429) puede vivirlo como bot mudo = revisión fallida. Meta reintenta el
+> webhook (no se pierden mensajes); lo que está en riesgo es la EXPERIENCIA del revisor.
+
+### 10.1 ¿Meta está probando activamente? (leído del backend, 2026-08-19, ventana 30 días)
+
+Fuente: enumeración read-only de `tenants/{t}/customers/*/messages` con field mask
+(`direction,createdAt,receivedVia` — el texto de los mensajes ni siquiera viajó), tenant
+resuelto por `metaExternalIndex`. Script: `scripts/review-window-audit.mjs`.
+
+| Métrica (tenant `meta-review`, número …686) | Valor |
+|---|---|
+| Último inbound | **2026-08-15 ≈ 11:48 America/Asuncion** (hace ~4 días) |
+| Últimos 7 días / últimas 48 h | **3** / **0** |
+| Actividad de 30 días | 9 mensajes en DOS ráfagas: **12-08 (mié): 7 mensajes a las 09 h** · 15-08 (sáb): 2 a las 11 h |
+| Remitentes distintos (30 d) | **5** (enmascarados: …576, …318, …332, …000, …215) |
+
+**Interpretación (es interpretación, no certeza):** la ráfaga multi-remitente del 12-08 es
+COMPATIBLE con revisores probando; el backend **no puede distinguir** un revisor de una prueba
+del owner (limitación del dato, declarada). Con actividad dentro de los últimos 7 días, la
+regla del programa manda: **no se puede declarar la revisión terminada desde el backend.**
+
+### 10.2 ¿Qué dice Meta vía API? — la Graph API NO expone el estado del App Review
+
+El estado de la revisión vive únicamente en el **App Dashboard**; la Graph API no lo publica
+(lo que expone —scopes de un token vía `debug_token`, como usa `meta/connectFlow.ts`— no
+responde esta pregunta). En este programa se hicieron **cero llamadas a Meta, ni siquiera GET**
+(usar el token exigiría leerlo del SecretStore y toda interacción con la app bajo revisión es
+ruido innecesario). La fuente autoritativa es el dashboard, con los pasos de §10.3.
+
+### 10.3 Pasos para el owner (dashboard de Meta, sin jerga)
+
+1. Entrá a `developers.facebook.com/apps` con tu cuenta de Meta (la dueña de la app).
+2. Abrí la app de VendeYaPy (la que tiene el número de WhatsApp de prueba).
+3. En el menú de la izquierda buscá **«Revisión de la app» / «App Review»** y adentro
+   **«Solicitudes» / «Requests»**.
+4. Vas a ver una lista de permisos pedidos (por ejemplo `whatsapp_business_messaging`).
+   Al lado de cada uno hay un estado. Buscá estas palabras EXACTAS:
+   - **«En revisión» / «In review» / «Pendiente»** → Meta la está evaluando **ahora**: NO desplegar.
+   - **«Aprobado» / «Approved»** → la revisión terminó bien: se puede desplegar.
+   - **«Rechazado» / «Rejected»** → terminó con rechazo: se puede desplegar igual (y leé el motivo para el próximo intento).
+   - **«Se necesita más información» / «Needs more info»** → Meta espera algo TUYO: mandalo antes de pensar en desplegar.
+5. Mirá también la campana de notificaciones del dashboard y el mail de la cuenta admin
+   (Meta avisa por ahí los cambios de estado).
+6. **Captura**: la pantalla completa de App Review → Solicitudes, donde se vea cada permiso
+   con su estado y su fecha. Con esa captura se decide el deploy.
+
+### 10.4 Ventana de menor tráfico (arfagi …904, 30 días reales, America/Asuncion)
+
+57 mensajes entrantes en 30 días (8 remitentes). Distribución por hora: TODO el tráfico cae
+entre **08:00 y 17:59** (48/57) más un residuo a las 22 h (2); **cero mensajes entre 23:00 y
+07:59** en el mes entero. Por día de semana: **domingo tuvo CERO mensajes en los 30 días**;
+sábado a la mañana es el pico (08-12 h).
+
+Cruce con los 8 schedulers (crons verificados en código): retención 02:40 · coverage 03:30 ·
+growth 04:00 · **catálogo-verificación 04:30 (timeout 540 s ⇒ libre desde ~04:40)** · trials
+09:00 · reserva IA minuto 10 de cada hora · outbox cada 5 min (inevitable e inocuo: drain
+gateado por tenant).
+
+**Ventana recomendada: DOMINGO 05:00–07:30 America/Asuncion** — cero tráfico histórico de
+clientes, después de la verificación de las 04:30, antes del arranque de tráfico (08 h) y de
+trials (09 h). Alternativa entre semana: cualquier día 05:00–07:30 (mismo razonamiento, con el
+único riesgo del tráfico matinal que arranca a las 08).
+
+### 10.5 Recomendación
+
+**NO-GO hoy, GO condicionado.** Fundamento: hay actividad en el número de revisión dentro de
+los últimos 7 días (ráfaga del 12-08 + mensajes del 15-08) y el backend no puede probar que la
+revisión terminó. Condición para el GO del Tramo 1:
+
+1. El owner verifica el estado REAL en el dashboard (§10.3) y saca la captura.
+2. **«Aprobado» o «Rechazado»** ⇒ GO en la próxima ventana de §10.4 (domingo 05:00–07:30).
+3. **«En revisión» / «Pendiente» / «Needs more info»** ⇒ NO-GO: se espera el cierre de la
+   revisión. (Si el negocio no puede esperar, la decisión de desplegar EN VENTANA con la
+   revisión abierta es del owner, asumiendo el riesgo de un revisor madrugador; los datos —
+   revisores activos 09-12 h los días observados — juegan a favor de la madrugada, pero es un
+   riesgo, no una garantía.)
+4. En cualquier caso: re-correr `scripts/review-window-audit.mjs` el día del deploy (¿hubo
+   inbound nuevo en …686 en las últimas 48 h?) como último check de la ventana.

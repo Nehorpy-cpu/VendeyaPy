@@ -99,10 +99,14 @@ universales ⇒ redeploy completo) + 1 TTL + 0 índices + 0 Rules + 0 DELETE. **
 sin Hosting** (panel `6f75601` no referencia ninguna CREATE; 3 divergencias de forma de error
 documentadas en flujos no ejercitados). Selectores literales de deploy y rollback en el plan.
 
-> **⛔ HOSTING CONGELADO — App Review de Meta EN CURSO.** El tenant `meta-review` (número …5686)
-> está bajo revisión de Meta y su entorno **no se toca**: no desplegar Hosting ni nada que Meta
-> esté revisando mientras dure. Los tres programas de arriba piden Hosting: **ese tramo está
-> bloqueado por un gate externo**, no por el código.
+> **⛔ HOSTING CONGELADO — App Review de Meta EN CURSO, ahora CON EVIDENCIA (2026-08-19).**
+> Actividad inbound REAL del número …686 leída del backend (read-only, sin contenido): ráfaga de
+> **7 mensajes el 12-08 (mié 09 h)** + 2 el 15-08, **5 remitentes distintos**, 3 en los últimos
+> 7 días, 0 en 48 h — compatible con revisores probando; el backend no distingue revisor de
+> prueba del owner (limitación declarada). **El gate NO es solo Hosting**: el Tramo 1
+> redespliega `metaWebhook`/`onWebhookInbox` (el camino del revisor) ⇒ **NO-GO hasta que el
+> owner confirme el estado en el App Dashboard** (pasos exactos y ventana recomendada —
+> domingo 05:00–07:30 ASU, cero tráfico histórico — en `release-plan-tres-programas.md` §10).
 >
 > **Deuda de release: superficie ya calculada y verificada** — ver
 > `docs/release-plan-tres-programas.md` (RELEASE-AUDIT-TRES-PROGRAMAS-1). Nota clave: los tres
