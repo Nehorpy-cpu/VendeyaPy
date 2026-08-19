@@ -69,12 +69,15 @@ const RAIZ_FUNCTIONS = resolve(AQUI, '..');
 const RAIZ_BACKEND = resolve(RAIZ_FUNCTIONS, '../..');
 
 /**
- * Último commit DESPLEGADO a producción (docs/HANDOFF.md §3: release de adjuntos seguros). Los dos
- * commits siguientes no desplegaron nada — está escrito así en el HANDOFF — y la fundación de
- * Coexistence todavía no salió. Es un valor por defecto documentado, no un supuesto: `--base` lo
- * pisa, y el informe siempre imprime cuál se usó.
+ * Último commit DESPLEGADO a producción: DEPLOY-AI-PHASE2-SALES-RESERVATION-1 (2026-08-16Z,
+ * 10 UPDATE / 0 CREATE). Verificado contra producción el 2026-08-18 leyendo GCF v2 read-only:
+ * el `updateTime` máximo de las 118 functions es 2026-08-16T00:35Z con exactamente 10 funciones
+ * actualizadas ese día — nada se desplegó después. Es un valor por defecto documentado, no un
+ * supuesto: `--base` lo pisa, y el informe siempre imprime cuál se usó. Si se despliega de
+ * nuevo, ACTUALIZAR esta constante en el mismo programa de deploy (el valor viejo `30c1687`
+ * infló un selector con funciones ya desplegadas — ver BITACORA 2026-08-18).
  */
-export const COMMIT_BASE_DESPLEGADO = '30c1687';
+export const COMMIT_BASE_DESPLEGADO = '6f75601';
 
 /** Un teléfono JAMÁS se imprime entero (misma convención que el motor y la migración). */
 export function enmascararPnid(pnid) {

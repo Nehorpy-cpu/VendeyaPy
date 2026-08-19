@@ -20,11 +20,12 @@
 
 | Superficie | Estado |
 |---|---|
-| Último commit desplegado | `6f75601` — DEPLOY-AI-PHASE2-SALES-RESERVATION-1 (2026-08-16Z) |
-| Functions | 118 ACTIVE ⚠️ verificar (115→118 el 2026-08-15; Fase 2 fue 10 UPDATE / 0 CREATE / 0 DELETE) |
-| Índices | 21 READY (18→21 el 2026-08-15, 3 `ai*`) |
-| Rules hash | `132712ca` (desde `a9c99e05`, 2026-08-15) |
-| Schedulers | 7, sin invoker público ⚠️ verificar |
+| Último commit desplegado | `6f75601` — DEPLOY-AI-PHASE2-SALES-RESERVATION-1 (2026-08-16Z). **Confirmado contra prod 2026-08-18**: `updateTime` máximo de las 118 = 2026-08-16T00:35Z, 10 funciones ese día, ninguna posterior |
+| Functions | 118 ACTIVE (verificado 2026-08-18 vía functions:list + GCF v2) |
+| Índices | 21 READY, cero pendientes (verificado 2026-08-18; el repo declara exactamente 21) |
+| TTL | 3 ACTIVE (`metaWebhookAppState/History/Shadow`); el repo declara 4 — **falta `metaOAuthStates` (ADR-0020, sale con el release)** |
+| Rules hash | `132712ca` (desde `a9c99e05`, 2026-08-15) ⚠️ verificar — los 3 programas EN REPO no tocan Rules |
+| Schedulers | **8** (verificado 2026-08-18: `aiReservationMaintenance`, `attachmentRetentionMaintenance`, `coverageMaintenanceDaily`, `metaCatalogOutbox/VerificationMaintenance`, `refreshGrowthJobsDaily`, `resetUsageMonthly`, `trialNotificationsDaily`); «sin invoker público» ⚠️ verificar |
 | WhatsApp | `automationMode: live` en …7904 (arfagi) y …5686 (meta-review) |
 
 **Rollbacks armados y conservados:** `bdaffbe` y `30c1687`.
@@ -87,26 +88,32 @@ Reconciliación 04:30 y 16:30 America/Asuncion contra TTL de 24 h, solo lectura.
 
 | Programa | Fecha | Superficie estimada del release |
 |---|---|---|
-| Coexistence (fundación + correctivos) | 2026-08-04/05 | Cutover = Programa 2, bloqueado |
-| META-ONBOARDING-SELF-SERVICE-1 (ADR-0020) | 2026-08-17 | 1 CREATE + updates meta-connect + índices TTL + Hosting |
-| CONVERSATIONS-WHATSAPP-UX-1 (ADR-0021) | 2026-08-18 | 11 CREATE + updates webhook/manualMessage/adjuntos + Hosting; sin índices/Rules/TTL |
-| CATALOG-AUTHORITY-SELF-SERVICE-1 (ADR-0022) | 2026-08-18 | 2 CREATE + updates metaCatalog*/runTenantJob/schedulers + Hosting; sin índices/Rules |
+| Coexistence (fundación + correctivos) | 2026-08-04/05 | Cutover = Programa 2, bloqueado. **⚠️ Sus 6 `coexistence*` son CREATE latentes: cualquier selector debe excluirlas** |
+| META-ONBOARDING-SELF-SERVICE-1 (ADR-0020) | 2026-08-17 | 1 CREATE (`completeMetaConnectWaba`) + TTL `metaOAuthStates` + Hosting |
+| CONVERSATIONS-WHATSAPP-UX-1 (ADR-0021) | 2026-08-18 | 11 CREATE + Hosting; sin índices/Rules/TTL |
+| CATALOG-AUTHORITY-SELF-SERVICE-1 (ADR-0022) | 2026-08-18 | 2 CREATE + Hosting; sin índices/Rules |
+
+**Superficie CONSOLIDADA calculada y verificada (2026-08-18, `docs/release-plan-tres-programas.md`):**
+release = **14 CREATE + las 118 UPDATE** (los tres tocaron `lib/firebase.ts` y `audit/audit.ts`,
+universales ⇒ redeploy completo) + 1 TTL + 0 índices + 0 Rules + 0 DELETE. **Backend-first APTO
+sin Hosting** (panel `6f75601` no referencia ninguna CREATE; 3 divergencias de forma de error
+documentadas en flujos no ejercitados). Selectores literales de deploy y rollback en el plan.
 
 > **⛔ HOSTING CONGELADO — App Review de Meta EN CURSO.** El tenant `meta-review` (número …5686)
 > está bajo revisión de Meta y su entorno **no se toca**: no desplegar Hosting ni nada que Meta
 > esté revisando mientras dure. Los tres programas de arriba piden Hosting: **ese tramo está
 > bloqueado por un gate externo**, no por el código.
 >
-> **⚠️ Deuda de release acumulada.** Los tres suman ~**14 funciones CREATE** + updates que se
-> pisan entre sí (ADR-0021 toca `metaWebhook`/`onWebhookInbox`; ADR-0022 toca los mismos
-> schedulers). El selector de rollback es *el mismo menos las CREATE*: con 14 CREATE quedarían 14
-> funciones que el rollback por selector **no puede revertir**. Calcular la superficie exacta con
-> `apps/functions/scripts/release-audit.mjs` **antes** de cualquier programa de deploy.
+> **Deuda de release: superficie ya calculada y verificada** — ver
+> `docs/release-plan-tres-programas.md` (RELEASE-AUDIT-TRES-PROGRAMAS-1). Nota clave: los tres
+> programas NO se pisan entre sí (solapamiento solo aditivo en `audit.ts`/`index.ts`), pero el
+> rollback por selector deja vivas las 14 CREATE (callables auth-gated, inertes sin panel;
+> retiro real = `functions:delete` con gate propio). La trampa del selector crudo son las **6
+> `coexistence*`** del Programa 2 bloqueado: el plan las excluye explícitamente.
 >
-> **🐞 `release-audit.mjs:77` tiene `COMMIT_BASE_DESPLEGADO = '30c1687'`, desactualizado por dos
-> deploys** (el último desplegado es `6f75601`). Corrido con el default calcula el diff desde
-> antes del tren ADR-0018/0019 y devuelve un selector inflado con funciones ya desplegadas.
-> Pasar `--base` explícito o corregir la constante.
+> ✅ **`release-audit.mjs` corregido el 2026-08-18**: `COMMIT_BASE_DESPLEGADO = '6f75601'`,
+> confirmado contra producción por `updateTime` antes de tocar la constante. Al próximo deploy,
+> actualizarla en el mismo programa.
 
 ## Deudas menores conocidas
 
@@ -127,6 +134,9 @@ Reconciliación 04:30 y 16:30 America/Asuncion contra TTL de 24 h, solo lectura.
   los excluye y `vitest.config.ts` no activa `typecheck`. O sea que `pnpm -r typecheck` en 0
   **no cubre los archivos de test**. Preexistente y sistémico: al leer un reporte, tenerlo en
   cuenta antes de dar por cubierta esa pata.
+- Los tests `tests/integration/release-audit.*.test.ts` que menciona el header de
+  `release-audit.mjs` **no existen** (verificado 2026-08-18): el parser del audit corre sin
+  ninguna cobertura propia.
 - **Cero CI** (verificado 2026-08-18): `.github/` solo tiene `pull_request_template.md`. La
   batería completa y las 6 suites E2E (~30-35 min) son manuales; nada impide que una sesión
   declare verde sin correr. Por eso el repo exige exit codes reales en los reportes.

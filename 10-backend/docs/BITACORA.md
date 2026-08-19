@@ -42,7 +42,31 @@ Reglas de escritura:
 
 ## 2026-08
 
-### CATALOG-AUTHORITY-SELF-SERVICE-1 — 2026-08-18 (EN REPO — NO DESPLEGADO)
+### RELEASE-AUDIT-TRES-PROGRAMAS-1 — 2026-08-18 (READ-ONLY — CERO DEPLOY EJECUTADO)
+
+Plan de release exacto y verificado de los tres programas EN REPO, en
+`docs/release-plan-tres-programas.md`. **Base confirmada contra producción**: el `updateTime`
+máximo de las 118 functions es 2026-08-16T00:35Z con exactamente 10 actualizadas ese día (las
+de DEPLOY-AI-PHASE2 desde `6f75601`; nada posterior) ⇒ se corrigió
+`release-audit.mjs:COMMIT_BASE_DESPLEGADO` `'30c1687'`→`'6f75601'` (único cambio de código).
+**Audit con base corregida: veredicto OK, cero bloqueos** — 139 exports coincidentes
+fuente/compilado, 0 divergencias de grafo, precondición `automationMode` aprobada (2/2),
+contraste exacto 20 ausentes-en-prod == 20 CREATE.
+
+**Hallazgos del cálculo**: (1) CREATE = 20, no 14 — el selector crudo incluye las **6
+`coexistence*`** de la fundación EN REPO (Programa 2 bloqueado): el plan las EXCLUYE; (2)
+UPDATE = **las 118** (sinCambio 0): `lib/firebase.ts` y `audit/audit.ts` son universales ⇒ el
+release es un redeploy completo + 14 CREATE; (3) schedulers reales: **8**, no 7; (4) único
+delta Firestore: TTL `metaOAuthStates` (3 ACTIVE en prod, repo declara 4); 21 índices READY ==
+repo; cero Rules. **Backend-first APTO sin Hosting** (0 referencias del panel `6f75601` a las
+14 CREATE; contratos consumidos aditivos; 3 divergencias de forma de error documentadas en
+flujos hoy no ejercitados) ⇒ release en 2 tramos: backend (4 pasos ordenados) + Hosting
+bloqueado por App Review. Rollback = los 118 UPDATE sin CREATEs; las 14 creadas quedan vivas e
+inertes (callables auth-gated; retiro real = `functions:delete` con gate propio).
+
+**Verificación**: typecheck/lint/build/diff-check en 0. Los tests
+`tests/integration/release-audit.*.test.ts` que menciona el header del script **no existen**.
+Deploy: NINGUNO — documento y constante solamente.
 
 ADR-0022 sobre ADR-0015: eje declarado `catalogSync.relationship` (`none|mirror|managed`) con
 derivación pura de autoridad (`vendeyapy|meta|external`; el bot siempre `local_mirror`). Legacy
