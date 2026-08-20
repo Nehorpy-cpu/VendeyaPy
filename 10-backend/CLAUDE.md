@@ -16,6 +16,17 @@ Si `ESTADO.md` tiene una fecha de más de 7 días o marcas `⚠️ verificar`, d
 trabajar. Un estado desactualizado es la causa raíz de la mayoría de los errores de deploy
 de este proyecto.
 
+## Skills del proyecto
+
+Dos skills en `.claude/skills/` encapsulan el estándar de trabajo. Se cargan solas cuando la
+tarea las amerita, y también se pueden invocar a propósito:
+
+- **`ingenieria-vendeyapy`** — el estándar para escribir, auditar y verificar código. Cargala
+  antes de implementar cualquier programa o de tocar webhook, checkout, pedidos, pagos,
+  autorización o multi-tenant. Es la que usan las sesiones **ejecutoras**.
+- **`redactar-programa`** — cómo redactar el prompt técnico de una fase y cómo verificar
+  adversarialmente el reporte que devuelve. Es la que usa la sesión **coordinadora**.
+
 ## Ciclo de trabajo
 
 Toda fase sigue este ciclo. No se saltan pasos ni se reordenan.
