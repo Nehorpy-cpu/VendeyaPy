@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import type { Promotion, Insight, Product, PromotionType, PromotionStatus } from '@vpw/shared';
 import { useActiveCompany } from '@/lib/active-company';
@@ -15,6 +15,9 @@ import {
   type PromotionInput,
 } from '@/lib/promotions';
 import { isDevToolingAllowed } from '@/lib/integrations';
+import { friendlyJobError } from '@/lib/entitlements';
+import { EstadoDeAccion } from '@/components/ui/EstadoDeAccion';
+import { avisoDeLectura } from '@/lib/lectura';
 import { SectionHeader, EmptyState, SkeletonList, StatusBadge, ConfirmModal, type BadgeTone } from '@/components/ui';
 
 const API = process.env['NEXT_PUBLIC_API_BASE_URL'] ?? 'http://localhost:5001/demo-aiafg/us-central1';
@@ -53,6 +56,19 @@ export default function PromotionsPage() {
   });
   const [confirmDel, setConfirmDel] = useState<Promotion | null>(null);
 
+  /** H-03: motivo del rechazo de la última acción, visible en pantalla. */
+  const [errorAccion, setErrorAccion] = useState<string | null>(null);
+  /** El rechazo de una acción hecha DESDE un modal se dice adentro del modal: un aviso en el
+   *  cuerpo de la página queda detrás del overlay y fuera de la vista si el dueño scrolleó. */
+  const [errorForm, setErrorForm] = useState<string | null>(null);
+  const [errorBorrado, setErrorBorrado] = useState<string | null>(null);
+  /** Confirmación de las acciones de pantalla (hoy solo el job de sugerencias). */
+  const [msgOk, setMsgOk] = useState<string | null>(null);
+
+  // Al cambiar de empresa la pantalla NO se remonta: sin esto, el aviso de la empresa anterior
+  // se queda colgado sobre los datos de la nueva.
+  useEffect(() => { setErrorAccion(null); setErrorForm(null); setErrorBorrado(null); setMsgOk(null); }, [tenantId]);
+
   const promosQ = useQuery({ queryKey: ['promotions', tenantId], queryFn: () => listPromotions(tenantId!), enabled: !!tenantId });
   const productsQ = useQuery({ queryKey: ['products', tenantId], queryFn: () => listProducts(tenantId!), enabled: !!tenantId });
   const suggestionsQ = useQuery({ queryKey: ['promoSuggestions', tenantId], queryFn: () => listPromoSuggestions(tenantId!), enabled: !!tenantId });
@@ -66,26 +82,37 @@ export default function PromotionsPage() {
       qc.invalidateQueries({ queryKey: ['promotions', tenantId] });
       qc.invalidateQueries({ queryKey: ['promoSuggestions', tenantId] });
       setForm({ open: false, promo: null, prefill: null, fromInsight: null });
+      setErrorForm(null);
     },
+    // H-03: sin esta rama, un rechazo del backend dejaba el modal abierto y la pantalla muda.
+    onError: (e) => setErrorForm(friendlyJobError(e)),
   });
   const delMut = useMutation({
     mutationFn: (id: string) => deletePromotion(tenantId!, id),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['promotions', tenantId] }); setConfirmDel(null); },
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['promotions', tenantId] }); setConfirmDel(null); setErrorBorrado(null); },
+    onError: (e) => setErrorBorrado(friendlyJobError(e)),
   });
   const statusMut = useMutation({
     mutationFn: ({ p, status }: { p: Promotion; status: PromotionStatus }) =>
       upsertPromotion(tenantId!, promoToInput(p, status)),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['promotions', tenantId] }),
+    onSuccess: async () => { setErrorAccion(null); setMsgOk(null); await qc.invalidateQueries({ queryKey: ['promotions', tenantId] }); },
+    onError: (e) => setErrorAccion(friendlyJobError(e)),
   });
   const dismissMut = useMutation({
     mutationFn: (id: string) => setInsightStatus(tenantId!, id, 'DISMISSED'),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['promoSuggestions', tenantId] }),
+    onSuccess: async () => { setErrorAccion(null); setMsgOk(null); await qc.invalidateQueries({ queryKey: ['promoSuggestions', tenantId] }); },
+    onError: (e) => setErrorAccion(friendlyJobError(e)),
   });
   const genMut = useMutation({
     mutationFn: async () => {
       await fetch(`${API}/devGenerateSuggestions`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tenantId }) });
     },
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['promoSuggestions', tenantId] }),
+    onSuccess: async () => {
+      setErrorAccion(null);
+      setMsgOk('Pedimos nuevas sugerencias.');
+      await qc.invalidateQueries({ queryKey: ['promoSuggestions', tenantId] });
+    },
+    onError: (e) => { setMsgOk(null); setErrorAccion(friendlyJobError(e)); },
   });
 
   const suggestions = suggestionsQ.data ?? [];
@@ -97,9 +124,15 @@ export default function PromotionsPage() {
   if (companyLoading) return <div className="text-sm text-ink-400">Cargando…</div>;
   if (!tenantId) return <EmptyState title="Seleccioná una empresa" text="Elegí una empresa en la barra superior para gestionar sus promociones." />;
 
-  const openNew = () => setForm({ open: true, promo: null, prefill: null, fromInsight: null });
-  const openEdit = (p: Promotion) => setForm({ open: true, promo: p, prefill: null, fromInsight: null });
-  const openFromInsight = (i: Insight) =>
+  // Un rechazo que llega con su modal ya cerrado (el dueño canceló mientras la acción estaba en
+  // vuelo) se dice acá: si no, se perdería en un estado que nadie renderiza.
+  const avisoDelCuerpo =
+    errorAccion ?? (form.open ? null : errorForm) ?? (confirmDel ? null : errorBorrado);
+
+  const openNew = () => { setErrorForm(null); setForm({ open: true, promo: null, prefill: null, fromInsight: null }); };
+  const openEdit = (p: Promotion) => { setErrorForm(null); setForm({ open: true, promo: p, prefill: null, fromInsight: null }); };
+  const openFromInsight = (i: Insight) => {
+    setErrorForm(null);
     setForm({
       open: true,
       promo: null,
@@ -113,6 +146,7 @@ export default function PromotionsPage() {
         productIds: i.relatedEntityId ? [i.relatedEntityId] : [],
       },
     });
+  };
 
   return (
     <div className="space-y-6">
@@ -121,6 +155,10 @@ export default function PromotionsPage() {
         subtitle="Creá y seguí promos, o partí de una sugerencia del copiloto."
         actions={<button onClick={openNew} className="rounded-lg bg-mint-600 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-mint-700">+ Nueva promo</button>}
       />
+
+      {/* H-03: el resultado de la última acción, dicho en pantalla. */}
+      <EstadoDeAccion tipo="error" mensaje={avisoDelCuerpo} />
+      <EstadoDeAccion tipo="ok" mensaje={msgOk} />
 
       <div className="rounded-2xl border border-mint-100 bg-mint-50/60 px-4 py-3 text-xs text-ink-600">
         💡 El bot puede <strong className="text-ink-800">mencionar</strong> tus promociones activas como información cuando el cliente pregunta. La <strong className="text-ink-800">aplicación automática del descuento</strong> en el carrito/pedido se habilitará más adelante; por ahora el equipo la aplica al cerrar la venta.
@@ -136,7 +174,12 @@ export default function PromotionsPage() {
             </button>
           )}
         </div>
-        {suggestions.length === 0 ? (
+        {avisoDeLectura(suggestionsQ, 'tus sugerencias') ? (
+          // H-15: sin esto, una lectura caída se leía como «no hay sugerencias».
+          <p className="text-sm text-coral-700">{avisoDeLectura(suggestionsQ, 'tus sugerencias')}</p>
+        ) : suggestionsQ.isLoading ? (
+          <p className="text-sm text-ink-400">Buscando sugerencias…</p>
+        ) : suggestions.length === 0 ? (
           <p className="text-sm text-ink-400">{devTools ? 'No hay sugerencias por ahora. Tocá “Actualizar sugerencias”.' : 'No hay sugerencias por ahora.'}</p>
         ) : (
           <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
@@ -159,6 +202,8 @@ export default function PromotionsPage() {
       </section>
 
       {/* Lista de promos */}
+      {/* H-15: si la lectura falla, la pantalla lo dice en vez de quedarse muda. */}
+      <EstadoDeAccion tipo="error" mensaje={avisoDeLectura(promosQ, 'tus promociones')} />
       {promosQ.isLoading && <SkeletonList rows={4} />}
       {promosQ.isSuccess && (promosQ.data?.length ?? 0) === 0 && (
         <EmptyState title="Todavía no hay promociones" text="Creá una con “+ Nueva promo” o desde una sugerencia del copiloto." />
@@ -207,8 +252,10 @@ export default function PromotionsPage() {
           initial={form.promo}
           prefill={form.prefill}
           products={productsQ.data ?? []}
+          productosSinLeer={avisoDeLectura(productsQ, 'tus productos')}
           saving={saveMut.isPending}
-          onCancel={() => setForm({ open: false, promo: null, prefill: null, fromInsight: null })}
+          error={errorForm}
+          onCancel={() => { setErrorForm(null); setForm({ open: false, promo: null, prefill: null, fromInsight: null }); }}
           onSubmit={(input) => saveMut.mutate(input)}
         />
       )}
@@ -219,7 +266,8 @@ export default function PromotionsPage() {
           confirmLabel="Finalizar"
           danger
           pending={delMut.isPending}
-          onCancel={() => setConfirmDel(null)}
+          error={errorBorrado}
+          onCancel={() => { setErrorBorrado(null); setConfirmDel(null); }}
           onConfirm={() => delMut.mutate(confirmDel.id)}
         >
           Vas a finalizar <span className="font-medium text-ink-800">{confirmDel.name}</span>. Dejará de estar activa y saldrá del listado (se conserva el historial).
@@ -249,14 +297,18 @@ function PromoForm({
   initial,
   prefill,
   products,
+  productosSinLeer,
   saving,
+  error,
   onCancel,
   onSubmit,
 }: {
   initial: Promotion | null;
   prefill: Partial<PromotionInput> | null;
   products: Product[];
+  productosSinLeer: string | null;
   saving: boolean;
+  error: string | null;
   onCancel: () => void;
   onSubmit: (input: PromotionInput) => void;
 }) {
@@ -309,7 +361,11 @@ function PromoForm({
           <div className="sm:col-span-2">
             <label className={lbl}>Productos en la promo ({f.productIds.length})</label>
             <div className="max-h-40 overflow-y-auto rounded-lg border border-ink-200 p-2">
-              {products.length === 0 && <p className="text-xs text-ink-400">No hay productos.</p>}
+              {productosSinLeer ? (
+                <p className="text-xs text-coral-700">{productosSinLeer}</p>
+              ) : products.length === 0 ? (
+                <p className="text-xs text-ink-400">No hay productos.</p>
+              ) : null}
               {products.map((p) => (
                 <label key={p.id} className="flex items-center gap-2 py-0.5 text-sm text-ink-700">
                   <input type="checkbox" className="accent-mint-600" checked={f.productIds.includes(p.id)} onChange={() => toggleProduct(p.id)} />
@@ -320,6 +376,12 @@ function PromoForm({
           </div>
         </div>
         </div>
+        {/* H-03: el motivo del rechazo, DENTRO del modal y pegado a los botones. */}
+        {error && (
+          <div className="shrink-0 px-6 pb-1">
+            <EstadoDeAccion tipo="error" mensaje={error} />
+          </div>
+        )}
         <div className="flex shrink-0 justify-end gap-3 border-t border-ink-100 px-6 py-4">
           <button type="button" onClick={onCancel} className="rounded-lg border border-ink-200 px-4 py-2 text-sm font-medium text-ink-700 transition-colors hover:bg-ink-50">Cancelar</button>
           <button type="submit" disabled={saving} className="rounded-lg bg-mint-600 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-mint-700 disabled:opacity-60">{saving ? 'Guardando…' : 'Guardar'}</button>

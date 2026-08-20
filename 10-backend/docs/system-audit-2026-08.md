@@ -144,6 +144,116 @@ exactamente el privilegio que el Tramo 1 entrega al primer cliente.
 
 ### H-03 🚨 — Guardado silencioso que se pierde
 
+> **✅ RESUELTO EN REPO — NO DESPLEGADO** (2026-08-20, programa `CRITICAL-FIX-PANEL-SILENT-SAVE-1`).
+> Cubre **H-03 + H-15 + H-38 + H-39**, todo del lado del panel: cero backend (`git diff --stat --
+> apps/functions packages` vacío). Nueve pantallas (`agent`, `promotions`, `decisions`, `ads`,
+> `followups`, `tracking`, `replies`, `welcome`, `onboarding`) muestran ahora el resultado de cada
+> mutación con el motivo real del backend (`friendlyJobError` conserva el `message` de
+> `invalid-argument`/`failed-precondition`), y las lecturas caídas dejaron de fingir vacío. El
+> componente `components/ui/EstadoDeAccion.tsx` es solo presentacional (`role="alert"` para el
+> error, `role="status"` para el éxito): NO se introdujo un hook genérico de mutaciones, para no
+> cambiar el comportamiento de ~30 mutaciones de una sola vez.
+>
+> Verificado en vivo contra emuladores, no solo en test: con 7.200 caracteres en «Reglas de venta»
+> el 400 real produjo «No se pudo guardar la configuración. Campo "salesRules" demasiado largo.»
+> —el prefijo se cambió después a «No se pudo guardar todo.», porque son dos escrituras y la
+> primera puede haber salido bien—
+> y los 7.200 caracteres del dueño **siguen en el formulario**; en `/promotions`, un nombre de 250
+> caracteres produce «Campo "name" demasiado largo.». Sin desbordes a 1440/1024/375 px.
+>
+> Durante la implementación aparecieron dos defectos que el propio fix había introducido o dejado:
+> el error de job se mostraba **dos veces** en `followups`/`tracking`/`replies` y en `welcome`
+> (bloque `isError` preexistente + el nuevo), y `followups` seguía mintiendo en el **subtítulo**
+> (`data ?? []` ⇒ «Sin tareas pendientes.» con la lectura caída).
+>
+> **La review adversarial encontró 8 hallazgos más, dos de ellos bloqueantes**, todos corregidos
+> antes del commit:
+> 1. 🚨 **El aviso quedaba DEBAJO del modal.** `PromoForm`, `ReplyForm`, `TrackingForm` y el
+>    `ConfirmModal` de borrado son overlays `fixed inset-0 z-50`: el aviso se pintaba en el cuerpo
+>    de la página, tapado por el scrim y fuera de pantalla si el dueño había scrolleado. Para el
+>    escenario exacto de H-03 —«llené el formulario, el backend rechazó»— la pantalla seguía muda,
+>    **con un test verde certificándolo** (happy-dom no calcula stacking). Ahora el error viaja
+>    como prop y se pinta adentro; `ConfirmModal` ya tenía `error?: string | null` —usado en
+>    conversaciones, pedidos y números de WhatsApp— y `/promotions` simplemente no se lo pasaba.
+> 2. 🚨 **`auditStatusMut` (`agent/page.tsx`) seguía sin `onError`**: «Resuelto»/«Descartar» sobre
+>    un hallazgo rebotaban sin decir nada. Era H-03 tal cual, en la pantalla insignia.
+> 3. Los avisos **no se limpiaban al cambiar de empresa** (`setTenantId` no remonta la pantalla):
+>    un error de la Empresa A quedaba colgado sobre los datos de la B. `useEffect` por `tenantId`.
+> 4. El error del formulario **sobrevivía a cerrar y reabrir** el modal.
+> 5. Éxitos que mentían: `syncAds`, `computeAttribution` y `generateInsights` usan `fetch` **sin
+>    chequear `res.ok`**, así que un 404/500 disparaba `onSuccess` — el fix pasaba de mudo a
+>    afirmar en verde algo que no ocurrió. Reescritos como PEDIDO, no como resultado (la cura de
+>    fondo, `if (!res.ok) throw`, cambia cuándo dispara `onSuccess` ⇒ programa aparte).
+> 6. `EstadoDeAccion` no estaba en el barrel `components/ui`.
+> 7. La live region del éxito se montaba junto con el texto ⇒ un `role="status"` recién insertado
+>    no se anuncia de forma confiable. Ahora está **siempre montada** (`sr-only`) y solo cambia su
+>    contenido; el error sigue como `role="alert"`, que sí se anuncia al insertarse.
+> 8. Nadie mueve el foco al aviso (queda como deuda declarada, no bloqueante).
+>
+> **Una SEGUNDA review adversarial sobre esas correcciones encontró 9 hallazgos más** (3 ALTO,
+> 4 MEDIO, 2 BAJO), todos corregidos:
+> - 🚨 **Pérdida de datos en `/agent`**: se había cubierto `auditsQ.isError` pero no `agentQ` ni
+>   `checkoutQ`. Con la lectura caída el formulario muestra `DEFAULT_AGENT` con bancos y vendedores
+>   **vacíos**; tocar «Guardar cambios» pisaba la configuración real y borraba los datos de cobro.
+>   Ahora se avisa con todas las letras y el botón queda **deshabilitado**.
+> - El error del modal tenía **un solo canal**: si el dueño tocaba «Cancelar» con la mutación en
+>   vuelo (el botón no estaba deshabilitado), o cerraba el `ConfirmModal` clickeando el fondo, el
+>   rechazo llegaba a un estado que ya nadie renderizaba ⇒ silencio total, otra vez H-03. Se
+>   guardó el click en el scrim del `ConfirmModal` (el Escape ya lo estaba) y el aviso cae al
+>   cuerpo de la página si el modal no está montado. (La primera versión de este arreglo
+>   deshabilitaba «Cancelar» mientras guarda; la tercera review probó que eso encerraba al dueño.)
+> - `openFromInsight` era la única de las tres puertas del formulario que no limpiaba el error.
+> - **Se había cambiado cuándo termina la mutación en 13 casos**: `onSuccess: invalidate`
+>   (cuerpo de expresión) **devolvía la promesa y react-query la esperaba**; al pasar a cuerpo de
+>   bloque, `isPending` caía antes del refetch y el botón de un job medido por cuota se
+>   rehabilitaba de más. Restaurado con `async/await` — era una violación del contrato del programa.
+> - En `/welcome` el aviso de «Ir al panel» se había alejado dos secciones del botón: la misma
+>   patología del bloqueante anterior, en el sentido inverso.
+> - H-15 incompleto en `/promotions` (sugerencias) y un job sin mensaje de éxito.
+>
+> **Y una TERCERA review sobre esas correcciones encontró 2 bloqueantes más + 6 menores**, también
+> corregidos:
+> - 🚨 La pérdida de datos de `/agent` **seguía abierta por la ventana de carga**: el gate miraba
+>   solo `agentQ.isLoading`, así que entre que resolvía una lectura y la otra el formulario se
+>   renderizaba con `banks`/`sellers` **vacíos** y el botón habilitado. Con el `retry: 3` por
+>   defecto del panel esa ventana dura segundos. Ahora el gate cubre las dos lecturas y el botón
+>   exige `isSuccess` de ambas.
+> - 🚨 El `ConfirmModal` compartido **deja «Cancelar» habilitado** durante la acción (y así debe
+>   ser): cancelar el borrado con la mutación en vuelo dejaba el rechazo en un estado que nadie
+>   renderizaba ⇒ H-03 otra vez. Ahora **todo** aviso huérfano cae al cuerpo de la página.
+> - **Regresión propia revertida:** deshabilitar «Cancelar» en los tres formularios propios los
+>   dejaba **sin ninguna salida** (no tienen Escape ni cierre por el fondo): hasta 70 s encerrado,
+>   el timeout del callable. El diseño correcto es el inverso — Cancelar siempre disponible y el
+>   aviso huérfano al cuerpo.
+> - El éxito se leía **dos veces** con lector de pantalla (`sr-only` oculta a la vista pero no del
+>   árbol de accesibilidad): la copia visible va `aria-hidden`.
+> - H-15 a medias en `/onboarding`: los pasos cuya lectura falló se contaban como **pendientes**.
+>   Ahora se marcan «no pudimos verificar este paso» y salen del cálculo del progreso.
+> - Un test certificaba en verde una rama muerta; reescrito para ejercitar el camino real.
+>
+> **Y una CUARTA review encontró 10 más** (2 ALTO), corregidos. Los dos ALTO salen de leer
+> react-query a fondo: (a) `isError` **no significa «no tengo datos»** —un refetch fallido lo
+> enciende conservando `data`— y como el guardado invalida sus propias queries, un hipo de red
+> después de guardar bien acusaba al dueño de estar por destruir su configuración y le mataba el
+> botón, ofreciéndole «recargá» (que le borra el trabajo); (b) en `/replies` y `/tracking` un
+> **éxito anterior tapaba** el rechazo huérfano — verde sobre un guardado que falló. También se
+> cubrió el estado `paused` (sin conexión: ni loading, ni error, ni success ⇒ secciones en
+> blanco), se le puso `key` al aviso para que la transición éxito→error se anuncie, y se
+> **revirtió** el guard del scrim del `ConfirmModal`: tocaba 12+ pantallas ajenas al programa y
+> dejó de ser necesario. El criterio común quedó en `lib/lectura.ts`.
+>
+> **Sigue pendiente** (mismo patrón, fuera del alcance de este programa; conteo verificado por la
+> review): `/simulator` (5 mutaciones, 0 `onError`), `/catalog` (4/1), `MetaReconciliation` (2/0),
+> `NotificationBell` (1/0), `OutboxIncidents` (2/0), `CustomerInfoPanel` (2/0), `LinkClientModal`
+> (2/0), `CoexistenceHistoryCard` (2/0), `WhatsappActivationQueue` (1/0), `CatalogAuthoritySelector`
+> (2/1). Y un H-15 vivo en la **primera pantalla**: `dashboard/page.tsx:80` — si `statsPubQ` falla,
+> los KPIs quedan como **skeleton animado para siempre**, sin error y sin salida. Y aparte: los tres mensajes configurables
+> de `/agent` (`fallbackMessage`, `handoffMessage`, `farewellMessage`) siguen sin llegar al motor
+> — config muerta con programa propio.
+>
+> A diferencia de H-01 y H-02, este fix **no viaja en el Tramo 1**: es panel, sale con el Tramo 2
+> (Hosting), también bloqueado por la App Review en curso.
+
 Ni `/agent` ni las seis mutaciones de `/promotions` tienen `onError` ni renderizan `isError`.
 Con >5000 caracteres en "Reglas de venta" (tope real del validador), el backend responde 400 y
 la pantalla **no muestra nada**: ni éxito ni error. Al recargar, el texto vuelve al anterior.
@@ -199,7 +309,7 @@ tocar producción; el deploy de todos ellos entra en el Tramo 1 (hoy bloqueado p
 |---|---|---|---|---|---|
 | 1 | H-01 | Responder 503 cuando falla la escritura de un mensaje vivo (la redelivery ya es idempotente); contadores de pérdida en el resumen; log con tenant + pnid + wamid | S | Bajo (idempotencia ya probada) | EN REPO |
 | 2 | H-02 | `inviteUser` valida el destino como `conversation/lifecycle.ts:183-196`; `assertSameTenant` fail-closed; mismo tratamiento en `setUserRole`/`setUserActive` | S | Bajo | EN REPO |
-| 3 | H-03 + H-15 + H-38 + H-39 | Estado de error/éxito en todas las mutaciones y rama `isError` en las lecturas (patrón ya existente en el repo) | M | Bajo | EN REPO |
+| 3 | H-03 + H-15 + H-38 + H-39 | Estado de error/éxito en todas las mutaciones y rama `isError` en las lecturas (patrón ya existente en el repo) | M | Bajo | ✅ HECHO — EN REPO (2026-08-20), sale con el Tramo 2 (Hosting) |
 | 4 | H-04 | Gate server-side: sin `config/checkout` real, el checkout no ofrece transferencia (fail-closed, como el de vendedores) | S | Medio (toca el camino de venta) | EN REPO |
 | 5 | H-05 + H-06 | Transacción/compensación en `confirmPayment`, audit antes del short-circuit, y enviar el mensaje al cliente | M | Medio (dinero) | EN REPO |
 | 6 | H-08 | `customers` → `write: if false` en Rules (el panel no la usa) | XS | Muy bajo | EN REPO (deploy de Rules) |

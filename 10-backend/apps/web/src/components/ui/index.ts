@@ -3,3 +3,4 @@ export { EmptyState } from './EmptyState';
 export { SkeletonList } from './SkeletonList';
 export { ConfirmModal } from './ConfirmModal';
 export { StatusBadge, type BadgeTone } from './StatusBadge';
+export { EstadoDeAccion } from './EstadoDeAccion';

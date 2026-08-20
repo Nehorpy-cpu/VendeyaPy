@@ -1,12 +1,15 @@
 'use client';
 
-import { useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import type { MetaCampaign } from '@vpw/shared';
 import { useActiveCompany } from '@/lib/active-company';
 import { listCampaigns, syncAds, computeAttribution } from '@/lib/ads';
 import { isDemoIntegrationsAllowed as isDemoAllowed } from '@/lib/integrations';
 import { SectionHeader, EmptyState, SkeletonList } from '@/components/ui';
+import { friendlyJobError } from '@/lib/entitlements';
+import { EstadoDeAccion } from '@/components/ui/EstadoDeAccion';
+import { avisoDeLectura } from '@/lib/lectura';
 
 const gs = (n: number) => '₲ ' + Math.round(n).toLocaleString('es-PY');
 const num = (n: number) => n.toLocaleString('es-PY');
@@ -17,8 +20,22 @@ export default function AdsPage() {
 
   const campaignsQ = useQuery({ queryKey: ['metaCampaigns', tenantId], queryFn: () => listCampaigns(tenantId!), enabled: !!tenantId });
   const invalidate = () => qc.invalidateQueries({ queryKey: ['metaCampaigns', tenantId] });
-  const syncMut = useMutation({ mutationFn: () => syncAds(tenantId!), onSuccess: invalidate });
-  const attrMut = useMutation({ mutationFn: () => computeAttribution(tenantId!), onSuccess: invalidate });
+  /** H-38: estas acciones respondían 200 y la pantalla no decía nada. */
+  const [msg, setMsg] = useState<{ tipo: 'ok' | 'error'; texto: string } | null>(null);
+
+  // Cambiar de empresa no remonta la pantalla: sin esto el aviso de la empresa anterior queda
+  // colgado sobre los datos de la nueva.
+  useEffect(() => { setMsg(null); }, [tenantId]);
+  const syncMut = useMutation({
+    mutationFn: () => syncAds(tenantId!),
+    onSuccess: async () => { setMsg({ tipo: 'ok', texto: 'Pedimos la sincronización de campañas.' }); await invalidate(); },
+    onError: (e) => setMsg({ tipo: 'error', texto: 'No pudimos pedir la sincronización. ' + friendlyJobError(e) }),
+  });
+  const attrMut = useMutation({
+    mutationFn: () => computeAttribution(tenantId!),
+    onSuccess: async () => { setMsg({ tipo: 'ok', texto: 'Pedimos el recálculo de atribución.' }); await invalidate(); },
+    onError: (e) => setMsg({ tipo: 'error', texto: 'No pudimos pedir el recálculo. ' + friendlyJobError(e) }),
+  });
   // Acciones demo (sync/atribución por endpoints dev) SOLO en emulador/demo; en staging/prod se ocultan
   // y la pantalla muestra estado honesto. Mismo criterio que Integraciones (isDemoIntegrationsAllowed).
   const demoAllowed = isDemoAllowed();
@@ -62,6 +79,9 @@ export default function AdsPage() {
         </div>
       )}
 
+      <EstadoDeAccion tipo={msg?.tipo ?? 'ok'} mensaje={msg?.texto} />
+
+      <EstadoDeAccion tipo="error" mensaje={avisoDeLectura(campaignsQ, 'tus campañas')} />
       {campaignsQ.isLoading && <SkeletonList rows={3} />}
       {campaignsQ.isSuccess && campaigns.length === 0 && (
         <EmptyState

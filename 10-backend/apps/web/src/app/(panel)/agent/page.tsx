@@ -17,6 +17,8 @@ import { canRunPanelJobs, friendlyJobError } from '@/lib/entitlements';
 import { isDevToolingAllowed } from '@/lib/integrations';
 import { AgentTestChat } from '@/components/AgentTestChat';
 import { SectionHeader, EmptyState, SkeletonList } from '@/components/ui';
+import { EstadoDeAccion } from '@/components/ui/EstadoDeAccion';
+import { avisoDeLectura } from '@/lib/lectura';
 
 const field = 'w-full rounded-lg border border-ink-200 px-3 py-2 text-sm text-ink-800 transition-colors focus:border-mint-500 focus:outline-none focus:ring-2 focus:ring-mint-500/30';
 const lbl = 'mb-1 block text-xs font-medium text-ink-600';
@@ -31,14 +33,27 @@ export default function AgentPage() {
   const auditsQ = useQuery({ queryKey: ['agentAudits', tenantId], queryFn: () => listOpenAudits(tenantId!), enabled: !!tenantId });
   const auditStatusMut = useMutation({
     mutationFn: ({ id, status }: { id: string; status: AuditStatus }) => setAuditStatus(tenantId!, id, status),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['agentAudits', tenantId] }),
+    onSuccess: async () => { setErrorAuditoria(null); await qc.invalidateQueries({ queryKey: ['agentAudits', tenantId] }); },
+    // H-03: sin esta rama, «Resuelto»/«Descartar» rebotaban y la fila quedaba igual, sin decir nada.
+    onError: (e) => setErrorAuditoria(friendlyJobError(e)),
   });
-  const auditGenMut = useMutation({ mutationFn: () => generateAudits(tenantId!), onSuccess: () => qc.invalidateQueries({ queryKey: ['agentAudits', tenantId] }) });
+  const auditGenMut = useMutation({
+    mutationFn: () => generateAudits(tenantId!),
+    onSuccess: async () => { setErrorAuditoria(null); await qc.invalidateQueries({ queryKey: ['agentAudits', tenantId] }); },
+    onError: (e) => setErrorAuditoria(friendlyJobError(e)),
+  });
 
   const [agent, setAgent] = useState<AgentConfig>(DEFAULT_AGENT);
   const [banks, setBanks] = useState<BankAccount[]>([]);
   const [sellers, setSellers] = useState<Seller[]>([]);
   const [saved, setSaved] = useState(false);
+  /** H-03: el motivo del rechazo del backend, visible hasta el proximo intento. */
+  const [errorGuardado, setErrorGuardado] = useState<string | null>(null);
+  /** H-03: lo mismo para las acciones sobre los hallazgos de la auditoría del agente. */
+  const [errorAuditoria, setErrorAuditoria] = useState<string | null>(null);
+
+  // Cambiar de empresa no remonta la pantalla: sin esto el aviso anterior queda colgado.
+  useEffect(() => { setErrorGuardado(null); setErrorAuditoria(null); setSaved(false); }, [tenantId]);
 
   useEffect(() => { if (agentQ.data) setAgent(agentQ.data); }, [agentQ.data]);
   useEffect(() => { if (checkoutQ.data) { setBanks(checkoutQ.data.bankAccounts); setSellers(checkoutQ.data.sellers); } }, [checkoutQ.data]);
@@ -51,8 +66,20 @@ export default function AgentPage() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['agentConfig', tenantId] });
       qc.invalidateQueries({ queryKey: ['checkoutConfig', tenantId] });
+      setErrorGuardado(null);
       setSaved(true);
       setTimeout(() => setSaved(false), 2500);
+    },
+    // H-03: sin esto, un rechazo del backend (p. ej. reglas de venta que superan el tope) dejaba
+    // la pantalla MUDA y el trabajo se perdía al recargar. El estado local NO se toca: lo que el
+    // dueño escribió sigue en el formulario para que pueda corregirlo y reintentar.
+    onError: (e) => {
+      setSaved(false);
+      // El prefijo dice QUÉ falló; el helper agrega el motivo del backend (p. ej. el tope de
+      // caracteres). Sin el prefijo, el dueño lee el motivo sin saber a qué acción corresponde.
+      // «todo» y no «la configuración»: son dos escrituras seguidas (agente y cobro) y la primera
+      // puede haber salido bien.
+      setErrorGuardado('No se pudo guardar todo. ' + friendlyJobError(e));
     },
   });
 
@@ -65,7 +92,20 @@ export default function AgentPage() {
 
   if (companyLoading) return <div className="text-sm text-ink-400">Cargando…</div>;
   if (!tenantId) return <EmptyState title="Seleccioná una empresa" text="Elegí una empresa en la barra superior para configurar su agente." />;
-  if (agentQ.isLoading) return <SkeletonList rows={5} />;
+  // Las DOS lecturas alimentan el formulario (`agent` una, `banks`/`sellers` la otra): mientras
+  // cualquiera esté en vuelo no se muestra nada editable, porque lo editable saldría vacío.
+  if (agentQ.isLoading || checkoutQ.isLoading) return <SkeletonList rows={5} />;
+
+  // H-15 (pérdida de datos): con la lectura caída, `agent` queda en DEFAULT_AGENT y `banks`/`sellers`
+  // vacíos. Guardar eso PISA la configuración real del tenant. Se avisa y se bloquea el guardado.
+  // `isError` también se enciende cuando falla un REFETCH teniendo datos buenos cargados — y este
+  // mismo guardado invalida las dos queries, así que un hipo de red después de guardar bien
+  // encendería el cartel. Solo importa el error que dejó a la pantalla SIN datos.
+  const avisoLectura =
+    avisoDeLectura(agentQ, 'la configuración de tu agente') ?? avisoDeLectura(checkoutQ, 'tus datos de cobro');
+  // Solo se guarda sobre datos que SE LEYERON: lo que se ve viene de `data`, y sin `data` el
+  // formulario muestra los valores por defecto.
+  const puedeGuardar = !!agentQ.data && !!checkoutQ.data;
 
   return (
     <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">
@@ -77,18 +117,37 @@ export default function AgentPage() {
           actions={
             <>
               {saved && <span className="text-sm font-medium text-mint-700">✓ Guardado</span>}
-              <button onClick={() => saveMut.mutate()} disabled={saveMut.isPending} className="rounded-lg bg-mint-600 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-mint-700 disabled:opacity-60">
+              <button onClick={() => saveMut.mutate()} disabled={saveMut.isPending || !puedeGuardar} className="rounded-lg bg-mint-600 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-mint-700 disabled:opacity-60">
                 {saveMut.isPending ? 'Guardando…' : 'Guardar cambios'}
               </button>
             </>
           }
         />
 
+        {/* H-15: lo que se ve NO es la configuración del tenant; guardarla la destruiría. */}
+        {avisoLectura && (
+          <EstadoDeAccion
+            tipo="error"
+            mensaje={`${avisoLectura} Mientras tanto, lo de abajo NO es lo que tenés guardado y el botón de guardar está bloqueado para no pisar tu configuración real.`}
+          />
+        )}
+
+        {/* H-03: el resultado del guardado, dicho en pantalla y anunciado a lectores. */}
+        <EstadoDeAccion tipo="error" mensaje={errorGuardado} />
+
         {/* Auditoría del agente (P16) */}
         <Section title="🔍 Auditoría del agente">
           <div className="mb-2 flex items-center justify-between">
+            {/* H-15: `data?.length ?? 0` convertía una lectura FALLIDA en «✓ Sin hallazgos» — un
+                tilde verde sobre algo que nunca se leyó. Los tres estados van separados. */}
             <span className="text-xs text-ink-500">
-              {(auditsQ.data?.length ?? 0) === 0 ? '✓ Sin hallazgos.' : `${auditsQ.data!.length} hallazgo(s) para revisar.`}
+              {auditsQ.isError
+                ? 'No pudimos leer la auditoría. Recargá la página para intentar de nuevo.'
+                : auditsQ.isLoading
+                  ? 'Revisando…'
+                  : (auditsQ.data?.length ?? 0) === 0
+                    ? '✓ Sin hallazgos.'
+                    : `${auditsQ.data!.length} hallazgo(s) para revisar.`}
             </span>
             {canJobs && (
               <button onClick={() => auditGenMut.mutate()} disabled={auditGenMut.isPending} className="text-xs font-medium text-mint-700 hover:text-mint-600 disabled:opacity-50">
@@ -96,9 +155,8 @@ export default function AgentPage() {
               </button>
             )}
           </div>
-          {auditGenMut.isError && (
-            <p className="mb-2 rounded-lg bg-coral-50 px-3 py-2 text-xs text-coral-700 ring-1 ring-inset ring-coral-100">{friendlyJobError(auditGenMut.error)}</p>
-          )}
+          {/* Antes era un <p> a mano sin role="alert": el fallo no se anunciaba a un lector de pantalla. */}
+          <EstadoDeAccion tipo="error" mensaje={errorAuditoria} className="mb-2" />
           <div className="space-y-2">
             {(auditsQ.data ?? []).map((a) => (
               <div key={a.id} className="flex items-start gap-2 rounded-xl border border-ink-100 p-2.5">

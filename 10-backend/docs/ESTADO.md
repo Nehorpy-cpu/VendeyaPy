@@ -1,6 +1,6 @@
 # ESTADO — VendeYaPy
 
-> **Última actualización: 2026-08-18** (corregido el mismo día: feed 403, congelamiento de Hosting y deudas sistémicas verificadas contra el repo).
+> **Última actualización: 2026-08-20** (H-03 + H-15 + H-38 + H-39 corregidos en repo: el panel dejó de guardar en silencio y de fingir vacíos).
 > Este archivo describe el **presente**, no la historia. La historia vive en `BITACORA.md`.
 > Se reescribe, no se acumula. Máximo una página.
 > `⚠️ verificar` = dato derivado de la bitácora, no leído de producción en la última sesión.
@@ -130,10 +130,9 @@ documentadas en flujos no ejercitados). Selectores literales de deploy y rollbac
 > confirmado contra producción por `updateTime` antes de tocar la constante. Al próximo deploy,
 > actualizarla en el mismo programa.
 
-7. **AUDITORÍA 2026-08-19 (`docs/system-audit-2026-08.md`) — 1 CRÍTICO + 15 ALTOS abiertos**
-   (H-01 y H-02 ya corregidos, ver punto 8). El CRÍTICO abierto: **H-03** "Guardar cambios"
-   del agente y de promociones **pierde el trabajo
-   en silencio** si el backend rechaza. ALTOS destacados: datos bancarios placeholder hacia
+7. **AUDITORÍA 2026-08-19 (`docs/system-audit-2026-08.md`) — CERO CRÍTICOS ABIERTOS + 15 ALTOS**
+   (los tres CRÍTICOS —H-01, H-02, H-03— están corregidos en repo; ver puntos 8, 9 y 10).
+   ALTOS destacados: datos bancarios placeholder hacia
    clientes reales (H-04), pago confirmado sin audit ni aviso al cliente (H-05/H-06), borrado
    del índice global de ruteo sin verificar tenant (H-07), `customers` con `write` de MANAGER
    incluido el delete físico (H-08), fan-out de tools sin tope que rompe la cuota (H-09), sin
@@ -161,6 +160,26 @@ documentadas en flujos no ejercitados). Selectores literales de deploy y rollbac
    Deuda abierta que el fix NO cierra (programa aparte): `inviteUser` sigue revelando si un email
    existe en la plataforma (`created: true|false`), sin auditoría del rechazo ni rate-limit; la
    cura de fondo es la invitación con aceptación del invitado (pendiente + token).
+
+10. **H-03 + H-15 + H-38 + H-39 (el panel guardaba en silencio y fingía vacíos) — ARREGLADO EN
+    REPO, NO DESPLEGADO** (2026-08-20, `CRITICAL-FIX-PANEL-SILENT-SAVE-1`). Fix **solo frontend**:
+    cero backend, cero Rules, cero índices. Nueve pantallas (`agent`, `promotions`, `decisions`,
+    `ads`, `followups`, `tracking`, `replies`, `welcome`, `onboarding`) dicen el resultado de cada
+    acción con el motivo real del backend, y una lectura caída ya no se disfraza de "no hay nada".
+    Cinco reviews adversariales (43 hallazgos, todos corregidos) destaparon de paso un caso de
+    **pérdida de datos** que la auditoría no había catalogado: en `/agent`, con la config sin poder
+    leerse, el formulario mostraba los valores por defecto y «Guardar cambios» **pisaba la
+    configuración real del tenant y borraba sus datos de cobro**. Ahora avisa y bloquea el guardado.
+    ⚠️ **A diferencia de H-01 y H-02, este fix NO viaja en el Tramo 1**: es panel ⇒ **sale con el
+    Tramo 2 (Hosting)**, hoy congelado por la App Review. Hasta entonces, producción sigue
+    perdiendo el trabajo del dueño en silencio si el backend rechaza una configuración.
+    Pendiente del mismo patrón, fuera de alcance (inventario en el informe de auditoría):
+    `/simulator` (5 mutaciones, 0 con rama de error), `/catalog`, `NotificationBell`,
+    `MetaReconciliation`, `OutboxIncidents`, `CustomerInfoPanel`, `LinkClientModal`,
+    `CoexistenceHistoryCard`, `WhatsappActivationQueue`; y un H-15 vivo en el **dashboard**
+    (si fallan las métricas, los KPIs quedan como esqueleto animado para siempre). Y aparte:
+    `fallbackMessage`/`handoffMessage`/`farewellMessage` de `/agent` siguen siendo **config muerta**
+    (se guardan, el motor no las usa) — programa propio.
 
 ## Deudas menores conocidas
 

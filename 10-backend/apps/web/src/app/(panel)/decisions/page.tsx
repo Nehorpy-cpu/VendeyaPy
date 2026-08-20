@@ -1,13 +1,16 @@
 'use client';
 
-import { useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import type { Insight, InsightType, InsightStatus } from '@vpw/shared';
 import { useActiveCompany } from '@/lib/active-company';
 import { listPendingInsights, setInsightStatus, generateInsights } from '@/lib/insights';
 import { isDevToolingAllowed } from '@/lib/integrations';
+import { friendlyJobError } from '@/lib/entitlements';
 import { SectionHeader, EmptyState, SkeletonList } from '@/components/ui';
+import { EstadoDeAccion } from '@/components/ui/EstadoDeAccion';
+import { avisoDeLectura } from '@/lib/lectura';
 
 const TYPE_LABEL: Record<string, string> = {
   PENDING_REPLY: '💬 Conversaciones sin responder',
@@ -31,11 +34,24 @@ export default function DecisionsPage() {
     qc.invalidateQueries({ queryKey: ['pendingInsights', tenantId] });
     qc.invalidateQueries({ queryKey: ['promoSuggestions', tenantId] });
   };
+  /** H-03/H-38: el resultado de la última acción, dicho en pantalla. */
+  const [msg, setMsg] = useState<{ tipo: 'ok' | 'error'; texto: string } | null>(null);
+
+  // Cambiar de empresa no remonta la pantalla: sin esto el aviso de la empresa anterior queda
+  // colgado sobre los datos de la nueva.
+  useEffect(() => { setMsg(null); }, [tenantId]);
+
   const statusMut = useMutation({
     mutationFn: ({ id, status }: { id: string; status: InsightStatus }) => setInsightStatus(tenantId!, id, status),
-    onSuccess: invalidate,
+    onSuccess: () => { invalidate(); setMsg(null); },
+    onError: (e) => setMsg({ tipo: 'error', texto: friendlyJobError(e) }),
   });
-  const genMut = useMutation({ mutationFn: () => generateInsights(tenantId!), onSuccess: invalidate });
+  const genMut = useMutation({
+    mutationFn: () => generateInsights(tenantId!),
+    // H-38: el job respondía 200 y la pantalla no decía nada.
+    onSuccess: () => { invalidate(); setMsg({ tipo: 'ok', texto: 'Pedimos una revisión de tus acciones.' }); },
+    onError: (e) => setMsg({ tipo: 'error', texto: 'No pudimos pedir la revisión. ' + friendlyJobError(e) }),
+  });
   // "Actualizar acciones" (generateAllInsights) NO tiene aún una acción de runTenantJob en el backend
   // (panel/jobs.ts no la mapea; solo existe el subconjunto 'generateFollowups'). Por eso sigue usando el
   // endpoint dev (404 en prod) y queda visible solo en local/emulador hasta que el backend la exponga.
@@ -49,6 +65,7 @@ export default function DecisionsPage() {
   }, [insightsQ.data]);
 
   const total = insightsQ.data?.length ?? 0;
+  const avisoLectura = avisoDeLectura(insightsQ, 'tus acciones');
 
   if (companyLoading) return <div className="text-sm text-ink-400">Cargando…</div>;
   if (!tenantId) return <EmptyState title="Seleccioná una empresa" text="Elegí una empresa en la barra superior para ver sus acciones recomendadas." />;
@@ -57,7 +74,15 @@ export default function DecisionsPage() {
     <div className="space-y-6">
       <SectionHeader
         title="Acciones de hoy"
-        subtitle={total === 0 ? 'Sin acciones pendientes.' : `Tenés ${total} acción(es) recomendada(s).`}
+        subtitle={
+          avisoLectura
+            ? 'Lo que conviene hacer hoy, según tus conversaciones y tus ventas.'
+            : insightsQ.isLoading
+              ? 'Buscando acciones…'
+              : total === 0
+                ? 'Sin acciones pendientes.'
+                : `Tenés ${total} acción(es) recomendada(s).`
+        }
         actions={
           devTools ? (
             <button onClick={() => genMut.mutate()} disabled={genMut.isPending} className="rounded-lg bg-mint-600 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-mint-700 disabled:opacity-60">
@@ -66,6 +91,11 @@ export default function DecisionsPage() {
           ) : undefined
         }
       />
+
+      <EstadoDeAccion tipo={msg?.tipo ?? 'ok'} mensaje={msg?.texto} />
+
+      {/* La falla de lectura se dice como en el resto del panel: en rojo y como `alert`. */}
+      <EstadoDeAccion tipo="error" mensaje={avisoLectura} />
 
       {insightsQ.isLoading && <SkeletonList rows={4} />}
       {insightsQ.isSuccess && total === 0 && (

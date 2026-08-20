@@ -42,6 +42,165 @@ Reglas de escritura:
 
 ## 2026-08
 
+### CRITICAL-FIX-PANEL-SILENT-SAVE-1 — 2026-08-20 (EN REPO — NO DESPLEGADO)
+
+Arreglo del CRÍTICO **H-03** y de **H-15 + H-38 + H-39**: el panel ejecutaba mutaciones que, si
+el backend rechazaba, **no decían nada** —el botón volvía de «Guardando…» a «Guardar cambios»
+como si hubiera salido bien— y varias pantallas afirmaban «no hay nada» cuando en realidad la
+lectura había fallado. La config del agente es *cómo vende el bot*: el dueño quedaba operando
+sobre una creencia falsa, y al recargar su trabajo volvía al texto anterior.
+
+**Causa raíz.** Ninguna de esas mutaciones tenía `onError` ni renderizaba `isError`, y los
+estados vacíos se calculaban con `data ?? []` / `?? 0`: con la lectura caída, `undefined` se
+volvía cero y la UI lo mostraba como «vacío». Dos formas distintas de la misma cosa — la
+pantalla afirmando algo que nunca verificó.
+
+**Qué hace ahora.** Nueve pantallas (`agent`, `promotions`, `decisions`, `ads`, `followups`,
+`tracking`, `replies`, `welcome`, `onboarding`) dicen el resultado de cada acción con el motivo
+real del backend (`friendlyJobError` conserva el `message` de `invalid-argument` y
+`failed-precondition`), y una lectura fallida se declara en vez de disfrazarse de vacío. El
+componente nuevo `components/ui/EstadoDeAccion.tsx` es **presentacional puro**: se descartó a
+propósito un hook genérico de mutaciones, que habría cambiado el comportamiento de ~30
+mutaciones del panel de una sola vez. RED-first: la batería final (10 archivos, 61 tests)
+corrida contra el código original —`git stash` de las 9 pantallas, medido al cierre— da **37
+fallando y 24 pasando**; los que pasan son los casos NO-REGRESIÓN, que por definición deben pasar
+antes y después.
+
+**Review adversarial (CINCO pasadas, revisor fresco cada una):** 8 + 9 + 8 + 10 + 8 hallazgos,
+**todos corregidos**. Cada pasada revisó las correcciones de la anterior; las cuatro primeras
+encontraron algo bloqueante —incluidas tres regresiones que el propio fix había introducido— y la
+quinta cerró **sin bloqueantes**. Primera pasada: 2 BLOQUEANTES + 2 ALTOS + 2 MEDIOS + 2 BAJOS.
+(1) 🚨 El aviso quedaba **debajo del modal**: `PromoForm`, `ReplyForm`, `TrackingForm` y el
+`ConfirmModal` de borrado son overlays `fixed inset-0 z-50`, así que para el escenario insignia
+de H-03 —«llené el formulario y el backend lo rechazó»— la pantalla seguía muda… con un test
+verde certificándolo, porque happy-dom no calcula stacking ni scroll. El error ahora viaja como
+prop y se pinta adentro del modal (`ConfirmModal` ya tenía `error?: string | null` sin usar).
+(2) 🚨 `auditStatusMut` de `/agent` seguía sin rama de error: «Resuelto»/«Descartar» rebotaban
+en silencio. (3) Los avisos no se limpiaban al **cambiar de empresa** (`setTenantId` no remonta
+la pantalla) ⇒ un error de la Empresa A colgado sobre los datos de la B. (4) El error del
+formulario sobrevivía a cerrar y reabrir el modal. (5) `syncAds`, `computeAttribution` y
+`generateInsights` van por endpoints `dev*` con `fetch` **sin chequear `res.ok`**: un 404/500
+disparaba `onSuccess`, así que el fix pasaba de mudo a **afirmar en verde** algo que no ocurrió
+— reescritos como pedido («Pedimos la sincronización…»), no como resultado. (6) El componente
+faltaba en el barrel `components/ui`. (7) La live region del éxito se montaba junto con su
+texto (un `role="status"` recién insertado no se anuncia de forma confiable): ahora está siempre
+montada y solo cambia el contenido. (8) Nadie mueve el foco al aviso — **queda como deuda**.
+
+**Segunda pasada (sobre las correcciones):** 3 ALTOS + 4 MEDIOS + 2 BAJOS, todos corregidos.
+(1) 🚨 **Pérdida de datos**: en `/agent` se había cubierto `auditsQ.isError` pero **no**
+`agentQ`/`checkoutQ` — con la lectura caída el formulario muestra `DEFAULT_AGENT` con bancos y
+vendedores vacíos, y «Guardar cambios» **pisaba la configuración real y borraba los datos de
+cobro**. Ahora se avisa y el botón queda deshabilitado. (2) El error del modal tenía un **único
+canal**: «Cancelar» no estaba deshabilitado mientras guarda y el `ConfirmModal` cerraba por click
+en el fondo sin mirar `pending`, así que el rechazo podía llegar con el modal ya desmontado ⇒
+silencio, H-03 otra vez. Cerrado por tres lados: botón deshabilitado, guard en el scrim (el
+Escape ya lo tenía) y fallback del aviso al cuerpo de la página. (3) `openFromInsight` era la
+única de las tres puertas del formulario sin limpiar el error previo. (4) **Violación del
+contrato detectada por la review**: `onSuccess: invalidate` devolvía la promesa y react-query la
+**esperaba**; al reescribirlo con cuerpo de bloque, `isPending` caía antes del refetch en **13
+mutaciones** y el botón de un job medido por cuota se rehabilitaba de más. Restaurado con
+`async/await`. (5) En `/welcome` el aviso de «Ir al panel» había quedado dos secciones arriba del
+botón — la misma patología del bloqueante anterior, invertida. (6) H-15 incompleto en las
+sugerencias de `/promotions`; (7) un job sin mensaje de éxito; (8) orden de declaración; (9) dos
+afirmaciones inexactas en esta misma documentación, corregidas.
+
+**Tercera pasada (sobre esas correcciones):** 2 ALTOS + 3 MEDIOS + 3 BAJOS, todos corregidos.
+(1) 🚨 La pérdida de datos de `/agent` **seguía abierta por la ventana de carga**: el gate miraba
+solo `agentQ.isLoading`, así que entre que aterrizaba una lectura y la otra el formulario se
+renderizaba con `banks`/`sellers` vacíos y el botón HABILITADO — y con el `retry: 3` por defecto
+del panel esa ventana dura segundos, no milisegundos. El gate ahora cubre las dos lecturas y el
+botón exige `isSuccess` de ambas. (2) 🚨 El `ConfirmModal` compartido deja «Cancelar» habilitado
+durante la acción: cancelar el borrado con la mutación en vuelo dejaba el rechazo en un estado
+que nadie renderizaba ⇒ H-03 otra vez, en el programa que existe para matarlo. Ahora **todos**
+los avisos huérfanos caen al cuerpo de la página. (3) **Regresión propia revertida**: deshabilitar
+«Cancelar» en los tres formularios propios los dejaba **sin ninguna salida** —no tienen Escape ni
+cierre por el fondo— hasta el timeout del callable (70 s). El diseño correcto es el inverso.
+(4) El éxito se leía **dos veces** con lector de pantalla: `sr-only` oculta a la vista pero no del
+árbol de accesibilidad ⇒ la copia visible va `aria-hidden`. (5) H-15 a medias en `/onboarding`:
+los pasos cuya lectura falló se contaban como pendientes; ahora se marcan «no pudimos verificar
+este paso» y salen del progreso. (6) Un test certificaba en verde una rama muerta; reescrito para
+ejercitar el camino real. (7-8) Avisos rancios entre acciones y copy redundante.
+
+**Cuarta pasada:** 2 ALTOS + 3 MEDIOS + 5 BAJOS, todos corregidos. Los dos primeros son de
+react-query leído a fondo, no de lógica de pantalla. (1) 🚨 `isError` **no significa «no tengo
+datos»**: un refetch en background que falla deja `status:'error'` conservando `data`. Y este
+mismo guardado invalida las dos queries de `/agent` ⇒ un hipo de red después de guardar bien
+pintaba el cartel rojo acusando al dueño de estar por destruir sus datos de cobro, **bloqueaba el
+botón** y le ofrecía como salida «recargá la página», que es justo lo que le borra el trabajo.
+Ahora se distingue el error que dejó la pantalla SIN datos (`isLoadingError`) y guardar solo
+exige que los datos existan. (2) 🚨 En `/replies` y `/tracking` un mensaje de **éxito anterior
+tapaba** el rechazo huérfano: caja verde sobre un guardado que había fallado. El rechazo ahora
+tiene prioridad. (3) **Sin conexión** la query queda `pending+paused`: ni `isLoading`, ni
+`isError`, ni `isSuccess` ⇒ las secciones quedaban **en blanco** y `/agent` con el botón muerto y
+mudo. Se agregó `lib/lectura.ts` (helper puro) para decir las dos cosas —error real y falta de
+conexión— igual en las nueve pantallas. (4) Sin `key`, pasar de éxito a error reutilizaba el
+mismo nodo: el `role="alert"` se le agregaba a un elemento ya montado y **no se anunciaba**.
+(5) El progreso de `/onboarding` podía llegar a **100 % con 1 de 4 pasos leídos**; ahora, con
+pasos sin verificar, no se muestra la barra. (6) **Se revirtió el guard del scrim del
+`ConfirmModal`**: era un cambio en un componente compartido por 12+ pantallas ajenas al programa,
+y con el aviso huérfano cayendo al cuerpo ya no hacía falta. (7-10) Prefijos en los errores de los
+endpoints `dev*` (solo pueden fallar con un error de red crudo), «No hay productos» sobre una
+lectura caída, y copy.
+
+**Quinta pasada:** veredicto **sin bloqueantes**, con 2 MEDIOS y 6 BAJOS igualmente corregidos.
+El principal era otra **regresión propia**: `/onboarding` no tenía gate de carga, así que en el
+primer render las cuatro lecturas están vacías y la pantalla de bienvenida del dueño nuevo
+mostraba **cinco mensajes rojos de «no pudimos verificar»** — cargar no es fallar. También:
+`isPaused` convive con datos ya cargados (un refetch por foco sin red), así que el aviso solo sale
+si la pantalla quedó **sin** datos; en `/decisions` y `/followups` la falla de lectura vivía en el
+subtítulo gris, indistinguible del texto que reemplazaba, y ahora se dice en rojo como `alert`
+como en las otras siete; y dos afirmaciones de esta misma bitácora estaban desactualizadas
+respecto del código.
+
+**Verificación.** `pnpm -r typecheck` **exit 0**; `pnpm --filter web lint` **exit 0** (sin
+warnings); `pnpm --filter web test` **57 archivos / 756 tests, exit 0** (61 de ellos nuevos, en
+10 archivos: los 9 de pantalla más el contrato de accesibilidad del componente); `pnpm --filter web build` **exit 0**; `git diff --check` **exit 0**. **Cero
+backend**, evidenciado: `git diff --stat -- apps/functions packages` **vacío** ⇒ los E2E de
+backend no aplican y no se corrieron. En navegador contra emuladores: con **7.200 caracteres**
+en «Reglas de venta» el 400 real produjo «No se pudo guardar la configuración. Campo
+"salesRules" demasiado largo.» y los 7.200 caracteres del dueño **siguieron en el formulario**
+(el prefijo se cambió después a «No se pudo guardar todo.» por el hallazgo (j) de la cuarta
+review —son dos escrituras y la primera puede haber salido bien—; el motivo del backend, que es
+lo que se estaba verificando, viaja igual); en
+`/promotions`, un nombre de 250 caracteres produce «Campo "name" demasiado largo.». Sin
+desbordes horizontales ni texto cortado a **1440 / 1024 / 375 px** (medido antes de mover el
+aviso al interior de los modales). Tras esa corrección se verificó en vivo la propiedad que los
+tests no pueden ver: el aviso queda **dentro del `<form>` del modal** —o sea, dentro del mismo
+overlay `fixed inset-0 z-50`— y no detrás de él. **Lo que NO se verificó en navegador:** la rama de lectura fallida — el SDK de Firestore en el panel no devolvió error con
+un rol sin permiso (las Rules sí se aplican: el mismo GET por REST con token de SELLER da 403),
+y forzarlo habría requerido tocar Rules, prohibido por el programa. Esa rama queda cubierta por
+los tests, no por evidencia en vivo.
+
+**Selector del release.** Ninguno de backend: 0 CREATE / 0 UPDATE / 0 DELETE, 0 índices, 0
+Rules, 0 TTL. Es **solo Hosting** ⇒ viaja en el **Tramo 2**, no en el Tramo 1 (a diferencia de
+H-01 y H-02). Rollback = `hosting:clone <site>@<versionId> <site>:live` (`hosting:rollback` no
+existe en firebase-tools).
+
+**Commit.** `COMMIT_PENDIENTE`
+
+**Estado real.** EN REPO — NO DESPLEGADO. **Producción sigue con el defecto**: hoy, si el
+backend rechaza una configuración del agente, el panel no lo dice y el dueño pierde el trabajo
+al recargar. El Hosting está **congelado** por la App Review de Meta en curso.
+
+**Deudas y limitaciones conocidas.** (a) El mismo patrón sigue vivo fuera del alcance:
+`/simulator` (5 mutaciones, 0 con rama de error), `/catalog`, `NotificationBell`,
+`MetaReconciliation`, `OutboxIncidents`, `CustomerInfoPanel`, `LinkClientModal`,
+`CoexistenceHistoryCard`, `WhatsappActivationQueue`. (b) H-15 vivo en el **dashboard**: si
+fallan las métricas, los KPIs quedan como esqueleto animado para siempre. (c) Los tres mensajes
+configurables de `/agent` (`fallbackMessage`, `handoffMessage`, `farewellMessage`) se guardan y
+**el motor no los usa** — config muerta, programa propio. (d) La cura de fondo de los endpoints
+`dev*` (`if (!res.ok) throw`) cambia cuándo dispara `onSuccess`: fuera del contrato de este
+programa. (e) El foco no se mueve al aviso de error. (g) La limpieza por cambio de
+empresa está en 8 pantallas: `/welcome` no la lleva porque no tiene selector de empresa.
+(h) El error del `ConfirmModal` se pinta con su propio `<p>`, no con `EstadoDeAccion`: unificarlo
+cambiaría el estilo de las otras seis pantallas que ya lo usan, así que queda fuera de alcance. (f) Los `<label>` de los formularios del
+panel no están asociados a sus inputs (sin `htmlFor`/`id`), detectado al escribir los tests.
+(i) Los mensajes de éxito de `/promotions`, `/replies` y `/tracking` no caducan solos (el de
+`/agent` sí, a los 2,5 s). (j) `saveMut` de `/agent` son dos escrituras secuenciales: si la
+segunda falla, la primera ya se guardó — el texto dice «No se pudo guardar todo», que es cierto
+pero no precisa cuál. (k) Ninguno de los tres formularios propios del panel tiene Escape ni
+cierre por el fondo (por eso «Cancelar» no puede bloquearse).
+
 ### CRITICAL-FIX-USER-CLAIMS-1 — 2026-08-19 (EN REPO — NO DESPLEGADO)
 
 Arreglo del CRÍTICO **H-02**: `inviteUser` resolvía el uid por email y escribía

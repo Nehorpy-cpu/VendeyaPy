@@ -15,6 +15,8 @@ import { useRouter } from 'next/navigation';
 import { doc, getDoc } from 'firebase/firestore';
 import { useMutation } from '@tanstack/react-query';
 import { useAuth } from '@/lib/auth-context';
+import { friendlyJobError } from '@/lib/entitlements';
+import { EstadoDeAccion } from '@/components/ui/EstadoDeAccion';
 import { firebaseDb } from '@/lib/firebase';
 import { INDUSTRY_TEMPLATES, applyTemplate, type IndustryTemplate } from '@/lib/templates';
 import { completeOnboarding, getTenantOnboardingCompleted } from '@/lib/registration';
@@ -58,14 +60,23 @@ export default function WelcomePage() {
     };
   }, [loading, user, tenantId, router]);
 
+  /** H-39: motivo del fallo de aplicar la plantilla (se muestra arriba, junto a las plantillas). */
+  const [errorAccion, setErrorAccion] = useState<string | null>(null);
+  /** El fallo de «Ir al panel» se muestra pegado a ESE botón, al final de la página. */
+  const [errorFinalizar, setErrorFinalizar] = useState<string | null>(null);
+
   const applyMut = useMutation({
     mutationFn: (t: IndustryTemplate) => applyTemplate(tenantId!, t),
-    onSuccess: (_d, t) => setAppliedId(t.id),
+    onSuccess: (_d, t) => { setAppliedId(t.id); setErrorAccion(null); setErrorFinalizar(null); },
+    // H-39: primera pantalla del dueño nuevo. Un fallo mudo acá es la peor primera impresión.
+    onError: (e) => setErrorAccion(friendlyJobError(e)),
   });
 
   const finishMut = useMutation({
     mutationFn: () => completeOnboarding(tenantId ?? undefined),
     onSuccess: () => router.replace('/dashboard'),
+    // El prefijo dice QUÉ falló; el helper agrega el motivo que devolvió el backend.
+    onError: (e) => setErrorFinalizar('No pudimos finalizar el onboarding. ' + friendlyJobError(e)),
   });
 
   if (loading || !ready) {
@@ -92,6 +103,9 @@ export default function WelcomePage() {
           </h1>
           <p className="mt-1 text-sm text-ink-500">Dejemos tu negocio listo para vender. Elegí tu rubro y entrá al panel.</p>
         </div>
+
+        {/* H-39: si aplicar la plantilla falla, el dueño nuevo tiene que enterarse. */}
+        <EstadoDeAccion tipo="error" mensaje={errorAccion} className="mb-4" />
 
         {/* Paso 1: rubro */}
         <div className="mb-8">
@@ -139,11 +153,7 @@ export default function WelcomePage() {
           </div>
         </div>
 
-        {finishMut.isError && (
-          <p className="mb-3 rounded-xl bg-coral-50 px-3.5 py-2.5 text-sm text-coral-700 ring-1 ring-inset ring-coral-100">
-            No pudimos finalizar el onboarding. Probá de nuevo.
-          </p>
-        )}
+        <EstadoDeAccion tipo="error" mensaje={errorFinalizar} className="mb-3" />
 
         <button
           onClick={() => finishMut.mutate()}

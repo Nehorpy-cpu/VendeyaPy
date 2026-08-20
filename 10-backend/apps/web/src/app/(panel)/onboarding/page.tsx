@@ -1,5 +1,6 @@
 'use client';
 
+import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useActiveCompany } from '@/lib/active-company';
@@ -7,7 +8,10 @@ import { INDUSTRY_TEMPLATES, applyTemplate, type IndustryTemplate } from '@/lib/
 import { getAgentConfig, getCheckoutConfig } from '@/lib/agent-config';
 import { listProducts } from '@/lib/catalog';
 import { listCustomers } from '@/lib/conversations';
+import { friendlyJobError } from '@/lib/entitlements';
 import { SectionHeader, EmptyState } from '@/components/ui';
+import { EstadoDeAccion } from '@/components/ui/EstadoDeAccion';
+import { avisoDeLectura } from '@/lib/lectura';
 
 export default function OnboardingPage() {
   const { tenantId, loading: companyLoading } = useActiveCompany();
@@ -18,12 +22,21 @@ export default function OnboardingPage() {
   const checkoutQ = useQuery({ queryKey: ['checkoutConfig', tenantId], queryFn: () => getCheckoutConfig(tenantId!), enabled: !!tenantId });
   const customersQ = useQuery({ queryKey: ['customers', tenantId], queryFn: () => listCustomers(tenantId!), enabled: !!tenantId });
 
+  /** H-39: motivo del fallo, visible en pantalla. */
+  const [errorAccion, setErrorAccion] = useState<string | null>(null);
+
+  // Cambiar de empresa no remonta la pantalla: sin esto el aviso anterior queda colgado.
+  useEffect(() => { setErrorAccion(null); }, [tenantId]);
+
   const applyMut = useMutation({
     mutationFn: (t: IndustryTemplate) => applyTemplate(tenantId!, t),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['agentConfig', tenantId] });
       qc.invalidateQueries({ queryKey: ['categories', tenantId] });
+      setErrorAccion(null);
     },
+    // H-39: si falla, el botón volvía a su estado y no pasaba nada.
+    onError: (e) => setErrorAccion(friendlyJobError(e)),
   });
 
   if (companyLoading) return <div className="text-sm text-ink-400">Cargando…</div>;
@@ -33,38 +46,60 @@ export default function OnboardingPage() {
   const banks = checkoutQ.data?.bankAccounts ?? [];
   const banksOk = banks.length > 0 && !/REEMPLAZAR/i.test(banks[0]?.bank + ' ' + banks[0]?.accountNumber);
   const steps = [
-    { label: 'Elegí tu rubro', done: !!industry, href: '#rubro', hint: 'Aplicá una plantilla acá abajo.' },
-    { label: 'Cargá tus productos', done: (productsQ.data?.length ?? 0) > 0, href: '/catalog', hint: 'Sumá tu catálogo.' },
-    { label: 'Poné tus datos bancarios', done: banksOk, href: '/agent', hint: 'Para que el bot pase los datos de pago.' },
-    { label: 'Probá tu bot', done: (customersQ.data?.length ?? 0) > 0, href: '/agent', hint: 'Usá el chat de prueba en Config. del agente.' },
+    { label: 'Elegí tu rubro', done: !!industry, sinLeer: !agentQ.data && !agentQ.isLoading, href: '#rubro', hint: 'Aplicá una plantilla acá abajo.' },
+    { label: 'Cargá tus productos', done: (productsQ.data?.length ?? 0) > 0, sinLeer: !productsQ.data && !productsQ.isLoading, href: '/catalog', hint: 'Sumá tu catálogo.' },
+    { label: 'Poné tus datos bancarios', done: banksOk, sinLeer: !checkoutQ.data && !checkoutQ.isLoading, href: '/agent', hint: 'Para que el bot pase los datos de pago.' },
+    { label: 'Probá tu bot', done: (customersQ.data?.length ?? 0) > 0, sinLeer: !customersQ.data && !customersQ.isLoading, href: '/agent', hint: 'Usá el chat de prueba en Config. del agente.' },
   ];
-  const doneCount = steps.filter((s) => s.done).length;
-  const pct = Math.round((doneCount / steps.length) * 100);
+  // H-15: un paso cuya lectura falló NO está pendiente — no se sabe. Contarlo como no hecho es
+  // afirmar sobre algo que nunca se leyó, así que sale del progreso en vez de bajarlo.
+  const verificables = steps.filter((s) => !s.sinLeer);
+  const avisoProgreso =
+    avisoDeLectura(agentQ, 'tu rubro') ??
+    avisoDeLectura(productsQ, 'tus productos') ??
+    avisoDeLectura(checkoutQ, 'tus datos de cobro') ??
+    avisoDeLectura(customersQ, 'tus conversaciones');
+  const doneCount = verificables.filter((s) => s.done).length;
+  const pct = verificables.length > 0 ? Math.round((doneCount / verificables.length) * 100) : 0;
 
   return (
     <div className="space-y-6">
       <SectionHeader title="Primeros pasos 🚀" subtitle="Dejá tu negocio listo para vender en unos minutos." />
 
+      {/* H-39: el resultado de aplicar la plantilla, dicho en pantalla. */}
+      <EstadoDeAccion tipo="error" mensaje={errorAccion} />
+
+      {/* H-15: el checklist se arma con `data ?? []`; si una lectura falla, los pasos aparecen
+          como pendientes y el porcentaje miente sobre lo que el dueño ya configuró. */}
+      <EstadoDeAccion tipo="error" mensaje={avisoProgreso} />
+
       {/* Progreso + checklist */}
       <div className="rounded-2xl border border-ink-100 bg-white p-5 shadow-soft">
         <div className="mb-3 flex items-center justify-between">
           <span className="text-sm font-semibold text-ink-700">Tu progreso</span>
-          <span className="text-sm text-ink-500">{doneCount}/{steps.length}</span>
+          <span className="text-sm text-ink-500">{verificables.length > 0 ? `${doneCount}/${verificables.length}` : '—'}</span>
         </div>
-        <div className="mb-4 h-2 w-full rounded-full bg-ink-100">
-          <div className="h-2 rounded-full bg-mint-brand transition-all" style={{ width: `${pct}%` }} />
-        </div>
+        {verificables.length > 0 && verificables.length < steps.length ? (
+          // Con pasos sin verificar, una barra llena afirmaría «terminaste» sobre lo que no se leyó.
+          <p className="mb-4 text-xs text-coral-700">
+            No pudimos verificar {steps.length - verificables.length} de {steps.length} pasos, así que no mostramos el progreso.
+          </p>
+        ) : verificables.length === steps.length ? (
+          <div className="mb-4 h-2 w-full rounded-full bg-ink-100">
+            <div className="h-2 rounded-full bg-mint-brand transition-all" style={{ width: `${pct}%` }} />
+          </div>
+        ) : null}
         <ul className="space-y-2">
           {steps.map((s) => (
             <li key={s.label} className="flex items-center justify-between gap-3">
               <div className="flex items-center gap-2">
-                <span className={'flex h-5 w-5 items-center justify-center rounded-full text-xs ' + (s.done ? 'bg-mint-600 text-white' : 'border border-ink-200 text-ink-400')}>{s.done ? '✓' : ''}</span>
+                <span className={'flex h-5 w-5 items-center justify-center rounded-full text-xs ' + (s.sinLeer ? 'border border-ink-200 text-ink-400' : s.done ? 'bg-mint-600 text-white' : 'border border-ink-200 text-ink-400')}>{s.sinLeer ? '?' : s.done ? '✓' : ''}</span>
                 <div>
-                  <div className={'text-sm ' + (s.done ? 'text-ink-400 line-through' : 'text-ink-800')}>{s.label}</div>
-                  {!s.done && <div className="text-xs text-ink-400">{s.hint}</div>}
+                  <div className={'text-sm ' + (!s.sinLeer && s.done ? 'text-ink-400 line-through' : 'text-ink-800')}>{s.label}</div>
+                  {s.sinLeer ? <div className="text-xs text-coral-700">No pudimos verificar este paso.</div> : !s.done && <div className="text-xs text-ink-400">{s.hint}</div>}
                 </div>
               </div>
-              {!s.done && !s.href.startsWith('#') && (
+              {!s.done && !s.sinLeer && !s.href.startsWith('#') && (
                 <Link href={s.href} className="shrink-0 rounded-lg border border-ink-200 px-3 py-1.5 text-xs font-medium text-mint-700 transition-colors hover:bg-ink-50">Ir</Link>
               )}
             </li>

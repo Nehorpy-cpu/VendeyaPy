@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import type { FollowUpTask, FollowUpType, FollowUpStatus } from '@vpw/shared';
@@ -9,6 +9,8 @@ import { useAuth } from '@/lib/auth-context';
 import { listFollowUpTasks, setTaskStatus, generateFollowups } from '@/lib/followups';
 import { canRunPanelJobs, friendlyJobError } from '@/lib/entitlements';
 import { SectionHeader, EmptyState, SkeletonList } from '@/components/ui';
+import { EstadoDeAccion } from '@/components/ui/EstadoDeAccion';
+import { avisoDeLectura } from '@/lib/lectura';
 
 const TYPE_LABEL: Record<FollowUpType, string> = {
   PAYMENT_PENDING: '💳 Pago pendiente',
@@ -38,12 +40,19 @@ export default function FollowupsPage() {
   const [onlyMine, setOnlyMine] = useState(false);
 
   const tasksQ = useQuery({ queryKey: ['followups', tenantId], queryFn: () => listFollowUpTasks(tenantId!), enabled: !!tenantId });
+  /** H-03/H-38: el resultado de la última acción, dicho en pantalla. */
+  const [msg, setMsg] = useState<{ tipo: 'ok' | 'error'; texto: string } | null>(null);
+
+  // Cambiar de empresa no remonta la pantalla: sin esto el aviso de la empresa anterior queda
+  // colgado sobre los datos de la nueva.
+  useEffect(() => { setMsg(null); }, [tenantId]);
   const invalidate = () => qc.invalidateQueries({ queryKey: ['followups', tenantId] });
-  const statusMut = useMutation({ mutationFn: ({ id, status }: { id: string; status: FollowUpStatus }) => setTaskStatus(tenantId!, id, status), onSuccess: invalidate });
-  const genMut = useMutation({ mutationFn: () => generateFollowups(tenantId!), onSuccess: invalidate });
+  const statusMut = useMutation({ mutationFn: ({ id, status }: { id: string; status: FollowUpStatus }) => setTaskStatus(tenantId!, id, status), onSuccess: async () => { setMsg(null); await invalidate(); }, onError: (e) => setMsg({ tipo: 'error', texto: friendlyJobError(e) }) });
+  const genMut = useMutation({ mutationFn: () => generateFollowups(tenantId!), onSuccess: async () => { setMsg({ tipo: 'ok', texto: 'Listo: volvimos a revisar tus seguimientos.' }); await invalidate(); }, onError: (e) => setMsg({ tipo: 'error', texto: friendlyJobError(e) }) });
   // "Actualizar tareas" llama al callable real runTenantJob('generateFollowups'). Visible para roles
   // que pueden ejecutar jobs (owner/manager/admin); los vendedores ven la lista pero no el botón.
   const canJobs = canRunPanelJobs(claims.role);
+  const avisoLectura = avisoDeLectura(tasksQ, 'tus seguimientos');
 
   const visible = useMemo(() => {
     const list = tasksQ.data ?? [];
@@ -59,7 +68,17 @@ export default function FollowupsPage() {
     <div className="space-y-6">
       <SectionHeader
         title="Seguimientos"
-        subtitle={visible.length === 0 ? 'Sin tareas pendientes.' : `${visible.length} tarea(s) de seguimiento.`}
+        subtitle={
+          // H-15: con la lectura caída, `data ?? []` daba 0 y el subtítulo afirmaba «Sin tareas
+          // pendientes» sobre una lista que nunca se leyó.
+          avisoLectura
+            ? 'Los clientes que quedaron a medio camino, para retomarlos.'
+            : tasksQ.isLoading
+              ? 'Buscando seguimientos…'
+              : visible.length === 0
+                ? 'Sin tareas pendientes.'
+                : `${visible.length} tarea(s) de seguimiento.`
+        }
         actions={
           <>
             <label className="flex items-center gap-2 text-xs text-ink-600">
@@ -74,9 +93,11 @@ export default function FollowupsPage() {
         }
       />
 
-      {genMut.isError && (
-        <p className="rounded-xl bg-coral-50 px-3.5 py-2.5 text-sm text-coral-700 ring-1 ring-inset ring-coral-100">{friendlyJobError(genMut.error)}</p>
-      )}
+      {/* H-03/H-38: el resultado de la última acción, dicho en pantalla. */}
+      <EstadoDeAccion tipo={msg?.tipo ?? 'ok'} mensaje={msg?.texto} />
+
+      {/* La falla de lectura se dice como en el resto del panel: en rojo y como `alert`. */}
+      <EstadoDeAccion tipo="error" mensaje={avisoLectura} />
 
       {tasksQ.isLoading && <SkeletonList rows={4} />}
       {tasksQ.isSuccess && visible.length === 0 && (
