@@ -130,11 +130,9 @@ documentadas en flujos no ejercitados). Selectores literales de deploy y rollbac
 > confirmado contra producción por `updateTime` antes de tocar la constante. Al próximo deploy,
 > actualizarla en el mismo programa.
 
-7. **AUDITORÍA 2026-08-19 (`docs/system-audit-2026-08.md`) — 2 CRÍTICOS + 15 ALTOS abiertos**
-   (H-01 ya corregido, ver punto 8). Los CRÍTICOS abiertos: (b) **H-02** un TENANT_OWNER reescribe
-   los claims de cualquier usuario por email ⇒ secuestra al owner de otro tenant y **degrada al
-   PLATFORM_ADMIN** (exige ser owner: hoy no hay terceros, se vuelve real con el primer cliente
-   del Tramo 1); (c) **H-03** "Guardar cambios" del agente y de promociones **pierde el trabajo
+7. **AUDITORÍA 2026-08-19 (`docs/system-audit-2026-08.md`) — 1 CRÍTICO + 15 ALTOS abiertos**
+   (H-01 y H-02 ya corregidos, ver punto 8). El CRÍTICO abierto: **H-03** "Guardar cambios"
+   del agente y de promociones **pierde el trabajo
    en silencio** si el backend rechaza. ALTOS destacados: datos bancarios placeholder hacia
    clientes reales (H-04), pago confirmado sin audit ni aviso al cliente (H-05/H-06), borrado
    del índice global de ruteo sin verificar tenant (H-07), `customers` con `write` de MANAGER
@@ -152,6 +150,17 @@ documentadas en flujos no ejercitados). Selectores literales de deploy y rollbac
    contador `liveWriteFailures` en el resumen, `catch` general que ya no se traga el lote (cubre
    también el archivo de Coexistence), clave estable para entrantes sin wamid, y log de rastreo
    con PNID y wamid **enmascarados** (la review probó que el wamid lleva el teléfono en base64).
+
+9. **H-02 (secuestro de cuentas por email) — ARREGLADO EN REPO, NO DESPLEGADO** (2026-08-19,
+   `CRITICAL-FIX-USER-CLAIMS-1`). **Producción sigue con el defecto hasta el release.** Entra en
+   el Tramo 1 ya calculado (`inviteUser`, `setUserRole` y `setUserActive` están en el selector
+   del Paso 1) y **no requiere deploy adicional**.
+   ⚠️ **REGLA OPERATIVA: H-02 tiene que estar DESPLEGADO antes de abrir el registro autoservicio
+   a la primera empresa externa** — el privilegio de owner que ese registro entrega es
+   exactamente el que explota este defecto.
+   Deuda abierta que el fix NO cierra (programa aparte): `inviteUser` sigue revelando si un email
+   existe en la plataforma (`created: true|false`), sin auditoría del rechazo ni rate-limit; la
+   cura de fondo es la invitación con aceptación del invitado (pendiente + token).
 
 ## Deudas menores conocidas
 

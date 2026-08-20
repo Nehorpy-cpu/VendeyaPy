@@ -113,6 +113,21 @@ venta) fallando en la única dirección que no deja rastro.
 
 ### H-02 🚨 — Un owner secuestra la autorización de cualquier usuario
 
+> **✅ RESUELTO EN REPO — NO DESPLEGADO** (2026-08-19, programa `CRITICAL-FIX-USER-CLAIMS-1`).
+> `assertSameTenant` (fail-open) fue reemplazado por `assertDestinoOperable`, fail-closed y
+> llamado también desde `inviteUser`: sólo se opera sobre un destino que declare ESTA empresa,
+> con mensaje único anti-enumeración. La review adversarial del fix endureció tres cosas más:
+> (1) una cuenta **huérfana** de Auth (registro sin aprovisionar) ya **no es adoptable** — era el
+> mismo secuestro con otras víctimas, porque el registro crea la cuenta antes de verificar el
+> mail; (2) `setUserRole`/`setUserActive` ahora escriben `tenantId` y el guard tolera un doc sin
+> él, para no dejar usuarios intocables para siempre; (3) las dos lecturas (doc y claims) ocurren
+> siempre, para cerrar el canal lateral por latencia.
+>
+> **Deuda que queda abierta y NO se cierra con este fix:** `inviteUser` sigue revelando por su
+> resultado si un email existe en la plataforma (`created: true|false`), sin auditoría del
+> rechazo ni rate-limit. La cura de fondo es la **invitación con aceptación del invitado**
+> (estado pendiente + token), que además elimina la adopción sin consentimiento. Programa aparte.
+
 `inviteUser` resuelve el uid por email (`getUserByEmail`) y hace `setCustomUserClaims` sobre un
 usuario **preexistente de otra empresa**, sin llamar a `assertSameTenant` — que además es
 fail-open: si `users/{uid}` no existe, deja pasar. El PLATFORM_ADMIN es alcanzable justamente

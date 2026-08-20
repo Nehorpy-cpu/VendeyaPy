@@ -42,6 +42,44 @@ Reglas de escritura:
 
 ## 2026-08
 
+### CRITICAL-FIX-USER-CLAIMS-1 — 2026-08-19 (EN REPO — NO DESPLEGADO)
+
+Arreglo del CRÍTICO **H-02**: `inviteUser` resolvía el uid por email y escribía
+`setCustomUserClaims` sobre un usuario de otra empresa sin validar nada, y `assertSameTenant`
+era fail-open (sin doc `users/{uid}` no lanzaba — justo el caso del PLATFORM_ADMIN, cuyo
+bootstrap no crea ese documento). Un owner secuestraba al owner ajeno, degradaba al admin de
+plataforma y, con `setUserActive`, le deshabilitaba la cuenta. RED-first: 4 tests fallando por
+el motivo correcto («promise resolved instead of rejecting»).
+
+**Fix:** `assertDestinoOperable` fail-closed —siguiendo el patrón de `conversation/lifecycle.ts`
+(mensaje único anti-enumeración)— llamado también desde `inviteUser` cuando el email ya existía.
+Sólo se opera sobre un destino que declare ESTA empresa. `setUserActive` conserva el permiso de
+tocar a un DISABLED (es la operación que lo reactiva; bloquearlo dejaba las bajas
+irrecuperables — detectado y cerrado durante la implementación).
+
+**Review adversarial:** 1 ALTO + 1 MEDIO + 3 menores, corregidos: (1) una cuenta **huérfana** de
+Auth ya no es adoptable — el registro crea la cuenta antes de verificar el mail, así que toda
+persona entre «me registré» y «verifiqué» era secuestrable (mismo defecto, otras víctimas); el
+caso legítimo de invitación a medio camino queda cubierto por la rama de claims; (2)
+`setUserRole`/`setUserActive` escribían docs SIN `tenantId`, lo que dejaba al usuario intocable
+para todos los tenants —incluido el admin— para siempre: ahora escriben `tenantId` y el guard
+tolera el doc parcial cayendo a los claims; (3) las dos lecturas ocurren siempre, para cerrar el
+canal lateral por latencia. Sin CRÍTICO introducido. Verificado que **no hay otro camino
+explotable por un owner** que escriba claims (`provision.ts` es PLATFORM_ADMIN-only,
+`registerTenantOwner` es self-only con triple barrera).
+
+**Deuda abierta declarada** (programa aparte): `inviteUser` sigue revelando si un email existe
+(`created: true|false`), sin audit del rechazo ni rate-limit ⇒ enumeración del padrón. La cura
+de fondo es la invitación con aceptación del invitado.
+
+**Verificación:** typecheck/lint/build/diff-check en 0; monorepo completo **verde**
+(`apps/functions` 226 archivos / 3458 tests, web 695/695, shared 341/341); `src/users` 18/18;
+E2E `verify-entitlements` 12/12 y `verify-fase4` **10/14 — los 4 rojos son preexistentes**
+(planes del SaaS y billing: verificados idénticos en la base sin este diff; ningún seed del repo
+crea `plans`), y sus checks de usuarios (7 «Owner invita un vendedor» y 8 «rol + tenant
+correctos») **pasan con el fix**. Panel sin cambios. En esta corrida el flake de
+`coexistenceConnect` no apareció, lo que confirma su intermitencia.
+
 ### CRITICAL-FIX-WEBHOOK-INBOUND-DURABILITY-1 — 2026-08-19 (EN REPO — NO DESPLEGADO)
 
 Arreglo del CRÍTICO **H-01**: el webhook respondía `200 {ok:true}` cuando fallaba la escritura
