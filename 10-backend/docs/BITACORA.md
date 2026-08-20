@@ -176,7 +176,7 @@ Rules, 0 TTL. Es **solo Hosting** ⇒ viaja en el **Tramo 2**, no en el Tramo 1 
 H-01 y H-02). Rollback = `hosting:clone <site>@<versionId> <site>:live` (`hosting:rollback` no
 existe en firebase-tools).
 
-**Commit.** `COMMIT_PENDIENTE`
+**Commit.** `6882740`
 
 **Estado real.** EN REPO — NO DESPLEGADO. **Producción sigue con el defecto**: hoy, si el
 backend rechaza una configuración del agente, el panel no lo dice y el dueño pierde el trabajo
