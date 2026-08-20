@@ -42,6 +42,40 @@ Reglas de escritura:
 
 ## 2026-08
 
+### CRITICAL-FIX-WEBHOOK-INBOUND-DURABILITY-1 — 2026-08-19 (EN REPO — NO DESPLEGADO)
+
+Arreglo del CRÍTICO **H-01**: el webhook respondía `200 {ok:true}` cuando fallaba la escritura
+de un evento vivo al inbox ⇒ Meta no reintentaba ⇒ el mensaje del cliente desaparecía sin
+rastro (y `written:0` era indistinguible de un lote vacío). RED-first: 10 tests nuevos fallando
+por el motivo correcto («expected 200 not to be 200») antes de tocar el código.
+
+**Qué hace ahora:** tráfico vivo sin persistir por fallo **transitorio** (gRPC 4/8/10/13/14, o
+error sin código) ⇒ **503 + `retry:true`**; fallo **permanente** (7 PERMISSION_DENIED, 3
+INVALID_ARGUMENT…) ⇒ 200 + log «requiere intervención», porque insistir no lo arregla y el
+bucle degradaría la salud del webhook con la App Review en curso. `liveWriteFailures` en el
+resumen; `catch` general que decide por contadores (o por el cuerpo crudo si la excepción fue
+antes de planificar) y que ahora **también** protege el archivo de Coexistence; entrante sin
+wamid con clave estable (hash del contenido) para que la redelivery no lo duplique;
+`traeTraficoVivoCrudo` cubre IG/Messenger (`entry[].messaging`) y excluye el history-media.
+Se corrigió el comentario que justificaba el 200 con dos premisas que la auditoría había
+refutado.
+
+**Review adversarial (obligatoria, revisor fresco):** 2 ALTOS + 3 MEDIOS + 2 BAJOS, todos
+corregidos. El más importante: **el wamid ES PII** — lleva el teléfono en base64
+(`Buffer.from('HBgMNTk1OTkxMjM0NTY3','base64')` ⇒ `\x1c\x18\x0c595991234567`), verificado
+empíricamente; iba completo al log y el test lo certificaba como seguro **por accidente**. Ahora
+va enmascarado y el test verifica también la forma codificada. Sin duplicación comercial
+reproducible ⇒ no se disparó la condición de parada.
+
+**Verificación:** typecheck/lint/build/diff-check en 0; `apps/functions` 3439/3440 y suite meta
+102 archivos/1761 tests; E2E en emuladores limpios: conversaciones 42/42, human-handoff 11/11,
+handoff2 8/8, ai-reservation 14/14; panel sin cambios (`git diff --stat apps/web` vacío). El
+único rojo de la corrida completa es un **flake preexistente** (`coexistenceConnect.test.ts`
+REPLAY), verificado en el commit base SIN este diff — documentado en ESTADO, no arreglado
+(fuera de alcance).
+
+**Deploy:** sale con el Paso 1 del Tramo 1 ya calculado; no necesita deploy propio.
+
 ### SYSTEM-AUDIT-SECURITY-ACTIONS-UI-1 — 2026-08-19 (AUDITORÍA — CERO FIX, CERO DEPLOY)
 
 Inventario completo del sistema en `docs/system-audit-2026-08.md`: **56 hallazgos (3 CRÍTICOS,

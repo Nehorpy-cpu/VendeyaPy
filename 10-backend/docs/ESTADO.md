@@ -130,10 +130,8 @@ documentadas en flujos no ejercitados). Selectores literales de deploy y rollbac
 > confirmado contra producción por `updateTime` antes de tocar la constante. Al próximo deploy,
 > actualizarla en el mismo programa.
 
-7. **AUDITORÍA 2026-08-19 (`docs/system-audit-2026-08.md`) — 3 CRÍTICOS + 15 ALTOS abiertos,
-   CERO fix aplicado.** Los tres CRÍTICOS: (a) **H-01** el webhook responde 200 a Meta cuando
-   falla la escritura del inbox ⇒ **se pierde el mensaje del cliente sin rastro** (no necesita
-   atacante: basta un error transitorio de Firestore); (b) **H-02** un TENANT_OWNER reescribe
+7. **AUDITORÍA 2026-08-19 (`docs/system-audit-2026-08.md`) — 2 CRÍTICOS + 15 ALTOS abiertos**
+   (H-01 ya corregido, ver punto 8). Los CRÍTICOS abiertos: (b) **H-02** un TENANT_OWNER reescribe
    los claims de cualquier usuario por email ⇒ secuestra al owner de otro tenant y **degrada al
    PLATFORM_ADMIN** (exige ser owner: hoy no hay terceros, se vuelve real con el primer cliente
    del Tramo 1); (c) **H-03** "Guardar cambios" del agente y de promociones **pierde el trabajo
@@ -143,6 +141,17 @@ documentadas en flujos no ejercitados). Selectores literales de deploy y rollbac
    incluido el delete físico (H-08), fan-out de tools sin tope que rompe la cuota (H-09), sin
    validación de salida del modelo (H-10), `metaWebhookInbox` sin TTL con 176 docs vencidos con
    PII (H-11), secretos legibles con rol viewer (H-12). Ranking de fixes en §3 del informe.
+
+8. **H-01 (pérdida silenciosa de mensajes en el webhook) — ARREGLADO EN REPO, NO DESPLEGADO**
+   (2026-08-19, `CRITICAL-FIX-WEBHOOK-INBOUND-DURABILITY-1`). **Producción sigue con el defecto
+   hasta el release**: hoy, si Firestore hipa mientras entra un mensaje, ese mensaje se pierde sin
+   rastro. El fix **NO requiere un deploy propio**: `functions:metaWebhook` ya está en el Paso 1
+   del Tramo 1 calculado (`docs/release-plan-tres-programas.md`), que espera el cierre de la App
+   Review. Contenido: 503 con `retry` solo para fallos TRANSITORIOS (los permanentes responden
+   200 + log de incidente, para no degradar la salud del webhook durante la revisión de Meta),
+   contador `liveWriteFailures` en el resumen, `catch` general que ya no se traga el lote (cubre
+   también el archivo de Coexistence), clave estable para entrantes sin wamid, y log de rastreo
+   con PNID y wamid **enmascarados** (la review probó que el wamid lleva el teléfono en base64).
 
 ## Deudas menores conocidas
 
@@ -163,6 +172,11 @@ documentadas en flujos no ejercitados). Selectores literales de deploy y rollbac
   los excluye y `vitest.config.ts` no activa `typecheck`. O sea que `pnpm -r typecheck` en 0
   **no cubre los archivos de test**. Preexistente y sistémico: al leer un reporte, tenerlo en
   cuenta antes de dar por cubierta esa pata.
+- **Flake preexistente en la suite completa** (verificado 2026-08-19 CON y SIN el diff del día,
+  en el commit base): `src/meta/coexistenceConnect.test.ts > "REPLAY: el segundo callback
+  devuelve lo mismo…"` falla en la corrida completa de `apps/functions` (225 archivos) y pasa
+  aislado (24/24). Compara el documento de conexión contra un snapshot previo, así que es
+  sensible a timestamp/carga. No lo introdujo ningún cambio reciente; queda como deuda.
 - Los tests `tests/integration/release-audit.*.test.ts` que menciona el header de
   `release-audit.mjs` **no existen** (verificado 2026-08-18): el parser del audit corre sin
   ninguna cobertura propia.

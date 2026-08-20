@@ -88,6 +88,17 @@ devuelven 404 real en prod; un owner NO puede auto-mejorarse el plan (deny-list 
 
 ### H-01 🚨 — El mensaje del cliente se destruye y a Meta se le dice "lo tengo"
 
+> **✅ RESUELTO EN REPO — NO DESPLEGADO** (2026-08-19, programa
+> `CRITICAL-FIX-WEBHOOK-INBOUND-DURABILITY-1`). El tráfico vivo sin persistir por un fallo
+> **transitorio** ahora responde 503 con `retry:true`; los fallos **permanentes** (IAM roto,
+> documento rechazado por forma) responden 200 con un log de incidente, porque insistir no los
+> arregla y el bucle degradaría la salud del webhook durante la App Review. El resumen suma
+> `liveWriteFailures`, el `catch` general ya no se traga el lote (y también cubre el archivo de
+> Coexistence), y un entrante sin wamid recibe clave estable para que la redelivery no lo
+> duplique. Sale con el Paso 1 del Tramo 1 (`functions:metaWebhook` ya está en el selector).
+> La review adversarial del fix encontró que **el wamid ES PII** (lleva el teléfono en base64):
+> va enmascarado al log.
+
 `webhookHttp.ts:575-579` trata igual el fallo de un chunk de historial y el de un mensaje vivo;
 `:659` responde `200 {ok:true}` igual, y `:662` responde `200 {ok:false}` ante cualquier
 excepción de más arriba (tirando **el lote entero**: Meta batchea varios `changes` por POST).

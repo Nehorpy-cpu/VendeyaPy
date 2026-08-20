@@ -243,14 +243,27 @@ describe('un chunk del historial que no se pudo persistir hace REINTENTAR a Meta
     expect(coord['status']).not.toBe('completed');
   });
 
-  it('un `messages` que falla NO cambia el código: el canal del número que vende no se altera', async () => {
-    // Un no-200 haría redelivery de TODO el canal, incluida la conversación viva del número que
-    // está vendiendo. El historial es la excepción justamente porque no se puede volver a pedir.
+  /**
+   * ACTUALIZADO por H-01 (auditoría 2026-08-19, `docs/system-audit-2026-08.md`).
+   *
+   * Este test fijaba lo contrario: que un `messages` fallido conservaba el 200 «para no forzar
+   * redelivery del canal del número que vende». La auditoría refutó las dos premisas de esa
+   * decisión — no existe ninguna vía de recuperación para un evento vivo que no se escribió, y la
+   * redelivery es inocua porque la clave del inbox es determinística por wamid (el reintento
+   * escribe cero: ver `webhookHttp.durabilidad.test.ts`, «lote mixto»). El 200 no protegía el
+   * canal: borraba el mensaje del cliente sin dejar rastro.
+   *
+   * La aserción no se debilita, se invierte y se refuerza: además del código, ahora se exige que
+   * el resumen declare el evento perdido (antes `written:0` era indistinguible de un lote vacío).
+   */
+  it('un `messages` que falla PIDE REINTENTO y lo declara en el resumen (H-01)', async () => {
     fake.fallar('metaWebhookInbox');
 
     const r = await post(cambio('messages', { metadata, messages: [{ from: CLIENTE, id: 'wamid.M1', timestamp: '1754200000', type: 'text', text: { body: 'hola' } }] }));
 
-    expect(r.code).toBe(200);
+    expect(r.code).toBe(503);
+    expect(r.body['retry']).toBe(true);
+    expect(r.body['liveWriteFailures']).toBe(1);
   });
 
   it('un chunk que ya existía (redelivery) NO se toma como fallo', async () => {

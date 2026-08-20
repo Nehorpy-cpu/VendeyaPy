@@ -7,6 +7,7 @@
  * devSimulateInbound: simula un mensaje entrante (para probar sin Meta real).
  */
 
+import { createHash } from 'node:crypto';
 import { onRequest } from 'firebase-functions/v2/https';
 import { Timestamp } from 'firebase-admin/firestore';
 import type { WebhookEventKind, WebhookInboxEvent } from '@vpw/shared';
@@ -75,6 +76,82 @@ function isAlreadyExists(e: unknown): boolean {
   return code === 6 || code === 'already-exists' || /already.?exists/i.test(String(e));
 }
 
+/**
+ * H-01 (endurecido en review) — ¿este fallo de escritura tiene sentido REINTENTARLO?
+ *
+ * Pedir redelivery sirve solo si la próxima vez puede salir distinto. Un `PERMISSION_DENIED`
+ * (IAM roto tras un deploy) o un `INVALID_ARGUMENT` (documento que Firestore rechaza por forma)
+ * fallan idéntico para siempre: insistir sería un bucle infinito con Meta, que mide la salud del
+ * webhook y puede throttlearlo o deshabilitarlo — con la App Review en curso, eso es peor que el
+ * defecto que este programa arregla. Misma doctrina que `process.ts` («reintentar no es insistir
+ * para siempre»), acá aplicada al canal de entrada.
+ *
+ * Códigos gRPC transitorios: 4 DEADLINE_EXCEEDED · 8 RESOURCE_EXHAUSTED · 10 ABORTED ·
+ * 13 INTERNAL · 14 UNAVAILABLE. Un error SIN código reconocible se trata como transitorio
+ * (fail-closed: ante la duda, que el mensaje del cliente tenga otra oportunidad).
+ */
+const CODIGOS_TRANSITORIOS = new Set([4, 8, 10, 13, 14]);
+
+/**
+ * Huella estable del contenido de un evento, para darle clave determinística a un entrante VIVO
+ * que llegó SIN wamid (Meta siempre lo manda, pero el parser lo tolera y el plan deja `docId`
+ * null). Sin esto, ese caso caía a id automático y una redelivery lo duplicaría. SHA-256 del
+ * payload canónico: no es reversible, así que tampoco filtra el teléfono en el id del documento.
+ */
+export function huellaDeEvento(event: { externalId?: string; payload?: unknown }): string {
+  const material = JSON.stringify({ externalId: event.externalId ?? '', payload: event.payload ?? null });
+  return createHash('sha256').update(material).digest('hex').slice(0, 32);
+}
+
+export function esFalloTransitorio(e: unknown): boolean {
+  const code = (e as { code?: number | string } | null)?.code;
+  if (typeof code === 'number') return CODIGOS_TRANSITORIOS.has(code);
+  if (typeof code === 'string') {
+    return ['deadline-exceeded', 'resource-exhausted', 'aborted', 'internal', 'unavailable'].includes(code);
+  }
+  return true; // sin código reconocible ⇒ se le da otra oportunidad al mensaje del cliente
+}
+
+/**
+ * H-01 — ¿el cuerpo CRUDO trae tráfico vivo (mensajes o echoes)?
+ *
+ * Se usa SOLO en el `catch` general, para el caso en que la excepción ocurrió ANTES de poder
+ * planificar (por ejemplo, el parser). Ahí no hay contadores en los que apoyarse y la pregunta
+ * que decide el código de respuesta es una sola: ¿había algo del cliente que perder?
+ *
+ * Deliberadamente TOSCO y defensivo (jamás lanza): si el cuerpo es tan inválido que ni esto se
+ * puede leer, entonces no había mensajes que perder y responder 200 evita el otro modo de falla
+ * —un payload que rompe el parser de forma determinística y que Meta reintentaría en loop hasta
+ * deshabilitar el webhook—. Fail-closed donde importa (hay mensajes ⇒ reintento), fail-open
+ * donde el reintento no puede arreglar nada.
+ */
+export function traeTraficoVivoCrudo(body: unknown): boolean {
+  try {
+    const entries = (body as { entry?: unknown[] } | null)?.entry;
+    if (!Array.isArray(entries)) return false;
+    const lleno = (v: unknown): boolean => Array.isArray(v) && v.length > 0;
+    for (const entry of entries) {
+      const e = entry as { changes?: unknown[]; messaging?: unknown[] } | null;
+      // Instagram y Messenger traen su tráfico vivo en `entry[].messaging[]` (no en `changes`) y
+      // van al MISMO inbox: mirarlos también, o H-01 seguiría vivo para esos canales.
+      if (lleno(e?.messaging)) return true;
+      if (!Array.isArray(e?.changes)) continue;
+      for (const change of e.changes) {
+        const c = change as { field?: unknown; value?: Record<string, unknown> } | null;
+        const value = c?.value;
+        if (!value || typeof value !== 'object') continue;
+        // `field` decide qué es tráfico vivo: un `history` trae sus adjuntos en `value.messages[]`
+        // y NO es tráfico vivo (tiene su propio 503 y su propio destino).
+        if (c?.field === 'history' || c?.field === 'smb_app_state_sync') continue;
+        if ([value['messages'], value['message_echoes'], value['statuses']].some(lleno)) return true;
+      }
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
 function baseEvent(args: {
   id: string;
   platform: string;
@@ -122,6 +199,16 @@ export interface PlannedWebhookWrite {
   docId: string | null;
   kind: WebhookEventKind;
   event: EventoDelArchivo;
+  /**
+   * H-01 — identificador de Meta del mensaje, para poder RASTREAR un evento vivo que no se pudo
+   * persistir ("¿a quién se le perdió?").
+   *
+   * ES PII (corregido en la review de este mismo programa): el wamid de la Cloud API lleva el
+   * teléfono del cliente en base64 dentro de su cuerpo —
+   * `Buffer.from('HBgMNTk1OTkxMjM0NTY3','base64')` ⇒ `\x1c\x18\x0c595991234567` —, así que al
+   * log va SIEMPRE enmascarado, igual que cualquier otro identificador (`privacy.ts`).
+   */
+  wamid?: string | null;
   /**
    * Presente SOLO en los chunks de historial: lo que el coordinador durable necesita saber de ese
    * chunk para decidir si la sincronización avanzó, se rechazó o quedó incompleta. `nuevo` y
@@ -227,6 +314,7 @@ export function planWebhookWrites(
       collection: paths.metaWebhookInbox(),
       docId: docId || null,
       kind: 'message',
+      wamid: m.messageId || null,
       event: { ...baseEvent({ id: docId, platform: m.platform, kind: 'message', eventType: 'messages', externalId: m.externalId, payload, nowMs, ttlMs: TTL_MS }), automationEligible: true },
     });
   }
@@ -252,6 +340,7 @@ export function planWebhookWrites(
       // este kind y adentro decide por la forma namespaceada. `automationEligible: false` deja
       // legible en el documento que esto jamás debió disparar negocio.
       kind: 'message',
+      wamid: s.waMessageId || null,
       event: {
         ...baseEvent({ id: docId, platform: 'whatsapp', kind: 'message', eventType: 'statuses', externalId: s.receivedVia, payload: { statuses: [s] }, nowMs, ttlMs: TTL_MS }),
         automationEligible: false,
@@ -494,6 +583,27 @@ export const metaWebhook = onRequest({ region: 'us-central1', cors: false }, asy
   //    con su tipo); `history` y `smb_app_state_sync` a colecciones propias, porque onWebhookInbox
   //    dispara sobre todo doc del inbox. Idempotencia por clave determinística (.create() falla si
   //    ya existe → duplicado). El shape del payload de `messages` no cambió: process.ts lo lee igual.
+  /**
+   * H-01 — contadores del TRÁFICO VIVO (lo que va al inbox: mensajes, recibos y echoes),
+   * declarados FUERA del `try` para que el `catch` general pueda decidir con ellos. Sin esto, una
+   * excepción a mitad del lote respondía 200 y se llevaba puesto todo lo que faltaba escribir.
+   */
+  let vivosPlanificados = 0;
+  let vivosResueltos = 0; // persistidos ahora o ya existentes (duplicado = material a salvo)
+  let vivosNoPersistidos = 0;
+  /** De los no persistidos, cuántos fallaron por algo que un reintento PUEDE arreglar. */
+  let vivosPerdidosRecuperables = 0;
+  /**
+   * Estas dos vivían dentro del `try`, así que el `catch` general no podía verlas: una excepción a
+   * mitad del lote respondía 200 y se llevaba el archivo del historial —el único material que no
+   * se puede volver a pedir— sin dejar rastro. Declaradas acá, el cierre y el `catch` deciden con
+   * la misma información.
+   */
+  let archivoNoPersistido = false;
+  let archivoSinBinding = false;
+  /** Chunks de historial del lote y cuántos quedaron a salvo: el `catch` decide con esto. */
+  let archivoPlanificado = 0;
+  let archivoResuelto = 0;
   try {
     const parsed = parseMetaWebhookPayload(req.body);
     const nowMs = Date.now();
@@ -519,16 +629,15 @@ export const metaWebhook = onRequest({ region: 'us-central1', cors: false }, asy
      * Por eso: se ejecutan las escrituras que NO son de archivo (idempotentes por wamid: una
      * redelivery las vuelve duplicados inocuos) y recién después se pide el reintento.
      */
-    const soloArchivoSinBinding = archivo.bindingAusente && hayArchivo;
+    archivoSinBinding = archivo.bindingAusente && hayArchivo;
+    const soloArchivoSinBinding = archivoSinBinding;
     const plan = planWebhookWrites(parsed, nowMs, archivo.tenants, archivo.generaciones, archivo.fueraDeCiclo)
       .filter((w) => !soloArchivoSinBinding || (w.kind !== 'history' && w.kind !== 'app_state'));
     let written = 0;
     const dups = { duplicates: 0, historyDuplicates: 0, appStateDuplicates: 0 };
     /** Observaciones del historial agrupadas por (empresa, número) para el coordinador durable. */
     const observaciones = new Map<string, { tenantId: string; phoneNumberId: string; generacionEtiquetada: number; fueraDeCiclo: boolean; chunks: ChunkObservado[]; media: number }>();
-    /** ¿Falló la persistencia de algún chunk del ARCHIVO? Decide el código de respuesta. */
-    let archivoNoPersistido = false;
-    const anotar = (tenantId: string | null, phoneNumberId: string): { chunks: ChunkObservado[]; media: number } | null => {
+    const anotar =(tenantId: string | null, phoneNumberId: string): { chunks: ChunkObservado[]; media: number } | null => {
       // Sin empresa no hay coordinador que actualizar: ese chunk se recupera por el reintento de
       // Meta, no inventando un destino.
       if (!tenantId || !phoneNumberId) return null;
@@ -553,11 +662,27 @@ export const metaWebhook = onRequest({ region: 'us-central1', cors: false }, asy
       return observaciones.get(clave)!;
     };
 
+    vivosPlanificados = plan.filter((w) => w.collection === paths.metaWebhookInbox()).length;
+    archivoPlanificado = plan.filter((w) => w.collection === COEXISTENCE_HISTORY_COLLECTION).length;
     for (const w of plan) {
+      // H-01: el tráfico VIVO es el que dispara el motor (mensajes, recibos y echoes del inbox).
+      // Perderlo es perder el mensaje de un cliente; el archivo tiene su propio tratamiento.
+      const esVivo = w.collection === paths.metaWebhookInbox();
       const col = db().collection(w.collection);
-      const ref = w.docId ? col.doc(w.docId) : col.doc();
+      /**
+       * H-01 (review) — un evento VIVO jamás puede ir con id automático. Toda la seguridad de
+       * pedirle redelivery a Meta se apoya en que la clave del inbox es determinística: con un id
+       * aleatorio, el reintento crearía un SEGUNDO documento ⇒ segundo disparo del motor ⇒ segunda
+       * burbuja y segunda respuesta al cliente. El plan deja `docId: null` cuando el mensaje llegó
+       * sin wamid (`parseWebhook` lo tolera), así que acá se deriva una clave estable del propio
+       * contenido: misma entrada ⇒ mismo id ⇒ duplicado inocuo, igual que con wamid.
+       */
+      const docIdEstable = w.docId
+        ?? (esVivo ? inboxDocId(w.event.platform, `sinwamid_${huellaDeEvento(w.event)}`) : null);
+      const ref = docIdEstable ? col.doc(docIdEstable) : col.doc();
       let nuevo = false;
       let persistido = false;
+      let falloTransitorio = false;
       try {
         await ref.create({ ...w.event, id: ref.id });
         written++;
@@ -571,13 +696,37 @@ export const metaWebhook = onRequest({ region: 'us-central1', cors: false }, asy
           // Sin identificadores completos: el docId puede contener el wamid o el teléfono del contacto.
           logger[level]('metaWebhook: evento duplicado, ignorado', { kind: w.kind, collection: w.collection, docId: maskPhone(ref.id) });
         } else {
+          falloTransitorio = esFalloTransitorio(e);
           // NO esconder otros errores como duplicados.
-          logger.error('metaWebhook: no se pudo escribir el evento', e, { kind: w.kind, collection: w.collection });
+          /**
+           * H-01: contexto suficiente para saber A QUIÉN se le perdió, sin filtrar PII.
+           *  · `phoneNumberId` (el NÚMERO DEL NEGOCIO) enmascarado es lo que identifica al tenant
+           *    en la práctica: es la clave de `metaExternalIndex`. El `tenantId` del evento vivo
+           *    nace en null a propósito (lo resuelve `process.ts`), así que se dice explícito en
+           *    vez de prometer un dato que este punto del código todavía no tiene.
+           *  · El wamid va ENMASCARADO: lleva el teléfono del cliente en base64 (ver el tipo).
+           *    Los últimos caracteres alcanzan para cruzarlo con los logs de Meta.
+           */
+          logger.error('metaWebhook: no se pudo escribir el evento', e, {
+            kind: w.kind,
+            collection: w.collection,
+            tenantId: w.event.tenantId ?? '(lo resuelve process)',
+            phoneNumberId: maskPhone(w.event.externalId),
+            transitorio: esFalloTransitorio(e),
+            ...(w.wamid ? { wamid: maskPhone(w.wamid) } : { docId: maskPhone(ref.id) }),
+          });
           // El historial NO se puede volver a pedir: un chunk perdido acá se recupera únicamente
           // desconectando el número real y rehaciendo el Embedded Signup. Por eso su fallo cambia
           // el código de respuesta y deja que Meta reintente (ver el cierre del handler).
           if (w.collection === COEXISTENCE_HISTORY_COLLECTION) archivoNoPersistido = true;
         }
+      }
+      if (w.collection === COEXISTENCE_HISTORY_COLLECTION && persistido) archivoResuelto++;
+      if (esVivo && persistido) vivosResueltos++;
+      else if (esVivo) {
+        vivosNoPersistidos++;
+        // Solo un fallo TRANSITORIO justifica pedirle a Meta que reintente: ver `esFalloTransitorio`.
+        if (falloTransitorio) vivosPerdidosRecuperables++;
       }
       if (w.observacion) {
         const acumulador = anotar(w.event.tenantId, w.event.externalId);
@@ -626,6 +775,9 @@ export const metaWebhook = onRequest({ region: 'us-central1', cors: false }, asy
     }
     const resumen = {
       written, ...dups, ignored: parsed.ignored,
+      // H-01: sin este contador, `written:0` por lote vacío y `written:0` por fallo TOTAL de
+      // escritura eran el mismo informe. Ahora el resumen dice cuántos eventos vivos se perdieron.
+      liveWriteFailures: vivosNoPersistidos,
       // ADR-0021 §1: cuántos recibos de entrega trajo el lote (antes se descartaban en silencio).
       deliveryStatuses: parsed.deliveryStatuses.length,
       echoes: parsed.echoes.length,
@@ -637,12 +789,41 @@ export const metaWebhook = onRequest({ region: 'us-central1', cors: false }, asy
       unknownFields: parsed.unknownFields.length,
     };
     logger.info('metaWebhook recibido', resumen);
-    // SEMÁNTICA DE REINTENTO DE META, aplicada SÓLO al archivo del historial. Un 200 le dice a Meta
-    // «lo tengo»; para el resto del tráfico eso sigue siendo lo correcto (un mensaje perdido se
-    // recupera de otras formas y un no-200 haría redelivery de TODO el canal del número que vende).
-    // Pero un chunk de historial que no se pudo persistir no se recupera de ninguna forma: pedirlo
-    // de nuevo exige que el cliente offboardee el número y rehaga el Embedded Signup. Ahí el
-    // reintento de Meta es la única red que existe, y perderlo en silencio es lo prohibido.
+    /**
+     * SEMÁNTICA DE REINTENTO DE META. Un 200 le dice a Meta «lo tengo» y Meta NO vuelve a mandarlo.
+     *
+     * CORREGIDO (H-01, auditoría 2026-08-19). Acá decía que para el tráfico vivo el 200 era lo
+     * correcto porque «un mensaje perdido se recupera de otras formas y un no-200 haría redelivery
+     * de TODO el canal». Las dos mitades resultaron falsas y así lo probó la auditoría:
+     *  · No hay «otras formas»: nada lee `processingStatus`, no hay barrido sobre el inbox y su
+     *    TTL ni siquiera está aplicado. Un evento vivo que no se escribió no existe en ningún lado.
+     *  · La redelivery es INOCUA: las claves del inbox son determinísticas por wamid, así que el
+     *    mismo POST vuelve a entrar como duplicado y escribe cero (test `durabilidad`, lote mixto).
+     * Costo de equivocarse en cada dirección: un duplicado es gratis (lo absorbe la clave), un
+     * mensaje de cliente perdido es una venta que nadie ve nunca. Por eso ahora también el tráfico
+     * vivo pide reintento cuando no se pudo persistir.
+     */
+    if (vivosPerdidosRecuperables > 0) {
+      logger.error('metaWebhook: tráfico VIVO sin persistir; se pide reintento a Meta', undefined, {
+        vivosNoPersistidos, vivosPerdidosRecuperables, vivosResueltos, vivosPlanificados,
+      });
+      res.status(503).json({ ok: false, retry: true, ...resumen });
+      return;
+    }
+    /**
+     * Perdido y NO recuperable por reintento (IAM roto, documento que Firestore rechaza por
+     * forma): el 200 acá NO es "lo tengo", es "insistir no lo va a arreglar". Se responde 200 para
+     * no entrar en un bucle que Meta castiga deshabilitando el webhook, y se grita en el log: es
+     * un incidente operativo que necesita intervención humana, no otra copia del mismo POST.
+     */
+    if (vivosNoPersistidos > 0) {
+      logger.error('metaWebhook: tráfico VIVO PERDIDO por un fallo NO transitorio — requiere intervención', undefined, {
+        vivosNoPersistidos, vivosResueltos, vivosPlanificados,
+      });
+    }
+    // El archivo del historial tiene el MISMO tratamiento y su propia razón: un chunk perdido acá
+    // no se recupera de ninguna forma — pedirlo de nuevo exige que el cliente offboardee el número
+    // y rehaga el Embedded Signup.
     if (archivoNoPersistido) {
       logger.error('metaWebhook: un chunk del historial no se pudo persistir; se pide reintento a Meta');
       res.status(503).json({ ok: false, retry: true, ...resumen });
@@ -658,8 +839,33 @@ export const metaWebhook = onRequest({ region: 'us-central1', cors: false }, asy
     }
     res.status(200).json({ ok: true, ...resumen });
   } catch (e) {
-    logger.error('Error en metaWebhook', e);
-    res.status(200).json({ ok: false }); // 200 igual: evita reintentos en loop de Meta
+    /**
+     * H-01 — el `catch` general respondía 200 SIEMPRE, así que una excepción a mitad del lote se
+     * llevaba puesto todo lo que faltaba escribir (Meta batchea varios `changes` por POST: en el
+     * pico de una campaña, ese 200 borra los leads del lote entero).
+     *
+     * Cómo se decide ahora, distinguiendo «falló ANTES de persistir» de «falló DESPUÉS»:
+     *  · Si alcanzamos a planificar, mandan los contadores: solo se pide reintento si quedó
+     *    tráfico vivo sin persistir. Una excepción posterior (coordinador del historial,
+     *    `accountUpdate`) con todo el tráfico vivo ya a salvo NO provoca redelivery.
+     *  · Si la excepción fue ANTES de planificar, no hay contadores: se mira el cuerpo crudo. Con
+     *    mensajes ⇒ reintento (fail-closed, hay algo que perder). Sin mensajes o cuerpo ilegible
+     *    ⇒ 200: ahí el reintento no puede arreglar nada y solo alimentaría un loop.
+     */
+    const vivosEnRiesgo = vivosPlanificados > 0
+      ? vivosResueltos < vivosPlanificados
+      : traeTraficoVivoCrudo(req.body);
+    // El ARCHIVO de Coexistence también entra en la decisión: es el único material que no se puede
+    // volver a pedir (recuperarlo exige que el cliente offboardee el número y rehaga el signup).
+    const archivoEnRiesgo = archivoNoPersistido || archivoSinBinding || archivoResuelto < archivoPlanificado;
+    logger.error('Error en metaWebhook', e, {
+      vivosPlanificados, vivosResueltos, vivosNoPersistidos, vivosEnRiesgo, archivoEnRiesgo,
+    });
+    if (vivosEnRiesgo || archivoEnRiesgo) {
+      res.status(503).json({ ok: false, retry: true });
+      return;
+    }
+    res.status(200).json({ ok: false }); // nada vivo en riesgo: el reintento no aportaría nada
   }
 });
 
