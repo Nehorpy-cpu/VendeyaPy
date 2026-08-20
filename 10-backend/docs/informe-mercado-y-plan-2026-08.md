@@ -157,3 +157,114 @@ SleekFlow, Callbell); agentes IA (Zowie, Sierra, Intercom Fin, Zapia); anuncios 
 (per-message jul-2025, Business Agent, prohibición IA genérica ene-2026, Flows, Coexistence);
 pagos LATAM/Paraguay (uPay/Pagopar, arnipay, Bancard, QR interoperable, WhatsApp Pay Brasil).
 Detalle completo con URLs en el journal del workflow de investigación.
+
+---
+
+# ADENDA (2026-08-20) — ¿Integrar Shopify? Decisión: NO. Evidencia.
+
+> Pregunta del owner: *"¿para qué es Shopify, y conviene integrarlo o seguir como estamos?"*
+> Investigación de 3 ángulos con fuentes primarias. Resultado: **no construir conector Shopify.**
+> El conector genérico por URL de feed (ADR-0023, ya anunciado) queda **confirmado** como la
+> decisión correcta, con una corrección de especificación importante (§4).
+
+## 1. El bloqueante decisivo: Shopify PROHÍBE lo que hace VendeYaPy
+
+Requisito de la Shopify App Store: *"Apps that bypass checkout or payment processing, or register
+any transactions through the Shopify API in connection with such activity, are prohibited."*
+Staff de Shopify en su foro de desarrolladores precisa que el problema concreto es **"the final
+step when you mark the order as paid"**. Hay apps de contraentrega rechazadas en review por
+"checkout bypass".
+
+**Eso es exactamente el diferenciador de VendeYaPy**: checkout conversacional + verificación de
+comprobante por foto que termina en pedido pagado. Bajo Shopify, ese cierre no se puede registrar.
+El producto pasaría de **vender** a **notificar**. No es un problema de esfuerzo: es incompatible
+por política.
+
+## 2. El mercado no está — y el corte que importa es demoledor
+
+| Métrica | Dato | Fuente |
+|---|---|---|
+| Tiendas Shopify vivas en **todo** Paraguay | **1.123** | Store Leads, 14-ago-2026 |
+| WooCommerce en Paraguay | 1.576 | Store Leads |
+| **Tiendas PY con Facebook SDK (las que pautan en Meta)** | **Custom Cart 64,5% · Woo 30,6% · Shopify 0,8% (1 de 124)** | Store Leads |
+| MIPYMES paraguayas | ~300.000 registradas (+690.000 informales) | INE 2024 |
+| MIPYMES que venden por FB/IG/WhatsApp | **93%** | Viceministerio de MIPYMES, Meta Day PY |
+| Tiendas con plataforma identificable | ~2.800-4.000 (**~1%**) | Store Leads + CAPACE |
+
+El corte de Facebook SDK es el que decide: entre los comercios paraguayos que **efectivamente
+pautan en Meta** —o sea, la fuente de tráfico del flujo crítico de VendeYaPy— Shopify es **1 de
+124**. El segmento dominante es el carrito a medida (64,5%), que es exactamente el perfil del
+tenant actual (app Laravel propia) y **no lo cubre ningún conector de plataforma**.
+
+**Corolario:** el catálogo LOCAL en Firestore no es un modo degradado — es el producto principal,
+y cubre al ~99% del mercado direccionable en Paraguay.
+
+## 3. Costos y timing en contra
+
+- **Shopify Payments no opera en Paraguay** (39 países soportados; en LatAm solo México) ⇒ todo
+  comercio paraguayo paga 2% extra a Shopify por pasarela de terceros **sobre** la comisión local
+  (Pagopar 2,9-3% en crédito) ⇒ ~5% por venta, con ticket promedio de **G. 82.600 (~US$11)**.
+- **Costo de ingeniería:** GraphQL Admin API obligatoria para apps públicas nuevas, OAuth, App
+  Bridge, session tokens, Billing API, review de App Store. Estimación: 6-10 semanas + 2-4 de
+  review. Y como toda app de WhatsApp necesita el **teléfono** del cliente, cae en **Protected
+  Customer Data Nivel 2** (cifrado de backups, entornos separados, DLP, logs de acceso, política
+  de incidentes) — en un equipo chico se mide en meses.
+- **Meta ya lo comoditizó:** el Business Agent (global 3-jun-2026) conecta a Shopify nativamente y
+  gratis. Construir hoy un conector propio es competir contra una feature nativa sin costo.
+
+## 4. Lo que SÍ hay que hacer — corrección de spec para ADR-0023
+
+El conector genérico queda confirmado, **pero no diseñar un esquema CSV/JSON propio.** Mapear
+directamente la **spec de feed de Meta/Google Merchant Center**: `id`, `title`, `description`,
+`availability`, `condition`, `price`, `sale_price`, `link`, `image_link`, `brand`, `item_group_id`;
+aceptar CSV, TSV y XML/RSS.
+
+**Razón:** cualquier comercio que pauta en Meta **ya tiene esa URL de feed generada y validada**,
+porque es requisito duro de los anuncios de catálogo Advantage+. El onboarding pasa de *"exportá
+y reformateá tu catálogo"* a *"pegá esta URL"*. Y un solo conector cubre de una vez Shopify,
+WooCommerce, PrestaShop, Fenicio, Tiendanube **y los carritos a medida**.
+
+Encaja sin fricción en lo ya construido: `EXTERNAL_SOURCE_KINDS = ['meta_feed', 'commerce_manager',
+'other_api']` con `authority=external` + `relationship=mirror` (ADR-0022).
+
+## 5. Orden de prioridad de conectores (por cobertura real en Paraguay)
+
+1. **Conector genérico por URL de feed** — máxima prioridad, con la spec de §4.
+2. **Sync read-only del catálogo de Meta** — ya construido, mantener.
+3. **WooCommerce REST API** — 1.576 tiendas PY, solo si aparece demanda concreta. El feed URL ya
+   lo cubre y cuesta 10x menos mantener.
+4. **Shopify** — último. Si algún día hace falta, la salida barata es una **Custom app por tienda**
+   (sin review de App Store y con acceso a protected data), no una app pública.
+5. **Tiendanube** — **no construir**: no opera en Paraguay (solo AR/BR/MX/CO/CL). Reevaluar solo
+   si se expande a Argentina (54.376 tiendas) o Brasil (122.220), donde sería el #1.
+6. **Jumpseller / Empretienda** — descartar (cero en PY; Empretienda además en contracción).
+
+## 6. La conclusión estratégica que va más allá del conector
+
+**No sobreinvertir en conectores.** Con ~99% de las MIPYMES sin tienda online, lo que mueve la
+aguja es el **onboarding del comercio SIN tienda**: sus productos hoy viven en fotos de Instagram
+y una planilla. Carga masiva desde imágenes, importación desde planilla, alta rápida asistida.
+El conector externo es la cuña para el 1-3% superior (y el seguro para que el tenant actual no se
+rompa cuando su Laravel cambie precios), **no el motor de adquisición**.
+
+Dato colateral que refuerza el roadmap: con **QR/transferencia en el 85% de los pagos online
+locales** (CAPACE/Bancard, ago-2026), la verificación de comprobante por foto es **infraestructura
+crítica del mercado paraguayo**, no un extra — merece la misma prioridad de ingeniería que el
+checkout.
+
+## 7. Precedente interno que confirma el patrón
+
+`ADR-0004` se tituló *"WordPress/WooCommerce como fuente del catálogo"* y lleva una corrección de
+2026-06-16: se asumió que `arfagi.com` era WooCommerce con REST API, y resultó ser una aplicación
+PHP a medida sin API. **Ya se pagó una vez el costo de asumir que el comercio está en una
+plataforma conocida.** El conector genérico por feed es precisamente la lección aprendida.
+
+## 8. Advertencia sobre calidad de fuentes
+
+Circula mucha cifra fabricada sobre ecommerce paraguayo. Ejemplo concreto detectado: una guía
+afirma que en Paraguay *"las plataformas más usadas son Shopify (45%), Tiendanube (30%) y
+WooCommerce (25%)"* — imposible, porque **Tiendanube no opera en Paraguay**, y la misma página
+reporta ventas paraguayas en pesos colombianos. Sitios como cartdna.com, tiendli.com,
+faststrat.ai, aurorainbox.com y chatsell.net son contenido SEO/IA sin metodología. Las cifras de
+esta adenda provienen de fuentes primarias (help center de Shopify, KB de Pagopar, Store Leads,
+CAPACE, INE, Viceministerio de MIPYMES) o están marcadas como no verificadas.
