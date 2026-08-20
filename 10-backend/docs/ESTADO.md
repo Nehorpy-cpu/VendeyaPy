@@ -130,6 +130,20 @@ documentadas en flujos no ejercitados). Selectores literales de deploy y rollbac
 > confirmado contra producción por `updateTime` antes de tocar la constante. Al próximo deploy,
 > actualizarla en el mismo programa.
 
+7. **AUDITORÍA 2026-08-19 (`docs/system-audit-2026-08.md`) — 3 CRÍTICOS + 15 ALTOS abiertos,
+   CERO fix aplicado.** Los tres CRÍTICOS: (a) **H-01** el webhook responde 200 a Meta cuando
+   falla la escritura del inbox ⇒ **se pierde el mensaje del cliente sin rastro** (no necesita
+   atacante: basta un error transitorio de Firestore); (b) **H-02** un TENANT_OWNER reescribe
+   los claims de cualquier usuario por email ⇒ secuestra al owner de otro tenant y **degrada al
+   PLATFORM_ADMIN** (exige ser owner: hoy no hay terceros, se vuelve real con el primer cliente
+   del Tramo 1); (c) **H-03** "Guardar cambios" del agente y de promociones **pierde el trabajo
+   en silencio** si el backend rechaza. ALTOS destacados: datos bancarios placeholder hacia
+   clientes reales (H-04), pago confirmado sin audit ni aviso al cliente (H-05/H-06), borrado
+   del índice global de ruteo sin verificar tenant (H-07), `customers` con `write` de MANAGER
+   incluido el delete físico (H-08), fan-out de tools sin tope que rompe la cuota (H-09), sin
+   validación de salida del modelo (H-10), `metaWebhookInbox` sin TTL con 176 docs vencidos con
+   PII (H-11), secretos legibles con rol viewer (H-12). Ranking de fixes en §3 del informe.
+
 ## Deudas menores conocidas
 
 - La campana no lleva `targetUid`: un rol SELLER puro no la ve. Hoy sin impacto (el vendedor

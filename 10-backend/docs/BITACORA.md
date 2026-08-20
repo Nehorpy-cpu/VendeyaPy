@@ -42,6 +42,32 @@ Reglas de escritura:
 
 ## 2026-08
 
+### SYSTEM-AUDIT-SECURITY-ACTIONS-UI-1 — 2026-08-19 (AUDITORÍA — CERO FIX, CERO DEPLOY)
+
+Inventario completo del sistema en `docs/system-audit-2026-08.md`: **56 hallazgos (3 CRÍTICOS,
+15 ALTOS, 17 MEDIOS, 21 BAJOS/INFO)** de seis auditorías con foco disjunto (autorización y
+multi-tenant, dinero/pedidos/pagos, prompt injection y frontera de IA, fallas silenciosas del
+backend, huecos de UI verificados en navegador con captura de red, y secretos/PII/datos leídos
+read-only de prod). Método: refutación antes de reporte; cada hallazgo con `archivo:línea` y
+reproducción (tests vitest temporales, borrados; nada mutó producción).
+
+**CRÍTICOS:** H-01 el webhook ACKea 200 a Meta cuando falla la escritura del inbox y el mensaje
+del cliente se pierde sin rastro (la redelivery se probó idempotente: la justificación escrita
+en el código no se sostiene); H-02 `inviteUser` reescribe claims de cualquier usuario por email
+(secuestro de owner ajeno + degradación del PLATFORM_ADMIN; `assertSameTenant` fail-open y ni
+se llama); H-03 el guardado del agente y de promociones pierde el trabajo en silencio ante un
+400. **Confirmación cruzada:** dos agentes independientes llegaron a `confirmPayment` no
+atómico (H-05) y al aviso de pago que nadie envía (H-06).
+
+**Lo que aguantó, verificado:** aislamiento de tenant en callables y Rules; la IA no fabrica
+precios/SKUs ni mueve dinero; el caption jamás llega al modelo (atacado por seis rutas); cero
+hard-delete de pedidos/pagos/comprobantes/auditoría; URLs firmadas nunca persistidas; los 22
+`dev*` devuelven 404 real en prod; un owner no puede auto-mejorarse el plan.
+
+**Cero fix aplicado** (es el contrato del programa): el ranking priorizado de correctivos está
+en §3 del informe. Verificación: `pnpm -r typecheck/lint/build` en 0 (solo se agregó
+documentación); E2E no corresponde. Repo intacto salvo los tres documentos.
+
 ### PRE-RELEASE-HOSTING-KEYS-AND-HANDOFF-STATE-1 — 2026-08-19 (DOCS + VERIFICACIÓN — CERO DEPLOY)
 
 **(A) Claves de Hosting corregidas — el defecto habría dejado el panel sin conexión de Meta.**
