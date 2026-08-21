@@ -100,7 +100,7 @@ universal (cierre transitivo de las 118 functions), así que ya estaba en las 11
 ya calculado: **no requiere deploy propio**.
 **Orden de rollback:** el del Tramo 1, sin CREATE.
 
-**Commit.** `COMMIT_PENDIENTE`
+**Commit.** `ebffc9f`
 
 **Estado real.** EN REPO — NO DESPLEGADO. **Producción sigue con el defecto**: hoy, si la sesión
 del cliente no existe cuando se confirma un pago, ese pago queda pagado y sin rastro para siempre.
