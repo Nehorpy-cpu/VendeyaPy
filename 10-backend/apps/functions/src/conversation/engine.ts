@@ -56,6 +56,7 @@ import { LEGACY_SESSION_KEY } from '@vpw/shared';
 import { createPendingOrder, assertOrdenSinDerivaCritica, ProductNoVendibleError, ProductoConDerivaCriticaError } from '../orders/createPendingOrder.js';
 import { resolveCheckoutReuse } from '../orders/checkoutReuse.js';
 import { getCheckoutConfig, formatTransferInstructions } from '../orders/checkoutConfig.js';
+import { avisarCheckoutSinDatos, MENSAJE_SIN_DATOS_DE_COBRO } from '../orders/checkoutUnconfigured.js';
 import { captureTrackingCode } from '../tracking/tracking.js';
 import { meterUsage, checkQuota } from '../entitlements/entitlements.js';
 
@@ -507,9 +508,22 @@ export async function decidirRespuesta(
         };
       }
       const config = await getCheckoutConfig(tenantId);
+      const instrucciones = formatTransferInstructions(config, decision.order.totals.total);
+      // H-04: sin cuentas cobrables no hay datos que reenviar. Antes salían los placeholders del
+      // seed; concatenar el null tampoco es opción (el cliente leería "null").
+      if (!instrucciones) {
+        await avisarCheckoutSinDatos(tenantId, customerId).catch(() => false);
+        logger.warn('Checkout idempotente sin datos de cobro: no se reenvian instrucciones', { tenantId, customerId, orderId: decision.order.id });
+        return {
+          reply: MENSAJE_SIN_DATOS_DE_COBRO,
+          nextState: 'AWAITING_PAYMENT',
+          pendingOrderId: decision.order.id,
+          pendingCart: null,
+        };
+      }
       logger.info('Checkout idempotente: se reenvía la orden pendiente', { tenantId, customerId, orderId: decision.order.id, repaired: decision.repaired });
       return {
-        reply: 'Seguís con tu pedido pendiente 🧾 Te reenvío los datos:\n\n' + formatTransferInstructions(config, decision.order.totals.total),
+        reply: 'Seguís con tu pedido pendiente 🧾 Te reenvío los datos:\n\n' + instrucciones,
         nextState: 'AWAITING_PAYMENT',
         pendingOrderId: decision.order.id, // mismo id (y repara el puntero si se había perdido)
         pendingCart: null,
@@ -598,8 +612,23 @@ export async function decidirRespuesta(
     // se incrementa ordersThisMonth). No bloqueante: el metering nunca rompe el pago.
     await meterUsage(tenantId, 'orders').catch(() => { /* metering no crítico */ });
     const config = await getCheckoutConfig(tenantId);
+    const instrucciones = formatTransferInstructions(config, order.totals.total);
+    // H-04: el pedido YA quedó creado; lo que no existe son los datos para pagarlo. Se le dice al
+    // cliente sin inventar una cuenta, y el dueño se entera por la campana.
+    if (!instrucciones) {
+      await avisarCheckoutSinDatos(tenantId, customerId).catch(() => false);
+      logger.warn('Checkout sin datos de cobro: el pedido queda creado y el equipo debe contactar', { tenantId, customerId, orderId: order.id });
+      return {
+        // `avisoCambio` se conserva: si el carrito cambió, el cliente tiene que saber que este
+        // pedido es OTRO, aunque todavía no pueda pagarlo.
+        reply: avisoCambio + MENSAJE_SIN_DATOS_DE_COBRO,
+        nextState: 'AWAITING_PAYMENT',
+        pendingOrderId: order.id,
+        pendingCart: null,
+      };
+    }
     return {
-      reply: avisoCambio + formatTransferInstructions(config, order.totals.total),
+      reply: avisoCambio + instrucciones,
       nextState: 'AWAITING_PAYMENT',
       pendingOrderId: order.id,
       pendingCart: null, // F3: el checkout congela el contexto de oferta (no arrastra a la próxima)

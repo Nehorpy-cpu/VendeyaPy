@@ -50,6 +50,7 @@ import { recordAudit } from '../audit/audit.js';
 import { coverageSettings } from './coverage.js';
 import { coverageHold } from './coverageTestHooks.js';
 import { getCheckoutConfig, formatTransferInstructions } from '../orders/checkoutConfig.js';
+import { avisarCheckoutSinDatos, MENSAJE_SIN_DATOS_DE_COBRO } from '../orders/checkoutUnconfigured.js';
 import {
   assertOrdenSinDerivaCritica,
   createPendingOrder,
@@ -889,7 +890,49 @@ export async function processCoverageResumeJob(tenantId: string, jobId: string):
 
     // 5) Instrucciones de pago de ESA orden, exactamente una vez (outbox por attemptId).
     const config = await getCheckoutConfig(tenantId);
-    const texto = `${MENSAJE_COBERTURA_APROBADA_INTRO}\n\n${formatTransferInstructions(config, order.totals.total)}`;
+    const instrucciones = formatTransferInstructions(config, order.totals.total);
+    // H-04: el cliente mandó su ubicación, se le aprobó la cobertura y su pedido ya está creado,
+    // pero el tenant no tiene ninguna cuenta cobrable. Interpolar el null le mandaría "null" donde
+    // iban los datos bancarios.
+    if (!instrucciones) {
+      logger.warn('Cobertura: aprobada sin datos de cobro, no se envian instrucciones', { tenantId, jobId, orderId });
+      await avisarCheckoutSinDatos(tenantId, customerId).catch(() => false);
+      // Al cliente se le PROMETIÓ seguir por acá («seguimos con tu pedido por acá»): dejarlo sin
+      // mensaje sería la falla silenciosa que este programa vino a cerrar. Va con action PROPIO:
+      // el id del outbox lleva el action, y reusar 'approved' le quemaba el slot a las
+      // instrucciones de pago — cuando el dueño cargara las cuentas y el job se re-encolara, el
+      // envío real habría encontrado ese doc `sent` y cerrado el job en `done` sin mandar nada
+      // (review). Con id propio, la reanudación posterior manda las instrucciones de verdad.
+      const avisoCliente = await enviarPorOutbox({
+        tenantId,
+        coverageRequestId: req.id,
+        action: 'approved_sin_cobro',
+        checkoutAttemptId,
+        customerId,
+        channel: job.channel,
+        receivedVia: job.receivedVia ?? req.receivedVia ?? null,
+        activationId: jobAct,
+        text: `${MENSAJE_COBERTURA_APROBADA_INTRO}
+
+${MENSAJE_SIN_DATOS_DE_COBRO}`,
+      });
+      if (avisoCliente === 'apagado') {
+        await pausar('approved_envio');
+        return;
+      }
+      // Un envío fallido NO es lo mismo que «entregado y esperando a una persona»: si el mensaje
+      // no salió, el job lo dice y el mantenimiento puede reintentarlo.
+      if (avisoCliente === 'failed' || avisoCliente === 'unknown') {
+        const estado = estadoPorEnvio(avisoCliente);
+        await setJob(tenantId, jobId, { status: estado, orderId }).catch(() => {});
+        await setResume(tenantId, req.id, estado, orderId).catch(() => {});
+        return;
+      }
+      await setJob(tenantId, jobId, { status: 'held_by_seller', orderId }).catch(() => {});
+      await setResume(tenantId, req.id, 'held_by_seller', orderId).catch(() => {});
+      return;
+    }
+    const texto = `${MENSAJE_COBERTURA_APROBADA_INTRO}\n\n${instrucciones}`;
     const envio = await enviarPorOutbox({
       tenantId,
       coverageRequestId: req.id,

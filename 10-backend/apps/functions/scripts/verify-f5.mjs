@@ -58,6 +58,7 @@ async function sendAndWait(body, pred, maxMs = 15000) {
 const before = (await db.doc(`tenants/${T}`).get()).data() ?? {};
 const beforeAgent = (await db.doc(`tenants/${T}/config/agent`).get()).data() ?? null;
 const beforeChannels = (await db.doc(`tenants/${T}/config/channels`).get()).data() ?? null;
+const beforeCheckout = (await db.doc(`tenants/${T}/config/checkout`).get()).data() ?? null;
 const now = Timestamp.now();
 const oldAssets = await db.collection(`tenants/${T}/metaAssets`).where('assetType', '==', 'whatsapp_phone_number').get();
 const oldAssetDocs = oldAssets.docs.map((d) => ({ id: d.id, data: d.data() }));
@@ -69,6 +70,12 @@ await db.doc(`tenants/${T}/metaAssets/${PNID}`).set({ id: PNID, tenantId: T, con
 await db.doc(`metaExternalIndex/whatsapp_${PNID}`).set({ id: `whatsapp_${PNID}`, tenantId: T, connectionId: 'main', assetType: 'whatsapp_phone_number', platform: 'whatsapp', externalId: PNID, status: 'active', updatedAt: now });
 await db.doc(`tenants/${T}/config/channels`).set({ whatsappSendMode: 'mock' });
 await db.doc(`tenants/${T}/config/agent`).set({ botEnabled: true, greetingMessage: 'Hola, soy el bot F5' }, { merge: true });
+// H-04: datos de cobro FICTICIOS y evidentemente de prueba. Sin esto el tenant no tiene cuentas
+// y el bot (con razón) no instruye ningún pago: el flujo de checkout no se podría ejercitar.
+await db.doc(`tenants/${T}/config/checkout`).set({
+  bankAccounts: [{ bank: 'Banco de Prueba F5', accountNumber: '00-TEST-0001', holder: 'Titular Ficticio SA', document: 'TEST-123456' }],
+  sellers: [{ name: 'Vendedora Ficticia', whatsapp: '595991000001', active: true }],
+}, { merge: true });
 await db.doc(`tenants/${T}`).set({
   planId: 'starter',
   subscription: { status: 'active', currentPeriodStart: now },
@@ -87,6 +94,7 @@ check('1. "quiero pagar" creó UNA orden', idsA.length === 1 && idsA[0] === orde
 // ===== 2. BUG REAL: "Para pagar cual es" reenvía, NO duplica =====
 const t2 = await sendAndWait('Para pagar cual es', (t) => t.includes('transferir'));
 const ids2 = await orderIds();
+check('2b. H-04: el mensaje de pago NO lleva datos de plantilla', !!t2 && !/REEMPLAZAR/i.test(t2) && t2.includes('00-TEST-0001'), (t2 ?? '').slice(0, 60));
 check('2. "Para pagar cual es" → REENVÍA la misma orden (sin duplicar) con aviso de pendiente',
   ids2.length === 1 && (await session())?.context?.pendingOrderId === orderA && t2.includes('pedido pendiente'),
   `orders=${ids2.length}`);
@@ -149,6 +157,7 @@ await db.doc(`tenants/${T}/metaAssets/${PNID}`).delete();
 await db.doc(`metaExternalIndex/whatsapp_${PNID}`).delete();
 for (const d of oldAssetDocs) await db.doc(`tenants/${T}/metaAssets/${d.id}`).set(d.data);
 if (beforeChannels) await db.doc(`tenants/${T}/config/channels`).set(beforeChannels); else await db.doc(`tenants/${T}/config/channels`).delete();
+if (beforeCheckout) await db.doc(`tenants/${T}/config/checkout`).set(beforeCheckout); else await db.doc(`tenants/${T}/config/checkout`).delete();
 if (beforeAgent) await db.doc(`tenants/${T}/config/agent`).set(beforeAgent);
 await db.doc(`tenants/${T}`).set(before);
 for (const d of (await db.collection(`tenants/${T}/customers/${CUST}/messages`).get()).docs) await d.ref.delete();

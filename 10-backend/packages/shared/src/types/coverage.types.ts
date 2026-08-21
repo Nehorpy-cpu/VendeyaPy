@@ -201,7 +201,12 @@ export interface CoverageOutboxReconciled {
 
 /** Mensajes legacy de la reanudación (1D): jamás llevan los campos de la saga de cotización. */
 export interface CoverageOutboxLegacyMessage extends CoverageOutboxMessageBase {
-  action: 'approved' | 'rejected' | 'expired' | 'empty_cart';
+  /**
+   * H-04: `approved_sin_cobro` es el aviso de «cobertura aprobada pero el tenant no tiene datos
+   * de cobro». Va con action PROPIO a propósito: el id del outbox se arma con el action, y
+   * reusar `approved` le quemaba el slot a las instrucciones de pago de ese mismo intento.
+   */
+  action: 'approved' | 'approved_sin_cobro' | 'rejected' | 'expired' | 'empty_cart';
   checkoutAttemptId: string | null;
   quote?: never;
   reconciled?: never;

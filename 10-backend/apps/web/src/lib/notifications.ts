@@ -106,6 +106,11 @@ const SEVERITY: Record<Notification['type'], number> = {
   // está esperando un precio/stock que solo una persona puede confirmar (se corrige en el ORIGEN).
   handoff_catalog_drift: 5,
   handoff_customer_requested: 4,
+  // H-04: un cliente llegó a pagar y el tenant no tiene datos de cobro cargados. Hay una venta
+  // cerrada que no se puede cobrar, así que va en el mismo escalón que el cliente esperando
+  // cobertura para pagar. (El backend puede emitirlo antes de que este panel se despliegue: el
+  // `?? 0` de abajo hace que un tipo desconocido se ordene último, nunca que se pierda.)
+  handoff_checkout_unconfigured: 6,
   // ADR-0015 §4: una fuente externa sin reconocer (o que cambió) DETUVO las escrituras hacia
   // Meta. No hay un cliente esperando, pero el catálogo quedó sin poder publicarse: por encima
   // de la calidad (que es trabajo de fondo) y por debajo de cualquier handoff.

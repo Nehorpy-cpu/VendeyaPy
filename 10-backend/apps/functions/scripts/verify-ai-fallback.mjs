@@ -68,7 +68,12 @@ await db.doc(`tenants/${T}`).set({
 }, { merge: true });
 await db.doc(`tenants/${T}/config/channels`).set({ whatsappSendMode: 'mock' });
 await db.doc(`tenants/${T}/config/agent`).set({ botEnabled: true, greetingMessage: 'Hola, soy el bot AIFB' }, { merge: true });
-await db.doc(`tenants/${T}/config/checkout`).set({ sellers: [{ name: 'Vendedor E2E', whatsapp: '595991000009', active: true }] }, { merge: true });
+await db.doc(`tenants/${T}/config/checkout`).set({
+  // H-04: sin `bankAccounts` el bot (con razón) no instruye ningún pago y el check 6 dejaría de
+  // ejercitar el checkout. Datos ficticios, evidentemente de prueba.
+  bankAccounts: [{ bank: 'Banco de Prueba AIFB', accountNumber: '00-TEST-0009', holder: 'Titular Ficticio SA', document: 'TEST-999999' }],
+  sellers: [{ name: 'Vendedor E2E', whatsapp: '595991000009', active: true }],
+}, { merge: true });
 await db.doc(FIX).set({ text: `Respuesta IA ${AI_MARK}` }); // si la IA corriera, aparecería el marker
 
 const admin = await signIn('superadmin@aiafg.com');
@@ -131,7 +136,9 @@ const catalogo = await waitFor(async () => (await msgsOf(CUST)).some((m) => m.te
 await postText(CUST, 'agregá la belle');
 const agregado = await waitFor(async () => (await msgsOf(CUST)).some((m) => m.text?.includes('Agregué')));
 await postText(CUST, 'quiero pagar');
-const pagar = await waitFor(async () => (await msgsOf(CUST)).some((m) => m.text?.includes('transferir')));
+// H-04: se afirma sobre el NÚMERO DE CUENTA, no sobre la palabra «transferir» — que también
+// aparece en el mensaje de «todavía no puedo pasarte los datos para transferir».
+const pagar = await waitFor(async () => (await msgsOf(CUST)).some((m) => m.text?.includes('00-TEST-0009')));
 const ses6 = await sessionOf(CUST);
 check('6. catálogo/carrito/checkout determinísticos INTACTOS con cuota agotada (sin handoff espurio)',
   catalogo && agregado && pagar && ses6?.context?.humanTakeover !== true,

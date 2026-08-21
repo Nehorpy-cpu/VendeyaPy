@@ -266,6 +266,45 @@ modelo a copiar.
 
 ### H-04 — Datos bancarios placeholder hacia clientes reales
 
+> **✅ RESUELTO EN REPO — NO DESPLEGADO** (2026-08-21, programa `MONEY-FIX-CHECKOUT-PLACEHOLDERS-1`).
+> Se **eliminó `DEFAULT_CONFIG`**: su existencia en el camino de producción era el defecto mismo,
+> porque mientras el fallback estuviera, «vacío» no podía significar vacío. `getCheckoutConfig`
+> devuelve ahora arrays vacíos por los DOS caminos (documento ausente y array vacío), y
+> `cuentasCobrables()` filtra además cualquier cuenta con el marcador de plantilla o con un campo
+> sin cargar — fail-closed sobre el dinero. `formatTransferInstructions` devuelve `null` cuando no
+> hay ninguna cuenta real, y `pickSeller` dejó de devolver «REEMPLAZAR-Vendedor» (el camino de
+> `submitComprobante`, que asignaba el pedido a ese vendedor de plantilla).
+>
+> **El cliente no queda mudo**: los tres call sites del dinero (`engine.ts` ×2 y
+> `coverageResume.ts`) le dicen la verdad y dejan el pedido en pie; en cobertura el mensaje sale
+> por el MISMO outbox que las instrucciones (hereda su dedupe) y el job queda `held_by_seller`, el
+> tratamiento que ya tenía un producto que dejó de ser vendible. **Y el dueño se entera**: aviso en
+> la campana con id determinístico por día (mismo anti-flood que `aiUnavailable` sin vendedor), con
+> el `customerId` para abrir esa conversación y sin PII en el texto.
+>
+> **`provision.ts` NO se tocó**, a propósito: con el default eliminado, un tenant nuevo sin
+> `config/checkout` ya es seguro por construcción. Sembrar el documento vacío no cambiaría ningún
+> comportamiento y agregaría estado al alta.
+>
+> Trampa que casi cuesta un defecto peor: **TypeScript acepta `'texto' + null`** (verificado con
+> el `tsc` del repo), así que devolver `null` no protegía nada por sí solo — sin cablear los tres
+> call sites a mano, el cliente habría recibido la palabra «null» donde iban los datos bancarios.
+>
+> Dos reviews adversariales (10 + 6 hallazgos) encontraron dos cosas que el propio fix había
+> introducido: **filtrar por `alias`** dejaba sin cobrar a un tenant con datos buenos (el panel
+> guarda `` cuando está vacío), y el aviso de cobertura **le robaba el id de outbox** a las
+> instrucciones de pago — al cargar el dueño sus cuentas, el envío real encontraba el slot `sent`
+> y el job cerraba en `done` sin que el cliente recibiera nunca los datos. Ambas corregidas, con
+> test que las fija.
+>
+> El E2E `verify-f5` (checkout idempotente) **se apoyaba en el defecto**: el seed no siembra
+> `config/checkout`, así que validaba el reenvío de cuentas inventadas. Ahora siembra datos
+> ficticios propios y tiene un check que falla si sale un `REEMPLAZAR`.
+>
+> Sale con el **Tramo 1** (backend) y no requiere deploy propio. Junto con H-02, **tiene que estar
+> desplegado antes de abrir el registro autoservicio a la primera empresa externa**: los dos se
+> activan con el primer tenant que no sea del dueño.
+
 `provisionTenantCore` siembra `config/agent` con `botEnabled: true` y **no** siembra
 `config/checkout`; `getCheckoutConfig` cae a `DEFAULT_CONFIG` tanto si el doc falta como si
 `bankAccounts` queda vacío. El cliente recibe "UENO Bank / Cuenta: REEMPLAZAR-Nro-Cuenta". El
@@ -310,7 +349,7 @@ tocar producción; el deploy de todos ellos entra en el Tramo 1 (hoy bloqueado p
 | 1 | H-01 | Responder 503 cuando falla la escritura de un mensaje vivo (la redelivery ya es idempotente); contadores de pérdida en el resumen; log con tenant + pnid + wamid | S | Bajo (idempotencia ya probada) | EN REPO |
 | 2 | H-02 | `inviteUser` valida el destino como `conversation/lifecycle.ts:183-196`; `assertSameTenant` fail-closed; mismo tratamiento en `setUserRole`/`setUserActive` | S | Bajo | EN REPO |
 | 3 | H-03 + H-15 + H-38 + H-39 | Estado de error/éxito en todas las mutaciones y rama `isError` en las lecturas (patrón ya existente en el repo) | M | Bajo | ✅ HECHO — EN REPO (2026-08-20), sale con el Tramo 2 (Hosting) |
-| 4 | H-04 | Gate server-side: sin `config/checkout` real, el checkout no ofrece transferencia (fail-closed, como el de vendedores) | S | Medio (toca el camino de venta) | EN REPO |
+| 4 | H-04 | Gate server-side: sin `config/checkout` real, el checkout no ofrece transferencia (fail-closed, como el de vendedores) | S | Medio (toca el camino de venta) | ✅ HECHO — EN REPO (2026-08-21), sale con el Tramo 1 |
 | 5 | H-05 + H-06 | Transacción/compensación en `confirmPayment`, audit antes del short-circuit, y enviar el mensaje al cliente | M | Medio (dinero) | EN REPO |
 | 6 | H-08 | `customers` → `write: if false` en Rules (el panel no la usa) | XS | Muy bajo | EN REPO (deploy de Rules) |
 | 7 | H-07 | Verificar `tenantId` de la entrada del índice antes del delete | S | Bajo | EN REPO |

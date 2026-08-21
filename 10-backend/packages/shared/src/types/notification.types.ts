@@ -14,13 +14,21 @@ export type TrialNotificationType = 'trial_ending_soon' | 'trial_ending_today' |
  * cambio de activación y el chat necesita atención manual.
  * ADR-0015 §8 agrega `handoff_catalog_drift`: el dato público de un producto lo gobierna una
  * fuente externa que hoy publica otra cosa — se corrige EN EL ORIGEN, no escribiendo en Meta.
+ * H-04 agrega `handoff_checkout_unconfigured`: no hay datos de cobro y el bot no puede cerrar
+ * la venta sin inventar una cuenta.
  */
 export type HandoffNotificationType =
   | 'handoff_customer_requested'
   | 'handoff_ai_unavailable'
   | 'handoff_coverage_review'
   | 'handoff_coverage_stale'
-  | 'handoff_catalog_drift';
+  | 'handoff_catalog_drift'
+  /**
+   * H-04: un cliente llegó a pagar y el tenant no tiene ninguna cuenta bancaria cobrable. El bot
+   * NO le pasa datos inventados (antes mandaba los placeholders del seed) y el dueño se entera.
+   * Aviso idempotente con bucket por día mientras el problema dure.
+   */
+  | 'handoff_checkout_unconfigured';
 
 /**
  * META-CATALOG-GENERIC-ONBOARDING-QUALITY-1: aviso AGREGADO del centro de calidad del

@@ -1,6 +1,6 @@
 # ESTADO — VendeYaPy
 
-> **Última actualización: 2026-08-20** (H-03 + H-15 + H-38 + H-39 corregidos en repo: el panel dejó de guardar en silencio y de fingir vacíos).
+> **Última actualización: 2026-08-21** (H-04 corregido en repo: el bot ya no puede mandar datos bancarios falsos).
 > Este archivo describe el **presente**, no la historia. La historia vive en `BITACORA.md`.
 > Se reescribe, no se acumula. Máximo una página.
 > `⚠️ verificar` = dato derivado de la bitácora, no leído de producción en la última sesión.
@@ -132,8 +132,7 @@ documentadas en flujos no ejercitados). Selectores literales de deploy y rollbac
 
 7. **AUDITORÍA 2026-08-19 (`docs/system-audit-2026-08.md`) — CERO CRÍTICOS ABIERTOS + 15 ALTOS**
    (los tres CRÍTICOS —H-01, H-02, H-03— están corregidos en repo; ver puntos 8, 9 y 10).
-   ALTOS destacados: datos bancarios placeholder hacia
-   clientes reales (H-04), pago confirmado sin audit ni aviso al cliente (H-05/H-06), borrado
+   ALTOS: **H-04 cerrado en repo** (ver punto 11). Siguen abiertos: pago confirmado sin audit ni aviso al cliente (H-05/H-06), borrado
    del índice global de ruteo sin verificar tenant (H-07), `customers` con `write` de MANAGER
    incluido el delete físico (H-08), fan-out de tools sin tope que rompe la cuota (H-09), sin
    validación de salida del modelo (H-10), `metaWebhookInbox` sin TTL con 176 docs vencidos con
@@ -180,6 +179,18 @@ documentadas en flujos no ejercitados). Selectores literales de deploy y rollbac
     (si fallan las métricas, los KPIs quedan como esqueleto animado para siempre). Y aparte:
     `fallbackMessage`/`handoffMessage`/`farewellMessage` de `/agent` siguen siendo **config muerta**
     (se guardan, el motor no las usa) — programa propio.
+
+11. **H-04 (el bot mandaba DATOS BANCARIOS FALSOS a clientes reales) — ARREGLADO EN REPO, NO
+    DESPLEGADO** (2026-08-21, `MONEY-FIX-CHECKOUT-PLACEHOLDERS-1`). Se eliminó el `DEFAULT_CONFIG`
+    con placeholders: «vacío» ya significa vacío por los dos caminos (documento ausente y array
+    vacío), ninguna cuenta con marcador de plantilla llega a un mensaje, y un tenant sin datos de
+    cobro deriva con un mensaje honesto en vez de inventar una cuenta — con aviso al dueño en la
+    campana. **Producción sigue con el defecto**; `arfagi` no lo sufre porque tiene sus cuentas
+    reales cargadas. Entra en el **Tramo 1** ya calculado y **no requiere deploy propio**.
+    ⚠️ **REGLA OPERATIVA: H-04, igual que H-02, tiene que estar DESPLEGADO antes de abrir el
+    registro autoservicio a la primera empresa externa** — los dos se activan con el primer tenant
+    que no sea del dueño: uno le entrega el privilegio y el otro le manda cuentas inventadas a sus
+    clientes.
 
 ## Deudas menores conocidas
 

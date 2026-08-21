@@ -42,6 +42,120 @@ Reglas de escritura:
 
 ## 2026-08
 
+### MONEY-FIX-CHECKOUT-PLACEHOLDERS-1 — 2026-08-21 (EN REPO — NO DESPLEGADO)
+
+Arreglo del ALTO **H-04**: el bot le mandaba **datos bancarios falsos a clientes reales**.
+`getCheckoutConfig` caía a un `DEFAULT_CONFIG` con placeholders por DOS caminos —documento
+ausente y array vacío— y `formatTransferInstructions` los imprimía tal cual en WhatsApp:
+«🏦 *UENO Bank* / Cuenta: REEMPLAZAR-Nro-Cuenta». Se llegaba ahí de dos formas verificadas: un
+tenant nuevo (nace con `botEnabled: true` y sin `config/checkout`) y un dueño que borra todas
+sus cuentas desde el panel.
+
+**Causa raíz.** El default existía para que un desarrollador viera la forma de la config, pero
+vivía en el camino de producción. Mientras el fallback estuviera, «vacío» no podía significar
+vacío: significaba «acá están estas cuentas». El equipo ya había cerrado esta misma clase de bug
+del lado de los VENDEDORES en cuatro lugares (`humanRequest`, `aiUnavailable`, `driftHandoff`,
+`coverage`) — el camino del dinero era el único sin el filtro.
+
+**Qué hace ahora.** `DEFAULT_CONFIG` **eliminado**. `getCheckoutConfig` devuelve vacío por los dos
+caminos; `cuentasCobrables()` descarta además cualquier cuenta con el marcador de plantilla o con
+un campo sin cargar (fail-closed sobre el dinero, con el marcador anclado al principio del valor
+para que un titular real como «Reemplazos Industriales SA» siga siendo válido);
+`formatTransferInstructions` devuelve `null` sin cuentas reales y `pickSeller` dejó de devolver
+«REEMPLAZAR-Vendedor» —el camino de `submitComprobante`, que asignaba el pedido a ese vendedor
+inexistente—. Los tres call sites del dinero (`engine.ts` ×2, `coverageResume.ts`) le dicen la
+verdad al cliente y dejan el pedido en pie; en cobertura el mensaje sale por el MISMO outbox que
+las instrucciones (hereda su dedupe por `checkoutAttemptId`) y el job queda `held_by_seller`, el
+tratamiento que ya recibía un producto que dejó de ser vendible. Y el dueño se entera: aviso en la
+campana con id determinístico **por día** (mismo anti-flood que `aiUnavailable` sin vendedor), sin
+PII del cliente. `provision.ts` **no se tocó**: con el default eliminado, un tenant nuevo sin
+`config/checkout` ya es seguro por construcción — el cambio más chico gana.
+
+**La trampa que casi cuesta un defecto peor.** Devolver `null` no protege por sí solo:
+**TypeScript acepta `'texto' + null`** (verificado con el `tsc` del repo, exit 0), así que sin
+cablear los tres call sites a mano el cliente habría recibido la palabra «null» donde iban los
+datos bancarios. No es teórico: al medir el RED de la rama de cobertura con el `coverageResume.ts`
+ORIGINAL, el test falla con `expected '¡Buenas noticias! Confirmamos la cobe…' not to contain
+'null'` — el mensaje que habría recibido el cliente. Cada call site tiene su test de que eso no
+pasa.
+
+**Review adversarial (dos pasadas, revisor fresco cada una):** 10 + 6 hallazgos, todos atendidos;
+las dos encontraron algo bloqueante. **Primera pasada:** 2 ALTOS + 4 MEDIOS + 4 BAJOS. **(1) 🚨 El fail-closed se
+había pasado de rosca**: `cuentasCobrables` filtraba también por `alias`, y `config/validate.ts`
+persiste `` cuando el dueño lo deja vacío ⇒ una cuenta con TODOS sus datos buenos quedaba
+descartada y **un tenant que hoy cobra dejaba de cobrar**, con un aviso que además le diagnosticaba
+mal la causa. El alias salió del filtro (sigue sin imprimirse si es de plantilla). **(2) 🚨 En
+cobertura el cliente quedaba MUDO**: la rama nueva hacía `held_by_seller` + `return` sin mandar
+nada, después de que el sistema le prometiera «seguimos con tu pedido por acá» — y el aviso al
+dueño afirmaba lo contrario. Ahora el mensaje sale por el mismo outbox. **(3)** Un campo NUMÉRICO
+en Firestore (un CI/RUC cargado a mano) hacía `.trim()` sobre un número ⇒ `TypeError` dentro del
+motor y el turno del cliente se caía; `String(v ?? )` y `Array.isArray` lo cierran. **(4)** El
+aviso no decía a QUÉ cliente atender: ahora lleva `customerId` como el resto de los avisos de
+handoff. **(5)** El mensaje al cliente prometía que «el equipo lo va a contactar» sin ningún
+handoff detrás — el propio repo se prohíbe esa promesa (`ai/prompts.ts`) — reescrito. **(6)** La
+rama de cobertura era la única sin test: ahora tiene dos. **(7)** `tieneDatosDeCobro` no lo usaba
+nadie: eliminado en vez de dejar API muerta. **(8)** Se perdía el aviso de «carrito cambiado».
+
+**Segunda pasada (sobre esas correcciones):** 1 ALTO + 2 MEDIOS + 4 BAJOS. 🚨 **El aviso de
+cobertura le robaba el id de outbox a las instrucciones de pago**: el id se arma
+`{requestId}_{action}[_{attemptId}]`, y reusar `action: 'approved'` con el mismo attemptId
+quemaba el slot del mensaje que de verdad importa. Al cargar el dueño sus cuentas,
+`coverageMaintenance` re-encola el job, el envío real encuentra el doc `sent` ⇒ `already_sent` ⇒
+el job cierra en **`done` sin que el cliente reciba jamás los datos bancarios** — la misma falla
+silenciosa, un escalón más adentro. Ahora ese mensaje tiene `action: 'approved_sin_cobro'` propio
+(aditivo en `@vpw/shared`), y hay un test que lo fija: con el action compartido falla con
+`to have a length of 2 but got 1`. Además: el resultado del envío se descartaba (un `failed` de
+Meta quedaba indistinguible de «entregado, esperando a una persona» ⇒ ahora pasa por
+`estadoPorEnvio`), el comentario del código y este mismo documento afirmaban un «freno permanente»
+que `coverageMaintenance` desmiente, y **`verify-ai-fallback` pasaba por casualidad léxica**: su
+check exigía la palabra «transferir», que también aparece en «todavía no puedo pasarte los datos
+para transferir», así que validaba el checkout mandara o no datos bancarios. Ahora siembra cuentas
+ficticias y afirma sobre el número de cuenta.
+
+**RED-first:** 16 fallando / 12 pasando contra el código original, con el motivo exacto:
+`expected '💳 *Para completar tu compra*…' not to match /REEMPLAZAR/i`. Los 12 que pasan son los
+NO-REGRESIÓN.
+
+**Verificación.** `pnpm -r typecheck` **exit 0**; `pnpm -r lint` **exit 0** (5 warnings
+preexistentes, ninguno de este diff); `pnpm -r build` **exit 0**; `git diff --check` **exit 0**.
+Unit: `functions` **229 archivos / 3491 tests exit 0** (33 nuevos: 3 archivos propios más 3 tests
+en `coverageResume.drift.test.ts`), `web` **57 / 756 exit 0**. E2E en emuladores LIMPIOS (`--project demo-aiafg` + `seed-users` + `load-catalog`
+en el mismo `exec`): **`verify-f5` (checkout idempotente) 10/10**, con un check nuevo que falla si
+sale un `REEMPLAZAR`; **`verify-attachments` (comprobante → asignación de vendedor) 98/98**;
+**`verify-coverage-resume` (cobertura aprobada → instrucciones de pago) 29/29**; y
+**`verify-ai-fallback` 9/9** (su check de checkout dejó de pasar por casualidad léxica). Los
+cuatro en la misma corrida, **exit 0**. **Hallazgo:** ese E2E **se apoyaba en el defecto** — el seed no
+siembra `config/checkout`, así que venía validando el reenvío de cuentas inventadas; ahora siembra
+datos ficticios propios y los restaura al terminar.
+
+**Selector del release.** 0 CREATE / 0 DELETE. UPDATE: las functions que tocan el camino de
+checkout y cobertura (`metaWebhook`, `onWebhookInbox`, `onCoverageResumeJob` y las que compilan
+`engine.ts`) — en la práctica quedan cubiertas por las 118 UPDATE del Tramo 1 ya calculado, así
+que **no requiere deploy propio**. 0 índices, 0 Rules, 0 TTL. Panel: 1 línea (severidad del aviso
+nuevo), va con el Tramo 2 y **no es requisito** — el panel viejo ordena el tipo desconocido último
+por su `?? 0`, nunca lo pierde.
+**Orden de rollback:** el del Tramo 1, sin CREATE.
+
+**Commit.** `COMMIT_PENDIENTE`
+
+**Estado real.** EN REPO — NO DESPLEGADO. **Producción sigue con el defecto**: hoy, un tenant sin
+datos de cobro le manda cuentas inventadas a un cliente que quiere pagar. `arfagi` tiene sus
+cuentas reales cargadas, así que hoy no le pasa a nadie — **es una bomba para el onboarding
+autoservicio**, igual que H-02: se activa con el primer cliente externo.
+
+**Deudas y limitaciones conocidas.** (a) El filtro de vendedores queda DUPLICADO: los cuatro
+consumidores que ya filtraban `REEMPLAZAR` siguen haciéndolo además de `pickSeller`; es
+inofensivo, pero sus criterios divergen levemente (ellos usan la palabra suelta, `pickSeller` la
+ancla al principio). (b) El docblock viejo del módulo mandaba a `scripts/seed-checkout-config.mjs`,
+que **no existe** en el repo. (c) `validateCheckoutConfig` sigue aceptando arrays vacíos: guardar
+cero cuentas es legítimo (el bot deriva), pero el panel no le avisa al dueño lo que implica.
+(d) El aviso al dueño no se autocierra cuando carga sus cuentas: caduca solo por el bucket diario.
+(e) **Requisito antes del deploy, no verificable desde el repo:** el filtro descarta la cuenta si
+le falta cualquiera de `bank`/`accountNumber`/`holder`/`document` (antes imprimía «undefined»).
+Hay que confirmar contra producción que la cuenta de `arfagi` tiene los cuatro cargados. (f) Este
+programa NO toca H-05/H-06 (pago sin rastro de auditoría y aviso de pago que nadie manda),
+que son el resto del lote de dinero.
+
 ### CRITICAL-FIX-PANEL-SILENT-SAVE-1 — 2026-08-20 (EN REPO — NO DESPLEGADO)
 
 Arreglo del CRÍTICO **H-03** y de **H-15 + H-38 + H-39**: el panel ejecutaba mutaciones que, si

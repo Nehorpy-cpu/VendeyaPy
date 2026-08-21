@@ -91,7 +91,7 @@ vi.mock('../messaging/whatsappClient.js', () => ({
 }));
 vi.mock('../orders/checkoutConfig.js', async (io) => {
   const real = await io<typeof import('../orders/checkoutConfig.js')>();
-  return { ...real, getCheckoutConfig: vi.fn(async () => CONFIG_CHECKOUT) };
+  return { ...real, getCheckoutConfig: vi.fn(async () => configVigente) };
 });
 vi.mock('../orders/createPendingOrder.js', async (io) => {
   const real = await io<typeof import('../orders/createPendingOrder.js')>();
@@ -108,6 +108,7 @@ const REQ = 'covr_1';
 const ORDER = 'ord_1';
 const ACT = 'actTest01';
 
+let configVigente: import('@vpw/shared').CheckoutConfig;
 const CONFIG_CHECKOUT = {
   bankAccounts: [{ bank: 'Banco T', accountNumber: '1-1', holder: 'H', document: 'D' }],
   sellers: [],
@@ -189,6 +190,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   docs.clear();
   enviados.length = 0;
+  configVigente = CONFIG_CHECKOUT; // cada test parte de un tenant CON cuentas reales
   delete process.env.FUNCTIONS_EMULATOR; // el fixture de pausa es solo-emulador
   sembrar();
 });
@@ -255,5 +257,59 @@ describe('coverageResume — la reanudación NO manda datos bancarios de un prec
     expect(enviados).toHaveLength(1);
     expect(enviados[0]?.text).toContain('Banco T');
     expect(job()?.status).toBe('done');
+  });
+
+  // H-04: la cobertura ya fue aprobada y la orden está creada, pero el tenant no tiene ninguna
+  // cuenta cobrable. Antes salían los placeholders del seed; después del fix, la primera versión
+  // dejaba al cliente MUDO tras haberle prometido «seguimos con tu pedido por acá» (review).
+  it('H-04: sin datos de cobro NO salen cuentas, pero el cliente SÍ recibe un mensaje', async () => {
+    configVigente = { bankAccounts: [], sellers: [], coverage: { enabled: true, activationId: ACT } } as unknown as import('@vpw/shared').CheckoutConfig;
+
+    await processCoverageResumeJob(TENANT, REQ);
+
+    expect(enviados).toHaveLength(1);
+    expect(enviados[0]?.text).not.toMatch(/REEMPLAZAR/i);
+    expect(enviados[0]?.text).not.toContain('null'); // TS deja pasar `${null}` en un template
+    expect(enviados[0]?.text).not.toContain('Transferí a cualquiera');
+    expect(enviados[0]?.text).toMatch(/pedido anotado/i);
+    // El job queda para una persona y el dueño se entera.
+    expect(job()?.status).toBe('held_by_seller');
+    expect([...docs.keys()].some((k) => k.includes('/notifications/checkout-sin-datos-'))).toBe(true);
+  });
+
+  // El defecto que encontró la review: el aviso «sin datos» usaba el MISMO id de outbox que las
+  // instrucciones de pago (`{req}_approved_{attempt}`). Al cargar las cuentas, el job se re-encola
+  // (`coverageMaintenance` re-conduce los `held_by_seller`) y el envío real encontraba el slot ya
+  // `sent` ⇒ `already_sent` ⇒ job `done` SIN que el cliente recibiera nunca los datos bancarios.
+  it('H-04: cuando el dueño CARGA las cuentas, la reanudación sí manda las instrucciones', async () => {
+    configVigente = { bankAccounts: [], sellers: [], coverage: { enabled: true, activationId: ACT } } as unknown as import('@vpw/shared').CheckoutConfig;
+    await processCoverageResumeJob(TENANT, REQ);
+    expect(enviados).toHaveLength(1);
+    expect(job()?.status).toBe('held_by_seller');
+
+    // El dueño carga sus cuentas y el job vuelve a la cola.
+    configVigente = CONFIG_CHECKOUT;
+    escribir(P_JOB, { status: 'pending', leaseUntil: null }, true);
+
+    await processCoverageResumeJob(TENANT, REQ);
+
+    expect(enviados).toHaveLength(2);
+    expect(enviados[1]?.text).toContain('Banco T'); // los datos de verdad, no un `done` vacío
+    expect(enviados[1]?.text).toContain('250.000');
+    expect(job()?.status).toBe('done');
+  });
+
+  it('H-04: una cuenta de PLANTILLA se trata igual que no tener ninguna', async () => {
+    configVigente = {
+      bankAccounts: [{ bank: 'UENO Bank', accountNumber: 'REEMPLAZAR-Nro-Cuenta', holder: 'REEMPLAZAR-Titular', document: 'REEMPLAZAR-CI/RUC' }],
+      sellers: [],
+      coverage: { enabled: true, activationId: ACT },
+    } as unknown as import('@vpw/shared').CheckoutConfig;
+
+    await processCoverageResumeJob(TENANT, REQ);
+
+    expect(enviados).toHaveLength(1);
+    expect(enviados[0]?.text).not.toMatch(/REEMPLAZAR/i);
+    expect(job()?.status).toBe('held_by_seller');
   });
 });
