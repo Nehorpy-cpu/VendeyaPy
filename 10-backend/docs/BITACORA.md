@@ -136,7 +136,7 @@ nuevo), va con el Tramo 2 y **no es requisito** — el panel viejo ordena el tip
 por su `?? 0`, nunca lo pierde.
 **Orden de rollback:** el del Tramo 1, sin CREATE.
 
-**Commit.** `COMMIT_PENDIENTE`
+**Commit.** `817caf3`
 
 **Estado real.** EN REPO — NO DESPLEGADO. **Producción sigue con el defecto**: hoy, un tenant sin
 datos de cobro le manda cuentas inventadas a un cliente que quiere pagar. `arfagi` tiene sus
