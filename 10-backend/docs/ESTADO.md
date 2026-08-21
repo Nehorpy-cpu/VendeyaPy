@@ -191,6 +191,12 @@ documentadas en flujos no ejercitados). Selectores literales de deploy y rollbac
     registro autoservicio a la primera empresa externa** — los dos se activan con el primer tenant
     que no sea del dueño: uno le entrega el privilegio y el otro le manda cuentas inventadas a sus
     clientes.
+    ✅ **Requisito previo al deploy — VERIFICADO CONTRA PRODUCCIÓN (2026-08-21, read-only, sin
+    imprimir datos bancarios):** `tenants/arfagi/config/checkout` tiene **1 cuenta con los cuatro
+    campos obligatorios** (`bank`, `accountNumber`, `holder`, `document`) presentes, no vacíos y
+    de tipo string, y **1 vendedor sin placeholder**. Es decir: `cuentasCobrables()` la conserva y
+    el mensaje de transferencia de `arfagi` sale idéntico tras el deploy. El pendiente que el
+    programa dejó abierto queda CERRADO.
 
 ## Deudas menores conocidas
 
