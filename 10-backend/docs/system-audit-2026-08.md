@@ -313,6 +313,33 @@ abierto el del dinero. Todo el repo es fail-closed; acá falla **abierto con dat
 
 ### H-05 / H-06 — El pago confirmado: sin rastro y sin aviso
 
+> **✅ H-05 RESUELTO EN REPO — NO DESPLEGADO** (2026-08-21, programa
+> `MONEY-FIX-CONFIRM-PAYMENT-DURABILITY-1`). H-06 sigue abierto (programa propio).
+> El orden de las escrituras estaba invertido respecto del daño de perder cada una. Ahora:
+> `PAID` primero, **el rastro (Purchase + audit) antes que la limpieza de sesión**, y la
+> limpieza —única escritura que puede lanzar NOT_FOUND— al final, best-effort y con log.
+> Fundamento: perder la limpieza del carrito es **auto-reparable** (el motor la arregla en el
+> siguiente mensaje, `engine.ts` rama `kind === 'paid'`); perder el audit es permanente.
+>
+> Y el cortocircuito **completa en vez de sellar**: un pedido ya `PAID` con el rastro incompleto
+> se repara al volver a llamar. Todo lo que re-ejecuta es idempotente — el Purchase por su id
+> `purchase-{orderId}` y el audit por un id determinístico nuevo (`recordAudit` recibe un `id`
+> **opcional**, estrictamente aditivo: los ~100 llamadores que no lo pasan no cambian).
+>
+> **Hallazgo de la auditoría de este programa:** el sellado no estaba en un lugar sino en DOS, y
+> ninguno volvía a llamar. `orderCallables.ts:162` cortaba ANTES de `confirmPayment`, y el
+> webhook de Stripe descarta el evento repetido con `claimEventOnce` y responde 200 en el
+> `catch`. Es decir: cuando esto se rompía, lo más probable era que **nadie volviera a llamar**.
+> Por eso el reorden es la defensa principal y no el cortocircuito. Se tocó el corte del panel
+> para que reintentar complete en vez de sellar — **aunque la segunda review demostró que ese
+> camino casi no es alcanzable desde la UI**: el panel nunca manda `to='PAID'` sobre un pedido
+> ya pagado (`orders/page.tsx` ofrece `PAID → PREPARING`). La puerta real para reparar un pago
+> viejo es `adminOrderCorrect` (PLATFORM_ADMIN) devolviendo el estado y llamando después. El
+> reorden, en cambio, protege TODOS los pagos nuevos sin depender de que alguien reintente.
+>
+> Sale con el **Tramo 1** (backend) y **no requiere deploy propio**: 0 CREATE, 0 índices,
+> 0 Rules. `audit/audit.ts` es universal, así que ya estaba en las 118 UPDATE.
+
 `confirmPayment` escribe `PAID` y después hace tres pasos no transaccionales; el `.update()` de
 la sesión (`:67-76`, el único `update()` pelado sobre sesión en todo el backend) puede lanzar
 NOT_FOUND y abortar el evento Purchase y el audit `payment.confirmed`. El reintento del panel
@@ -350,7 +377,7 @@ tocar producción; el deploy de todos ellos entra en el Tramo 1 (hoy bloqueado p
 | 2 | H-02 | `inviteUser` valida el destino como `conversation/lifecycle.ts:183-196`; `assertSameTenant` fail-closed; mismo tratamiento en `setUserRole`/`setUserActive` | S | Bajo | EN REPO |
 | 3 | H-03 + H-15 + H-38 + H-39 | Estado de error/éxito en todas las mutaciones y rama `isError` en las lecturas (patrón ya existente en el repo) | M | Bajo | ✅ HECHO — EN REPO (2026-08-20), sale con el Tramo 2 (Hosting) |
 | 4 | H-04 | Gate server-side: sin `config/checkout` real, el checkout no ofrece transferencia (fail-closed, como el de vendedores) | S | Medio (toca el camino de venta) | ✅ HECHO — EN REPO (2026-08-21), sale con el Tramo 1 |
-| 5 | H-05 + H-06 | Transacción/compensación en `confirmPayment`, audit antes del short-circuit, y enviar el mensaje al cliente | M | Medio (dinero) | EN REPO |
+| 5 | H-05 + H-06 | Transacción/compensación en `confirmPayment`, audit antes del short-circuit, y enviar el mensaje al cliente | M | Medio (dinero) | ✅ H-05 HECHO — EN REPO (2026-08-21), Tramo 1; H-06 abierto |
 | 6 | H-08 | `customers` → `write: if false` en Rules (el panel no la usa) | XS | Muy bajo | EN REPO (deploy de Rules) |
 | 7 | H-07 | Verificar `tenantId` de la entrada del índice antes del delete | S | Bajo | EN REPO |
 | 8 | H-09 + H-29 | Tope de `tool_use` por ronda, `TOKENS_RESULTADO_TOOL` realista y tope de tamaño del system prompt | M | Medio (afecta la venta) | EN REPO |

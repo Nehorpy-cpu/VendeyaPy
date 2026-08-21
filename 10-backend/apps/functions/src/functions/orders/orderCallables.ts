@@ -159,7 +159,30 @@ export const orderUpdateStatus = onCall<{ tenantId?: string; orderId?: string; t
       throw new HttpsError('failed-precondition', 'Cancelaciones van por orderCancel; reembolsos solo por el administrador.');
     }
     const { ref, order } = await loadOrder(tenantId, req.data?.orderId ?? '');
-    if (order.status === to) return { ok: true, status: to }; // idempotente
+    if (order.status === to) {
+      // H-05: cortar acá SELLABA un pago a medias — un pedido que quedó `PAID` sin evento
+      // Purchase ni auditoría (porque la limpieza de sesión lanzó) no se podía reparar desde
+      // ningún lado: este era el único camino por el que una persona puede reintentar.
+      // `confirmPayment` es idempotente y COMPLETA lo que falte; no se repite el audit manual
+      // porque esto no es una confirmación nueva, es una reparación.
+      if (to === 'PAID') {
+        const res = await confirmPayment(tenantId, order.id);
+        // Solo se audita si realmente se pudo completar: entre `loadOrder` y la re-lectura de
+        // `confirmPayment` el pedido pudo cambiar de estado (review).
+        if (res.ok) {
+          // Constancia de QUIÉN pidió la reparación — sin esto, el único acto humano sobre un
+          // pedido ya pagado era anónimo. Id por (pedido, día): repetir el click no acumula.
+          await recordAudit({
+            id: `payment-repair-${order.id}-${new Date().toISOString().slice(0, 10)}`,
+            tenantId, action: 'order.payment_confirmed_manual', actorUid: uid, actorRole: role,
+            targetType: 'order', targetId: order.id,
+            summary: `Rastro del pago revisado por ${role} (el pedido ya estaba ${order.status})`,
+            metadata: { reparacion: true, status: order.status },
+          });
+        }
+      }
+      return { ok: true, status: to }; // idempotente
+    }
 
     if (!canAdvanceStatus(order.status, to)) {
       throw new HttpsError('failed-precondition', `Transición inválida: ${order.status} → ${to} (solo avance hacia adelante).`);

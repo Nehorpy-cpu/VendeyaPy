@@ -1,6 +1,6 @@
 # ESTADO — VendeYaPy
 
-> **Última actualización: 2026-08-21** (H-04 corregido en repo: el bot ya no puede mandar datos bancarios falsos).
+> **Última actualización: 2026-08-21** (H-04 y H-05 corregidos en repo: ni datos bancarios falsos, ni pagos sin rastro).
 > Este archivo describe el **presente**, no la historia. La historia vive en `BITACORA.md`.
 > Se reescribe, no se acumula. Máximo una página.
 > `⚠️ verificar` = dato derivado de la bitácora, no leído de producción en la última sesión.
@@ -132,7 +132,8 @@ documentadas en flujos no ejercitados). Selectores literales de deploy y rollbac
 
 7. **AUDITORÍA 2026-08-19 (`docs/system-audit-2026-08.md`) — CERO CRÍTICOS ABIERTOS + 15 ALTOS**
    (los tres CRÍTICOS —H-01, H-02, H-03— están corregidos en repo; ver puntos 8, 9 y 10).
-   ALTOS: **H-04 cerrado en repo** (ver punto 11). Siguen abiertos: pago confirmado sin audit ni aviso al cliente (H-05/H-06), borrado
+   ALTOS: **H-04 y H-05 cerrados en repo** (puntos 11 y 12).
+   Siguen abiertos: el aviso de pago confirmado que nadie manda (H-06), borrado
    del índice global de ruteo sin verificar tenant (H-07), `customers` con `write` de MANAGER
    incluido el delete físico (H-08), fan-out de tools sin tope que rompe la cuota (H-09), sin
    validación de salida del modelo (H-10), `metaWebhookInbox` sin TTL con 176 docs vencidos con
@@ -191,6 +192,18 @@ documentadas en flujos no ejercitados). Selectores literales de deploy y rollbac
     registro autoservicio a la primera empresa externa** — los dos se activan con el primer tenant
     que no sea del dueño: uno le entrega el privilegio y el otro le manda cuentas inventadas a sus
     clientes.
+
+12. **H-05 (un pago confirmado quedaba SIN RASTRO, de forma permanente) — ARREGLADO EN REPO, NO
+    DESPLEGADO** (2026-08-21, `MONEY-FIX-CONFIRM-PAYMENT-DURABILITY-1`). `confirmPayment` marcaba
+    `PAID` y después limpiaba la sesión con un `.update()` que lanza NOT_FOUND si el documento no
+    existe; la excepción se llevaba puestos el evento `Purchase` y el audit `payment.confirmed`, y
+    el reintento SELLABA el estado a medias. Ahora el rastro va ANTES que la limpieza (que es la
+    única escritura recuperable: el motor la repara sola) y el cortocircuito completa en vez de
+    sellar. **Mantiene 0 CREATE / 0 índices / 0 Rules**: `audit/audit.ts` es universal, así que ya
+    estaba en las 118 UPDATE del Tramo 1 — **no requiere deploy propio**. **Producción sigue con
+    el defecto.** Ojo con el alcance real: el fix protege los pagos NUEVOS; los que ya quedaron
+    rotos sólo se reparan por `adminOrderCorrect` (PLATFORM_ADMIN), porque el panel no ofrece
+    `to=PAID` sobre un pedido ya pagado y el webhook de Stripe no reintenta.
     ✅ **Requisito previo al deploy — VERIFICADO CONTRA PRODUCCIÓN (2026-08-21, read-only, sin
     imprimir datos bancarios):** `tenants/arfagi/config/checkout` tiene **1 cuenta con los cuatro
     campos obligatorios** (`bank`, `accountNumber`, `holder`, `document`) presentes, no vacíos y

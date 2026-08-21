@@ -42,6 +42,83 @@ Reglas de escritura:
 
 ## 2026-08
 
+### MONEY-FIX-CONFIRM-PAYMENT-DURABILITY-1 — 2026-08-21 (EN REPO — NO DESPLEGADO)
+
+Arreglo del ALTO **H-05**: un pago se confirmaba y quedaba **sin rastro, de forma permanente**.
+`confirmPayment` marcaba `PAID` y después limpiaba la sesión con `.update()`, que **lanza
+NOT_FOUND si el documento no existe**; la excepción se llevaba puestos el evento `Purchase` y el
+audit `payment.confirmed`, que venían después. Y el reintento lo **sellaba**: el cortocircuito
+veía `PAID` y devolvía «ya estaba» sin completar nada. Lo hallaron dos auditorías independientes
+(A2-3 y A4-3) por caminos distintos.
+
+**Causa raíz.** El orden de las escrituras estaba invertido respecto del daño de perder cada una:
+lo irrecuperable (la auditoría del dinero) colgaba de lo recuperable (la cosmética del carrito).
+
+**Hallazgo de la Fase 0 que definió el diseño.** El sellado no estaba en un lugar sino en **DOS**,
+y ninguno de los dos vuelve a llamar: `orderCallables.ts:162` cortaba ANTES de llegar a
+`confirmPayment`, y el webhook de Stripe descarta el evento repetido con `claimEventOnce` y
+responde 200 en el `catch` para no disparar reintentos. Es decir: cuando esto se rompía, lo más
+probable era que **nadie volviera a llamar nunca**. Por eso la defensa principal es el REORDEN, no
+el cortocircuito.
+
+**Qué hace ahora.** `PAID` primero (si eso falla, no hay Purchase ni audit de un pago que no
+ocurrió); después el RASTRO; y al final la limpieza de sesión, best-effort, con su fallo
+registrado con tenant, pedido y el cliente enmascarado. Perder la limpieza es auto-reparable: el
+motor la arregla en el siguiente mensaje (`engine.ts`, rama `kind === 'paid'` — «Cierra lo que
+confirmPayment no llegó a limpiar»). El cortocircuito **completa** el rastro que falte en vez de
+sellar, y todo lo que re-ejecuta es idempotente: el Purchase por `purchase-{orderId}` y el audit
+por un id determinístico nuevo. `recordAudit` recibe un `id` **opcional** — estrictamente
+aditivo: los ~100 llamadores que no lo pasan conservan el id automático de siempre. Se tocó el
+corte del panel (4 líneas) para que reintentar COMPLETE en vez de sellar, y ahí queda constancia
+de quién pidió la reparación (con id por pedido+día, así el click repetido no acumula entradas).
+**La segunda review demostró que ese camino casi no es alcanzable desde la UI**: el panel nunca
+manda `to='PAID'` sobre un pedido ya pagado (`orders/page.tsx` ofrece `PAID → PREPARING`), así que
+en la práctica sólo se llega por `adminOrderCorrect` (PLATFORM_ADMIN) o invocando el callable a
+mano. Lo que protege a TODOS los pagos nuevos, sin depender de que alguien reintente, es el
+reorden.
+
+**RED-first:** 4 fallando / 6 pasando contra el código original, con los motivos exactos:
+`5 NOT_FOUND: no entity to update: …/sessions/active` (el defecto del informe, reproducido con el
+error real del SDK) y `expected "spy" to be called 1 times, but got 0 times` (el cortocircuito
+sellando). Los 6 que pasan son los NO-REGRESIÓN.
+
+**Verificación.** `pnpm -r typecheck` **exit 0**; `pnpm -r lint` **exit 0** (5 warnings
+preexistentes); `pnpm -r build` **exit 0**; `git diff --check` **exit 0**. Unit: `functions`
+**231 archivos / 3509 tests exit 0** (18 nuevos: 12 de durabilidad del pago y 6 de `audit`, que
+no tenía ningún test), `web` **57 / 756 exit 0**. **Backend puro:**
+`git diff --stat -- apps/web` **VACÍO**. E2E en emuladores LIMPIOS: `verify-order-lifecycle`
+**18/18** (ejercita `orderUpdateStatus → PAID` y el reintento, que es el llamador tocado),
+`verify-order-comprobante` **9/9**, `verify-f5` **10/10**, `verify-attachments` **98/98**.
+⚠️ **`verify-d6` falla su check 4** («confirmar el pago registró el evento Purchase en vivo»,
+`order=undefined`) — **preexistente, verificado en esta sesión** con el método del repo: stash de
+los tres archivos y corrida contra el código base, falla idéntico. El script no logra crear el
+pedido con el catálogo actual, así que ese check venía sin ejercitar de antes. No se arregló:
+fuera del alcance de este programa.
+
+**Selector del release.** 0 CREATE / 0 DELETE / 0 índices / 0 Rules / 0 TTL. `audit/audit.ts` es
+universal (cierre transitivo de las 118 functions), así que ya estaba en las 118 UPDATE del Tramo 1
+ya calculado: **no requiere deploy propio**.
+**Orden de rollback:** el del Tramo 1, sin CREATE.
+
+**Commit.** `COMMIT_PENDIENTE`
+
+**Estado real.** EN REPO — NO DESPLEGADO. **Producción sigue con el defecto**: hoy, si la sesión
+del cliente no existe cuando se confirma un pago, ese pago queda pagado y sin rastro para siempre.
+
+**Deudas y limitaciones conocidas.** (a) `recordAudit` **sigue tragándose sus propios errores**
+(`try/catch` con `logger.error`): si la escritura del audit falla, el rastro se pierde igual, y
+ahora eso es más visible porque el audit es la pieza que este fix protege. Arreglarlo impacta a
+~100 llamadores y quedó explícitamente fuera de alcance. (b) El webhook de Stripe **no reintenta** (`claimEventOnce` + 200 en el
+`catch`). Sumado a que el panel no ofrece `to='PAID'` sobre un pedido pagado, un pago que ya quedó
+roto **antes** de este fix sólo se puede reparar por `adminOrderCorrect` (PLATFORM_ADMIN) o
+llamando al callable a mano: el fix protege los pagos NUEVOS, no repara solo los viejos. (c) `verify-d6` check 4 roto de antes (ver arriba): el E2E que debería cubrir H-05 no lo
+cubre. (d) El camino NORMAL de `limpiarCheckout` (la primera confirmación) sigue sin el guard de
+`pendingOrderId`: si el cliente cambió de carrito y paga el link de un pedido anterior, se le vacía
+el carrito vivo. **No es regresión** —es el comportamiento previo— y el criterio correcto ya está
+identificado (`checkoutReuse.ts` usa `sameCartAsOrder`), pero tocar el camino de venta que hoy
+funciona quedó fuera del alcance de este programa. (e) **H-06 sigue abierto**: el «🎉 ¡Pago confirmado!» se construye y ningún llamador lo
+envía. El campo `message` del retorno quedó intacto a propósito para ese programa.
+
 ### MONEY-FIX-CHECKOUT-PLACEHOLDERS-1 — 2026-08-21 (EN REPO — NO DESPLEGADO)
 
 Arreglo del ALTO **H-04**: el bot le mandaba **datos bancarios falsos a clientes reales**.

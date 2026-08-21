@@ -139,6 +139,13 @@ export type AuditAction = (typeof AUDIT_ACTIONS)[number];
 
 export interface AuditEntry {
   tenantId: string;
+  /**
+   * H-05: id DETERMINÍSTICO opcional. Sin él la entrada usa un id automático, así que repetir la
+   * misma acción la DUPLICA — y eso vuelve imposible reintentar un audit que no llegó a
+   * escribirse. Con id, repetir es idempotente. Los ~100 llamadores que no lo pasan mantienen
+   * exactamente el comportamiento anterior.
+   */
+  id?: string;
   action: AuditAction;
   actorUid?: string | null;
   actorRole?: string | null;
@@ -151,8 +158,14 @@ export interface AuditEntry {
 /** Registra una entrada de auditoría. Best-effort (loguea y sigue si falla). */
 export async function recordAudit(entry: AuditEntry): Promise<void> {
   try {
-    const ref = db().collection(`tenants/${entry.tenantId}/auditLogs`).doc();
-    await ref.set({
+    const col = db().collection(`tenants/${entry.tenantId}/auditLogs`);
+    const ref = entry.id ? col.doc(entry.id) : col.doc();
+    const escribir = entry.id
+      // Con id determinístico se usa `create`: repetir NO reescribe la entrada que ya existe, así
+      // que el `at` sigue siendo el del hecho original y no el de la repetición.
+      ? (d: Record<string, unknown>) => ref.create(d)
+      : (d: Record<string, unknown>) => ref.set(d);
+    await escribir({
       id: ref.id,
       tenantId: entry.tenantId,
       action: entry.action,
@@ -165,6 +178,10 @@ export async function recordAudit(entry: AuditEntry): Promise<void> {
       at: Timestamp.now(),
     });
   } catch (e) {
+    // Con id determinístico, «ya existe» es el resultado ESPERADO de una repetición: la entrada
+    // original está intacta y no hay nada que reportar.
+    const code = (e as { code?: number | string })?.code;
+    if (entry.id && (code === 6 || code === 'already-exists')) return;
     logger.error('No se pudo registrar audit log', e, { tenantId: entry.tenantId, action: entry.action });
   }
 }
