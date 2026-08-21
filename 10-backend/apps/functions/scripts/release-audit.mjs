@@ -69,15 +69,18 @@ const RAIZ_FUNCTIONS = resolve(AQUI, '..');
 const RAIZ_BACKEND = resolve(RAIZ_FUNCTIONS, '../..');
 
 /**
- * Último commit DESPLEGADO a producción: DEPLOY-AI-PHASE2-SALES-RESERVATION-1 (2026-08-16Z,
- * 10 UPDATE / 0 CREATE). Verificado contra producción el 2026-08-18 leyendo GCF v2 read-only:
- * el `updateTime` máximo de las 118 functions es 2026-08-16T00:35Z con exactamente 10 funciones
- * actualizadas ese día — nada se desplegó después. Es un valor por defecto documentado, no un
- * supuesto: `--base` lo pisa, y el informe siempre imprime cuál se usó. Si se despliega de
- * nuevo, ACTUALIZAR esta constante en el mismo programa de deploy (el valor viejo `30c1687`
- * infló un selector con funciones ya desplegadas — ver BITACORA 2026-08-18).
+ * Último commit DESPLEGADO a producción: DEPLOY-TRAMO-1-BACKEND-1 (2026-08-21, 14 CREATE +
+ * 118 UPDATE / 0 DELETE). Verificado contra producción el 2026-08-21 leyendo GCF v2 read-only:
+ * las 132 functions quedaron ACTIVE y las 132 con `updateTime` de ese día — cero sin tocar.
+ * Es un valor por defecto documentado, no un supuesto: `--base` lo pisa, y el informe siempre
+ * imprime cuál se usó. Si se despliega de nuevo, ACTUALIZAR esta constante en el mismo programa
+ * de deploy (el valor viejo `30c1687` infló un selector con funciones ya desplegadas — ver
+ * BITACORA 2026-08-18).
+ *
+ * ⚠️ Ese Tramo 1 fue backend puro: el panel (Hosting) sigue en `6f75601`. Para auditar una
+ * superficie de HOSTING, el base correcto NO es esta constante sino `6f75601` vía `--base`.
  */
-export const COMMIT_BASE_DESPLEGADO = '6f75601';
+export const COMMIT_BASE_DESPLEGADO = 'eb0432f';
 
 /** Un teléfono JAMÁS se imprime entero (misma convención que el motor y la migración). */
 export function enmascararPnid(pnid) {

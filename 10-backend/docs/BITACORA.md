@@ -42,7 +42,137 @@ Reglas de escritura:
 
 ## 2026-08
 
-### MONEY-FIX-CONFIRM-PAYMENT-DURABILITY-1 — 2026-08-21 (EN REPO — NO DESPLEGADO)
+### DEPLOY-TRAMO-1-BACKEND-1 — 2026-08-21 (EN PROD — ACTIVO; las 14 CREATE, EN PROD — INERTES)
+
+**Qué hace.** Es el **primer deploy real a producción desde el 2026-08-16Z** y el que puso en el
+aire los cuatro correctivos que estaban esperando: el mensaje del cliente ya no se pierde cuando
+Firestore hipa (H-01), no se puede secuestrar una cuenta por email (H-02), el bot no puede mandar
+datos bancarios inventados (H-04) y un pago confirmado ya no queda sin rastro (H-05). Backend
+puro: **Hosting no se tocó**, porque el panel es el Tramo 2 y sigue congelado por la App Review
+de Meta.
+
+**Causa raíz.** No corrige un defecto: ejecuta la superficie ya calculada y verificada en
+`RELEASE-AUDIT-TRES-PROGRAMAS-1` (`docs/release-plan-tres-programas.md`), que estaba en NO-GO
+desde el 2026-08-19 esperando la ventana. Los defectos que el deploy destapó son de la
+**herramienta de deploy**, no del producto, y están en «Deudas» abajo y en `HANDOFF.md` §5.
+
+**Verificación.**
+
+*Preflight (read-only contra producción, antes de tocar nada):* 118 functions ACTIVE ·
+21 índices READY · 3 TTL ACTIVE · **0 pedidos en vuelo** en los tres tenants (15 históricos:
+14 CANCELLED + 1 PAID viejo) · **0 jobs de cobertura vivos** · `automationMode: live` en …7904 y
+…5686 · `credipower` intacto. Árbol limpio, `HEAD == origin/main == eb0432f`.
+
+*Verificación del deploy (la que importa):* **contraste de `updateTime` función por función contra
+GCF v2**, no el exit code — ver la trampa 1 abajo. Resultado final leído de producción:
+**132 functions · 132 ACTIVE · 132 con `updateTime` del 2026-08-21 · 0 sin tocar · 0 faltantes**
+respecto del selector esperado. 118 previas + 14 CREATE. `metaWebhook` ACTIVE con `updateTime`
+**2026-08-21T17:13:06Z**.
+
+*Índices, TTL, Rules, schedulers:* **21 índices READY** (ninguno pendiente) · **4 políticas TTL
+ACTIVE**, incluida la nueva `metaOAuthStates.expiresAt` de ADR-0020, que se leyó `CREATING`
+durante el deploy y se re-verificó **ACTIVE** al cierre · **Rules: 0 cambios** — no se
+desplegaron ni hacía falta; ruleset vigente `132712ca` con `updateTime` 2026-08-15T11:59:45Z,
+leído de la API de Firebase Rules en esta sesión · **8 schedulers ENABLED** con sus crons
+intactos en `America/Asuncion`.
+
+*Smoke con TRÁFICO REAL (producción, no emulador):* mensaje entrante real al número de `arfagi`
+(…7904) a las **19:18:30Z**. `metaWebhook` a las **19:18:36Z** reportó `written=1`,
+**`liveWriteFailures=0`**, `duplicates=0`. Cadena completa en los logs:
+`metawebhook` → `onwebhookinbox` → `AI gateway: ok` → `Respuesta por sales agent IA` →
+`Mensaje procesado` → `Webhook procesado`. **Respuesta entregada al cliente en 2 segundos.**
+Ese contador `liveWriteFailures` **lo introdujo H-01**: verlo en los logs de producción es la
+prueba directa de que el fix está corriendo, no solo desplegado.
+
+*Encuadre del bot, probado por el owner en el mismo smoke:* `19:18:37` una pregunta de dominio
+(«diferencia entre EDT y Parfum») se responde con concentraciones y duración reales; `19:18:58`
+una pregunta **fuera de dominio** («¿Qué es el libro de Mormón?») se **rechaza manteniendo el
+rol** («Eso está fuera de mi área… yo soy Sofía de Arfagi y me dedico a perfumes») y redirige al
+catálogo. **Es evidencia de cumplimiento de la política de Meta de enero de 2026**, que prohíbe
+los bots de IA de propósito general y solo admite agentes acotados a un proceso de negocio.
+Sirve para la App Review si hay que reenviarla.
+
+*Estado posterior:* flags inertes **sin cambios** — visión de productos AUSENTE en los dos
+tenants, purga de adjuntos AUSENTE, Meta Catalog sin encender. Este deploy **no activó nada**.
+
+**Selector del release.** Ejecutado en **cuatro pasos**, siempre con
+`--config firebase.functions.json --project vpw-prod-dd6ff`, **sin `--force`** y **sin `--only
+functions` a secas**, excluyendo explícitamente las **6 `coexistence*`** (CREATE latentes del
+Programa 2, detenido fail-closed) y `devRunMetaCatalogOutbox`:
+
+- **Paso 0 — `--only firestore:indexes`**: 21 índices READY + el TTL nuevo (`metaOAuthStates`,
+  ADR-0020), que quedó `CREATING` y cerró `ACTIVE`.
+- **Paso 1 — lote A, 123 functions** (todas menos `metaWebhook` y los 8 schedulers). Acá van los
+  **consumidores**: `onWebhookInbox`, `chatRelease`, los llamadores de `confirmPayment`,
+  `inviteUser`/`setUserRole`/`setUserActive`, y las 14 CREATE.
+- **Paso 2 — `--only functions:metaWebhook`**: el **productor**, solo.
+- **Paso 3 — los 8 schedulers**, al final.
+
+**Orden consumidor → productor, y por qué se respetó al pie de la letra:** `metaWebhook` escribe
+en el inbox que `onWebhookInbox` consume, y H-01 cambia el contrato de esa escritura (clave
+estable para entrantes sin wamid, 503 con `retry` en fallos transitorios). Si el productor sube
+antes que el consumidor, los mensajes que entren en la ventana intermedia los procesa código
+viejo con un formato nuevo. Por eso `metaWebhook` fue **el último paso de código**, y por eso el
+retraso en aplicarlo (cuatro intentos) **no fue un problema**: mientras se reintentaba, el
+productor viejo seguía sirviendo contra un consumidor ya actualizado, que es el lado seguro del
+desfasaje.
+
+**Reintentos por cuota:** los 429 de Cloud Functions obligaron a repetir operaciones **tres
+veces** (`conversationSendAttachment` + `onWebhookInbox` en el Paso 1; `metaWebhook` dos veces en
+el Paso 2), y un cuarto intento de `metaWebhook` se perdió por un error de ruta propio. **Ningún
+downtime**: mientras una función no se aplica, la versión vieja sigue sirviendo.
+
+**Orden de rollback:** el inverso y **SIN las 14 CREATE** — si se incluye una CREATE, ese export
+no existe en el código anterior y `firebase deploy` aborta el comando entero. Artefacto preparado
+y **conservado**: worktree en `C:/AI_AFG/.claude/worktrees/rollback-6f75601`, commit `6f75601` en
+detached HEAD, **ya compilado** (`pnpm -r build` exit 0). No borrarlo.
+
+**Commit.** Superficie desplegada: **`eb0432f`** (el deploy no cambió una sola línea de código;
+subió exactamente ese árbol). El commit de esta documentación de cierre va en el reporte de fase.
+
+**Estado real.**
+- **EN PROD — ACTIVO:** H-01, H-02, H-04, H-05, el fix de `releaseToBot` que destruía el checkout
+  (`chatRelease`, en repo desde `4af6607` y sin desplegar desde el 2026-08-04) y las 118 UPDATE.
+- **EN PROD — INERTE:** las **14 CREATE** (1 de ADR-0020, 11 de ADR-0021, 2 de ADR-0022). Son
+  **callables autenticadas que solo el panel invoca**, y el panel no se desplegó: existen, están
+  ACTIVE y **nadie las llama**. Desplegado ≠ activo.
+- **EN REPO — NO DESPLEGADO:** H-03 + H-15/H-38/H-39 (el guardado mudo del panel) y Coexistence.
+- **Sin cambios:** flags de visión, Meta Catalog (`dry_run`), purga de adjuntos, `credipower`, el
+  feed, Rules, `.env`, tokens, WABA, PNID y `automationMode`. Hosting **sin tocar**.
+
+**Qué NO valida esta entrada.**
+1. **El panel no se desplegó.** Nada de lo que se ve en `vendeyapy.com` cambió, y **H-03 sigue
+   vivo en producción**: si el owner configura el agente estos días y el backend rechaza el
+   guardado, el panel no se lo dice.
+2. **Las 14 CREATE no están ejercitadas.** Están desplegadas e inertes; su primer uso real será
+   con el Tramo 2.
+3. **El ciclo de venta completo sigue SIN evidencia (Fase 3).** El smoke fue un mensaje del
+   **propio owner**: valida el webhook, la durabilidad del entrante y el encuadre del bot, no la
+   venta de punta a punta con un número **externo** (carrito → orden → comprobante →
+   confirmación en el panel). Ese sigue siendo el criterio de cierre del proyecto.
+4. **H-05 no se ejercitó en producción**: no hubo ningún pago real en la ventana. Lo desplegado
+   protege los pagos nuevos; los que ya quedaron rotos siguen necesitando `adminOrderCorrect`.
+
+**Deudas y limitaciones conocidas.** Dos trampas **nuevas y verificadas**, ya escritas en
+`HANDOFF.md` §5 junto a `hosting:rollback` y `--only functions` sin selector:
+- **`firebase deploy` devuelve EXIT 0 con funciones SIN aplicar.** Pasó **dos veces en este mismo
+  deploy**: los 429 agotaron sus reintentos, el CLI imprimió el error de esa función y **cerró el
+  comando con éxito global**. La primera vez dejó sin aplicar `onWebhookInbox` y
+  `conversationSendAttachment`; la segunda, `metaWebhook`. Lo detectó únicamente el contraste de
+  `updateTime` contra producción. **Regla: el éxito de un deploy se mide contra `updateTime`,
+  JAMÁS contra el exit code.** Confiar en el exit code habría significado avanzar al productor
+  con el consumidor viejo.
+- **El predeploy NO compila `shared`.** El hook corre `pnpm --filter @vpw/shared build`, que
+  imprime «No projects matched the filters» y sale en 0: el filtro correcto es `--filter shared`.
+  Acá no rompió nada porque `shared/dist` ya estaba compilado de las corridas de la sesión; **en
+  una máquina limpia ese hook no hace nada**. Defecto abierto; arreglarlo es otro programa.
+
+Y las que ya venían: `verify-d6` check 4 sigue roto de antes (el E2E que debería cubrir H-05 no
+lo cubre) · `CATALOG-AUTHORITY-SELF-SERVICE-1` nunca tuvo entrada propia en esta bitácora y sus
+2 CREATE viajaron igual en este Tramo 1 · la rotación de los 4 secretos de staging sigue sin
+ejecutarse · el feed de `arfagi` sigue en HTTP 403, prioridad 0 y fuera de este repo.
+
+### MONEY-FIX-CONFIRM-PAYMENT-DURABILITY-1 — 2026-08-21 (desplegado el 2026-08-21 — ver DEPLOY-TRAMO-1-BACKEND-1)
 
 Arreglo del ALTO **H-05**: un pago se confirmaba y quedaba **sin rastro, de forma permanente**.
 `confirmPayment` marcaba `PAID` y después limpiaba la sesión con `.update()`, que **lanza
@@ -119,7 +249,7 @@ identificado (`checkoutReuse.ts` usa `sameCartAsOrder`), pero tocar el camino de
 funciona quedó fuera del alcance de este programa. (e) **H-06 sigue abierto**: el «🎉 ¡Pago confirmado!» se construye y ningún llamador lo
 envía. El campo `message` del retorno quedó intacto a propósito para ese programa.
 
-### MONEY-FIX-CHECKOUT-PLACEHOLDERS-1 — 2026-08-21 (EN REPO — NO DESPLEGADO)
+### MONEY-FIX-CHECKOUT-PLACEHOLDERS-1 — 2026-08-21 (desplegado el 2026-08-21 — ver DEPLOY-TRAMO-1-BACKEND-1)
 
 Arreglo del ALTO **H-04**: el bot le mandaba **datos bancarios falsos a clientes reales**.
 `getCheckoutConfig` caía a un `DEFAULT_CONFIG` con placeholders por DOS caminos —documento
@@ -392,7 +522,7 @@ segunda falla, la primera ya se guardó — el texto dice «No se pudo guardar t
 pero no precisa cuál. (k) Ninguno de los tres formularios propios del panel tiene Escape ni
 cierre por el fondo (por eso «Cancelar» no puede bloquearse).
 
-### CRITICAL-FIX-USER-CLAIMS-1 — 2026-08-19 (EN REPO — NO DESPLEGADO)
+### CRITICAL-FIX-USER-CLAIMS-1 — 2026-08-19 (desplegado el 2026-08-21 — ver DEPLOY-TRAMO-1-BACKEND-1)
 
 Arreglo del CRÍTICO **H-02**: `inviteUser` resolvía el uid por email y escribía
 `setCustomUserClaims` sobre un usuario de otra empresa sin validar nada, y `assertSameTenant`
@@ -430,7 +560,7 @@ crea `plans`), y sus checks de usuarios (7 «Owner invita un vendedor» y 8 «ro
 correctos») **pasan con el fix**. Panel sin cambios. En esta corrida el flake de
 `coexistenceConnect` no apareció, lo que confirma su intermitencia.
 
-### CRITICAL-FIX-WEBHOOK-INBOUND-DURABILITY-1 — 2026-08-19 (EN REPO — NO DESPLEGADO)
+### CRITICAL-FIX-WEBHOOK-INBOUND-DURABILITY-1 — 2026-08-19 (desplegado el 2026-08-21, con smoke real — ver DEPLOY-TRAMO-1-BACKEND-1)
 
 Arreglo del CRÍTICO **H-01**: el webhook respondía `200 {ok:true}` cuando fallaba la escritura
 de un evento vivo al inbox ⇒ Meta no reintentaba ⇒ el mensaje del cliente desaparecía sin
@@ -581,7 +711,7 @@ encolado) + 6 BAJO — todos corregidos (sweep/discard siempre, re-derivación e
 índices ni Rules.
 **Deudas al conector:** selector de `catalogId`, URL directa, TTL de runs.
 
-### CONVERSATIONS-WHATSAPP-UX-1 — 2026-08-18 (EN REPO — NO DESPLEGADO)
+### CONVERSATIONS-WHATSAPP-UX-1 — 2026-08-18 (desplegado INERTE el 2026-08-21 — sus 11 callables no tienen panel hasta el Tramo 2)
 
 ADR-0021, bandeja profesional. Los recibos de Meta dejan de descartarse → `deliveryStatus`
 monotónico transaccional por wamid (pending<sent<delivered<read, failed terminal temprano,
@@ -599,7 +729,7 @@ corregidos; P1-P3 documentados en el ADR.
 **Deploy futuro:** 11 CREATE + updates de webhook/manualMessage/adjuntos + Hosting; sin
 índices, Rules ni TTL.
 
-### META-ONBOARDING-SELF-SERVICE-1 — 2026-08-17 (EN REPO — NO DESPLEGADO)
+### META-ONBOARDING-SELF-SERVICE-1 — 2026-08-17 (desplegado INERTE el 2026-08-21 — su callable no tiene panel hasta el Tramo 2)
 
 ADR-0020: lifecycle owner-facing consolidado, 11 gaps cerrados, cero sistema paralelo.
 Selección de WABA con estado pendiente + `completeMetaConnectWaba`; verify/disconnect por

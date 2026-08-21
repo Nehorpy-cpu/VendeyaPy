@@ -1,8 +1,10 @@
 # ESTADO — VendeYaPy
 
-> **Última actualización: 2026-08-21** (H-04 y H-05 corregidos en repo: ni datos bancarios falsos, ni pagos sin rastro).
+> **Última actualización: 2026-08-21** — **el Tramo 1 (backend) está DESPLEGADO y verificado con
+> tráfico real.** H-01, H-02, H-04 y H-05 pasaron a producción. **Hosting sigue sin tocar**: el
+> panel es el Tramo 2 y sigue congelado por la App Review de Meta.
 > Este archivo describe el **presente**, no la historia. La historia vive en `BITACORA.md`.
-> Se reescribe, no se acumula. Máximo una página.
+> Se reescribe, no se acumula.
 > `⚠️ verificar` = dato derivado de la bitácora, no leído de producción en la última sesión.
 
 ## Identidad
@@ -13,208 +15,166 @@
   API, Anthropic Claude, pnpm workspaces.
 - **Producción:** `vpw-prod-dd6ff` · panel en `https://vendeyapy.com`.
 - **Tenants:** `arfagi` (real, activo) · `credipower` (diferido e intocable) ·
-  `meta-review` (número …5686) — **App Review de Meta EN CURSO: entorno CONGELADO**, no tocar
-  Hosting ni nada que Meta esté revisando.
+  `meta-review` (número …5686) — **App Review de Meta EN CURSO: Hosting CONGELADO.**
 
 ## Producción hoy
 
+Todo lo de esta tabla fue **leído de producción el 2026-08-21** (read-only) salvo lo marcado.
+
 | Superficie | Estado |
 |---|---|
-| Último commit desplegado | `6f75601` — DEPLOY-AI-PHASE2-SALES-RESERVATION-1 (2026-08-16Z). **Confirmado contra prod 2026-08-18**: `updateTime` máximo de las 118 = 2026-08-16T00:35Z, 10 funciones ese día, ninguna posterior |
-| Functions | 118 ACTIVE (verificado 2026-08-18 vía functions:list + GCF v2) |
-| Índices | 21 READY, cero pendientes (verificado 2026-08-18; el repo declara exactamente 21) |
-| TTL | 3 ACTIVE (`metaWebhookAppState/History/Shadow`); el repo declara 4 — **falta `metaOAuthStates` (ADR-0020, sale con el release)** |
-| Rules hash | `132712ca` (desde `a9c99e05`, 2026-08-15) ⚠️ verificar — los 3 programas EN REPO no tocan Rules |
-| Schedulers | **8** (verificado 2026-08-18: `aiReservationMaintenance`, `attachmentRetentionMaintenance`, `coverageMaintenanceDaily`, `metaCatalogOutbox/VerificationMaintenance`, `refreshGrowthJobsDaily`, `resetUsageMonthly`, `trialNotificationsDaily`); «sin invoker público» ⚠️ verificar |
+| Último commit desplegado | **`eb0432f`** — DEPLOY-TRAMO-1-BACKEND-1 (2026-08-21). Verificado contra prod: las 132 functions tienen `updateTime` de ese día, ninguna quedó atrás. **Solo backend: el Hosting sigue en `6f75601`** |
+| Functions | **132 · 132 ACTIVE** (118 previas + 14 CREATE). `metaWebhook` ACTIVE, `updateTime` 2026-08-21T17:13:06Z |
+| Índices | **21 READY**, cero pendientes |
+| TTL | **4 ACTIVE**: `metaOAuthStates` (nueva, ADR-0020 — nació `CREATING` y cerró `ACTIVE`), `metaWebhookAppState`, `metaWebhookHistory`, `metaWebhookShadow` |
+| Rules | **0 cambios en este deploy.** Ruleset vigente `132712ca`, release `updateTime` 2026-08-15T11:59:45Z (leído de la API de Firebase Rules). Storage: `8fe5a630` |
+| Schedulers | **8 ENABLED**, crons intactos en `America/Asuncion` |
 | WhatsApp | `automationMode: live` en …7904 (arfagi) y …5686 (meta-review) |
+| Pedidos / jobs | 0 pedidos en vuelo y 0 jobs de cobertura vivos en los tres tenants |
 
-**Rollbacks armados y conservados:** `bdaffbe` y `30c1687`.
+**Smoke de producción con tráfico REAL (2026-08-21).** Mensaje entrante real al número de
+`arfagi` (…7904) a las **19:18:30Z**; `metaWebhook` a las **19:18:36Z** reportó `written=1`,
+**`liveWriteFailures=0`**, `duplicates=0`; cadena completa `metawebhook → onwebhookinbox →
+AI gateway: ok → sales agent IA → Mensaje procesado → Webhook procesado`; **respuesta entregada
+al cliente en 2 segundos**. `liveWriteFailures` es el contador que **introdujo H-01**: verlo en
+los logs de prod es la prueba directa de que el fix corre, no solo de que está desplegado.
+**Encuadre del bot verificado en el mismo smoke:** responde una pregunta de dominio (EDT vs
+Parfum) y **rechaza** una fuera de dominio manteniendo el rol y redirigiendo al catálogo — es
+**evidencia de cumplimiento de la política de Meta de enero de 2026** (prohibidos los bots de IA
+de propósito general; solo se admiten agentes acotados a un proceso de negocio). Sirve para la
+App Review si hay que reenviarla.
+
+**Rollback conservado — NO BORRAR:** worktree en `C:/AI_AFG/.claude/worktrees/rollback-6f75601`,
+commit `6f75601` en detached HEAD, ya compilado. El selector de vuelta atrás es el mismo del
+deploy **menos las 14 CREATE** (incluir una CREATE aborta el comando entero). Históricos:
+`bdaffbe` y `30c1687`.
 
 ## Flags e interruptores por tenant
 
 | Flag | arfagi | credipower | meta-review |
 |---|---|---|---|
-| Visión de productos (ADR-0019) | AUSENTE (apagada) | AUSENTE | AUSENTE |
-| Coverage | ACTIVO — `required`, máx ₲200.000, exp. 24 h | apagado | — |
-| `attachments.ingest.enabled` | `true` | documento AUSENTE | — |
-| `receiptGate.enabled` | `true` | documento AUSENTE | — |
-| Purga de adjuntos | APAGADA | — | — |
-| Meta Catalog `mode` | `dry_run` | sin config | — |
-| Meta Catalog propiedad | `external_managed`, cero campos escribibles | — | — |
+| Visión de productos (ADR-0019) | AUSENTE (apagada) ✓2026-08-21 | AUSENTE | AUSENTE ✓2026-08-21 |
+| Coverage | ACTIVO — `required`, máx ₲200.000, exp. 24 h ⚠️ verificar | apagado | — |
+| `attachments.ingest.enabled` | `true` ✓2026-08-21 | documento AUSENTE | sin config |
+| `receiptGate.enabled` | `true` ⚠️ verificar | documento AUSENTE | — |
+| Purga de adjuntos | APAGADA ✓2026-08-21 | — | APAGADA ✓2026-08-21 |
+| Meta Catalog (`config/meta.catalogSync`) | `enabled:true`, **`mode: dry_run`**, `sourceOfTruth: vendeyapy`, `ownership.model: external_managed` ✓2026-08-21 | sin `catalogSync` (fail-closed) | sin `catalogSync` (fail-closed) |
+
+**El deploy del Tramo 1 no encendió ningún flag.** Todo lo que estaba inerte sigue inerte.
 
 ## Catálogo Meta
 
 El catálogo de Meta lo gobierna **al 100 % un feed diario del sitio del tenant**
 (`primary_feed` `1668013347585391`, `deletion_enabled: true`, Server Fetch diario 03:33
-America/Asuncion desde `api.arfagi.com`). 181 artículos. El feed **no se toca, no se ejecuta
-a mano y no se desactiva**. Nunca escribimos en Meta: una sola escritura en toda la historia
-del proyecto (canary de Odyssey, 2026-07-28, revertido por el feed 36 h después).
+America/Asuncion desde `api.arfagi.com`). 181 artículos ⚠️ verificar. El feed **no se toca, no se
+ejecuta a mano y no se desactiva**. Nunca escribimos en Meta: una sola escritura en toda la
+historia del proyecto (canary de Odyssey, 2026-07-28, revertido por el feed 36 h después).
 
 Reconciliación 04:30 y 16:30 America/Asuncion contra TTL de 24 h, solo lectura.
 
 ## Bloqueantes abiertos
 
 1. **FEED ROTO (HTTP 403) en el origen de arfagi — PRIORIDAD 0, fuera de este repo.**
-   **Diagnóstico corregido el 2026-08-18** (antes se registraba como simple divergencia de
-   precio): `api.arfagi.com` devuelve **HTTP 403 desde ≤2026-08-14** y el último run del feed en
-   Meta cerró con **0 items / 1 error**. No es una diferencia de precio: **el feed no publica
-   nada**. Odyssey (`ARM-744646-5202`) tiene precio local **₲190.000** (intención comercial
-   declarada del owner) contra **₲130.000 obsoleto en Meta**; el guard lo mantiene
-   `drifted_external` y **no cierra venta automática** — fail-closed correcto.
-   **Acción del owner, fuera de este repo:** arreglar credenciales/URL del feed en su plataforma.
-   Recién después: corrida del feed → verificación de la reconciliación → y solo entonces el gate
-   de activación de visión. **Mientras el feed 403ee, esperar la reconciliación de las 04:30 es
-   esperar algo que no puede ocurrir.**
-2. **Fase 3 sin evidencia.** Todas las pruebas end-to-end salieron de números del owner.
-   Falta el ciclo completo con un número **externo**: inbound real → bot → carrito → orden →
-   comprobante visible en el panel → logs limpios.
+   `api.arfagi.com` devuelve **HTTP 403 desde ≤2026-08-14** y el último run del feed en Meta
+   cerró con **0 items / 1 error**: el feed **no publica nada** ⚠️ verificar (diagnóstico del
+   2026-08-18, no releído hoy). Odyssey (`ARM-744646-5202`) tiene precio local **₲190.000**
+   contra **₲130.000 obsoleto en Meta**; el guard lo mantiene `drifted_external` y **no cierra
+   venta automática** — fail-closed correcto. **Acción del owner, fuera de este repo:** arreglar
+   credenciales/URL del feed. Recién después: corrida del feed → verificación de la
+   reconciliación → y solo entonces el gate de activación de visión. **Mientras el feed 403ee,
+   esperar la reconciliación de las 04:30 es esperar algo que no puede ocurrir.**
+2. **Fase 3 sin evidencia — sigue siendo el criterio de cierre del proyecto.** El smoke del
+   2026-08-21 valida el **backend** (webhook, durabilidad del entrante, encuadre del bot) con un
+   mensaje del **propio owner**. Falta el ciclo completo con un número **externo**: inbound real
+   → bot → carrito → orden → comprobante visible en el panel → confirmación → logs limpios.
+   Nunca se hizo. **Novedad favorable:** el sistema está hoy en su mejor versión para intentarlo
+   —H-01, H-04, H-05 y el fix de `chatRelease` ya corren en producción—, y la advertencia
+   operativa que impedía usar «devolver al asistente» durante un checkout **quedó levantada**
+   (ver la fila `releaseToBot` en la tabla de auditoría, más abajo).
 3. **Activación de visión.** Desplegada e inerte desde el 2026-08-15, re-canary exitoso.
    Activarla es un programa aparte y depende de (1) y de la calibración del matcher.
 4. **Coexistence, Programa 2.** Detenido fail-closed en el preflight del 2026-08-06: 5 gates
-   externos de Meta sin evidencia (incluida la elegibilidad de Paraguay, que Meta no
-   documenta) y el `config_id` de Coexistence sin crear. El bloqueo por ADC quedó resuelto
-   el 2026-08-15 cuando el owner la habilitó.
+   externos de Meta sin evidencia (incluida la elegibilidad de Paraguay) y el `config_id` de
+   Coexistence sin crear. **Sus 6 `coexistence*` siguen siendo CREATE latentes: cualquier
+   selector de deploy debe excluirlas** — el Tramo 1 las excluyó.
 5. **Rotación de los 4 secretos de staging — NO EJECUTADA.** Deploys anteriores a
    RELEASE-SECURITY-AND-RUNBOOK-HARDEN-1 subieron `.env.vpw-staging` al bucket de fuentes de
-   prod. La fuga es interna (bucket no público, valores distintos por entorno), pero quedan
-   109 versiones vivas construidas con ese `.env`, no borradas.
-6. **`releaseToBot` destruye el checkout — ARREGLADO EN REPO desde `4af6607` (2026-08-04),
-   NO DESPLEGADO (verificado 2026-08-19).** Prod tiene `chatRelease` con `updateTime`
-   2026-07-31T11:23Z (GCF v2, dato directo) < fecha del fix ⇒ el defecto SIGUE VIVO en
-   producción hasta el release (`functions:chatRelease` ya está en el Paso 1 del plan).
-   El fix (`ESTADOS_QUE_SOBREVIVEN_A_LIBERAR` = SELECTING_PAYMENT + AWAITING_PAYMENT, 6 tests
-   en `handoff.release.test.ts`) fue re-verificado el 2026-08-19: el set de DOS es COMPLETO —
-   `Session.cart` no se toca al liberar y «carrito»/«pagar» son reglas globales previas a la
-   máquina de estados (el cliente conserva su carrito desde IDLE); `CHECKOUT_DONE` no tiene
-   lectores y transiciona solo a IDLE; los estados de navegación se reinician a propósito.
-   **⚠️ ADVERTENCIA OPERATIVA (vigente hasta el deploy, aplica a la prueba de Fase 3):**
-   durante una venta real NO usar «devolver al asistente» si el cliente está por pagar o ya
-   recibió los datos bancarios — el `chatRelease` desplegado todavía degrada la sesión a IDLE
-   y el comprobante rebota en el receipt gate.
+   prod. La fuga es interna (bucket no público, valores distintos por entorno). Quedaban 109
+   versiones vivas construidas con ese `.env` ⚠️ verificar — **el redeploy completo del
+   2026-08-21 debería haber reemplazado los artefactos de las 132 functions por artefactos
+   limpios; no se verificó en esta sesión.**
+6. **Tramo 2 (Hosting) — CONGELADO, esperando el fin de la App Review.** El owner confirmó en el
+   dashboard de Meta (2026-08-19) **«Revisión en curso»**: 4 solicitudes
+   (`whatsapp_business_messaging/management`, `catalog_management`, `public_profile`), plazo
+   típico 20 días, sin fecha de envío visible. **El Tramo 1 ya se ejecutó sin incidentes y sin
+   tocar Hosting.** Al destrabarse: desplegar el panel (procedimiento y las **14 claves
+   obligatorias** del env temporal en `HANDOFF.md` §5) y con él salen H-03 + H-15/H-38/H-39.
+
+## Auditoría 2026-08-19 (`docs/system-audit-2026-08.md`)
+
+**Cero CRÍTICOS abiertos.** Los tres CRÍTICOS y los dos ALTOS de dinero están así:
+
+| Hallazgo | Estado |
+|---|---|
+| **H-01** — pérdida silenciosa de mensajes en el webhook | **EN PROD — ACTIVO** (2026-08-21). Verificado con tráfico real: `liveWriteFailures=0` |
+| **H-02** — secuestro de cuentas por email | **EN PROD — ACTIVO** (2026-08-21) |
+| **H-04** — el bot mandaba datos bancarios falsos | **EN PROD — ACTIVO** (2026-08-21) |
+| **H-05** — un pago confirmado quedaba sin rastro | **EN PROD — ACTIVO** (2026-08-21). **No ejercitado en prod**: no hubo pagos reales en la ventana |
+| **H-03** + H-15/H-38/H-39 — el panel guarda en silencio y finge vacíos | **EN REPO — NO DESPLEGADO.** Es panel ⇒ sale con el **Tramo 2** |
+| `releaseToBot` destruía el checkout (`chatRelease`) | **EN PROD — ACTIVO** (2026-08-21). Estaba en repo sin desplegar desde el 2026-08-04. **La advertencia operativa de no usar «devolver al asistente» durante un checkout queda LEVANTADA** |
+
+⚠️ **Consecuencia práctica de que H-03 siga en repo:** si el owner configura el agente estos
+días y el backend rechaza el guardado, **el panel no se lo dice** y puede pisar su propia
+configuración. Hasta el Tramo 2, verificar a mano después de cada cambio de configuración.
+
+**ALTOS que siguen abiertos:** el aviso de pago confirmado que nadie manda (**H-06** — el
+«🎉 ¡Pago confirmado!» se construye y ningún llamador lo envía; el campo `message` quedó intacto
+a propósito) · borrado del índice global de ruteo sin verificar tenant (H-07) · `customers` con
+`write` de MANAGER incluido el delete físico (H-08) · fan-out de tools sin tope que rompe la
+cuota (H-09) · sin validación de salida del modelo (H-10) · `metaWebhookInbox` sin TTL con 176
+docs vencidos con PII (H-11) · secretos legibles con rol viewer (H-12). Ranking de fixes en §3
+del informe.
+
+**Reglas operativas que siguen vigentes:** H-02 y H-04 ya están desplegados, así que **la
+precondición para abrir el registro autoservicio a la primera empresa externa está cumplida del
+lado del backend** — falta el Tramo 2, porque sin H-03 el panel de esa empresa guardaría en
+silencio.
 
 ## En repo, sin desplegar
 
-| Programa | Fecha | Superficie estimada del release |
+| Programa | Fecha | Qué falta |
 |---|---|---|
-| Coexistence (fundación + correctivos) | 2026-08-04/05 | Cutover = Programa 2, bloqueado. **⚠️ Sus 6 `coexistence*` son CREATE latentes: cualquier selector debe excluirlas** |
-| META-ONBOARDING-SELF-SERVICE-1 (ADR-0020) | 2026-08-17 | 1 CREATE (`completeMetaConnectWaba`) + TTL `metaOAuthStates` + Hosting |
-| CONVERSATIONS-WHATSAPP-UX-1 (ADR-0021) | 2026-08-18 | 11 CREATE + Hosting; sin índices/Rules/TTL |
-| CATALOG-AUTHORITY-SELF-SERVICE-1 (ADR-0022) | 2026-08-18 | 2 CREATE + Hosting; sin índices/Rules |
+| CRITICAL-FIX-PANEL-SILENT-SAVE-1 (H-03 + H-15/H-38/H-39) | 2026-08-20 | **Solo Hosting.** Cero backend, cero Rules, cero índices ⇒ sale con el Tramo 2 |
+| Coexistence (fundación + correctivos) | 2026-08-04/05 | Cutover = Programa 2, bloqueado. **Sus 6 `coexistence*` son CREATE latentes: excluirlas de todo selector** |
 
-**Superficie CONSOLIDADA calculada y verificada (2026-08-18, `docs/release-plan-tres-programas.md`):**
-release = **14 CREATE + las 118 UPDATE** (los tres tocaron `lib/firebase.ts` y `audit/audit.ts`,
-universales ⇒ redeploy completo) + 1 TTL + 0 índices + 0 Rules + 0 DELETE. **Backend-first APTO
-sin Hosting** (panel `6f75601` no referencia ninguna CREATE; 3 divergencias de forma de error
-documentadas en flujos no ejercitados). Selectores literales de deploy y rollback en el plan.
+Todo lo demás que estaba en esta tabla **se desplegó el 2026-08-21**: META-ONBOARDING-SELF-SERVICE-1
+(ADR-0020), CONVERSATIONS-WHATSAPP-UX-1 (ADR-0021) y CATALOG-AUTHORITY-SELF-SERVICE-1 (ADR-0022).
 
-> **⛔ HOSTING CONGELADO — App Review de Meta EN CURSO, ahora CON EVIDENCIA (2026-08-19).**
-> Actividad inbound REAL del número …686 leída del backend (read-only, sin contenido): ráfaga de
-> **7 mensajes el 12-08 (mié 09 h)** + 2 el 15-08, **5 remitentes distintos**, 3 en los últimos
-> 7 días, 0 en 48 h — compatible con revisores probando; el backend no distingue revisor de
-> prueba del owner (limitación declarada). **El gate NO es solo Hosting**: el Tramo 1
-> redespliega `metaWebhook`/`onWebhookInbox` (el camino del revisor).
-> **CONFIRMADO POR EL OWNER EN EL DASHBOARD (2026-08-19): «Revisión en curso»** — 4 solicitudes
-> (`whatsapp_business_messaging/management`, `catalog_management`, `public_profile`), plazo
-> típico 20 días, fecha de envío no visible ⇒ **NO-GO FIRME para el Tramo 1** hasta
-> «Aprobado»/«Rechazado». Al destrabarse: re-correr `review-window-audit.mjs` + ventana
-> domingo 05:00–07:30 ASU (`release-plan-tres-programas.md` §10.4-10.6).
->
-> **Deuda de release: superficie ya calculada y verificada** — ver
-> `docs/release-plan-tres-programas.md` (RELEASE-AUDIT-TRES-PROGRAMAS-1). Nota clave: los tres
-> programas NO se pisan entre sí (solapamiento solo aditivo en `audit.ts`/`index.ts`), pero el
-> rollback por selector deja vivas las 14 CREATE (callables auth-gated, inertes sin panel;
-> retiro real = `functions:delete` con gate propio). La trampa del selector crudo son las **6
-> `coexistence*`** del Programa 2 bloqueado: el plan las excluye explícitamente.
->
-> ✅ **`release-audit.mjs` corregido el 2026-08-18**: `COMMIT_BASE_DESPLEGADO = '6f75601'`,
-> confirmado contra producción por `updateTime` antes de tocar la constante. Al próximo deploy,
-> actualizarla en el mismo programa.
+⚠️ **Sus 14 CREATE están EN PROD — INERTES, no activas.** Son callables autenticadas que **solo
+el panel invoca**, y el panel no se desplegó: existen, están ACTIVE y **nadie las llama**. Su
+primer uso real será con el Tramo 2. **Desplegado ≠ activo.**
 
-7. **AUDITORÍA 2026-08-19 (`docs/system-audit-2026-08.md`) — CERO CRÍTICOS ABIERTOS + 15 ALTOS**
-   (los tres CRÍTICOS —H-01, H-02, H-03— están corregidos en repo; ver puntos 8, 9 y 10).
-   ALTOS: **H-04 y H-05 cerrados en repo** (puntos 11 y 12).
-   Siguen abiertos: el aviso de pago confirmado que nadie manda (H-06), borrado
-   del índice global de ruteo sin verificar tenant (H-07), `customers` con `write` de MANAGER
-   incluido el delete físico (H-08), fan-out de tools sin tope que rompe la cuota (H-09), sin
-   validación de salida del modelo (H-10), `metaWebhookInbox` sin TTL con 176 docs vencidos con
-   PII (H-11), secretos legibles con rol viewer (H-12). Ranking de fixes en §3 del informe.
-
-8. **H-01 (pérdida silenciosa de mensajes en el webhook) — ARREGLADO EN REPO, NO DESPLEGADO**
-   (2026-08-19, `CRITICAL-FIX-WEBHOOK-INBOUND-DURABILITY-1`). **Producción sigue con el defecto
-   hasta el release**: hoy, si Firestore hipa mientras entra un mensaje, ese mensaje se pierde sin
-   rastro. El fix **NO requiere un deploy propio**: `functions:metaWebhook` ya está en el Paso 1
-   del Tramo 1 calculado (`docs/release-plan-tres-programas.md`), que espera el cierre de la App
-   Review. Contenido: 503 con `retry` solo para fallos TRANSITORIOS (los permanentes responden
-   200 + log de incidente, para no degradar la salud del webhook durante la revisión de Meta),
-   contador `liveWriteFailures` en el resumen, `catch` general que ya no se traga el lote (cubre
-   también el archivo de Coexistence), clave estable para entrantes sin wamid, y log de rastreo
-   con PNID y wamid **enmascarados** (la review probó que el wamid lleva el teléfono en base64).
-
-9. **H-02 (secuestro de cuentas por email) — ARREGLADO EN REPO, NO DESPLEGADO** (2026-08-19,
-   `CRITICAL-FIX-USER-CLAIMS-1`). **Producción sigue con el defecto hasta el release.** Entra en
-   el Tramo 1 ya calculado (`inviteUser`, `setUserRole` y `setUserActive` están en el selector
-   del Paso 1) y **no requiere deploy adicional**.
-   ⚠️ **REGLA OPERATIVA: H-02 tiene que estar DESPLEGADO antes de abrir el registro autoservicio
-   a la primera empresa externa** — el privilegio de owner que ese registro entrega es
-   exactamente el que explota este defecto.
-   Deuda abierta que el fix NO cierra (programa aparte): `inviteUser` sigue revelando si un email
-   existe en la plataforma (`created: true|false`), sin auditoría del rechazo ni rate-limit; la
-   cura de fondo es la invitación con aceptación del invitado (pendiente + token).
-
-10. **H-03 + H-15 + H-38 + H-39 (el panel guardaba en silencio y fingía vacíos) — ARREGLADO EN
-    REPO, NO DESPLEGADO** (2026-08-20, `CRITICAL-FIX-PANEL-SILENT-SAVE-1`). Fix **solo frontend**:
-    cero backend, cero Rules, cero índices. Nueve pantallas (`agent`, `promotions`, `decisions`,
-    `ads`, `followups`, `tracking`, `replies`, `welcome`, `onboarding`) dicen el resultado de cada
-    acción con el motivo real del backend, y una lectura caída ya no se disfraza de "no hay nada".
-    Cinco reviews adversariales (43 hallazgos, todos corregidos) destaparon de paso un caso de
-    **pérdida de datos** que la auditoría no había catalogado: en `/agent`, con la config sin poder
-    leerse, el formulario mostraba los valores por defecto y «Guardar cambios» **pisaba la
-    configuración real del tenant y borraba sus datos de cobro**. Ahora avisa y bloquea el guardado.
-    ⚠️ **A diferencia de H-01 y H-02, este fix NO viaja en el Tramo 1**: es panel ⇒ **sale con el
-    Tramo 2 (Hosting)**, hoy congelado por la App Review. Hasta entonces, producción sigue
-    perdiendo el trabajo del dueño en silencio si el backend rechaza una configuración.
-    Pendiente del mismo patrón, fuera de alcance (inventario en el informe de auditoría):
-    `/simulator` (5 mutaciones, 0 con rama de error), `/catalog`, `NotificationBell`,
-    `MetaReconciliation`, `OutboxIncidents`, `CustomerInfoPanel`, `LinkClientModal`,
-    `CoexistenceHistoryCard`, `WhatsappActivationQueue`; y un H-15 vivo en el **dashboard**
-    (si fallan las métricas, los KPIs quedan como esqueleto animado para siempre). Y aparte:
-    `fallbackMessage`/`handoffMessage`/`farewellMessage` de `/agent` siguen siendo **config muerta**
-    (se guardan, el motor no las usa) — programa propio.
-
-11. **H-04 (el bot mandaba DATOS BANCARIOS FALSOS a clientes reales) — ARREGLADO EN REPO, NO
-    DESPLEGADO** (2026-08-21, `MONEY-FIX-CHECKOUT-PLACEHOLDERS-1`). Se eliminó el `DEFAULT_CONFIG`
-    con placeholders: «vacío» ya significa vacío por los dos caminos (documento ausente y array
-    vacío), ninguna cuenta con marcador de plantilla llega a un mensaje, y un tenant sin datos de
-    cobro deriva con un mensaje honesto en vez de inventar una cuenta — con aviso al dueño en la
-    campana. **Producción sigue con el defecto**; `arfagi` no lo sufre porque tiene sus cuentas
-    reales cargadas. Entra en el **Tramo 1** ya calculado y **no requiere deploy propio**.
-    ⚠️ **REGLA OPERATIVA: H-04, igual que H-02, tiene que estar DESPLEGADO antes de abrir el
-    registro autoservicio a la primera empresa externa** — los dos se activan con el primer tenant
-    que no sea del dueño: uno le entrega el privilegio y el otro le manda cuentas inventadas a sus
-    clientes.
-
-12. **H-05 (un pago confirmado quedaba SIN RASTRO, de forma permanente) — ARREGLADO EN REPO, NO
-    DESPLEGADO** (2026-08-21, `MONEY-FIX-CONFIRM-PAYMENT-DURABILITY-1`). `confirmPayment` marcaba
-    `PAID` y después limpiaba la sesión con un `.update()` que lanza NOT_FOUND si el documento no
-    existe; la excepción se llevaba puestos el evento `Purchase` y el audit `payment.confirmed`, y
-    el reintento SELLABA el estado a medias. Ahora el rastro va ANTES que la limpieza (que es la
-    única escritura recuperable: el motor la repara sola) y el cortocircuito completa en vez de
-    sellar. **Mantiene 0 CREATE / 0 índices / 0 Rules**: `audit/audit.ts` es universal, así que ya
-    estaba en las 118 UPDATE del Tramo 1 — **no requiere deploy propio**. **Producción sigue con
-    el defecto.** Ojo con el alcance real: el fix protege los pagos NUEVOS; los que ya quedaron
-    rotos sólo se reparan por `adminOrderCorrect` (PLATFORM_ADMIN), porque el panel no ofrece
-    `to=PAID` sobre un pedido ya pagado y el webhook de Stripe no reintenta.
-    ✅ **Requisito previo al deploy — VERIFICADO CONTRA PRODUCCIÓN (2026-08-21, read-only, sin
-    imprimir datos bancarios):** `tenants/arfagi/config/checkout` tiene **1 cuenta con los cuatro
-    campos obligatorios** (`bank`, `accountNumber`, `holder`, `document`) presentes, no vacíos y
-    de tipo string, y **1 vendedor sin placeholder**. Es decir: `cuentasCobrables()` la conserva y
-    el mensaje de transferencia de `arfagi` sale idéntico tras el deploy. El pendiente que el
-    programa dejó abierto queda CERRADO.
+✅ `release-audit.mjs` actualizado en este cierre: `COMMIT_BASE_DESPLEGADO = 'eb0432f'`, con la
+verificación contra producción escrita en el comentario. **Ojo:** ese base vale para superficies
+de **backend**; para auditar una superficie de **Hosting** el base correcto sigue siendo
+`6f75601` vía `--base`.
 
 ## Deudas menores conocidas
 
-- La campana no lleva `targetUid`: un rol SELLER puro no la ve. Hoy sin impacto (el vendedor
-  configurado es el owner).
+**Nuevas, del deploy del 2026-08-21 — están en `HANDOFF.md` §5, que es donde hay que leerlas
+antes del próximo deploy:**
+
+- **`firebase deploy` devuelve EXIT 0 con funciones SIN aplicar.** Pasó **dos veces en el mismo
+  deploy**: los 429 de cuota agotan sus reintentos, el CLI imprime el error de esa función y
+  **igual cierra con éxito global**. **El éxito de un deploy se mide contrastando `updateTime`
+  contra producción, JAMÁS contra el exit code.**
+- **El predeploy NO compila `shared`.** El hook corre `pnpm --filter @vpw/shared build`, que
+  imprime «No projects matched the filters» y sale en 0 (el filtro correcto es `--filter shared`).
+  En una máquina limpia ese hook no hace nada: correr `pnpm -r build` a mano antes de desplegar.
+
+**Las que ya venían:**
+
+- La campana no lleva `targetUid`: un rol SELLER puro no la ve. Hoy sin impacto.
 - 4 secretos productivos siguen como env vars planas en vez de Secret Manager, contra la
   política escrita del propio repo.
 - Higiene de logs: el `customerId` completo (el teléfono) va en metadata estructurada.
@@ -223,24 +183,25 @@ documentadas en flujos no ejercitados). Selectores literales de deploy y rollbac
 - `metaSyncState` no se recalcula al editar un producto: un importado enriquecido arrastra
   `drifted_external` hasta la reconciliación siguiente (máx. ~12 h).
 - Pendientes de calidad de catálogo: 23 genéricos, 18 duplicados probables, 33 incoherencias,
-  1 sin marca.
+  1 sin marca ⚠️ verificar.
 - Pedidos: 15 históricos, 14 CANCELLED y 1 PAID anterior a los releases de julio. Cero pagos
-  nuevos. Ningún pedido pendiente de verificación.
-- **Los `.test.ts` NO se typechequean** (verificado 2026-08-18): `apps/functions/tsconfig.json`
-  los excluye y `vitest.config.ts` no activa `typecheck`. O sea que `pnpm -r typecheck` en 0
-  **no cubre los archivos de test**. Preexistente y sistémico: al leer un reporte, tenerlo en
-  cuenta antes de dar por cubierta esa pata.
-- **Flake preexistente en la suite completa** (verificado 2026-08-19 CON y SIN el diff del día,
-  en el commit base): `src/meta/coexistenceConnect.test.ts > "REPLAY: el segundo callback
-  devuelve lo mismo…"` falla en la corrida completa de `apps/functions` (225 archivos) y pasa
-  aislado (24/24). Compara el documento de conexión contra un snapshot previo, así que es
-  sensible a timestamp/carga. No lo introdujo ningún cambio reciente; queda como deuda.
+  nuevos. Ningún pedido pendiente de verificación (verificado 2026-08-21).
+- `fallbackMessage`/`handoffMessage`/`farewellMessage` de `/agent` son **config muerta**: se
+  guardan y el motor no las usa. Programa propio.
+- Patrón de H-03 pendiente fuera de alcance: `/simulator` (5 mutaciones, 0 con rama de error),
+  `/catalog`, `NotificationBell`, `MetaReconciliation`, `OutboxIncidents`, `CustomerInfoPanel`,
+  `LinkClientModal`, `CoexistenceHistoryCard`, `WhatsappActivationQueue`, y un H-15 vivo en el
+  **dashboard** (si fallan las métricas, los KPIs quedan como esqueleto animado para siempre).
+- **`verify-d6` falla su check 4** («confirmar el pago registró el evento Purchase en vivo»),
+  preexistente y verificado contra el código base: **el E2E que debería cubrir H-05 no lo cubre.**
+- **Los `.test.ts` NO se typechequean**: `apps/functions/tsconfig.json` los excluye y
+  `vitest.config.ts` no activa `typecheck`. `pnpm -r typecheck` en 0 **no cubre los tests**.
+- **Flake preexistente en la suite completa**: `src/meta/coexistenceConnect.test.ts > "REPLAY…"`
+  falla en la corrida completa de `apps/functions` y pasa aislado. Sensible a timestamp/carga.
 - Los tests `tests/integration/release-audit.*.test.ts` que menciona el header de
-  `release-audit.mjs` **no existen** (verificado 2026-08-18): el parser del audit corre sin
-  ninguna cobertura propia.
-- **Cero CI** (verificado 2026-08-18): `.github/` solo tiene `pull_request_template.md`. La
-  batería completa y las 6 suites E2E (~30-35 min) son manuales; nada impide que una sesión
-  declare verde sin correr. Por eso el repo exige exit codes reales en los reportes.
+  `release-audit.mjs` **no existen**: el parser del audit corre sin cobertura propia.
+- **Cero CI**: `.github/` solo tiene `pull_request_template.md`. La batería completa y las 6
+  suites E2E (~30-35 min) son manuales. Por eso el repo exige exit codes reales en los reportes.
 
 ## Backlog (solo a pedido del owner)
 
@@ -253,4 +214,5 @@ Meta Catalog Live · `CATALOG-IMPORT-1` (CSV/Excel/Sheets) · `CATALOG-ENRICHMEN
 
 Una persona externa completa el ciclo entero sin intervención técnica: WhatsApp →
 recomendación → carrito → orden → comprobante → el vendedor lo ve y lo confirma en el panel
-desde `vendeyapy.com`.
+desde `vendeyapy.com`. **Sigue sin evidencia.** Lo validado el 2026-08-21 es el backend, con un
+mensaje del propio owner.
